@@ -86,6 +86,7 @@ pub const GLOB_IMPORT_LOCAL_NAME: &str = "*";
 /// the evidence a relationship through the binding rests on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ImportBindingRule {
     /// Unresolved, or resolved from the module-key map and a name match in the target file.
     #[default]

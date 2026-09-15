@@ -22,6 +22,8 @@ pub(crate) struct RustUsePath {
     /// The path is `self::`/`super::`, so it is only as sound as `importer_module`, which a
     /// `#[path]` declaration or a missing `mod` declaration makes wrong.
     pub(crate) relative: bool,
+    /// `lib` or `main` when the importer is that crate root file itself.
+    pub(crate) importer_root: Option<&'static str>,
 }
 
 impl RustUsePath {
@@ -63,7 +65,12 @@ pub(crate) fn map_rust_use_path(
     if matches!(importer_module.as_slice(), ["bin", _, ..]) {
         return None;
     }
-    if matches!(importer_module.as_slice(), ["lib"] | ["main"]) {
+    let importer_root = match importer_module.as_slice() {
+        ["lib"] => Some("lib"),
+        ["main"] => Some("main"),
+        _ => None,
+    };
+    if importer_root.is_some() {
         importer_module.clear();
     } else if importer_module.last() == Some(&"mod") {
         importer_module.pop();
@@ -105,6 +112,7 @@ pub(crate) fn map_rust_use_path(
         segments: segments.into_iter().map(str::to_string).collect(),
         importer_module: importer_module_names,
         relative: first != "crate",
+        importer_root,
     })
 }
 

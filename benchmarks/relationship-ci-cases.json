@@ -791,6 +791,48 @@
       "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
     },
     {
+      "id": "ci-python-calls-02-try_block_import",
+      "fixture_id": "ci/ri3/python/calls/try_block_import",
+      "split": "development",
+      "language": "python",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:python:calls:try_block_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "try_block_import",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:python:calls:try_block_import:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case: `from codec import target_fn` inside a module-level `try:` body binds at module level, so the call in `caller_fn` resolves through it."
+    },
+    {
+      "id": "ci-python-calls-03-try_except_alternative_imports",
+      "fixture_id": "ci/ri3/python/calls/try_except_alternative_imports",
+      "split": "development",
+      "language": "python",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:python:calls:try_except_alternative_imports:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "try_except_alternative_imports",
+      "notes": "Regression case: `try: from fast_codec import target_fn` / `except ImportError: from slow_codec import target_fn` gives two candidates for the call, and neither may become a single authoritative edge."
+    },
+    {
       "id": "ci-python-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/python/references/metamorphic_a",
       "split": "development",

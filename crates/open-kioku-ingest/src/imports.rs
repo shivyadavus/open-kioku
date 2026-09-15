@@ -101,10 +101,54 @@ impl<'a> RustModuleTree<'a> {
     /// `mod auth { ... }` is not the module `crate::auth` names.
     fn declares_file_modules(&self, path: &RustUsePath, module: &[String]) -> bool {
         (0..module.len()).all(|depth| {
-            path.module_file_stems(&module[..depth])
-                .into_iter()
-                .any(|stem| self.file_modules.contains(&(stem, module[depth].clone())))
+            let declares =
+                |stem: String| self.file_modules.contains(&(stem, module[depth].clone()));
+            if depth == 0 {
+                let roots = self.crate_roots(path);
+                !roots.is_empty() && roots.into_iter().all(declares)
+            } else {
+                path.module_file_stems(&module[..depth])
+                    .into_iter()
+                    .any(declares)
+            }
         })
+    }
+
+    /// The crate root files whose module tree holds the importer: the root file itself, or the
+    /// `lib.rs` and `main.rs` that declare the importer's top-level module. A package with both
+    /// roots is two crates, and `crate::` names only the modules of the importer's own root; when
+    /// both roots declare the importer's module, a path must be declared under both.
+    fn crate_roots(&self, path: &RustUsePath) -> Vec<String> {
+        if let Some(root) = path.importer_root {
+            return vec![format!("{}/{root}", path.src_root)];
+        }
+        let roots = path
+            .module_file_stems(&[])
+            .into_iter()
+            .filter(|stem| self.files_by_stem.contains_key(stem))
+            .collect::<Vec<_>>();
+        let Some(top) = path.importer_module.first() else {
+            return roots;
+        };
+        let declaring = roots
+            .iter()
+            .filter(|stem| self.file_modules.contains(&((*stem).clone(), top.clone())))
+            .cloned()
+            .collect::<Vec<_>>();
+        if declaring.is_empty() {
+            roots
+        } else {
+            declaring
+        }
+    }
+
+    /// Extension-less paths of the files that can hold `module` in the importer's crate.
+    fn module_stems(&self, path: &RustUsePath, module: &[String]) -> Vec<String> {
+        if module.is_empty() {
+            self.crate_roots(path)
+        } else {
+            path.module_file_stems(module).to_vec()
+        }
     }
 
     /// The one indexed file holding `module`, when the module is declared as a file.
@@ -334,7 +378,7 @@ fn rust_import_target(
 
     let module_file = modules.module_file(&path, &path.segments);
     let item = if modules.declares_file_modules(&path, parent) {
-        rust_module_item(&path, parent, item_name, symbols)
+        rust_module_item(&modules.module_stems(&path, parent), item_name, symbols)
     } else {
         None
     };
@@ -351,15 +395,13 @@ fn rust_import_target(
     }
 }
 
-/// The one module-level Rust item named `item` in the file holding `module`.
+/// The one module-level Rust item named `item` in the files at `module_stems`.
 fn rust_module_item(
-    path: &RustUsePath,
-    module: &[String],
+    module_stems: &[String],
     item: &str,
     symbols: &open_kioku_resolution::SymbolIndex,
 ) -> Option<SymbolId> {
-    let mut targets = path
-        .module_file_stems(module)
+    let mut targets = module_stems
         .iter()
         .filter_map(|stem| {
             symbols
@@ -780,6 +822,78 @@ mod tests {
         assert_eq!(bound.origin, ImportOrigin::Internal);
         assert_eq!(bound.rule, ImportBindingRule::RustModulePath);
         assert_eq!(bound.target_file, None);
+    }
+
+    #[test]
+    fn rust_crate_import_follows_only_the_root_of_the_importers_own_crate() {
+        // A package with both roots: `lib.rs` declares `auth` and `session`, `main.rs` declares
+        // `cli`, and each root defines its own `run`.
+        let registry = bind_rust_imports(
+            &[
+                "src/lib.rs",
+                "src/main.rs",
+                "src/auth.rs",
+                "src/session.rs",
+                "src/cli.rs",
+            ],
+            &[""],
+            vec![
+                mod_decl("src/lib.rs", "auth"),
+                mod_decl("src/lib.rs", "session"),
+                mod_decl("src/main.rs", "cli"),
+            ],
+            &[
+                rust_use_site(
+                    "src/session.rs",
+                    "crate::auth::issue_token",
+                    "issue_token",
+                    None,
+                ),
+                rust_use_site(
+                    "src/cli.rs",
+                    "crate::auth::issue_token",
+                    "issue_token",
+                    None,
+                ),
+                rust_use_site(
+                    "src/main.rs",
+                    "crate::auth::issue_token",
+                    "issue_token",
+                    None,
+                ),
+                rust_use_site("src/cli.rs", "crate::run", "run", None),
+                rust_use_site("src/session.rs", "crate::run", "run", None),
+            ],
+            vec![
+                rust_symbol("src/auth.rs", "issue_token"),
+                rust_symbol("src/lib.rs", "run"),
+                rust_symbol("src/main.rs", "run"),
+            ],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            bound_target(&registry, "src/session.rs", "issue_token").as_deref(),
+            Some("symbol:src/auth.rs:issue_token")
+        );
+        assert_eq!(
+            bound_target(&registry, "src/cli.rs", "issue_token"),
+            None,
+            "the binary crate does not declare `auth`"
+        );
+        assert_eq!(
+            bound_target(&registry, "src/main.rs", "issue_token"),
+            None,
+            "`main.rs` is the binary crate's root"
+        );
+        assert_eq!(
+            bound_target(&registry, "src/cli.rs", "run").as_deref(),
+            Some("symbol:src/main.rs:run")
+        );
+        assert_eq!(
+            bound_target(&registry, "src/session.rs", "run").as_deref(),
+            Some("symbol:src/lib.rs:run")
+        );
     }
 
     #[test]

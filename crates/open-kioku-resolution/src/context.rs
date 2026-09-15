@@ -26,6 +26,9 @@ pub(crate) enum ScopedImport<'r> {
 /// same name imported further out, and an explicit import shadows a glob in its own scope. A Rust
 /// `mod` block does not see the imports of the module around it, so the walk stops at one:
 /// `use crate::auth::f;` at file level does not reach `mod tests { use crate::fakes::*; }`.
+/// A Python `if`, `try`, `with` or loop body is not a namespace, so an import made in one binds in
+/// the enclosing function, class or module; and a function body does not see its class body's
+/// names, so the walk skips class scopes once it has left a function.
 /// Without a scope index or a use-site scope, every import of the name in the file is one set.
 pub(crate) fn scoped_import<'r>(
     repository: &'r SemanticRepository,
@@ -59,20 +62,27 @@ pub(crate) fn scoped_import<'r>(
         };
     };
 
+    let python = *language == Language::Python;
+    let mut left_function = false;
     let mut current = Some(scope_id);
     let mut steps = 0usize;
     while let Some(id) = current {
+        let scope = scopes.get(id);
+        let visible = !(python
+            && left_function
+            && nearest_non_block_scope(scopes, id)
+                .is_some_and(|owner| owner.kind == ScopeKind::Class));
         let here = named
             .iter()
             .copied()
-            .filter(|binding| &binding.scope_id == id)
+            .filter(|binding| visible && binds_at(scopes, language, &binding.scope_id, id))
             .collect::<Vec<_>>();
         if !here.is_empty() {
             return settle(here);
         }
         let globs_here = globs
             .iter()
-            .filter(|binding| &binding.scope_id == id)
+            .filter(|binding| visible && binds_at(scopes, language, &binding.scope_id, id))
             .collect::<Vec<_>>();
         if !globs_here.is_empty() {
             // `use super::*;` names the parent module's namespace, the parent's own imports
@@ -92,10 +102,19 @@ pub(crate) fn scoped_import<'r>(
             current = Some(parent);
             continue;
         }
-        let scope = scopes.get(id);
         if *language == Language::Rust && scope.is_some_and(|scope| scope.kind == ScopeKind::Module)
         {
             return ScopedImport::NotImported;
+        }
+        if python
+            && scope.is_some_and(|scope| {
+                matches!(
+                    scope.kind,
+                    ScopeKind::Function | ScopeKind::Method | ScopeKind::Closure
+                )
+            })
+        {
+            left_function = true;
         }
         steps += 1;
         if steps > scopes.scopes.len() {
@@ -119,6 +138,49 @@ pub(crate) fn scoped_import<'r>(
     } else {
         ScopedImport::NotImported
     }
+}
+
+/// Whether an import recorded at `binding_scope` binds its names at `level`. In Python the import
+/// also binds in each block enclosing it, up to the nearest function, class or module.
+fn binds_at<'s>(
+    scopes: &'s ScopeIndex,
+    language: &Language,
+    binding_scope: &'s ScopeId,
+    level: &ScopeId,
+) -> bool {
+    if *language != Language::Python {
+        return binding_scope == level;
+    }
+    let mut current = binding_scope;
+    for _ in 0..=scopes.scopes.len() {
+        if current == level {
+            return true;
+        }
+        match scopes.get(current) {
+            Some(scope) if scope.kind == ScopeKind::Block => match scope.parent_id.as_ref() {
+                Some(parent) => current = parent,
+                None => return false,
+            },
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// `scope_id` itself, or the nearest scope above it, that is not a block.
+fn nearest_non_block_scope<'s>(scopes: &'s ScopeIndex, scope_id: &ScopeId) -> Option<&'s Scope> {
+    let mut current = scopes.get(scope_id);
+    for _ in 0..=scopes.scopes.len() {
+        let scope = current?;
+        if scope.kind != ScopeKind::Block {
+            return Some(scope);
+        }
+        current = scope
+            .parent_id
+            .as_ref()
+            .and_then(|parent| scopes.get(parent));
+    }
+    None
 }
 
 /// The module scope that the globs at `scope_id` name, when every one of them is the same
