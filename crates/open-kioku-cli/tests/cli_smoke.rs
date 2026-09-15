@@ -4066,11 +4066,11 @@ fn mcp_repo_status_error(repo: &std::path::Path) -> String {
     response["error"]["message"].as_str().unwrap().to_string()
 }
 
-/// Holds the index writer lock from a separate process for
-/// `index_lock_reports_in_progress_only_while_a_live_process_holds_it`, which re-runs this test
-/// binary with `OK_TEST_HOLD_INDEX_LOCK` naming the repository and then kills it. Without the
-/// variable there is nothing to hold and it returns at once. It also returns when its stdin
-/// closes, so a parent that fails before the kill does not leave it running.
+/// Holds the index writer lock from a separate process for the tests that need a live writer,
+/// which re-run this test binary through [`spawn_index_lock_holder`] with
+/// `OK_TEST_HOLD_INDEX_LOCK` naming the repository. Without the variable there is nothing to
+/// hold and it returns at once. It also returns when its stdin closes, so a parent that fails
+/// before releasing it does not leave it running.
 #[test]
 fn hold_index_lock_for_a_parent_test() {
     let Some(repo) = std::env::var_os("OK_TEST_HOLD_INDEX_LOCK") else {
@@ -4083,6 +4083,36 @@ fn hold_index_lock_for_a_parent_test() {
     .expect("the parent test leaves the lock free");
     let mut sink = Vec::new();
     let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+}
+
+/// A separate process holding `repo`'s index writer lock, returned once it holds it. Closing
+/// its stdin releases the lock as a finishing writer does; killing it releases the lock as
+/// Ctrl-C or the OOM killer would.
+fn spawn_index_lock_holder(repo: &std::path::Path) -> std::process::Child {
+    let mut holder = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "hold_index_lock_for_a_parent_test",
+            "--exact",
+            "--test-threads=1",
+        ])
+        .env("OK_TEST_HOLD_INDEX_LOCK", repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the lock holder should spawn");
+    let waiting_since = std::time::Instant::now();
+    while !open_kioku_storage::generations::index_write_in_progress(repo) {
+        if let Some(status) = holder.try_wait().unwrap() {
+            panic!("the lock holder exited before taking the lock: {status}");
+        }
+        assert!(
+            waiting_since.elapsed() < std::time::Duration::from_secs(60),
+            "the lock holder never took the lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    holder
 }
 
 /// `.ok/index.lock` means "indexing in progress" only while a live process holds it. A file
@@ -4127,29 +4157,7 @@ fn index_lock_reports_in_progress_only_while_a_live_process_holds_it() {
     );
 
     // A live process holds it: every surface says the index is being built.
-    let mut holder = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "hold_index_lock_for_a_parent_test",
-            "--exact",
-            "--test-threads=1",
-        ])
-        .env("OK_TEST_HOLD_INDEX_LOCK", repo)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the lock holder should spawn");
-    let waiting_since = std::time::Instant::now();
-    while !index_write_in_progress(repo) {
-        if let Some(status) = holder.try_wait().unwrap() {
-            panic!("the lock holder exited before taking the lock: {status}");
-        }
-        assert!(
-            waiting_since.elapsed() < std::time::Duration::from_secs(60),
-            "the lock holder never took the lock"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    let mut holder = spawn_index_lock_holder(repo);
     for args in [
         vec!["status"],
         vec!["--json", "status"],
@@ -4269,6 +4277,283 @@ fn index_run_that_fails_after_the_rows_publishes_no_manifest() {
     });
     let status: serde_json::Value = serde_json::from_str(&status).unwrap();
     assert_eq!(status["indexed"], true, "{status}");
+}
+
+/// `ok snapshot import` is a writer: it waits for a live writer's lock like `ok index` does,
+/// and until it has the lock the published index stays exactly as it was.
+#[test]
+fn snapshot_import_waits_for_a_live_index_writer_and_leaves_the_index_untouched() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .args(["snapshot", "export", "--quality", "fast"]);
+        command
+    });
+    let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
+    let index_before = fs::read(&db).unwrap();
+
+    let mut holder = spawn_index_lock_holder(&repo);
+    let mut import = {
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .args(["snapshot", "import"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.spawn().expect("snapshot import should spawn")
+    };
+    // Far inside the 30 s writer wait, and far longer than an import of this fixture takes.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert!(
+        import.try_wait().unwrap().is_none(),
+        "snapshot import must wait while a live writer holds the lock"
+    );
+    assert_eq!(
+        fs::read(&db).unwrap(),
+        index_before,
+        "a waiting import must not touch the index"
+    );
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(
+        status["indexed"], true,
+        "the previous index stays published while the import waits: {status}"
+    );
+
+    drop(holder.stdin.take());
+    holder.wait().unwrap();
+    let output = import.wait_with_output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("waiting for exclusive index writer lock"),
+        "{stderr}"
+    );
+    let imported: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(imported["imported"], true, "{imported}");
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["indexed"], true, "{status}");
+}
+
+/// The imported database is moved into place without its manifest, and the manifest is put
+/// back only after the search index is rebuilt: an import that fails at the search stage
+/// leaves the repository unindexed, not a published manifest over a missing search index.
+#[test]
+fn snapshot_import_that_fails_at_the_search_stage_publishes_no_manifest() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    let import = |repo: &std::path::Path| {
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .args(["snapshot", "import"]);
+        command
+    };
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .args(["snapshot", "export", "--quality", "fast"]);
+        command
+    });
+
+    // A regular file where the search index directory goes fails the search rebuild, which
+    // runs after the imported database has replaced the previous one.
+    let search_dir = open_kioku_storage::generations::resolve_index_location(&repo).tantivy_dir();
+    fs::remove_dir_all(&search_dir).unwrap();
+    fs::write(&search_dir, b"not a directory").unwrap();
+    let (_stdout, stderr) = run_failure(import(&repo));
+    assert!(stderr.contains("Not a directory"), "{stderr}");
+    assert!(
+        stderr.contains("the imported index was not published"),
+        "{stderr}"
+    );
+    assert!(
+        !open_kioku_storage::generations::index_write_in_progress(&repo),
+        "a failed import releases the writer lock"
+    );
+
+    let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let count = |table: &str| -> i64 {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert!(count("files") > 0, "the imported rows are in place");
+        assert_eq!(
+            count("manifests"),
+            0,
+            "no manifest may be published before the search index is rebuilt"
+        );
+    }
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["indexed"], false, "{status}");
+    assert!(status["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("repository is not indexed"));
+    let response = mcp_repo_status(&repo);
+    assert_eq!(
+        response["result"]["structuredContent"]["indexed"], false,
+        "{response}"
+    );
+
+    // Repaired, the next import publishes.
+    fs::remove_file(&search_dir).unwrap();
+    let imported: serde_json::Value = serde_json::from_str(&run(import(&repo))).unwrap();
+    assert_eq!(imported["imported"], true, "{imported}");
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["indexed"], true, "{status}");
+    let search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .args(["--json", "search", "Worker"]);
+        command
+    });
+    assert!(search.contains("src/lib.rs"), "{search}");
+}
+
+/// Export reads the index like every other read surface: an index a live writer has not
+/// published is refused as being built, and a database with no manifest is not exported.
+#[test]
+fn snapshot_export_refuses_an_unpublished_index() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    let metadata_path = repo.join(".ok/artifacts/index.snapshot.json");
+    let export = |repo: &std::path::Path| {
+        run_failure({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["snapshot", "export", "--quality", "fast"]);
+            command
+        })
+        .1
+    };
+
+    let mut holder = spawn_index_lock_holder(&repo);
+    // What a full `ok index` leaves between staging its rows and publishing the manifest.
+    let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute("DELETE FROM manifests", [])
+        .unwrap();
+    let stderr = export(&repo);
+    let expected = open_kioku_storage::generations::indexing_in_progress_message(&repo);
+    assert!(stderr.contains(&expected), "{stderr}");
+    assert!(!metadata_path.exists(), "nothing is exported mid-index");
+
+    drop(holder.stdin.take());
+    holder.wait().unwrap();
+    let stderr = export(&repo);
+    assert!(stderr.contains("repository is not indexed"), "{stderr}");
+    assert!(!metadata_path.exists());
+}
+
+/// A running MCP session holds the database an import replaces. The import withdraws that
+/// database's manifest before moving it aside, so the session probes the index path again and
+/// answers from the imported index instead of from the file that was replaced.
+#[test]
+fn snapshot_import_moves_a_running_mcp_session_to_the_imported_index() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .args(["snapshot", "export", "--quality", "fast"]);
+        command
+    });
+    let exported: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo.join(".ok/artifacts/index.snapshot.json")).unwrap(),
+    )
+    .unwrap();
+    fs::write(repo.join("src/extra.rs"), "pub fn extra() {}\n").unwrap();
+    let reindexed: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command.arg("--json").arg("index").arg(&repo);
+        command
+    }))
+    .unwrap();
+    assert_ne!(
+        reindexed["file_count"], exported["file_count"],
+        "the live index must differ from the snapshot for this test to see which one is served"
+    );
+
+    let mut server = {
+        let mut command = ok();
+        command
+            .args(["mcp", "serve", "--read-only", "--repo"])
+            .arg(&repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        command.spawn().expect("the MCP server should spawn")
+    };
+    let mut stdin = server.stdin.take().unwrap();
+    let mut stdout = std::io::BufReader::new(server.stdout.take().unwrap());
+    let mut served_file_count = |id: u64| -> serde_json::Value {
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"repo_status","arguments":{{}}}}}}"#
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut stdout, &mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        response["result"]["structuredContent"]["file_count"].clone()
+    };
+    assert_eq!(served_file_count(1), reindexed["file_count"]);
+
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .args(["snapshot", "import"]);
+        command
+    });
+    assert_eq!(
+        served_file_count(2),
+        exported["file_count"],
+        "the session must serve the imported index, not the database it replaced"
+    );
+
+    drop(stdin);
+    server.wait().unwrap();
 }
 
 fn bump_manifest_schema_version(db_path: &std::path::Path) {

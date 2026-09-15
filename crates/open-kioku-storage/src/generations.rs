@@ -152,8 +152,8 @@ pub fn index_write_in_progress(repo: &Path) -> bool {
 
 pub fn indexing_in_progress_message(repo: &Path) -> String {
     format!(
-        "indexing in progress: an `ok index` or `ok watch` run holds {} and has not published \
-         the index yet; retry when it finishes",
+        "indexing in progress: an `ok index`, `ok watch` or `ok snapshot import` run holds {} \
+         and has not published the index yet; retry when it finishes",
         index_lock_path(repo).display()
     )
 }
@@ -161,9 +161,9 @@ pub fn indexing_in_progress_message(repo: &Path) -> String {
 /// Exclusive writer lock for a repository's index, released when dropped or when the
 /// holding process exits.
 ///
-/// Held by `ok index` and by every `ok watch` write for the whole run, so two writers never
-/// interleave their component writes and readers can tell an index being built from one that
-/// does not exist ([`index_write_in_progress`]).
+/// Held by `ok index`, by every `ok watch` write and by `ok snapshot import` for the whole
+/// run, so two writers never interleave their component writes and readers can tell an index
+/// being built from one that does not exist ([`index_write_in_progress`]).
 #[derive(Debug)]
 pub struct IndexWriteLock {
     path: PathBuf,
@@ -201,8 +201,8 @@ impl IndexWriteLock {
             drop(file);
             if started_waiting.elapsed() > wait {
                 return Err(OkError::Index(format!(
-                    "index is locked by a running `ok index` or `ok watch` ({}); retry when it \
-                     finishes",
+                    "index is locked by a running `ok index`, `ok watch` or `ok snapshot import` \
+                     ({}); retry when it finishes",
                     path.display()
                 )));
             }

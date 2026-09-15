@@ -95,18 +95,28 @@ The manifest is the publication marker, written as the last step of an index run
   returned, so the repository reads as unindexed instead of serving this run's rows under
   the previous manifest with no search index; the next `ok watch` event finds no manifest and
   rebuilds in full.
+- **`ok snapshot import`** removes the manifest from the imported database before moving it
+  into place, rebuilds the Tantivy index from the imported rows, and then puts the imported
+  manifest, so a failure at the search stage or at the manifest write leaves the repository
+  unindexed rather than a manifest over a missing search index. The manifest of the database
+  being replaced is withdrawn before that database is moved aside, so a session that holds it
+  (an MCP server) probes again and switches to the imported index instead of answering from
+  the replaced file. If the imported database cannot be moved into place or opened, the
+  previous database is moved back and its manifest restored; if restoring the manifest also
+  fails, the error says so and the repository reads as unindexed until `ok index` runs.
 
 SQLite components are therefore consistent per transaction; the search index is not
 versioned with them.
 
 `.ok/index.lock` is an OS advisory lock (`flock` on unix, `LockFileEx` on Windows) that every
-writer holds for its whole run, and the kernel releases it however the writer exits, Ctrl-C
-and OOM kills included. On unix the writer removes the file as it finishes, while still
-holding the lock; on Windows the file stays. A lock file nobody holds is ignored by readers
-and taken over by the next writer at once. On a filesystem where advisory locks do not
-work, `ok index` and `ok watch` fail with `could not lock` and readers treat the lock as
-absent; on a network mount without lock support, the lock is local to each machine and does
-not exclude a writer on another. While a live writer holds the lock and no
+writer — `ok index`, `ok watch`, `ok snapshot import` — holds for its whole run, and the
+kernel releases it however the writer exits, Ctrl-C and OOM kills included. On unix the
+writer removes the file as it finishes, while still holding the lock; on Windows the file
+stays. A lock file nobody holds is ignored by readers and taken over by the next writer at
+once. On a filesystem where advisory locks do not work, `ok index`, `ok watch` and
+`ok snapshot import` fail with `could not lock` and readers treat the lock as absent; on a
+network mount without lock support, the lock is local to each machine and does not exclude
+a writer on another. While a live writer holds the lock and no
 manifest is published, every read surface — `ok status`, `ok doctor`, every read command,
 and the MCP server — reports `indexing in progress` rather than `repository is not indexed`.
 The MCP session survives the failed probe, and a session that already holds a store checks
@@ -498,4 +508,7 @@ manifests still read through serde defaults.
 `ok snapshot import` refuses an artifact whose `sqlite_user_version` is below the supported
 version and names the fix, instead of importing a store whose graph would be discarded on
 first open. `ok snapshot export` likewise refuses a store awaiting a rebuild, rather than
-writing `graph_edge_count: 0` into the artifact metadata as though it were a measurement.
+writing `graph_edge_count: 0` into the artifact metadata as though it were a measurement. It
+opens the index the way every read surface does, so it refuses with `indexing in progress`
+while a live writer holds the lock and no manifest is published, and with `repository is not
+indexed` when there is no published index to export.

@@ -13,34 +13,29 @@ fn absolutize(path: &Path) -> anyhow::Result<PathBuf> {
 
 fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<SnapshotExportReport> {
     let repo = absolutize(repo)?;
-    let index_path = index_sqlite_path(&repo);
-    if !index_path.exists() {
+    // The probe every read surface makes: an index a live writer has not published yet is
+    // refused with `indexing in progress`, and a database without a manifest is not an index.
+    let Some(store) = SqliteStore::open_repo_index(&repo)? else {
         anyhow::bail!(
-            "index database is missing at {}; run `ok index` first",
-            index_path.display()
+            "{}",
+            open_kioku_storage::generations::not_indexed_message(&repo)
         );
-    }
+    };
+    let index_path = index_sqlite_path(&repo);
 
     // A store whose edges were discarded still has an edge table, so the export would count
     // it, write `graph_edge_count: 0` into the metadata, and pass the required-table check —
     // a clean-looking measurement of a repository that has not been measured. The artifact is
     // effect-safe (it carries the marker, and the importer's first open raises the rebuild
     // error), but the metadata file is read by people, so refuse rather than publish the zero.
-    {
-        let conn = Connection::open_with_flags(
-            &index_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .with_context(|| format!("opening {} read-only", index_path.display()))?;
-        conn.execute_batch("PRAGMA query_only = ON;")?;
-        if open_kioku_storage_sqlite::graph_rebuild_required(&conn)? {
-            anyhow::bail!(
-                "index at {} has no graph edges: they were built by an older index format and \
-                 were discarded on open; run `ok index` before exporting a snapshot",
-                index_path.display()
-            );
-        }
+    if store.graph_rebuild_required()? {
+        anyhow::bail!(
+            "index at {} has no graph edges: they were built by an older index format and \
+             were discarded on open; run `ok index` before exporting a snapshot",
+            index_path.display()
+        );
     }
+    drop(store);
 
     let artifact_dir = snapshot_artifact_dir(&repo);
     fs::create_dir_all(&artifact_dir)?;
@@ -72,8 +67,14 @@ fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<Snap
     integrity_check_sqlite(&temp_db)?;
     ensure_required_snapshot_tables(&temp_db)?;
 
-    let manifest = read_manifest_from_sqlite(&temp_db)?
-        .ok_or_else(|| anyhow::anyhow!("snapshot source database has no index manifest"))?;
+    let manifest = match read_manifest_from_sqlite(&temp_db)? {
+        Some(manifest) => manifest,
+        None => {
+            let _ = fs::remove_file(&temp_db);
+            // A writer withdrew the manifest between the probe above and the copy.
+            anyhow::bail!("{}", unpublished_index_message(&repo));
+        }
+    };
     let graph_counts = read_graph_counts_from_sqlite(&temp_db)?;
     let sqlite_user_version = sqlite_user_version(&temp_db)?;
     let original_size_bytes = fs::metadata(&temp_db)?.len();
@@ -128,6 +129,16 @@ fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<Snap
 
 fn snapshot_import(repo: &Path) -> anyhow::Result<SnapshotImportReport> {
     let repo = absolutize(repo)?;
+    // An import replaces every index component, so it takes the writer lock `ok index` and
+    // `ok watch` take, for the whole run: it never interleaves with either, and readers report
+    // an index being built, not an unindexed repository, until the manifest is published.
+    if open_kioku_storage::generations::index_write_in_progress(&repo) {
+        eprintln!(
+            "snapshot import: waiting for exclusive index writer lock {}",
+            open_kioku_storage::generations::index_lock_path(&repo).display()
+        );
+    }
+    let _lock = IndexWriteLock::acquire(&repo, IndexWriteLock::DEFAULT_WAIT)?;
     let artifact_path = snapshot_artifact_path(&repo);
     let metadata_path = snapshot_metadata_path(&repo);
     let metadata = read_snapshot_metadata(&metadata_path)?;
@@ -183,10 +194,30 @@ fn snapshot_import(repo: &Path) -> anyhow::Result<SnapshotImportReport> {
         );
     }
 
+    // The manifest is the publication marker and the artifact carries one. The database is
+    // moved into place without it, and it is put back once the search index has been rebuilt
+    // from the imported rows, as `ok index` publishes its own.
+    if let Err(err) = withhold_snapshot_manifest(&temp_db) {
+        let _ = fs::remove_file(&temp_db);
+        return Err(err);
+    }
     let index_path = index_sqlite_path(&repo);
     promote_snapshot_db(&repo, &temp_db)?;
-    let store = open_store_for_write(&repo)?;
-    rebuild_search_from_store(&repo, &store)?;
+    let publish = || -> anyhow::Result<()> {
+        let store = open_store_for_write(&repo)?;
+        rebuild_search_from_store(&repo, &store)?;
+        store.put_manifest(&temp_manifest)?;
+        Ok(())
+    };
+    // The previous database is gone from here on. Without a manifest the imported rows read
+    // as unindexed, never as an index whose search side is missing.
+    publish().with_context(|| {
+        format!(
+            "the imported index was not published, so reads report the repository as \
+             unindexed; run `ok snapshot import` again or `ok index {}`",
+            repo.display()
+        )
+    })?;
 
     Ok(SnapshotImportReport {
         ok: true,
@@ -1203,30 +1234,46 @@ fn promote_snapshot_db(repo: &Path, temp_db: &Path) -> anyhow::Result<()> {
     let ok_dir = repo.join(".ok");
     fs::create_dir_all(&ok_dir)?;
     let index_path = index_sqlite_path(repo);
-    checkpoint_sqlite(&index_path);
     let backup_path = unique_temp_path(&ok_dir, "index.sqlite", "backup");
     let had_existing = index_path.exists();
+    // A session that already holds the previous database (an MCP server) keeps reading that
+    // file after it is moved aside, for as long as it has a manifest. Withdrawn first, the
+    // session probes the index path again: the import in progress, then the imported index.
+    let previous_manifest = if had_existing {
+        withdraw_replaced_manifest(&index_path)?
+    } else {
+        None
+    };
+    checkpoint_sqlite(&index_path);
     if had_existing {
-        fs::rename(&index_path, &backup_path).with_context(|| {
-            format!(
+        if let Err(err) = fs::rename(&index_path, &backup_path) {
+            let err = anyhow::Error::new(err).context(format!(
                 "moving existing index {} to rollback backup {}",
                 index_path.display(),
                 backup_path.display()
-            )
-        })?;
+            ));
+            return Err(restore_replaced_manifest(
+                err,
+                &index_path,
+                previous_manifest.as_deref(),
+            ));
+        }
     }
 
     if let Err(err) = fs::rename(temp_db, &index_path) {
         if had_existing {
             let _ = fs::rename(&backup_path, &index_path);
         }
-        return Err(err).with_context(|| {
-            format!(
-                "promoting imported snapshot {} to {}",
-                temp_db.display(),
-                index_path.display()
-            )
-        });
+        let err = anyhow::Error::new(err).context(format!(
+            "promoting imported snapshot {} to {}",
+            temp_db.display(),
+            index_path.display()
+        ));
+        return Err(restore_replaced_manifest(
+            err,
+            &index_path,
+            previous_manifest.as_deref(),
+        ));
     }
     remove_sqlite_sidecars(&index_path);
 
@@ -1243,8 +1290,92 @@ fn promote_snapshot_db(repo: &Path, temp_db: &Path) -> anyhow::Result<()> {
                 let _ = fs::rename(&backup_path, &index_path);
             }
             remove_sqlite_sidecars(&index_path);
-            Err(anyhow::Error::from(err)).context("imported snapshot failed SQLite open")
+            let err = anyhow::Error::from(err).context("imported snapshot failed SQLite open");
+            Err(restore_replaced_manifest(
+                err,
+                &index_path,
+                previous_manifest.as_deref(),
+            ))
         }
+    }
+}
+
+/// Remove the manifest an artifact carries before its database is moved into place; the
+/// import puts it back once the search index is rebuilt. The rename moves the database file
+/// alone, so the delete is committed in rollback-journal mode, where it is in that file when
+/// the statement returns; a WAL frame left beside the file would be lost with the manifest
+/// still in it.
+fn withhold_snapshot_manifest(db: &Path) -> anyhow::Result<()> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .with_context(|| format!("opening {} to withhold its manifest", db.display()))?;
+    conn.execute_batch("PRAGMA journal_mode = DELETE; DELETE FROM manifests;")
+        .with_context(|| format!("withholding the index manifest of {}", db.display()))?;
+    Ok(())
+}
+
+/// Withdraw the manifest of the database an import is about to replace, returning it so a
+/// failed import can put it back. A database whose manifest cannot be read is left as it is:
+/// no reader can serve it as an index, and a corrupt index must stay replaceable by import.
+/// A manifest that is read and cannot be deleted fails the import with the index untouched.
+fn withdraw_replaced_manifest(index_path: &Path) -> anyhow::Result<Option<String>> {
+    let Ok(conn) = Connection::open_with_flags(index_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+    else {
+        return Ok(None);
+    };
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let Ok(Some(manifest)) = conn
+        .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+    else {
+        return Ok(None);
+    };
+    conn.execute("DELETE FROM manifests", []).with_context(|| {
+        format!(
+            "withdrawing the index manifest of {} before replacing it",
+            index_path.display()
+        )
+    })?;
+    Ok(Some(manifest))
+}
+
+/// Put back the manifest [`withdraw_replaced_manifest`] removed, once a failed import has
+/// moved the previous database back to `index_path`. If that fails too, the previous index
+/// stays unpublished and reads as unindexed, and the returned error says so.
+fn restore_replaced_manifest(
+    err: anyhow::Error,
+    index_path: &Path,
+    manifest: Option<&str>,
+) -> anyhow::Error {
+    let Some(manifest) = manifest else {
+        return err;
+    };
+    let restored = Connection::open_with_flags(index_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .and_then(|conn| {
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            conn.execute(
+                "INSERT INTO manifests(id, json) VALUES(1, ?1) \
+                 ON CONFLICT(id) DO UPDATE SET json = excluded.json",
+                params![manifest],
+            )
+        });
+    match restored {
+        Ok(_) => err,
+        Err(restore_err) => err.context(format!(
+            "restoring the previous index manifest at {} also failed ({restore_err}), so the \
+             repository reads as unindexed; run `ok index`",
+            index_path.display()
+        )),
+    }
+}
+
+/// Why there is no published index to read: a live writer is building one, or there is none.
+fn unpublished_index_message(repo: &Path) -> String {
+    if open_kioku_storage::generations::index_write_in_progress(repo) {
+        open_kioku_storage::generations::indexing_in_progress_message(repo)
+    } else {
+        open_kioku_storage::generations::not_indexed_message(repo)
     }
 }
 
@@ -1253,6 +1384,102 @@ fn remove_sqlite_sidecars(index_path: &Path) {
     let shm = index_path.with_extension("sqlite-shm");
     let _ = fs::remove_file(wal);
     let _ = fs::remove_file(shm);
+}
+
+#[cfg(test)]
+mod snapshot_publication_tests {
+    use super::*;
+
+    const PREVIOUS_MANIFEST: &str = r#"{"published_by":"the index before the import"}"#;
+
+    /// A repository whose index holds a manifest, as `ok index` leaves it.
+    fn indexed_repo() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let index_path = index_sqlite_path(temp.path());
+        drop(SqliteStore::open(&index_path).unwrap());
+        Connection::open(&index_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO manifests(id, json) VALUES(1, ?1)",
+                params![PREVIOUS_MANIFEST],
+            )
+            .unwrap();
+        (temp, index_path)
+    }
+
+    fn manifest_rows(db: &Path) -> Vec<String> {
+        let conn = Connection::open(db).unwrap();
+        let mut stmt = conn.prepare("SELECT json FROM manifests").unwrap();
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rows
+    }
+
+    #[test]
+    fn a_withdrawn_manifest_is_restored_when_the_import_fails() {
+        let (temp, index_path) = indexed_repo();
+        let withdrawn = withdraw_replaced_manifest(&index_path).unwrap();
+        assert_eq!(withdrawn.as_deref(), Some(PREVIOUS_MANIFEST));
+        assert!(manifest_rows(&index_path).is_empty());
+        assert!(
+            matches!(SqliteStore::open_repo_index(temp.path()), Ok(None)),
+            "a replaced index with its manifest withdrawn is not served"
+        );
+
+        let err = restore_replaced_manifest(
+            anyhow::anyhow!("promoting imported snapshot failed"),
+            &index_path,
+            withdrawn.as_deref(),
+        );
+        assert_eq!(err.to_string(), "promoting imported snapshot failed");
+        assert_eq!(manifest_rows(&index_path), vec![PREVIOUS_MANIFEST]);
+    }
+
+    /// The previous database did not come back to the index path, so its manifest cannot be
+    /// put back: the error must say the repository reads as unindexed, and nothing may be
+    /// created at the index path in the attempt.
+    #[test]
+    fn a_failed_restore_leaves_the_repository_unindexed_and_says_so() {
+        let (temp, index_path) = indexed_repo();
+        let withdrawn = withdraw_replaced_manifest(&index_path).unwrap();
+        let aside = temp.path().join("moved-aside.sqlite");
+        fs::rename(&index_path, &aside).unwrap();
+
+        let err = restore_replaced_manifest(
+            anyhow::anyhow!("promoting imported snapshot failed"),
+            &index_path,
+            withdrawn.as_deref(),
+        );
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("reads as unindexed; run `ok index`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("promoting imported snapshot failed"),
+            "{message}"
+        );
+        assert!(!index_path.exists(), "restore must not create a database");
+
+        fs::rename(&aside, &index_path).unwrap();
+        assert!(
+            matches!(SqliteStore::open_repo_index(temp.path()), Ok(None)),
+            "without its manifest the previous database reads as unindexed"
+        );
+    }
+
+    #[test]
+    fn an_index_that_is_not_a_database_is_replaced_without_withdrawal() {
+        let temp = tempfile::tempdir().unwrap();
+        let index_path = index_sqlite_path(temp.path());
+        fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        fs::write(&index_path, b"not a database").unwrap();
+        assert_eq!(withdraw_replaced_manifest(&index_path).unwrap(), None);
+        assert_eq!(fs::read(&index_path).unwrap(), b"not a database");
+    }
 }
 
 fn rebuild_search_from_store(repo: &Path, store: &SqliteStore) -> anyhow::Result<()> {
