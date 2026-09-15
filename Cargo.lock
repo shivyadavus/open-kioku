@@ -2736,6 +2736,7 @@ dependencies = [
  "open-kioku-errors",
  "open-kioku-storage",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",

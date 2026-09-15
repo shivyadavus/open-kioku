@@ -1,3 +1,7 @@
+use crate::schema::{
+    edge_type_for_query_name, edge_type_name, node_type_for_query_name, node_type_name, EDGE_TYPES,
+    NODE_TYPES,
+};
 use open_kioku_core::{GraphEdgeType, GraphNodeType};
 use open_kioku_errors::OkError;
 
@@ -116,7 +120,7 @@ impl Default for GraphQueryOptions {
 }
 
 pub fn parse_graph_query(input: &str) -> QueryResult<GraphQueryAst> {
-    let tokens = tokenize(input)?;
+    let tokens = tokenize_with_columns(input)?;
     let mut parser = Parser::new(tokens);
     let ast = parser.parse()?;
     validate_ast(&ast)?;
@@ -752,76 +756,84 @@ pub enum Token {
 }
 
 pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
-    let mut tokens = Vec::new();
-    let mut chars = input.chars().peekable();
+    Ok(tokenize_with_columns(input)?
+        .into_iter()
+        .map(|(token, _)| token)
+        .collect())
+}
 
-    while let Some(&c) = chars.peek() {
+/// Each token with the 1-based column it starts at, so a parse error can point at it.
+fn tokenize_with_columns(input: &str) -> QueryResult<Vec<(Token, usize)>> {
+    let mut tokens = Vec::new();
+    let mut chars = input.chars().enumerate().peekable();
+
+    while let Some(&(index, c)) = chars.peek() {
         if c.is_whitespace() {
             chars.next();
             continue;
         }
 
-        match c {
+        let token = match c {
             '(' => {
-                tokens.push(Token::LParen);
                 chars.next();
+                Token::LParen
             }
             ')' => {
-                tokens.push(Token::RParen);
                 chars.next();
+                Token::RParen
             }
             '[' => {
-                tokens.push(Token::LBracket);
                 chars.next();
+                Token::LBracket
             }
             ']' => {
-                tokens.push(Token::RBracket);
                 chars.next();
+                Token::RBracket
             }
             ':' => {
-                tokens.push(Token::Colon);
                 chars.next();
+                Token::Colon
             }
             ',' => {
-                tokens.push(Token::Comma);
                 chars.next();
+                Token::Comma
             }
             '*' => {
-                tokens.push(Token::Asterisk);
                 chars.next();
+                Token::Asterisk
             }
             '=' => {
                 chars.next();
-                if let Some(&'~') = chars.peek() {
+                if let Some(&(_, '~')) = chars.peek() {
                     chars.next();
-                    tokens.push(Token::RegexMatch);
+                    Token::RegexMatch
                 } else {
-                    tokens.push(Token::Equals);
+                    Token::Equals
                 }
             }
             '.' => {
                 chars.next();
-                if let Some(&'.') = chars.peek() {
+                if let Some(&(_, '.')) = chars.peek() {
                     chars.next();
-                    tokens.push(Token::DotDot);
+                    Token::DotDot
                 } else {
-                    tokens.push(Token::Dot);
+                    Token::Dot
                 }
             }
             '-' => {
                 chars.next();
-                if let Some(&'>') = chars.peek() {
+                if let Some(&(_, '>')) = chars.peek() {
                     chars.next();
-                    tokens.push(Token::ArrowRight);
+                    Token::ArrowRight
                 } else {
-                    tokens.push(Token::Dash);
+                    Token::Dash
                 }
             }
             '<' => {
                 chars.next();
-                if let Some(&'-') = chars.peek() {
+                if let Some(&(_, '-')) = chars.peek() {
                     chars.next();
-                    tokens.push(Token::ArrowLeft);
+                    Token::ArrowLeft
                 } else {
                     return Err(GraphQueryError::ParseError(
                         "Unexpected character: <".into(),
@@ -833,7 +845,7 @@ pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
                 chars.next();
                 let mut string_lit = String::new();
                 let mut closed = false;
-                while let Some(&next_c) = chars.peek() {
+                while let Some(&(_, next_c)) = chars.peek() {
                     if next_c == quote {
                         chars.next();
                         closed = true;
@@ -847,11 +859,11 @@ pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
                         "Unclosed string literal".into(),
                     ));
                 }
-                tokens.push(Token::StringLiteral(string_lit));
+                Token::StringLiteral(string_lit)
             }
             _ if c.is_ascii_digit() => {
                 let mut num_str = String::new();
-                while let Some(&next_c) = chars.peek() {
+                while let Some(&(_, next_c)) = chars.peek() {
                     if next_c.is_ascii_digit() {
                         num_str.push(next_c);
                         chars.next();
@@ -862,11 +874,11 @@ pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
                 let val: usize = num_str.parse().map_err(|_| {
                     GraphQueryError::ParseError(format!("Invalid integer: {}", num_str))
                 })?;
-                tokens.push(Token::IntLiteral(val));
+                Token::IntLiteral(val)
             }
             _ if c.is_ascii_alphabetic() || c == '_' => {
                 let mut ident = String::new();
-                while let Some(&next_c) = chars.peek() {
+                while let Some(&(_, next_c)) = chars.peek() {
                     if next_c.is_ascii_alphanumeric() || next_c == '_' {
                         ident.push(next_c);
                         chars.next();
@@ -874,7 +886,7 @@ pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
                         break;
                     }
                 }
-                let token = match ident.to_uppercase().as_str() {
+                match ident.to_uppercase().as_str() {
                     "MATCH" => Token::Match,
                     "WHERE" => Token::Where,
                     "RETURN" => Token::Return,
@@ -890,8 +902,7 @@ pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
                         )));
                     }
                     _ => Token::Identifier(ident),
-                };
-                tokens.push(token);
+                }
             }
             _ => {
                 return Err(GraphQueryError::ParseError(format!(
@@ -899,28 +910,98 @@ pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
                     c
                 )));
             }
-        }
+        };
+        tokens.push((token, index + 1));
     }
 
     Ok(tokens)
 }
 
+/// The token as a query would spell it, for error messages.
+fn token_text(token: &Token) -> String {
+    match token {
+        Token::Match => "MATCH".into(),
+        Token::Where => "WHERE".into(),
+        Token::Return => "RETURN".into(),
+        Token::Limit => "LIMIT".into(),
+        Token::Offset => "OFFSET".into(),
+        Token::And => "AND".into(),
+        Token::StartsWith => "STARTS_WITH".into(),
+        Token::Identifier(name) => name.clone(),
+        Token::StringLiteral(value) => format!("'{value}'"),
+        Token::IntLiteral(value) => value.to_string(),
+        Token::LParen => "(".into(),
+        Token::RParen => ")".into(),
+        Token::LBracket => "[".into(),
+        Token::RBracket => "]".into(),
+        Token::Dash => "-".into(),
+        Token::ArrowRight => "->".into(),
+        Token::ArrowLeft => "<-".into(),
+        Token::Colon => ":".into(),
+        Token::Dot => ".".into(),
+        Token::Comma => ",".into(),
+        Token::Equals => "=".into(),
+        Token::RegexMatch => "=~".into(),
+        Token::Asterisk => "*".into(),
+        Token::DotDot => "..".into(),
+    }
+}
+
+fn missing_edge_pattern() -> GraphQueryError {
+    GraphQueryError::ParseError(
+        "MATCH needs an edge pattern such as (a:File)-[:DEFINES]->(b:Function); isolated node patterns are not supported".into(),
+    )
+}
+
+fn return_expression_error() -> GraphQueryError {
+    GraphQueryError::ParseError(
+        "RETURN accepts only variables bound in MATCH; functions, DISTINCT and AS aliases are not supported".into(),
+    )
+}
+
+fn unknown_node_type(name: &str) -> GraphQueryError {
+    let accepted = NODE_TYPES
+        .iter()
+        .map(node_type_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    GraphQueryError::ParseError(format!(
+        "Unknown node type: {name}; node types are {accepted}"
+    ))
+}
+
+fn unknown_edge_type(name: &str) -> GraphQueryError {
+    let accepted = EDGE_TYPES
+        .iter()
+        .map(edge_type_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    GraphQueryError::ParseError(format!(
+        "Unknown edge type: {name}; edge types are {accepted}"
+    ))
+}
+
 struct Parser {
-    tokens: Vec<Token>,
+    tokens: Vec<(Token, usize)>,
     pos: usize,
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
+    fn new(tokens: Vec<(Token, usize)>) -> Self {
         Self { tokens, pos: 0 }
     }
 
     fn peek(&self) -> Option<&Token> {
-        self.tokens.get(self.pos)
+        self.tokens.get(self.pos).map(|(token, _)| token)
+    }
+
+    /// Column of the token `peek` returns; 0 once the input is exhausted.
+    fn column(&self) -> usize {
+        self.tokens.get(self.pos).map_or(0, |(_, column)| *column)
     }
 
     fn consume(&mut self) -> Option<&Token> {
-        let t = self.tokens.get(self.pos);
+        let t = self.tokens.get(self.pos).map(|(token, _)| token);
         if t.is_some() {
             self.pos += 1;
         }
@@ -958,8 +1039,9 @@ impl Parser {
                 Token::Offset => offset = Some(self.parse_offset()?),
                 _ => {
                     return Err(GraphQueryError::ParseError(format!(
-                        "Unexpected token: {:?}",
-                        t
+                        "Unexpected token `{}` at column {}; only LIMIT <n> and OFFSET <n> may follow RETURN",
+                        token_text(t),
+                        self.column()
                     )))
                 }
             }
@@ -983,110 +1065,92 @@ impl Parser {
     fn parse_path(&mut self) -> QueryResult<PathExpr> {
         let source = self.parse_node()?;
 
-        if let Some(t) = self.peek() {
-            match t {
-                Token::Dash | Token::ArrowLeft => {
-                    let is_reverse = match self.consume().unwrap() {
-                        Token::ArrowLeft => true,
-                        Token::Dash => false,
-                        _ => unreachable!(),
-                    };
-                    self.expect(Token::LBracket)?;
+        let is_reverse = match self.peek() {
+            Some(Token::Dash) => false,
+            Some(Token::ArrowLeft) => true,
+            _ => return Err(missing_edge_pattern()),
+        };
+        self.consume();
+        self.expect(Token::LBracket)?;
 
-                    let mut edge_type = None;
-                    if let Some(Token::Colon) = self.peek() {
-                        self.consume();
-                        if let Some(Token::Identifier(s)) = self.peek() {
-                            let s = s.clone();
-                            self.consume();
-                            let json_val = serde_json::Value::String(s.to_uppercase());
-                            edge_type =
-                                Some(serde_json::from_value::<GraphEdgeType>(json_val).map_err(
-                                    |_| {
-                                        GraphQueryError::ParseError(format!(
-                                            "Unknown edge type: {}",
-                                            s
-                                        ))
-                                    },
-                                )?);
-                        }
-                    }
-
-                    if let Some(Token::Asterisk) = self.peek() {
-                        self.consume();
-                        let min_hops = match self.consume() {
-                            Some(Token::IntLiteral(n)) => *n,
-                            _ => {
-                                return Err(GraphQueryError::ParseError(
-                                    "Expected integer min hops".into(),
-                                ))
-                            }
-                        };
-                        self.expect(Token::DotDot)?;
-                        let max_hops = match self.consume() {
-                            Some(Token::IntLiteral(n)) => *n,
-                            _ => {
-                                return Err(GraphQueryError::ParseError(
-                                    "Expected integer max hops".into(),
-                                ))
-                            }
-                        };
-                        self.expect(Token::RBracket)?;
-
-                        let direction = if is_reverse {
-                            self.expect(Token::Dash)?;
-                            Direction::Reverse
-                        } else {
-                            self.expect(Token::ArrowRight)?;
-                            Direction::Forward
-                        };
-
-                        if is_reverse {
-                            return Err(GraphQueryError::ParseError(
-                                "Reverse multi-hop not supported in v1".into(),
-                            ));
-                        }
-
-                        let target = self.parse_node()?;
-                        return Ok(PathExpr::MultiHop {
-                            source,
-                            edge_range: EdgeRangeExpr {
-                                direction,
-                                edge_type,
-                                min_hops,
-                                max_hops,
-                            },
-                            target,
-                        });
-                    } else {
-                        self.expect(Token::RBracket)?;
-                        let direction = if is_reverse {
-                            self.expect(Token::Dash)?;
-                            Direction::Reverse
-                        } else {
-                            self.expect(Token::ArrowRight)?;
-                            Direction::Forward
-                        };
-
-                        let target = self.parse_node()?;
-                        return Ok(PathExpr::OneHop {
-                            source,
-                            edge: EdgeExpr {
-                                direction,
-                                edge_type,
-                                variable: None,
-                            },
-                            target,
-                        });
-                    }
-                }
-                _ => return Err(GraphQueryError::ParseError("Expected edge".into())),
+        let mut edge_type = None;
+        if let Some(Token::Colon) = self.peek() {
+            self.consume();
+            if let Some(Token::Identifier(s)) = self.peek() {
+                let s = s.clone();
+                self.consume();
+                edge_type =
+                    Some(edge_type_for_query_name(&s).ok_or_else(|| unknown_edge_type(&s))?);
             }
         }
 
-        Err(GraphQueryError::ParseError(
-            "Isolated nodes not supported".into(),
-        ))
+        if let Some(Token::Asterisk) = self.peek() {
+            self.consume();
+            let min_hops = match self.consume() {
+                Some(Token::IntLiteral(n)) => *n,
+                _ => {
+                    return Err(GraphQueryError::ParseError(
+                        "Expected integer min hops; give a hop range such as *1..3".into(),
+                    ))
+                }
+            };
+            self.expect(Token::DotDot)?;
+            let max_hops = match self.consume() {
+                Some(Token::IntLiteral(n)) => *n,
+                _ => {
+                    return Err(GraphQueryError::ParseError(
+                        "Expected integer max hops; give a hop range such as *1..3".into(),
+                    ))
+                }
+            };
+            self.expect(Token::RBracket)?;
+
+            let direction = if is_reverse {
+                self.expect(Token::Dash)?;
+                Direction::Reverse
+            } else {
+                self.expect(Token::ArrowRight)?;
+                Direction::Forward
+            };
+
+            if is_reverse {
+                return Err(GraphQueryError::ParseError(
+                    "Reverse multi-hop not supported; write (a)<-[:TYPE *min..max]-(b) forward as (b)-[:TYPE *min..max]->(a)".into(),
+                ));
+            }
+
+            let target = self.parse_node()?;
+            return Ok(PathExpr::MultiHop {
+                source,
+                edge_range: EdgeRangeExpr {
+                    direction,
+                    edge_type,
+                    min_hops,
+                    max_hops,
+                },
+                target,
+            });
+        }
+
+        self.expect(Token::RBracket)?;
+        let direction = if is_reverse {
+            self.expect(Token::Dash)?;
+            Direction::Reverse
+        } else {
+            self.expect(Token::ArrowRight)?;
+            Direction::Forward
+        };
+
+        let target = self.parse_node()?;
+        Ok(PathExpr::OneHop {
+            source,
+            edge: EdgeExpr {
+                direction,
+                edge_type,
+                variable: None,
+            },
+            target,
+        })
     }
 
     fn parse_node(&mut self) -> QueryResult<NodeExpr> {
@@ -1102,10 +1166,7 @@ impl Parser {
         if let Some(Token::Colon) = self.peek() {
             self.consume();
             if let Some(Token::Identifier(s)) = self.consume() {
-                let json_val = serde_json::Value::String(s.to_lowercase());
-                node_type = Some(serde_json::from_value::<GraphNodeType>(json_val).map_err(
-                    |_| GraphQueryError::ParseError(format!("Unknown node type: {}", s)),
-                )?);
+                node_type = Some(node_type_for_query_name(s).ok_or_else(|| unknown_node_type(s))?);
             } else {
                 return Err(GraphQueryError::ParseError("Expected node type".into()));
             }
@@ -1201,26 +1262,47 @@ impl Parser {
     fn parse_return(&mut self) -> QueryResult<ReturnClause> {
         self.expect(Token::Return)?;
         let mut variables = Vec::new();
-        match self.consume() {
-            Some(Token::Identifier(s)) => variables.push(s.clone()),
+        let variable = match self.consume() {
+            Some(Token::Identifier(s)) => s.clone(),
             _ => {
                 return Err(GraphQueryError::ParseError(
                     "Expected identifier in RETURN".into(),
                 ))
             }
-        }
+        };
+        self.reject_return_expression(&variable)?;
+        variables.push(variable);
         while let Some(Token::Comma) = self.peek() {
             self.consume();
-            match self.consume() {
-                Some(Token::Identifier(s)) => variables.push(s.clone()),
+            let variable = match self.consume() {
+                Some(Token::Identifier(s)) => s.clone(),
                 _ => {
                     return Err(GraphQueryError::ParseError(
                         "Expected identifier after comma".into(),
                     ))
                 }
-            }
+            };
+            self.reject_return_expression(&variable)?;
+            variables.push(variable);
         }
         Ok(ReturnClause { variables })
+    }
+
+    /// RETURN takes bare variables. Property access, functions, DISTINCT and AS aliases are named
+    /// here, so the error says what RETURN accepts instead of reporting trailing input.
+    fn reject_return_expression(&self, variable: &str) -> QueryResult<()> {
+        match self.peek() {
+            Some(Token::Dot) => Err(GraphQueryError::ParseError(
+                "RETURN accepts variables only; filter properties in WHERE".into(),
+            )),
+            Some(Token::LParen) => Err(return_expression_error()),
+            Some(Token::Identifier(next))
+                if variable.eq_ignore_ascii_case("DISTINCT") || next.eq_ignore_ascii_case("AS") =>
+            {
+                Err(return_expression_error())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn parse_limit(&mut self) -> QueryResult<usize> {
@@ -1735,5 +1817,287 @@ mod tests {
         .unwrap();
         assert_eq!(res.rows.len(), 2);
         assert!(res.has_more);
+    }
+
+    /// Labels are shaped as an index writes them. A File node carries its repository-relative path.
+    /// A symbol node carries the qualified name tree-sitter gives it, which the graph builder copies
+    /// into the label: the path without its extension, `/` as `::`, then `::name`, in every language.
+    /// `symbol_label` mirrors `qualified_name` in open-kioku-tree-sitter; the Java node pins that no
+    /// package prefix is applied, which `identity::qualified_name` would add.
+    fn example_store() -> MockGraphStore {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        let symbol_label = |path: &str, name: &str| {
+            let stem = std::path::Path::new(path)
+                .with_extension("")
+                .to_string_lossy()
+                .replace(['/', '\\'], "::");
+            format!("{stem}::{name}")
+        };
+        let java_path = "src/main/java/com/acme/OrderService.java";
+        for (id, label, node_type) in [
+            ("file:app", "src/app.rs".to_string(), GraphNodeType::File),
+            (
+                "file:config",
+                "src/config.rs".to_string(),
+                GraphNodeType::File,
+            ),
+            (
+                "file:order_service",
+                java_path.to_string(),
+                GraphNodeType::File,
+            ),
+            (
+                "fn:run",
+                symbol_label("src/app.rs", "run"),
+                GraphNodeType::Function,
+            ),
+            (
+                "fn:handle_request",
+                symbol_label("src/app.rs", "handle_request"),
+                GraphNodeType::Function,
+            ),
+            (
+                "fn:parse_config",
+                symbol_label("src/config.rs", "parse_config"),
+                GraphNodeType::Function,
+            ),
+            (
+                "method:handle_order",
+                symbol_label(java_path, "handle_order"),
+                GraphNodeType::Method,
+            ),
+        ] {
+            store
+                .nodes
+                .insert(id.into(), test_node(id, &label, node_type));
+        }
+        assert_eq!(
+            store.nodes["fn:parse_config"].label,
+            "src::config::parse_config"
+        );
+        assert_eq!(
+            store.nodes["method:handle_order"].label,
+            "src::main::java::com::acme::OrderService::handle_order"
+        );
+        store.edges.push(test_edge(
+            "defines-handle-order",
+            "file:order_service",
+            "method:handle_order",
+            GraphEdgeType::Defines,
+        ));
+
+        for (id, from, to, edge_type) in [
+            ("defines-run", "file:app", "fn:run", GraphEdgeType::Defines),
+            (
+                "defines-handle",
+                "file:app",
+                "fn:handle_request",
+                GraphEdgeType::Defines,
+            ),
+            (
+                "defines-parse",
+                "file:config",
+                "fn:parse_config",
+                GraphEdgeType::Defines,
+            ),
+            (
+                "calls-parse",
+                "fn:run",
+                "fn:parse_config",
+                GraphEdgeType::Calls,
+            ),
+            (
+                "calls-handle",
+                "fn:parse_config",
+                "fn:handle_request",
+                GraphEdgeType::Calls,
+            ),
+            (
+                "imports-config",
+                "file:app",
+                "file:config",
+                GraphEdgeType::Imports,
+            ),
+        ] {
+            store.edges.push(test_edge(id, from, to, edge_type));
+        }
+        store
+    }
+
+    #[test]
+    fn functions_distinct_and_aliases_in_return_say_return_accepts_only_variables() {
+        for query in [
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN count(s)",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN DISTINCT s",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s AS symbol",
+        ] {
+            assert_eq!(
+                parse_graph_query(query).unwrap_err().to_string(),
+                "Parse error: RETURN accepts only variables bound in MATCH; functions, DISTINCT \
+                 and AS aliases are not supported",
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_node_type_lists_the_node_types_the_schema_names() {
+        let error = parse_graph_query("MATCH (s:Symbol) RETURN s")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "Parse error: Unknown node type: Symbol; node types are File, Directory, Module, \
+             Package, Class, Trait, Interface, Function, Method, Field, Endpoint, DatabaseTable, \
+             Collection, Queue, Topic, ConfigKey, Test, BuildTarget, RuntimeError, Ticket, \
+             PullRequest, Resource, ArchitectureComponent"
+        );
+    }
+
+    #[test]
+    fn unknown_edge_type_lists_the_edge_types_the_schema_names() {
+        let error = parse_graph_query("MATCH (f:File)-[:USES]->(p:Package) RETURN f")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(
+                "Parse error: Unknown edge type: USES; edge types are Contains, Defines, "
+            ),
+            "{error}"
+        );
+        assert!(error.contains(", DependsOn, "), "{error}");
+        assert!(error.ends_with(", DerivedFrom"), "{error}");
+    }
+
+    #[test]
+    fn match_without_an_edge_pattern_names_the_accepted_form() {
+        for query in ["MATCH (f:File) RETURN f", "MATCH (f:File)"] {
+            assert_eq!(
+                parse_graph_query(query).unwrap_err().to_string(),
+                "Parse error: MATCH needs an edge pattern such as \
+                 (a:File)-[:DEFINES]->(b:Function); isolated node patterns are not supported",
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn property_access_in_return_says_to_filter_in_where() {
+        for query in [
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f.file_path",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s.label",
+        ] {
+            assert_eq!(
+                parse_graph_query(query).unwrap_err().to_string(),
+                "Parse error: RETURN accepts variables only; filter properties in WHERE",
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_token_error_names_the_token_and_its_column() {
+        let query = "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN s ORDER BY s";
+        let column = query.find("ORDER").unwrap() + 1;
+        assert_eq!(
+            parse_graph_query(query).unwrap_err().to_string(),
+            format!(
+                "Parse error: Unexpected token `ORDER` at column {column}; \
+                 only LIMIT <n> and OFFSET <n> may follow RETURN"
+            )
+        );
+    }
+
+    #[test]
+    fn write_like_keywords_are_rejected_naming_the_keyword() {
+        for keyword in [
+            "CREATE", "MERGE", "DELETE", "DETACH", "SET", "REMOVE", "DROP", "CALL", "LOAD",
+            "UNION", "WITH", "FOREACH",
+        ] {
+            let query = format!("MATCH (f:File)-[:DEFINES]->(s:Function) {keyword} s RETURN s");
+            assert_eq!(
+                parse_graph_query(&query).unwrap_err().to_string(),
+                format!("Parse error: Write-like or unsupported keyword rejected: {keyword}")
+            );
+        }
+    }
+
+    #[test]
+    fn every_type_parses_as_the_schema_writes_it_and_as_it_serializes() {
+        let schema = crate::schema::current_schema(None);
+        assert_eq!(schema.node_types.len(), NODE_TYPES.len());
+        assert_eq!(schema.edge_types.len(), EDGE_TYPES.len());
+
+        for (spec, node_type) in schema.node_types.iter().zip(NODE_TYPES) {
+            let serialized = crate::schema::node_type_query_spelling(&node_type);
+            for spelling in [
+                spec.name.clone(),
+                spec.name.to_ascii_uppercase(),
+                serialized.clone(),
+                serialized.to_ascii_uppercase(),
+            ] {
+                let ast =
+                    parse_graph_query(&format!("MATCH (a:{spelling})-[:DEFINES]->(b) RETURN a"))
+                        .unwrap_or_else(|error| panic!("{spelling} does not parse: {error}"));
+                let PathExpr::OneHop { source, .. } = ast.match_clause.path else {
+                    panic!("a one-hop path was parsed as multi-hop");
+                };
+                assert_eq!(source.node_type.as_ref(), Some(&node_type), "{spelling}");
+            }
+        }
+
+        for (spec, edge_type) in schema.edge_types.iter().zip(EDGE_TYPES) {
+            let serialized = crate::schema::edge_type_query_spelling(&edge_type);
+            for spelling in [
+                spec.name.clone(),
+                spec.name.to_ascii_lowercase(),
+                serialized.clone(),
+                serialized.to_ascii_lowercase(),
+            ] {
+                let ast = parse_graph_query(&format!("MATCH (a)-[:{spelling}]->(b) RETURN a"))
+                    .unwrap_or_else(|error| panic!("{spelling} does not parse: {error}"));
+                let PathExpr::OneHop { edge, .. } = ast.match_clause.path else {
+                    panic!("a one-hop path was parsed as multi-hop");
+                };
+                assert_eq!(edge.edge_type.as_ref(), Some(&edge_type), "{spelling}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_schema_example_parses_and_returns_rows() {
+        let store = example_store();
+        let examples = crate::schema::current_schema(None).examples;
+        assert!(examples.len() >= 4);
+        for example in examples {
+            let ast = parse_graph_query(&example.query)
+                .unwrap_or_else(|error| panic!("{} does not parse: {error}", example.query));
+            let result = execute_graph_query(&store, &ast, GraphQueryOptions::default())
+                .unwrap_or_else(|error| panic!("{} does not run: {error}", example.query));
+            assert!(
+                !result.rows.is_empty(),
+                "{} returned no rows from the example graph",
+                example.query
+            );
+        }
+    }
+
+    #[test]
+    fn every_unsupported_form_in_the_schema_is_rejected() {
+        let store = example_store();
+        for entry in crate::schema::current_schema(None).unsupported {
+            let rejected = match parse_graph_query(&entry.example) {
+                Err(_) => true,
+                Ok(ast) => execute_graph_query(&store, &ast, GraphQueryOptions::default()).is_err(),
+            };
+            assert!(
+                rejected,
+                "{} is listed as unsupported but runs: {}",
+                entry.form, entry.example
+            );
+        }
     }
 }

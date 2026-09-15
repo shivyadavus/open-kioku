@@ -422,6 +422,12 @@ fn test_cli_graph_schema_markdown() {
             "# Open Kioku Evidence Graph Schema v1.0.0",
         ))
         .stdout(predicate::str::contains("## Query Features"))
+        .stdout(predicate::str::contains("## Query Syntax"))
+        .stdout(predicate::str::contains(
+            r"A query is MATCH \<path\> \[WHERE \<filter\>",
+        ))
+        .stdout(predicate::str::contains("## Query Examples"))
+        .stdout(predicate::str::contains("## Unsupported Query Forms"))
         .stdout(predicate::str::contains("## Evidence Source Types"))
         .stdout(predicate::str::contains(
             "## Optional Evidence Availability",
