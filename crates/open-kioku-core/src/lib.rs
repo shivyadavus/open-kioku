@@ -3942,6 +3942,12 @@ pub struct IndexQuality {
     /// rather than treat absence as full coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<IndexCoverage>,
+    /// Data, config and prose files indexed with at least one secret-like value replaced by
+    /// `[REDACTED]` before storage (`docs/security-model.md`). Absent on manifests written
+    /// before redaction existed: those indexes stored such files' values as read, so readers
+    /// must say "not recorded" rather than report zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redacted_files: Option<usize>,
     /// Every note, typed by producer. Status payloads summarize this list; see
     /// `IndexManifest::status_value`.
     #[serde(default)]

@@ -43,6 +43,7 @@ pub(crate) fn compact_message(mut message: String) -> String {
 }
 pub mod imports;
 pub mod project_model;
+pub mod redaction;
 pub mod relationships;
 pub mod resolver;
 pub mod runtime;
@@ -318,20 +319,33 @@ impl Indexer {
     /// quote the source text around the failing byte, and parser messages stay redacted.
     /// `AssertUnwindSafe` holds because the parser is `Sync` and borrowed immutably; the only
     /// other state the closure touches is the local content buffer, which is dropped either way.
+    ///
+    /// The flag is true when secret-like values were redacted from the file's content.
     fn parse_file(
         &self,
         root: &Path,
         file: &File,
         build_hint: Option<&str>,
-    ) -> std::result::Result<open_kioku_parse::ParsedFile, ParseFailure> {
+    ) -> std::result::Result<(open_kioku_parse::ParsedFile, bool), ParseFailure> {
         let bytes = fs::read(root.join(&file.path)).map_err(|err| ParseFailure {
             source: SkipSource::Filesystem,
             message: err.to_string(),
         })?;
         let content = String::from_utf8_lossy(&bytes).into_owned();
+        // Data, config and prose files are redacted before the parser sees them, so no chunk,
+        // symbol, fact or test derived from the text, and nothing stored or searched from
+        // those, can carry a secret-like value (#379). Programming-language source is indexed
+        // as written.
+        let (content, redacted) = if file.language.is_programming() {
+            (content, false)
+        } else {
+            let redacted = redaction::redact_secret_values(&content);
+            (redacted.text, redacted.redactions > 0)
+        };
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.parser.parse_with_hint(file, &content, build_hint)
         }))
+        .map(|parsed| (parsed, redacted))
         .map_err(|_| ParseFailure {
             source: SkipSource::Parser,
             message: "parser panicked on this file; its content was not indexed".to_string(),
@@ -450,6 +464,8 @@ impl Indexer {
                 phase_reports: &phase_reports,
                 skipped_paths: &[],
                 coverage: None,
+                // Nothing was read, so nothing was stored unredacted.
+                redacted_files: Some(0),
             });
             let manifest = IndexManifest {
                 analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
@@ -557,12 +573,14 @@ impl Indexer {
         // empty `.ok/` and the same failure on retry (#350).
         let mut skipped_paths = scan.skipped_paths;
         let mut coverage = scan.coverage;
+        let mut redacted_files = scan.redacted_files;
         let mut parse_warnings = Vec::new();
         let mut kept_files = Vec::with_capacity(files.len());
         let mut parsed = Vec::with_capacity(files.len());
         for (file, outcome) in files.into_iter().zip(outcomes) {
             match outcome {
-                Ok(parsed_file) => {
+                Ok((parsed_file, redacted)) => {
+                    redacted_files += usize::from(redacted);
                     kept_files.push(file);
                     parsed.push(parsed_file);
                 }
@@ -1174,6 +1192,7 @@ impl Indexer {
             phase_reports: &phase_reports,
             skipped_paths: &skipped_paths,
             coverage: Some(coverage),
+            redacted_files: Some(redacted_files),
         });
         let resolution_quality = if resolution_mode == open_kioku_config::ResolutionMode::Legacy {
             None
@@ -1267,6 +1286,7 @@ impl Indexer {
         let mut warnings = Vec::new();
         let mut scanned_files = 0;
         let mut source_like_files = 0;
+        let mut redacted_files = 0;
         progress.emit(ProgressEvent::new("scan"));
         for entry in builder.build() {
             let entry = match entry {
@@ -1471,9 +1491,13 @@ impl Indexer {
                     }
                     document_paths.insert(rel.clone());
                     ledger.indexed(&language, false);
+                    // Documents are prose, redacted like every other non-source file before
+                    // anything is derived from them (see `Indexer::parse_file`).
+                    let redacted = redaction::redact_secret_values(&content);
+                    redacted_files += usize::from(redacted.redactions > 0);
                     document_sections.extend(build_document_sections(
                         &rel,
-                        &content,
+                        &redacted.text,
                         document_type,
                     ));
                     document_elapsed_ms = document_elapsed_ms.saturating_add(
@@ -1609,6 +1633,7 @@ impl Indexer {
             warnings,
             skipped_paths,
             coverage,
+            redacted_files,
         })
     }
 }
@@ -1623,6 +1648,8 @@ struct ScanResult {
     warnings: Vec<String>,
     skipped_paths: Vec<SkippedPath>,
     coverage: IndexCoverage,
+    /// Document-corpus files whose content had secret-like values redacted.
+    redacted_files: usize,
 }
 
 /// Discovery's running record of what was left out and why. Coverage counts only
@@ -1852,6 +1879,7 @@ struct IndexQualityInput<'a> {
     phase_reports: &'a [IndexPhaseReport],
     skipped_paths: &'a [SkippedPath],
     coverage: Option<IndexCoverage>,
+    redacted_files: Option<usize>,
 }
 
 fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
@@ -2007,6 +2035,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             semantic_provider_notes,
             resolution_quality: None,
             coverage: input.coverage,
+            redacted_files: input.redacted_files,
             quality_notes,
         }
     } else {
@@ -2040,6 +2069,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             semantic_provider_notes,
             resolution_quality: None,
             coverage: input.coverage,
+            redacted_files: input.redacted_files,
             quality_notes,
         }
     };

@@ -173,6 +173,13 @@ fn render_status_markdown(
             "| Skipped paths | {} |\n",
             manifest.quality.skipped_paths.len()
         ));
+        out.push_str(&format!(
+            "| Files with redacted values | {} |\n",
+            manifest
+                .quality
+                .redacted_files
+                .map_or_else(|| "not recorded by this index".into(), |count| count.to_string())
+        ));
         if let Some(excluded) = manifest
             .quality
             .coverage
@@ -1329,6 +1336,9 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                     coverage_check(quality.coverage.as_ref(), manifest.index_mode);
                 checks.push(check);
                 next_steps.extend(step);
+                let (check, step) = redaction_check(quality.redacted_files);
+                checks.push(check);
+                next_steps.extend(step);
                 coverage = quality.coverage.clone();
             }
         }
@@ -1463,6 +1473,38 @@ fn doctor_report(repo: &Path) -> DoctorReport {
         coverage,
         next_steps,
     }
+}
+
+/// The redaction count as `ok index`, `ok status`, and `ok doctor` print it.
+fn redaction_summary(redacted_files: Option<usize>) -> String {
+    match redacted_files {
+        Some(0) => "no secret-like values found in indexed data, config, or prose files".into(),
+        Some(count) => format!(
+            "{} data, config, or prose file(s) indexed with secret-like values replaced by [REDACTED]",
+            group_thousands(count)
+        ),
+        None => "not recorded; this index predates secret-value redaction, so its data, config, and prose files were stored as read".into(),
+    }
+}
+
+/// Redaction sits beside coverage. An index written before redaction existed warns rather
+/// than fails: it holds config values as read, and rebuilding it is the fix.
+fn redaction_check(redacted_files: Option<usize>) -> (DoctorCheck, Option<String>) {
+    let step = redacted_files.is_none().then(|| {
+        "Redaction: run `ok index .` so data, config, and prose files are stored with secret-like values replaced by [REDACTED].".to_string()
+    });
+    (
+        DoctorCheck {
+            name: "redaction",
+            status: if redacted_files.is_some() {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Warn
+            },
+            message: redaction_summary(redacted_files),
+        },
+        step,
+    )
 }
 
 /// Coverage is a warning, never a failure: a low ratio is a fact about the repository

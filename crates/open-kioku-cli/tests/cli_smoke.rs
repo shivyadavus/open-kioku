@@ -5898,3 +5898,237 @@ fn index_from_a_newer_open_kioku_reports_upgrade_or_reindex_on_every_surface() {
         open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION
     );
 }
+
+/// Credential-shaped test values are assembled at run time so that no string in the repository
+/// matches a real provider's key format or reads as a leaked secret to a scanner.
+fn striding_token(alphabet: &[u8], len: usize, stride: usize, offset: usize) -> String {
+    (0..len)
+        .map(|index| char::from(alphabet[(index * stride + offset) % alphabet.len()]))
+        .collect()
+}
+
+/// Every stored field value and every indexed term of the lexical index. Stored fields are
+/// compressed on disk, so a byte scan of the index files could not prove a value is absent.
+fn tantivy_stored_texts_and_terms(index_dir: &std::path::Path) -> Vec<String> {
+    use tantivy::schema::Value;
+    let index = tantivy::Index::open_in_dir(index_dir).unwrap();
+    let schema = index.schema();
+    let searcher = index.reader().unwrap().searcher();
+    let mut texts = Vec::new();
+    for segment in searcher.segment_readers() {
+        let store = segment.get_store_reader(1).unwrap();
+        for document in store.iter::<tantivy::TantivyDocument>(segment.alive_bitset()) {
+            for (_, value) in document.unwrap().field_values() {
+                texts.extend(value.as_str().map(str::to_string));
+            }
+        }
+        for (field, entry) in schema.fields() {
+            if !entry.is_indexed() {
+                continue;
+            }
+            let inverted = segment.inverted_index(field).unwrap();
+            let mut terms = inverted.terms().stream().unwrap();
+            while terms.advance() {
+                texts.push(String::from_utf8_lossy(terms.key()).into_owned());
+            }
+        }
+    }
+    texts
+}
+
+fn assert_secrets_absent(label: &str, haystack: &str, secrets: &[&str]) {
+    let lowered = haystack.to_ascii_lowercase();
+    for secret in secrets {
+        assert!(
+            !lowered.contains(&secret.to_ascii_lowercase()),
+            "{label} holds a secret value"
+        );
+    }
+}
+
+/// A config file's secret-like values never reach any store or output, and the file stays
+/// indexed and searchable by its keys (#379).
+#[test]
+fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    // Shaped like a cloud access key id without any provider's prefix, and a token under a
+    // key no rule names, so only the entropy rule can catch it.
+    let cloud_key = format!(
+        "{}{}",
+        ["OK", "CK"].concat(),
+        striding_token(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 16, 7, 3)
+    );
+    let token = striding_token(
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+        32,
+        17,
+        5,
+    );
+    let secrets = [cloud_key.as_str(), token.as_str()];
+    let config_path = "config/settings.yaml";
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("config")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn load_settings() {}\n").unwrap();
+    fs::write(
+        repo.join(config_path),
+        format!(
+            "storage:\n  provider: objectstore\n  access_key_id: {cloud_key}\nwebhooks:\n  delivery_nonce: \"{token}\"\n"
+        ),
+    )
+    .unwrap();
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    let indexed = run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    assert!(
+        indexed.contains(
+            "redaction: 1 data, config, or prose file(s) indexed with secret-like values replaced by [REDACTED]"
+        ),
+        "{indexed}"
+    );
+
+    // SQLite and its WAL store text uncompressed, so their bytes are checked directly.
+    for entry in walkdir::WalkDir::new(repo.join(".ok")) {
+        let entry = entry.unwrap();
+        if entry.file_type().is_file() {
+            let bytes = fs::read(entry.path()).unwrap();
+            assert_secrets_absent(
+                &entry.path().display().to_string(),
+                &String::from_utf8_lossy(&bytes),
+                &secrets,
+            );
+        }
+    }
+    let lexical =
+        tantivy_stored_texts_and_terms(&open_kioku_search_tantivy::default_index_dir(repo));
+    assert!(
+        lexical.iter().any(|text| text.contains("access_key_id")),
+        "the lexical index holds the config file's keys"
+    );
+    assert_secrets_absent("tantivy", &lexical.join("\n"), &secrets);
+
+    let by_key = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("search")
+            .arg("access_key_id");
+        command
+    });
+    assert!(by_key.contains(config_path), "{by_key}");
+    assert!(by_key.contains("[REDACTED]"), "{by_key}");
+    assert_secrets_absent("ok search by key", &by_key, &secrets);
+    for secret in secrets {
+        let by_value = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .arg("--json")
+                .arg("search")
+                .arg(secret);
+            command
+        });
+        assert_secrets_absent("ok search by value", &by_value, &secrets);
+    }
+
+    for quality in ["best", "fast"] {
+        let exported = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .arg("--json")
+                .arg("snapshot")
+                .arg("export")
+                .arg("--quality")
+                .arg(quality);
+            command
+        });
+        assert_secrets_absent("snapshot export report", &exported, &secrets);
+        let artifact = fs::File::open(repo.join(".ok/artifacts/index.snapshot.zst")).unwrap();
+        let database = zstd::decode_all(artifact).unwrap();
+        assert_secrets_absent(
+            &format!("snapshot artifact ({quality})"),
+            &String::from_utf8_lossy(&database),
+            &secrets,
+        );
+    }
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    assert_secrets_absent("ok status", &status, &secrets);
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["quality"]["redacted_files"], 1, "{status}");
+
+    let doctor = run({
+        let mut command = ok();
+        command.arg("--json").arg("doctor").arg(repo);
+        command
+    });
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "redaction")
+        .expect("doctor has a redaction check");
+    assert_eq!(check["status"], "pass", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("1 data, config, or prose file(s)"),
+        "{check}"
+    );
+
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"access_key_id"}}}"#.to_string(),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"search_code","arguments":{{"query":"{cloud_key}"}}}}}}"#
+        ),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"search_code","arguments":{{"query":"{token}"}}}}}}"#
+        ),
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#.to_string(),
+    ];
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        &format!("{}\n", requests.join("\n")),
+    );
+    assert_secrets_absent("mcp", &mcp, &secrets);
+    let responses = mcp
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let by_id = |id: u64| {
+        responses
+            .iter()
+            .find(|response| response["id"] == id)
+            .unwrap_or_else(|| panic!("no MCP response {id}: {mcp}"))
+    };
+    assert!(by_id(1).to_string().contains(config_path), "{mcp}");
+    assert_eq!(
+        by_id(4)["result"]["structuredContent"]["quality"]["redacted_files"],
+        1,
+        "{mcp}"
+    );
+}

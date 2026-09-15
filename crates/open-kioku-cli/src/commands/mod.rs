@@ -117,6 +117,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 if let Some(coverage) = snapshot.manifest.quality.coverage.as_ref() {
                     println!("coverage: {}", coverage.summary_line());
                 }
+                println!(
+                    "redaction: {}",
+                    redaction_summary(snapshot.manifest.quality.redacted_files)
+                );
                 if let Some(scip) = &snapshot.scip {
                     println!(
                         "SCIP: mode {:?}, imported {} index(es), {} exact references",
@@ -270,6 +274,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     Some(coverage) => println!("Coverage: {}", coverage.summary_line()),
                     None => println!("Coverage: not recorded by this index; run `ok index .`"),
                 }
+                println!(
+                    "Redaction: {}",
+                    redaction_summary(manifest.quality.redacted_files)
+                );
                 let semantics = analysis_semantics_compatibility_for_manifest(Some(&manifest));
                 println!(
                     "Analysis semantics: {:?}; stored={}, current={}",
