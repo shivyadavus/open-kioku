@@ -2127,9 +2127,10 @@ fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
 fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
     // `since` is caller input on a read-only server. Without the terminator a value such as
     // `--output=<path>` is an option to git, which exits 0 and writes the diff there.
-    // Rename detection and the `a/`/`b/` path prefixes are requested rather than left to
-    // `diff.renames`, `diff.noprefix`, `diff.mnemonicPrefix` or `diff.srcPrefix`, so the report
-    // pairs both sides of a rename, and only a real rename, whatever the local git config says.
+    // Rename detection, the `a/`/`b/` path prefixes and uncoloured output are requested rather
+    // than left to `diff.renames`, `diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix` or
+    // `color.diff`, so the report pairs both sides of a rename, and only a real rename, whatever
+    // the local git config says.
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -2137,6 +2138,7 @@ fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
             "diff",
             "--unified=0",
             "--no-ext-diff",
+            "--no-color",
             "--find-renames",
             "--src-prefix=a/",
             "--dst-prefix=b/",
@@ -4544,9 +4546,10 @@ mod tests {
     }
 
     /// Local path-prefix settings would make one path read as two, which the verifier would
-    /// take for a rename; the diff pins `a/` and `b/`.
+    /// take for a rename, and forced colour would hide every path; the diff pins `a/`, `b/` and
+    /// uncoloured output.
     #[test]
-    fn git_diff_since_pins_path_prefixes_over_local_config() {
+    fn git_diff_since_output_ignores_local_prefix_and_color_config() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
         let git = |args: &[&str]| {
@@ -4568,6 +4571,7 @@ mod tests {
         git(&["config", "diff.mnemonicPrefix", "true"]);
         git(&["config", "diff.srcPrefix", "old/"]);
         git(&["config", "diff.dstPrefix", "new/"]);
+        git(&["config", "color.diff", "always"]);
         fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
 
         let diff = git_diff_since(repo, "HEAD").unwrap().unwrap();

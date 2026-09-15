@@ -1082,11 +1082,12 @@ fn verify_git_checks_both_sides_of_a_rename() {
     git(&repo, &["config", "user.name", "CLI Test"]);
     git(&repo, &["config", "commit.gpgsign", "false"]);
     // Verification must pair both sides of the rename without relying on this setting, and
-    // without local path prefixes turning one side into two paths.
+    // without local path prefixes turning one side into two paths or forced colour hiding them.
     git(&repo, &["config", "diff.renames", "false"]);
     git(&repo, &["config", "diff.mnemonicPrefix", "true"]);
     git(&repo, &["config", "diff.srcPrefix", "old/"]);
     git(&repo, &["config", "diff.dstPrefix", "new/"]);
+    git(&repo, &["config", "color.diff", "always"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "--quiet", "-m", "initial"]);
     run({
