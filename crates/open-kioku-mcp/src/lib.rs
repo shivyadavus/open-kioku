@@ -682,6 +682,15 @@ async fn dispatch(
                 // coverage recording, so absence is never mistaken for 100%.
                 let coverage = manifest.quality.coverage.as_ref();
                 object.insert("coverage".into(), serde_json::to_value(coverage)?);
+                // The coverage verdict context packs and plans price, mirrored by `ok --json
+                // status`. Absent with `coverage`, so a missing record never reads as a
+                // repository without gaps.
+                if let Some(coverage) = coverage {
+                    object.insert(
+                        "coverage_gaps".into(),
+                        serde_json::to_value(coverage.gaps())?,
+                    );
+                }
                 object.insert(
                     "languages".into(),
                     json!(indexed_languages(store, coverage)?),

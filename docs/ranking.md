@@ -177,17 +177,89 @@ in `open-kioku-core` computes it from typed inputs (weights in parentheses):
 - `evidence_density` (0.10): distinct evidence records over twice the selected primary files, capped at 1.0. Counting evidence *lines* saturated it for any non-empty pack.
 - `validation_availability` (0.15): 1.0 when at least one validation target was selected, else 0.2.
 - `test_coverage` (0.10): 1.0 when a selected target carries a runnable command, 0.6 when targets need manual commands, 0.2 with none.
-- `negative_evidence` (0.15): 1.0 with no counted negative evidence, 0.3 with one or two items, 0.1 beyond. Counted items are the pack's `negative_evidence` entries in the `primary_context` and `anchor` scopes; `exact_references`, `validation`, and `runtime` absence is priced by the components above, and `history` and `boundary` items are reported but not priced.
+- `negative_evidence` (0.15): 1.0 with no counted negative evidence, 0.3 with one or two items, 0.1 beyond. Counted items are the pack's `negative_evidence` entries in the `primary_context` and `anchor` scopes; `exact_references`, `validation`, and `runtime` absence is priced by the components above; `history` and `boundary` items are reported but not priced; and the `coverage` item is priced by the `index_coverage` caps rather than counted.
 - `boundary_tightness` (0.15) and `runtime_corroboration` (0.05): the allowed-file bound and the typed `runtime_corroboration` score component on selected results.
+- `index_coverage` (weight 0; present only with a coverage gap): the lowest indexed share among the languages `IndexCoverage::gaps` returns for the manifest the pack or plan read, carrying one evidence id per gap, `coverage:<language>:<cause>` (`coverage:rust:git_ignore`). The id names the `coverage.by_language` and `coverage.policy_excluded_by_language` entries that `repo_status` and `ok --json status` report, so the signal traces to the persisted manifest. Caps price it, not weight; see "Index coverage gaps".
 
 Caps apply after the weighted sum, in this order: 0.35 with no primary context; 0.55 when
 exact references, validation targets, and runtime signals are all absent; 0.74 without exact
 evidence; 0.30 when no task term appears in the selected context, or 0.50 when fewer than
 `WEAK_TASK_RELEVANCE` (0.34) of them do; 0.60 with counted negative evidence; 0.50 when
-every named task identifier is unmatched by the selected context; and 0.94 with any caveat,
-including a plan's evidence-quality caveats attached after scoring. The `Exact` label
+every named task identifier is unmatched by the selected context; 0.50 or 0.74 beside a
+majority coverage gap under the conditions in "Index coverage gaps"; and 0.94 with any
+caveat except a coverage caveat, including a plan's evidence-quality caveats attached
+after scoring. The `Exact` label
 additionally requires `exact_reference_count > 0`; otherwise the label stops at `High`.
 `docs/context-pack-spec.md` defines the label semantics.
+
+### Index coverage gaps
+
+A file the index never read cannot disprove anything. When the index set aside much of a
+programming language, a pack or plan whose selected context lacks something must not read
+as though the code does not exist. `IndexCoverage::gaps` in `open-kioku-core` applies the
+`ok doctor` coverage predicates to each programming language; config and prose languages
+never qualify:
+
+| `cause` | Fires when | `language_files` |
+| --- | --- | --- |
+| `git_ignore` | git ignore rules (`.gitignore`, `.git/info/exclude`, `core.excludesFile`) excluded at least `INDEX_COVERAGE_MISSING_FILES_WARN` (20) files of the language, and more files than it has considered | git-ignored plus considered files |
+| `excluded_by_policy` | discovery found programming-language source and policy left none of it to consider; every such language is a gap under its dominant source | discovered files |
+| `omitted` | the language is under `INDEX_COVERAGE_WARN_PERCENT` (98%) with at least `INDEX_COVERAGE_LANGUAGE_FLOOR` (50) considered files, or is missing at least 20 considered files (`too-large`, `binary`, unreadable) | considered files |
+
+The index's own settings (`hidden`, `vendor`, `fast_mode`, `denied`, `[index] exclude`,
+`.okignore`) produce no gap while some programming-language source remains considered,
+because they record an intended exclusion. Listing git-ignored paths under `[index] exclude`
+marks them intended and removes the gap. A manifest written before per-language sources were
+recorded yields no `git_ignore` gap; a manifest without coverage yields none. The doctor's
+repository-wide ratio and walk-error warnings are not per-language and do not reach
+confidence.
+
+How ignored directories are counted decides what can be a gap. Discovery descends into
+git-ignored directories and records each file as `git_ignore`, before the vendor detector
+runs, so a git-ignored `venv/`, `env/`, `out/` or `site-packages` tree of `.py` or `.js` files
+is a gap. Directories pruned by name (`.git`, `.ok`, `target`, `node_modules`, `dist`,
+`build`, `.venv`) count once each in `pruned_dirs`; their files are never discovered, so they
+never produce a gap.
+
+A gap is always reported, and by itself changes no score or label:
+
+- a caveat naming the share and the reason category, `index coverage: 25 of 27 rust source
+  files (92.6%) are not indexed (git-ignore); an absence among them is not evidence`. Coverage
+  caveats are exempt from the 0.94 any-caveat cap, including when a plan attaches caveats
+  after scoring;
+- the `index_coverage` component;
+- one `coverage` negative evidence item covering all gaps. Its `inspected_sources` are
+  `index_manifest.quality.coverage` and the gap evidence ids, and its next probe names the
+  governing setting. It is not counted in `negative_evidence_count`;
+- `coverage_gaps` in `repo_status` and `ok --json status`.
+
+A majority gap is one whose missing files are at least `COVERAGE_GAP_MAJORITY_SHARE` (half)
+of its `language_files`. Every `git_ignore` and `excluded_by_policy` gap is a majority gap;
+an `omitted` gap usually is not. A majority gap lowers confidence only beside a symptom it
+could explain, and at most one cap applies:
+
+- **Absence symptom: cap 0.50 (`Low`).** A named task identifier is unmatched by the selected
+  context, or no primary context matched. The blocker `the task may name code in source the
+  index excluded: rust (25 of 27 files, git-ignore)` is added, the `anchor` item's next probe
+  points at the `coverage` item instead of saying the name does not exist in this
+  repository, and a plan adds the risk reason `low confidence: named task anchor(s) … may be
+  defined in source the index excluded: …`. An unmatched hyphenated task word is not a
+  symptom.
+- **Selection in the excluded language: cap 0.74 (below `High`).** The task names no
+  identifier, and a primary selection's language is the gap's language, taken from its symbol or its
+  indexed file record: the right file may be among those the index did not read. The blocker
+  `the selected context is in a language the index mostly excluded: …` is added. A task that
+  names identifiers reaches one of the other two outcomes instead: an unmatched one is the
+  absence symptom above, whatever language its definition is in, and a task whose every named
+  identifier the selected context spells found what it named.
+
+Otherwise the gap changes nothing. On a Python repository that git-ignores a `venv/` larger
+than `src/`, a task naming a function defined in `src/` reports the gap and keeps the score,
+label and blockers of the same repository without `venv/`.
+
+The languages are looked up only when a majority gap exists: a selection's symbol supplies
+its language when it has one, and otherwise its file record is read by path, once per
+distinct primary path. A pack over an index without a majority gap reads nothing extra.
 
 Use `ok search --explain-ranking "query"` to inspect dominant signals for each
 result. Use `ok eval` to compare baseline ranking, fused ranking, and signal
