@@ -58,7 +58,7 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | SCIP exact references | 0 |
 | Static analysis facts | 35 |
 
-Indexed at `2026-09-15 18:06:14.990884 UTC`.
+Indexed at `2026-09-15 19:02:38.404730 UTC`.
 
 Build systems: `cargo`.
 
@@ -69,7 +69,7 @@ Local signal notes:
 - symbol registry facts detected: 24
 - complexity/similarity relationship facts detected: 7
 
-Quality notes (196): scip: 1, symbol_registry_caveat: 138, symbol_registry_unresolved: 57
+Quality notes (195): scip: 1, symbol_registry_caveat: 138, symbol_registry_unresolved: 56
 
 - [scip] SCIP disabled; symbol references use tree-sitter/import heuristics
 - [symbol_registry_caveat] symbol registry caveat for `10000` via unresolved: no registry candidate matched
@@ -171,7 +171,7 @@ Quality notes (196): scip: 1, symbol_registry_caveat: 138, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `proven` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `provider` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `quality` via unresolved: no registry candidate matched
-- 96 additional quality notes omitted; use `ok status --markdown --full` or `ok status --json --full` for every note.
+- 95 additional quality notes omitted; use `ok status --markdown --full` or `ok status --json --full` for every note.
 
 ## Readiness Checks
 
@@ -179,7 +179,7 @@ Quality notes (196): scip: 1, symbol_registry_caveat: 138, symbol_registry_unres
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
-| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-15 18:06:14.990884 UTC |
+| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-15 19:02:38.404730 UTC |
 | `pass` | `graph` | relationship graph present |
 | `pass` | `analysis-semantics` | compatible; fingerprint bae3d079094ab15c45c150bc63a9c93f6bb38408baa2c34fc906eb69ee3b8f16 |
 | `pass` | `generations` | legacy layout (adopts the generation layout on the next `ok index`) |
