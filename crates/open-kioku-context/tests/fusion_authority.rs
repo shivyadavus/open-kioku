@@ -72,6 +72,37 @@ fn extreme_heuristic_weight_cannot_displace_authoritative_evidence() {
 }
 
 #[test]
+fn raw_score_magnitude_cannot_displace_authoritative_evidence() {
+    // The pack path orders by authority before fused score, so a lexical score eight orders
+    // of magnitude larger still ranks below exact evidence under the measured profile.
+    let streams = vec![
+        CandidateStream::success(
+            RetrievalSourceKind::Lexical,
+            vec![candidate(
+                "src/heuristic.rs",
+                1.0e6,
+                RetrievalAuthority::Heuristic,
+            )],
+        ),
+        CandidateStream::success(
+            RetrievalSourceKind::ExactSemantic,
+            vec![candidate(
+                "src/authoritative.rs",
+                0.01,
+                RetrievalAuthority::Exact,
+            )],
+        ),
+    ];
+    let fused = fuse_candidate_streams(&streams, 10, &FusionConfig::measured());
+
+    assert_eq!(fused.results[0].path, PathBuf::from("src/authoritative.rs"));
+    assert_eq!(
+        fused.diagnostics.traces[0].authority,
+        RetrievalAuthority::Exact
+    );
+}
+
+#[test]
 fn source_agreement_only_reorders_candidates_with_equal_authority() {
     let streams = vec![
         CandidateStream::success(

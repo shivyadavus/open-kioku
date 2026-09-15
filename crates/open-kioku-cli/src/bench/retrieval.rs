@@ -4,6 +4,9 @@ const RETRIEVAL_QUERY_SHAPE_LABEL_SCHEMA_VERSION: &str = "1.0.0";
 const RETRIEVAL_BASELINE_DIMENSIONS_VERSION: &str = "2.0.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
 const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
+/// k for the rank-scaled advisory arm. 10 is the context-pack path's RRF k; the arm's label
+/// names the value, so it stays put if the pack's k moves.
+const RETRIEVAL_TEXT_RANK_K: u32 = 10;
 const RETRIEVAL_CC6_MAX_DEV_POSITIVE_ABSTENTION_RATE: f64 = 0.0;
 const RETRIEVAL_CC6_MIN_DEV_NO_GOLD_ABSTENTION_RECALL: f64 = 0.0;
 /// Activation criteria for `--write-abstention-activation`: suppressing any positive
@@ -195,13 +198,33 @@ enum RetrievalSplit {
 enum RetrievalStrategy {
     Lexical,
     Fusion,
+    /// `fusion` with `text_relevance` divided by the pool's top lexical score.
+    FusionPoolMax,
+    /// `fusion` with `text_relevance` replaced by its lexical rank.
+    FusionRank,
 }
 
 impl RetrievalStrategy {
+    /// Measured beside `fusion` and reported under `stream_ablations`, so they never reach
+    /// the checked-in baseline or the release thresholds.
+    const TEXT_SCALE_ARMS: [Self; 2] = [Self::FusionPoolMax, Self::FusionRank];
+
     fn label(self) -> &'static str {
         match self {
             Self::Lexical => "lexical",
             Self::Fusion => "fusion",
+            Self::FusionPoolMax => "fusion_pool_max",
+            Self::FusionRank => "fusion_rank10",
+        }
+    }
+
+    fn text_relevance_scale(self) -> TextRelevanceScale {
+        match self {
+            Self::Lexical | Self::Fusion => TextRelevanceScale::Raw,
+            Self::FusionPoolMax => TextRelevanceScale::PoolMax,
+            Self::FusionRank => TextRelevanceScale::Rank {
+                k: RETRIEVAL_TEXT_RANK_K,
+            },
         }
     }
 }
@@ -511,6 +534,14 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
             .or_default()
             .push(routed_report);
         cc6_abstention_cases.push(abstention_case);
+        for strategy in RetrievalStrategy::TEXT_SCALE_ARMS {
+            cc2_cases
+                .entry(strategy.label().into())
+                .or_default()
+                .push(run_retrieval_case(
+                    fixture, &store, case, budgets, limit, strategy,
+                )?);
+        }
     }
 
     let strategies = vec![
@@ -970,10 +1001,13 @@ fn run_retrieval_case(
     let candidates = retrieval_candidate_pool(fixture, store, &case.query, limit)?;
     let ranked = match strategy {
         RetrievalStrategy::Lexical => top_unique_paths(rerank_baseline(candidates), limit),
-        RetrievalStrategy::Fusion => {
+        RetrievalStrategy::Fusion
+        | RetrievalStrategy::FusionPoolMax
+        | RetrievalStrategy::FusionRank => {
             let mut options = ranking_options_for_repo(fixture)?;
             options.mode = RankingMode::Fusion;
             options.query = Some(case.query.clone());
+            options.text_relevance_scale = strategy.text_relevance_scale();
             top_unique_paths(rerank_with_options(candidates, &options), limit)
         }
     };
@@ -1821,6 +1855,24 @@ fn retrieval_strategy_identities(
             backend: None,
         },
     );
+    identities.insert(
+        RetrievalStrategy::FusionPoolMax.label().into(),
+        RetrievalStrategyIdentity {
+            algorithm: "ranking_fusion_text_pool_max".into(),
+            provider: None,
+            model: None,
+            backend: None,
+        },
+    );
+    identities.insert(
+        RetrievalStrategy::FusionRank.label().into(),
+        RetrievalStrategyIdentity {
+            algorithm: format!("ranking_fusion_text_rank_k{RETRIEVAL_TEXT_RANK_K}"),
+            provider: None,
+            model: None,
+            backend: None,
+        },
+    );
     identities
 }
 
@@ -2267,7 +2319,7 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
         out.push('\n');
     }
     if !report.stream_ablations.is_empty() {
-        out.push_str("## Advisory retrieval strategies\n\nThese measurements are excluded from the frozen generic retrieval release baseline. `cc2:semantic_vector_local_hash` measures the current deterministic local-hash/exact-flat backend; `cc4:routed_contextpack` measures the complete deterministic task-family routing and ContextPack path.\n\n");
+        out.push_str("## Advisory retrieval strategies\n\nThese measurements are excluded from the frozen generic retrieval release baseline. `cc2:semantic_vector_local_hash` measures the current deterministic local-hash/exact-flat backend; `cc4:routed_contextpack` measures the complete deterministic task-family routing and ContextPack path. `fusion_pool_max` and `fusion_rank10` rank the `fusion` candidate pool with `text_relevance` divided by the pool's top lexical score, or replaced by `(k + 1) / (k + rank)` with k = 10; every weight is unchanged.\n\n");
         out.push_str("| Strategy | R@5 | R@10 | MRR | F1@10 | No-gold FP | Holdout R@10 | Holdout MRR | p95 ms |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for strategy in &report.stream_ablations {
             let quality = &strategy.summary.quality;
@@ -3357,5 +3409,102 @@ mod retrieval_bench_tests {
         assert_eq!(semantic.provider.as_deref(), Some("local"));
         assert_eq!(semantic.model.as_deref(), Some("local-hash"));
         assert_eq!(semantic.backend.as_deref(), Some("exact-flat"));
+    }
+
+    #[test]
+    fn text_scale_arms_are_identified_and_never_the_frozen_fusion_scale() {
+        assert_eq!(
+            RetrievalStrategy::Fusion.text_relevance_scale(),
+            TextRelevanceScale::Raw
+        );
+        assert_eq!(
+            RetrievalStrategy::FusionRank.label(),
+            format!("fusion_rank{RETRIEVAL_TEXT_RANK_K}")
+        );
+        let identities = retrieval_strategy_identities(&cc2_semantic_benchmark_config());
+        for strategy in RetrievalStrategy::TEXT_SCALE_ARMS {
+            assert_ne!(strategy.text_relevance_scale(), TextRelevanceScale::Raw);
+            assert!(
+                identities.contains_key(strategy.label()),
+                "{} has no strategy identity",
+                strategy.label()
+            );
+        }
+    }
+
+    #[test]
+    fn text_scale_arms_keep_their_first_pages_when_the_candidate_fetch_deepens() {
+        // `--limit 20` fetches 100 candidates and `--limit 50` fetches 200. Every file is a
+        // comment-only source file, indexed as one chunk with no symbol, so boundary, test and
+        // path signals are identical across the pool and the deeper fetch adds only
+        // lower-scoring candidates. The first two pages must then keep their paths and fused
+        // scores, which a scale that read the pool's depth or its minimum would not. Markdown
+        // would not do: it is indexed as document sections, outside the lexical pool.
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        for index in 0..130 {
+            let mentions = "widget ".repeat(1 + index % 9);
+            fs::write(
+                repo.join(format!("src/unit_{index:03}.rs")),
+                format!("// {mentions}\n// filler text for unit {index}\n"),
+            )
+            .unwrap();
+        }
+        OkConfig::write_default(repo.join("ok.toml")).unwrap();
+        let mut config = OkConfig::load_from_repo(repo).unwrap();
+        config.history.enabled = false;
+        config.scip.enabled = false;
+        config.semantic.enabled = false;
+        index_repo_with_config(repo, config, IndexMode::Full).unwrap();
+        let store = open_store(repo).unwrap();
+
+        let narrow_pool = search_raw(repo, &store, "widget", ranking_candidate_limit(20)).unwrap();
+        let wide_pool = search_raw(repo, &store, "widget", ranking_candidate_limit(50)).unwrap();
+        assert!(
+            narrow_pool.len() < wide_pool.len(),
+            "the fixture must be deep enough for the fetch depth to matter: {} against {}",
+            narrow_pool.len(),
+            wide_pool.len()
+        );
+
+        let page = |results: &[SearchResult]| {
+            results
+                .iter()
+                .map(|result| (result.path.clone(), result.score.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        for strategy in RetrievalStrategy::TEXT_SCALE_ARMS {
+            let options = RankingOptions {
+                query: Some("widget".into()),
+                text_relevance_scale: strategy.text_relevance_scale(),
+                ..RankingOptions::default()
+            };
+            let narrow = top_unique_paths(rerank_with_options(narrow_pool.clone(), &options), 20);
+            let wide = top_unique_paths(rerank_with_options(wide_pool.clone(), &options), 50);
+            assert_eq!(narrow.len(), 20, "{}", strategy.label());
+            assert_eq!(
+                page(&narrow[..10]),
+                page(&wide[..10]),
+                "{} moved the first page",
+                strategy.label()
+            );
+            assert_eq!(
+                page(&narrow[10..20]),
+                page(&wide[10..20]),
+                "{} moved the second page",
+                strategy.label()
+            );
+            assert_eq!(
+                narrow[0]
+                    .score_breakdown
+                    .iter()
+                    .find(|component| component.signal == "text_relevance")
+                    .map(|component| component.raw_value),
+                Some(1.0),
+                "{}: the Tantivy pool must actually be scaled",
+                strategy.label()
+            );
+        }
     }
 }
