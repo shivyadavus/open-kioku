@@ -8,7 +8,7 @@
 //! [`resolve_index_location`], and adopt the generation layout in place — a directory
 //! move, not a data copy — via [`adopt_legacy_layout`] under the index write lock.
 //!
-//! Design: `docs/ri3-index-generations-design.md`. This module is phase 1: layout,
+//! Design: `docs/index-generations-design.md`. This module is phase 1: layout,
 //! resolution, adoption, atomic pointer, and startup classification.
 
 use crate::Result;
