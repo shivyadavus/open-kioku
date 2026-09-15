@@ -570,8 +570,8 @@ mod tests {
         let files = vec![
             file("pkg/router.go", Language::Go, false),
             file("pkg/router_test.go", Language::Go, false),
-            file("path/posix/join.ts", Language::TypeScript, false),
-            file("path/posix/join_test.ts", Language::TypeScript, false),
+            file("codec/base/encode.ts", Language::TypeScript, false),
+            file("codec/base/encode_test.ts", Language::TypeScript, false),
             file("ui/button.tsx", Language::TypeScript, false),
             file("ui/__tests__/button.test.tsx", Language::TypeScript, false),
             file("lib/parse.js", Language::JavaScript, false),
@@ -597,7 +597,7 @@ mod tests {
         let found = pairs(root.path(), &files);
         let expected = [
             ("pkg/router_test.go", "pkg/router.go"),
-            ("path/posix/join_test.ts", "path/posix/join.ts"),
+            ("codec/base/encode_test.ts", "codec/base/encode.ts"),
             ("ui/__tests__/button.test.tsx", "ui/button.tsx"),
             ("lib/parse.spec.js", "lib/parse.js"),
             (

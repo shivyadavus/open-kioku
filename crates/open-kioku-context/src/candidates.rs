@@ -287,7 +287,7 @@ impl FusionConfig {
     /// The product default, from frozen-corpus data. Every source votes at 1.0 except validation
     /// at 0.5: a test whose *name* overlaps the task is weaker evidence than a full-text BM25
     /// match on the task, yet at 1.0 two such votes outranked a lexical #2 hit. On the 490-case
-    /// commit-derived benchmark on a 10k-file Java service the prior is neutral (R@5/R@20 identical, MRR
+    /// commit-derived benchmark on the Java corpus (10k files) the prior is neutral (R@5/R@20 identical, MRR
     /// +0.001 on both splits); on this repository's workflow benchmark it restores the
     /// `test-selector` case. Re-measure before changing any weight here.
     pub fn measured() -> Self {
@@ -1254,7 +1254,7 @@ mod tests {
 
     #[test]
     fn lattice_terms_are_searched_last_and_carry_their_provenance() {
-        let task = "CollectionsUtils Tests";
+        let task = "ChannelsUtils Tests";
         let index = TermAwareIndex {
             by_term: std::collections::BTreeMap::from([
                 (
@@ -1262,13 +1262,9 @@ mod tests {
                     vec![result("src/test/CircleUtilsTests.java", 3.0, None)],
                 ),
                 (
-                    "CollectionUtils".to_string(),
+                    "ChannelUtils".to_string(),
                     vec![
-                        result(
-                            "src/main/CollectionUtils.java",
-                            9.0,
-                            Some("CollectionUtils"),
-                        ),
+                        result("src/main/ChannelUtils.java", 9.0, Some("ChannelUtils")),
                         result("src/test/CircleUtilsTests.java", 1.0, None),
                     ],
                 ),
@@ -1277,8 +1273,8 @@ mod tests {
         let source = SearchIndexCandidateSource::new(index);
         let request = CandidateRequest::new(task, vec![task.into()], 10).with_lattice_terms(vec![
             crate::lattice::LatticeTerm {
-                term: "CollectionUtils".into(),
-                origin: "CollectionsUtils".into(),
+                term: "ChannelUtils".into(),
+                origin: "ChannelsUtils".into(),
                 relation: crate::lattice::LatticeRelation::Stem,
                 from_primary: true,
                 ambiguous: false,
@@ -1295,18 +1291,18 @@ mod tests {
             paths,
             vec![
                 "src/test/CircleUtilsTests.java",
-                "src/main/CollectionUtils.java"
+                "src/main/ChannelUtils.java"
             ]
         );
         let reached = &stream.candidates[1].result.evidence;
         assert!(
             reached.iter().any(|line| line
-                == "identifier lattice: task term `CollectionsUtils` reached repository term `CollectionUtils` (stem)"),
+                == "identifier lattice: task term `ChannelsUtils` reached repository term `ChannelUtils` (stem)"),
             "{reached:?}"
         );
         assert!(reached
             .iter()
-            .any(|line| line.contains("expanded task query `CollectionUtils`")));
+            .any(|line| line.contains("expanded task query `ChannelUtils`")));
     }
 
     #[test]

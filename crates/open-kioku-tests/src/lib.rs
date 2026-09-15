@@ -1127,18 +1127,18 @@ mod tests {
             tests: vec![TestTarget {
                 selection_tier: open_kioku_core::TestSelectionTier::default(),
                 tier_justification: Vec::new(),
-                id: "search-service-test".into(),
-                name: "SearchServiceTests".into(),
+                id: "ledger-service-test".into(),
+                name: "LedgerServiceTests".into(),
                 file_id: FileId::new("test-file"),
                 range: None,
-                command: Some("gradle :server:test".into()),
+                command: Some("gradle :core:test".into()),
                 confidence: Confidence::Medium,
                 reason: "test-like path".into(),
-                evidence_refs: vec!["search-service-test".into()],
+                evidence_refs: vec!["ledger-service-test".into()],
                 score_breakdown: vec![ScoreComponent::single(
                     "test_fixture_confidence",
                     Confidence::Medium.score(),
-                    vec!["search-service-test".into()],
+                    vec!["ledger-service-test".into()],
                     "test-like path",
                 )],
             }],
@@ -1146,21 +1146,21 @@ mod tests {
 
         let selected = TestSelector::new(&store)
             .for_changed_path_fast(
-                Path::new("server/src/main/java/org/foo/search/SearchService.java"),
+                Path::new("core/src/main/java/org/foo/ledger/LedgerService.java"),
                 5,
             )
             .unwrap();
 
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].name, "SearchServiceTests");
+        assert_eq!(selected[0].name, "LedgerServiceTests");
         assert_eq!(selected[0].confidence, Confidence::High);
     }
 
     #[test]
     fn path_tokenization_keeps_searchable_segments() {
-        let tokens = super::path_tokens("server/src/main/java/search/searchservice.java");
-        assert!(tokens.contains(&"server".to_string()));
-        assert!(tokens.contains(&"searchservice".to_string()));
+        let tokens = super::path_tokens("core/src/main/java/ledger/ledgerservice.java");
+        assert!(tokens.contains(&"core".to_string()));
+        assert!(tokens.contains(&"ledgerservice".to_string()));
         assert!(!tokens.contains(&"src".to_string()));
     }
 

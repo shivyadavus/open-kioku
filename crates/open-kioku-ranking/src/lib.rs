@@ -724,8 +724,8 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
     // Tests are edit targets only when the task is about tests. Barring them
     // unconditionally broke `code_to_test` queries, where the gold answer *is*
     // a test file. Admitting them unconditionally - which is what I did first -
-    // broke ordinary queries on real repositories: "geoip processor" returned
-    // four test helpers before the processor, because a large Java project has
+    // broke ordinary queries on real repositories: "quota enforcer" returned
+    // four test helpers before the enforcer, because a large Java project has
     // far more test files than source files and they match the same terms.
     if is_test_path(&result.path.to_string_lossy())
         && !query.map(query_wants_tests).unwrap_or(false)

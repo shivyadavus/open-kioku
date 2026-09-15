@@ -621,7 +621,7 @@ fn is_test_file_name(name: &str) -> bool {
         || has_camel_test_suffix(stem)
 }
 
-/// `GeoIpProcessorTests`, `GeoIpReindexedIT`, `internalClusterTest`: a test
+/// `QuotaEnforcerTests`, `QuotaReloadedIT`, `internalClusterTest`: a test
 /// suffix in CamelCase, recognised only at a case boundary so `UNIT` and a
 /// bare `Test` do not count.
 fn has_camel_test_suffix(value: &str) -> bool {
@@ -640,7 +640,7 @@ fn has_camel_test_suffix(value: &str) -> bool {
 /// Deliberately narrow: the cost of a false positive is promoting test files
 /// over source for an ordinary query, which is the regression this guards.
 pub fn query_wants_tests(query: &str) -> bool {
-    // Whole words and CamelCase parts: "Add BenchmarkHashString" is about a benchmark, which in
+    // Whole words and CamelCase parts: "Add BenchmarkRingBuffer" is about a benchmark, which in
     // Go and Rust lives in the test files; "LatestFoo" splits to latest/foo and stays clear.
     let mut tokens = std::collections::HashSet::new();
     collect_identifier_tokens(query, &mut tokens);
@@ -4889,7 +4889,7 @@ mod tests {
 
     #[test]
     fn shared_path_serializes_exactly_as_a_pathbuf() {
-        let raw = "modules/lang-expression/src/main/java/com/acme/Script.java";
+        let raw = "extensions/lang-rules/src/main/java/com/acme/Script.java";
         let as_pathbuf = serde_json::to_string(&std::path::PathBuf::from(raw)).unwrap();
         let as_shared = serde_json::to_string(&SharedPath::from(raw)).unwrap();
         assert_eq!(
@@ -6337,13 +6337,13 @@ mod test_path_tests {
     #[test]
     fn gradle_source_sets_and_java_suffixes_are_tests() {
         for path in [
-            "modules/ip-location/src/internalClusterTest/java/org/es/GeoIpDownloaderIT.java",
-            "modules/ip-location/src/yamlRestTest/java/org/es/GeoIpDatabaseTestHelper.java",
-            "modules/ip-location/src/test/java/org/es/GeoIpProcessorTests.java",
-            "modules/ip-location/qa/geoip-reindexed/src/javaRestTest/java/GeoIpReindexedIT.java",
-            "server/src/testFixtures/java/org/es/ESTestCase.java",
-            "src/main/java/org/es/AbstractStringProcessorTestCase.java",
-            "src/main/java/org/es/RoutingSpec.java",
+            "extensions/admission/src/internalClusterTest/java/org/acme/QuotaReloaderIT.java",
+            "extensions/admission/src/yamlRestTest/java/org/acme/QuotaLedgerTestHelper.java",
+            "extensions/admission/src/test/java/org/acme/QuotaEnforcerTests.java",
+            "extensions/admission/qa/quota-reloaded/src/javaRestTest/java/QuotaReloadedIT.java",
+            "core/src/testFixtures/java/org/acme/QXTestCase.java",
+            "src/main/java/org/acme/AbstractQuotaEnforcerTestCase.java",
+            "src/main/java/org/acme/RoutingSpec.java",
             "crates/core/tests/api.rs",
             "crates/core/src/tests.rs",
             "pkg/store/store_test.go",
@@ -6364,13 +6364,13 @@ mod test_path_tests {
     #[test]
     fn substring_lookalikes_and_source_are_not_tests() {
         for path in [
-            "modules/ip-location/src/main/java/org/es/GeoIpProcessor.java",
-            "server/src/main/java/org/es/cluster/ClusterState.java",
+            "extensions/admission/src/main/java/org/acme/QuotaEnforcer.java",
+            "core/src/main/java/org/acme/ledger/LedgerState.java",
             "src/latest_news.rs",
             "src/attestation/verify.rs",
             "src/contest/scoring.py",
-            "src/main/java/org/es/UNIT.java",
-            "src/main/java/org/es/Test.java",
+            "src/main/java/org/acme/UNIT.java",
+            "src/main/java/org/acme/Test.java",
             "docs/testing-guide.md",
             // A crate or package *named* after tests is product code: this one is the test
             // selector. Directory suffixes `-tests`/`_tests` are therefore not a test rule;
@@ -6386,10 +6386,10 @@ mod test_path_tests {
 
     #[test]
     fn query_wants_tests_is_narrow() {
-        assert!(query_wants_tests("add tests for the geoip processor"));
+        assert!(query_wants_tests("add tests for the quota enforcer"));
         assert!(query_wants_tests("which spec covers routing"));
-        assert!(query_wants_tests("identity: Add BenchmarkHashString"));
-        assert!(!query_wants_tests("geoip processor"));
-        assert!(!query_wants_tests("latest cluster state publication"));
+        assert!(query_wants_tests("identity: Add BenchmarkRingBuffer"));
+        assert!(!query_wants_tests("quota enforcer"));
+        assert!(!query_wants_tests("latest ledger state publication"));
     }
 }
