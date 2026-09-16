@@ -1218,11 +1218,11 @@ mod tests {
 
     #[test]
     fn source_symbol_file_stem_can_beat_higher_scoring_test_context() {
-        let mut source = make_result("src/DotPrefixValidator.java", 44.5);
+        let mut source = make_result("src/TildePrefixValidator.java", 44.5);
         source.symbol = Some(Symbol {
-            id: SymbolId::new("dot-prefix-validator"),
-            name: "DotPrefixValidator".into(),
-            qualified_name: "com.acme.validation.DotPrefixValidator".into(),
+            id: SymbolId::new("tilde-prefix-validator"),
+            name: "TildePrefixValidator".into(),
+            qualified_name: "com.acme.validation.TildePrefixValidator".into(),
             kind: SymbolKind::Class,
             file_id: FileId::new("source"),
             range: Some(LineRange::single(1)),
@@ -1235,15 +1235,15 @@ mod tests {
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
         });
-        let test = make_result("src/test/DotPrefixValidatorTests.java", 48.1);
+        let test = make_result("src/test/TildePrefixValidatorTests.java", 48.1);
 
         let options = RankingOptions {
-            query: Some("DotPrefixValidator".into()),
+            query: Some("TildePrefixValidator".into()),
             ..RankingOptions::default()
         };
         let results = rerank_with_options(vec![test, source], &options);
 
-        assert_eq!(results[0].path, Path::new("src/DotPrefixValidator.java"));
+        assert_eq!(results[0].path, Path::new("src/TildePrefixValidator.java"));
         assert!(results[0]
             .score_breakdown
             .iter()
