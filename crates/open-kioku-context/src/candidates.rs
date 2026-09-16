@@ -860,6 +860,7 @@ mod tests {
             evidence_refs: vec![format!("evidence:{path}")],
             confidence: 0.8,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 

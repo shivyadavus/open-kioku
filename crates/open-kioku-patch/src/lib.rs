@@ -3670,6 +3670,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut supporting_files = (0..10)
             .map(|rank| {
@@ -3680,7 +3681,9 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        supporting_files.push(hit("src/caller.rs", 0.1, "exact symbol reference via SCIP"));
+        let mut exact = hit("src/caller.rs", 0.1, "exact symbol reference via SCIP");
+        exact.exact_reference_provenance = Some(open_kioku_core::EvidenceSourceType::Scip);
+        supporting_files.push(exact);
         // Bounded-search evidence makes the plan reuse these supporting files as its impact.
         let context = open_kioku_core::ContextPack {
             task: "change handler".into(),

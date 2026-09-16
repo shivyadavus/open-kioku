@@ -143,7 +143,6 @@ impl RankingFeatures {
     /// semantic-only; every other candidate gets none.
     fn assess(result: &SearchResult, query: Option<&str>) -> (Self, bool) {
         let path = result.path.to_string_lossy().to_ascii_lowercase();
-        let reason = result.match_reason.to_ascii_lowercase();
         // Every signal below reads a persisted `ScoreComponent` emitted by the
         // producer that actually holds the evidence. It must never be inferred
         // from evidence prose.
@@ -157,8 +156,12 @@ impl RankingFeatures {
         // co-change scoring for any query containing those ordinary words.
         // Absence was being rendered as presence, which is the one thing this
         // ranker must not do.
+        //
+        // An impact occurrence result carries no `exact_reference` component; its typed
+        // provenance stands in for one. `match_reason` is not read: deduplication hands it to
+        // whichever duplicate scored higher, and any result may say "exact symbol reference".
         let exact_reference = component_signal_value(result, &["exact_reference"])
-            .or_else(|| reason.contains("exact symbol reference").then_some(0.35))
+            .or_else(|| result.is_exact_reference().then_some(0.35))
             .unwrap_or(0.0);
         let graph_proximity = component_signal_value(result, &["graph_proximity"]).unwrap_or(0.0);
         let boundary_fit = boundary_fit_score(result, &path, query);
@@ -1006,6 +1009,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 
@@ -1092,6 +1096,7 @@ mod tests {
                 vec!["test".into()],
                 "test fixture",
             )],
+            exact_reference_provenance: None,
         }
     }
 
@@ -1143,6 +1148,7 @@ mod tests {
     fn fusion_records_dominant_signals() {
         let mut exact = make_result("src/a.rs", 1.0);
         exact.match_reason = "exact symbol reference via SCIP".into();
+        exact.exact_reference_provenance = Some(EvidenceSourceType::Scip);
         exact.evidence = vec!["exact reference from scip".into()];
         let results = rerank(vec![exact]);
         let signals = top_score_signals(&results[0], 3);
@@ -1158,6 +1164,7 @@ mod tests {
     fn exact_reference_dominates_bounded_history_signal() {
         let mut exact = make_result("src/exact.rs", 0.1);
         exact.match_reason = "exact symbol reference via SCIP".into();
+        exact.exact_reference_provenance = Some(EvidenceSourceType::Scip);
         exact.evidence = vec!["exact reference from scip".into()];
 
         let mut historical = make_result("src/history.rs", 0.1);
@@ -1187,6 +1194,7 @@ mod tests {
     fn ablation_removes_named_signal() {
         let mut exact = make_result("src/a.rs", 1.0);
         exact.match_reason = "exact symbol reference via SCIP".into();
+        exact.exact_reference_provenance = Some(EvidenceSourceType::Scip);
         let fused = rerank(vec![exact.clone()]);
         let ablated = rerank_without_signal(vec![exact], RankingSignal::ExactReference);
         assert!(fused[0].score > ablated[0].score);
@@ -1349,6 +1357,7 @@ mod tests {
     fn semantic_only_result_does_not_outrank_exact_reference() {
         let mut exact = make_result("src/exact.rs", 0.45);
         exact.match_reason = "exact symbol reference via SCIP".into();
+        exact.exact_reference_provenance = Some(EvidenceSourceType::Scip);
         exact.evidence = vec!["exact reference from scip".into()];
 
         let mut semantic = make_result("src/semantic.rs", 0.99);
@@ -1396,6 +1405,7 @@ mod tests {
                 vec!["lexical".into()],
                 "BM25 score from local Tantivy index",
             )],
+            exact_reference_provenance: None,
         }
     }
 
@@ -1894,5 +1904,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn exact_reference_prose_without_typed_provenance_scores_no_exact_reference_signal() {
+        let has_exact_reference = |result: &SearchResult| {
+            result
+                .score_breakdown
+                .iter()
+                .any(|component| component.signal == "exact_reference")
+        };
+        let mut prose_only = make_result("src/caller.rs", 1.0);
+        prose_only.match_reason = "exact symbol reference via SCIP".into();
+        prose_only.evidence =
+            vec!["exact reference to `issue_token` from `SCIP` occurrence data".into()];
+        let results = rerank(vec![prose_only]);
+        assert!(
+            !has_exact_reference(&results[0]),
+            "{:?}",
+            results[0].score_breakdown
+        );
+
+        let mut typed = make_result("src/caller.rs", 1.0);
+        typed.exact_reference_provenance = Some(EvidenceSourceType::TreeSitter);
+        let results = rerank(vec![typed]);
+        assert!(has_exact_reference(&results[0]));
     }
 }

@@ -130,9 +130,11 @@ impl<'a> ImpactEngine<'a> {
         // by path: twelve call sites in one file are twelve references in one impacted file.
         let mut exact_reference_count = 0;
         let mut exact_reference_files = 0;
+        let mut exact_reference_sources = Vec::new();
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
             exact_reference_count = direct.len();
+            exact_reference_sources = exact_reference_sources_by_authority(&direct);
             exact_reference_files = direct
                 .iter()
                 .map(|result| result.path.as_path())
@@ -280,11 +282,13 @@ impl<'a> ImpactEngine<'a> {
         let evidence = Evidence {
             id: EvidenceId::new(format!("impact:{}", path.display())),
             source: "open-kioku-impact".into(),
-            source_type: if exact_reference_count > 0 {
-                EvidenceSourceType::Scip
-            } else {
-                EvidenceSourceType::Lexical
-            },
+            // One record summarises every exact reference, so it takes the strongest source
+            // among them and its message names them all: a tree-sitter or LSP reference is
+            // never labelled SCIP.
+            source_type: exact_reference_sources
+                .first()
+                .cloned()
+                .unwrap_or(EvidenceSourceType::Lexical),
             file_range: Some(FileRange {
                 path: path.into(),
                 line_range: None,
@@ -302,8 +306,15 @@ impl<'a> ImpactEngine<'a> {
             message: if file.is_none() {
                 "impact target is not in the index; no symbols or references were available".into()
             } else if exact_reference_count > 0 {
-                "impact report derived from exact indexed symbol references and lexical references"
-                    .into()
+                format!(
+                    "impact report derived from exact indexed symbol references ({}) and lexical references",
+                    exact_reference_sources
+                        .iter()
+                        .filter_map(exact_reference_label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into()
             } else {
                 "impact report derived from indexed symbols and lexical references".into()
             },
@@ -649,6 +660,7 @@ fn git_cochange_impacts(
                 vec![fact.id.clone()],
                 "impact candidate historically changed with the target file",
             )],
+            exact_reference_provenance: None,
         });
     }
     Ok(dedupe_results(results))
@@ -1161,7 +1173,8 @@ fn exact_reference_impacts(
     Ok(dedupe_results(results))
 }
 
-/// `match_reason` prefix of a result produced from an indexed symbol occurrence.
+/// `match_reason` prefix of a result produced from an indexed symbol occurrence. Prose for
+/// readers only: exactness is read from `SearchResult::exact_reference_provenance`.
 const EXACT_REFERENCE_MATCH_REASON_PREFIX: &str = "exact symbol reference via ";
 
 /// Further chunks of one path whose evidence lines a grouped direct impact lists. The rest are
@@ -1191,7 +1204,7 @@ fn direct_impact_kind(result: &SearchResult) -> DirectImpactKind {
             .iter()
             .any(|component| component.signal == signal)
     };
-    if is_exact_reference_result(result) {
+    if result.is_exact_reference() {
         DirectImpactKind::ExactReference
     } else if result.match_reason == GIT_COCHANGE_MATCH_REASON {
         DirectImpactKind::CoChange
@@ -1241,11 +1254,12 @@ fn merge_direct_group(mut chunks: Vec<SearchResult>) -> Option<SearchResult> {
     let mut unlisted = Vec::new();
     for (index, other) in others.into_iter().enumerate() {
         representative.confidence = representative.confidence.max(other.confidence);
+        let location = chunk_location(&other);
         if index >= MAX_LISTED_GROUPED_CHUNKS {
-            unlisted.push(chunk_location(&other));
+            unlisted.push(location);
             continue;
         }
-        let location = chunk_location(&other);
+        let listed_lines = evidence.len();
         for (message, id) in other.evidence.iter().zip(aligned_evidence_refs(&other)) {
             if evidence_refs.contains(&id) {
                 continue;
@@ -1253,15 +1267,18 @@ fn merge_direct_group(mut chunks: Vec<SearchResult>) -> Option<SearchResult> {
             evidence.push(format!("{location}: {message}"));
             evidence_refs.push(id);
         }
+        // Every line of this chunk is already cited under the same id. Without naming it here
+        // its range would appear in neither the listed lines nor the summary.
+        if evidence.len() == listed_lines {
+            unlisted.push(location);
+        }
     }
     if !unlisted.is_empty() {
-        let summary_id = search_result_evidence_ids(
+        let summary_id = unused_line_id(
             &representative.path,
             &representative.line_range,
-            evidence.len() + 1,
-        )
-        .pop()
-        .unwrap_or_default();
+            &evidence_refs,
+        );
         evidence.push(format!(
             "{} more matching ranges on this path, evidence not listed: {}",
             unlisted.len(),
@@ -1274,21 +1291,37 @@ fn merge_direct_group(mut chunks: Vec<SearchResult>) -> Option<SearchResult> {
     Some(representative)
 }
 
-/// One id per evidence line, index-aligned: the result's own refs where it has them, the
-/// derived `search:` id for any line past them.
+/// One id per evidence line. Refs that are index-aligned with the lines are kept; otherwise
+/// every line takes its derived `search:` id, as the context pack's primary evidence does.
+/// Pairing refs with lines by position when the counts differ gave a runtime line from one
+/// fact a lexical id, and left that fact uncited.
 fn aligned_evidence_refs(result: &SearchResult) -> Vec<String> {
     let refs = result.derived_evidence_ids();
     if refs.len() == result.evidence.len() {
         return refs;
     }
-    let derived =
-        search_result_evidence_ids(&result.path, &result.line_range, result.evidence.len());
-    derived
+    search_result_evidence_ids(&result.path, &result.line_range, result.evidence.len())
         .into_iter()
-        .enumerate()
         .take(result.evidence.len())
-        .map(|(index, fallback)| refs.get(index).cloned().unwrap_or(fallback))
         .collect()
+}
+
+/// The first derived `search:` id for this path and range that `cited` does not already hold,
+/// for a line whose own id another line carries.
+fn unused_line_id(
+    path: &Path,
+    line_range: &Option<open_kioku_core::LineRange>,
+    cited: &[String],
+) -> String {
+    let mut line_count = cited.len() + 1;
+    loop {
+        if let Some(id) = search_result_evidence_ids(path, line_range, line_count).pop() {
+            if !cited.contains(&id) {
+                return id;
+            }
+        }
+        line_count += 1;
+    }
 }
 
 fn chunk_location(result: &SearchResult) -> String {
@@ -1303,13 +1336,50 @@ fn chunk_location(result: &SearchResult) -> String {
     }
 }
 
-/// Whether `result` is an indexed symbol reference rather than a lexical or heuristic hit.
-/// Consumers count exact references by this predicate instead of scanning result prose, so
-/// a lexical hit whose query words include "exact" or "scip" cannot pass as one.
-pub fn is_exact_reference_result(result: &SearchResult) -> bool {
-    result
-        .match_reason
-        .starts_with(EXACT_REFERENCE_MATCH_REASON_PREFIX)
+/// Reader-facing name of an exact reference source; `None` for every source that is not one.
+fn exact_reference_label(source: &EvidenceSourceType) -> Option<&'static str> {
+    match source {
+        EvidenceSourceType::Scip => Some("SCIP"),
+        EvidenceSourceType::TreeSitter => Some("tree-sitter"),
+        EvidenceSourceType::Lsp => Some("LSP"),
+        _ => None,
+    }
+}
+
+/// Which source a merged result or summary record names when exact references from several
+/// sources meet: index data from a compiler or language server before tree-sitter occurrences.
+fn exact_reference_authority(source: &EvidenceSourceType) -> u8 {
+    match source {
+        EvidenceSourceType::Scip => 3,
+        EvidenceSourceType::Lsp => 2,
+        EvidenceSourceType::TreeSitter => 1,
+        _ => 0,
+    }
+}
+
+/// Distinct exact-reference sources among `results`, strongest first.
+fn exact_reference_sources_by_authority(results: &[SearchResult]) -> Vec<EvidenceSourceType> {
+    let mut sources = Vec::<EvidenceSourceType>::new();
+    for source in results
+        .iter()
+        .filter_map(SearchResult::exact_reference_source)
+    {
+        if !sources.contains(source) {
+            sources.push(source.clone());
+        }
+    }
+    sources.sort_by_key(|source| std::cmp::Reverse(exact_reference_authority(source)));
+    sources
+}
+
+fn stronger_exact_provenance(
+    current: Option<EvidenceSourceType>,
+    other: Option<EvidenceSourceType>,
+) -> Option<EvidenceSourceType> {
+    current
+        .into_iter()
+        .chain(other)
+        .max_by_key(exact_reference_authority)
 }
 
 /// Whether a direct impact was reached only through lexical search, not through an exact
@@ -1328,14 +1398,14 @@ fn occurrence_result(
     let Some(file) = files_by_id.get(&occurrence.file_id) else {
         return Ok(None);
     };
+    // A lexical or heuristic occurrence is not an exact reference, and it used to be counted
+    // as one "via indexed". The lexical searches over the target's symbol names still reach its
+    // file, without exact authority.
+    let Some(source) = exact_reference_label(&occurrence.provenance) else {
+        return Ok(None);
+    };
     let chunks = store.chunks_for_file(&occurrence.file_id)?;
     let snippet = best_occurrence_snippet(&chunks, occurrence, &symbol.name);
-    let source = match occurrence.provenance {
-        EvidenceSourceType::Scip => "SCIP",
-        EvidenceSourceType::TreeSitter => "tree-sitter",
-        EvidenceSourceType::Lsp => "LSP",
-        _ => "indexed",
-    };
     let score = 1.25 + occurrence.confidence.score();
     let evidence = vec![format!(
         "exact reference to `{}` from `{source}` occurrence data",
@@ -1359,6 +1429,7 @@ fn occurrence_result(
             evidence_ids,
             format!("{source} occurrence confidence plus exact-reference base weight"),
         )],
+        exact_reference_provenance: Some(occurrence.provenance.clone()),
     }))
 }
 
@@ -1397,28 +1468,61 @@ fn dedupe_results(results: Vec<SearchResult>) -> Vec<SearchResult> {
     for result in results {
         let key = result_key(&result);
         match by_path.get_mut(&key) {
-            Some(existing) => {
-                if result.score > existing.score {
-                    existing.score = result.score;
-                    existing.snippet = result.snippet.clone();
-                    existing.line_range = result.line_range.clone();
-                    existing.match_reason = result.match_reason.clone();
-                    existing.confidence = existing.confidence.max(result.confidence);
-                    existing.score_breakdown = result.score_breakdown.clone();
-                }
-                for evidence in result.evidence {
-                    if !existing.evidence.contains(&evidence) {
-                        existing.evidence.push(evidence);
-                    }
-                }
-                existing.reconcile_score_breakdown();
-            }
+            Some(existing) => merge_duplicate(existing, result),
             None => {
                 by_path.insert(key, result);
             }
         }
     }
     by_path.into_values().collect()
+}
+
+/// Folds a result on the same path and range into `existing`. The higher score supplies the
+/// score and prose, but exact-reference provenance is kept from whichever duplicate carries
+/// it: a lexical hit outscoring an exact reference used to erase it. Each evidence line keeps
+/// the id it was published with, so a runtime line from a second fact cites that fact.
+fn merge_duplicate(existing: &mut SearchResult, duplicate: SearchResult) {
+    let mut evidence_refs = aligned_evidence_refs(existing);
+    let duplicate_refs = aligned_evidence_refs(&duplicate);
+    let duplicate_line_ids = search_result_evidence_ids(
+        &duplicate.path,
+        &duplicate.line_range,
+        duplicate.evidence.len(),
+    );
+    existing.exact_reference_provenance = stronger_exact_provenance(
+        existing.exact_reference_provenance.take(),
+        duplicate.exact_reference_provenance,
+    );
+    if duplicate.score > existing.score {
+        existing.score = duplicate.score;
+        existing.snippet = duplicate.snippet;
+        existing.line_range = duplicate.line_range;
+        existing.match_reason = duplicate.match_reason;
+        existing.confidence = existing.confidence.max(duplicate.confidence);
+        existing.score_breakdown = duplicate.score_breakdown;
+    }
+    for ((message, id), line_id) in duplicate
+        .evidence
+        .into_iter()
+        .zip(duplicate_refs)
+        .zip(duplicate_line_ids)
+    {
+        let cited = evidence_refs.contains(&id);
+        // The same line under its positional id, or under an id already cited, is the same
+        // evidence. The same line under another fact's id is that fact's, and stays.
+        if existing.evidence.contains(&message) && (cited || id == line_id) {
+            continue;
+        }
+        let id = if cited {
+            unused_line_id(&existing.path, &existing.line_range, &evidence_refs)
+        } else {
+            id
+        };
+        existing.evidence.push(message);
+        evidence_refs.push(id);
+    }
+    existing.evidence_refs = evidence_refs;
+    existing.reconcile_score_breakdown();
 }
 
 fn result_key(result: &SearchResult) -> String {
@@ -1627,6 +1731,7 @@ mod tests {
             evidence: vec![message.into()],
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 
@@ -1634,6 +1739,7 @@ mod tests {
     fn chunk_hits_on_one_path_group_into_one_direct_impact_per_edge_kind() {
         let mut exact = chunk_hit("src/publisher.rs", 40, 2.0, "exact reference");
         exact.match_reason = format!("{EXACT_REFERENCE_MATCH_REASON_PREFIX}SCIP");
+        exact.exact_reference_provenance = Some(EvidenceSourceType::Scip);
         let grouped = group_direct_impacts(vec![
             chunk_hit("src/publisher.rs", 20, 0.4, "matched `rate` at 20"),
             chunk_hit("src/publisher.rs", 1, 0.9, "matched `rate` at 1"),
@@ -1648,7 +1754,7 @@ mod tests {
         );
         let lexical = grouped
             .iter()
-            .find(|result| !is_exact_reference_result(result))
+            .find(|result| !result.is_exact_reference())
             .unwrap();
         assert_eq!(lexical.line_range, Some(LineRange { start: 1, end: 3 }));
         assert_eq!(
@@ -1667,7 +1773,7 @@ mod tests {
                 "search:src/publisher.rs:20-22:0".to_string(),
             ]
         );
-        assert!(grouped.iter().any(is_exact_reference_result));
+        assert!(grouped.iter().any(SearchResult::is_exact_reference));
     }
 
     #[test]
@@ -1698,6 +1804,291 @@ mod tests {
             .iter()
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), entry.evidence_refs.len());
+    }
+
+    fn exact_hit(path: &str, start: u32, source: EvidenceSourceType) -> SearchResult {
+        let mut hit = chunk_hit(
+            path,
+            start,
+            2.2,
+            "exact reference to `rates::RateValidator` from `SCIP` occurrence data",
+        );
+        hit.match_reason = format!("{EXACT_REFERENCE_MATCH_REASON_PREFIX}SCIP");
+        hit.exact_reference_provenance = Some(source);
+        hit
+    }
+
+    #[test]
+    fn a_lexical_duplicate_that_outscores_an_exact_reference_keeps_its_exact_provenance() {
+        let exact = exact_hit("src/publisher.rs", 10, EvidenceSourceType::Scip);
+        let lexical = chunk_hit(
+            "src/publisher.rs",
+            10,
+            31.0,
+            "query variant `RateValidator` matched local index",
+        );
+        for arrival in [vec![exact.clone(), lexical.clone()], vec![lexical, exact]] {
+            let grouped = group_direct_impacts(dedupe_results(arrival));
+
+            assert_eq!(grouped.len(), 1, "{grouped:#?}");
+            let entry = &grouped[0];
+            assert_eq!(entry.score, 31.0);
+            assert_eq!(entry.match_reason, "tantivy hybrid lexical match");
+            assert_eq!(
+                entry.exact_reference_provenance,
+                Some(EvidenceSourceType::Scip)
+            );
+            assert!(!is_lexical_impact_result(entry));
+            assert_eq!(
+                grouped
+                    .iter()
+                    .filter(|result| result.is_exact_reference())
+                    .count(),
+                1
+            );
+            assert_eq!(entry.evidence.len(), entry.evidence_refs.len());
+            let unique = entry
+                .evidence_refs
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(unique.len(), entry.evidence_refs.len());
+        }
+    }
+
+    fn runtime_fact(id: &str, target: &str) -> AnalysisFact {
+        AnalysisFact {
+            id: id.into(),
+            file_id: FileId::new("target"),
+            symbol_id: None,
+            target: target.into(),
+            target_kind: GraphNodeType::File,
+            edge_type: GraphEdgeType::SimilarTo,
+            range: None,
+            confidence: Confidence::High,
+            source: "traces/checkout.json".into(),
+            source_type: EvidenceSourceType::Runtime,
+            message: "observed endpoint".into(),
+        }
+    }
+
+    #[test]
+    fn deduplicated_results_with_different_runtime_annotations_cite_their_own_facts() {
+        let mut orders = chunk_hit("src/checkout.rs", 10, 1.0, "matched `checkout` at 10");
+        annotate_runtime_impact(&mut orders, &runtime_fact("runtime:orders", "/v1/orders"));
+        let mut payments = chunk_hit("src/checkout.rs", 10, 0.8, "matched `checkout` at 10");
+        annotate_runtime_impact(
+            &mut payments,
+            &runtime_fact("runtime:payments", "/v1/payments"),
+        );
+
+        let merged = dedupe_results(vec![orders, payments]);
+
+        assert_eq!(merged.len(), 1);
+        let merged = &merged[0];
+        assert_eq!(merged.evidence.len(), merged.evidence_refs.len());
+        let cited = |fragment: &str| {
+            merged
+                .evidence
+                .iter()
+                .zip(&merged.evidence_refs)
+                .find(|(message, _)| message.contains(fragment))
+                .map(|(_, id)| id.as_str())
+        };
+        assert_eq!(
+            cited("matched `checkout`"),
+            Some("search:src/checkout.rs:10-12:0")
+        );
+        assert_eq!(cited("`/v1/orders`"), Some("runtime:orders"));
+        assert_eq!(cited("`/v1/payments`"), Some("runtime:payments"));
+    }
+
+    #[test]
+    fn evidence_refs_that_do_not_align_with_lines_are_not_paired_by_position() {
+        let mut result = chunk_hit("src/publisher.rs", 1, 0.9, "matched `rate` at 1");
+        result
+            .evidence
+            .push("runtime corroboration from local artifact `a` targeting `b`".into());
+        result
+            .evidence
+            .push("service-boundary evidence from `c` targeting `d`".into());
+        result.evidence_refs.push("runtime:a".into());
+
+        assert_eq!(
+            aligned_evidence_refs(&result),
+            vec![
+                "search:src/publisher.rs:1-3:0".to_string(),
+                "search:src/publisher.rs:1-3:1".to_string(),
+                "search:src/publisher.rs:1-3:2".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_grouped_chunk_whose_lines_are_all_already_cited_is_still_named() {
+        let representative = chunk_hit("src/publisher.rs", 1, 0.9, "matched `rate` at 1");
+        // Producers put the line range in every id, so this needs a ref two chunks share.
+        let mut already_cited = chunk_hit("src/publisher.rs", 20, 0.5, "matched `rate` at 20");
+        already_cited.evidence_refs = representative.evidence_refs.clone();
+
+        let grouped = group_direct_impacts(vec![representative, already_cited]);
+
+        assert_eq!(grouped.len(), 1);
+        let entry = &grouped[0];
+        assert_eq!(entry.evidence.len(), entry.evidence_refs.len());
+        assert_eq!(
+            entry.evidence.last().unwrap(),
+            "1 more matching ranges on this path, evidence not listed: lines 20-22"
+        );
+    }
+
+    /// A target defining `RateValidator` and a caller holding one reference to it, the
+    /// reference occurrence carrying `provenance`.
+    fn index_one_reference(provenance: EvidenceSourceType) -> SqliteStore {
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let file = |id: &str, path: &str| File {
+            id: FileId::new(id),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: id.into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let source = file("source", "src/rates.rs");
+        let caller = file("caller", "src/publisher.rs");
+        let symbol = Symbol {
+            id: SymbolId::new("symbol:rate_validator"),
+            name: "RateValidator".into(),
+            qualified_name: "rates::RateValidator".into(),
+            kind: SymbolKind::Class,
+            file_id: source.id.clone(),
+            range: Some(LineRange { start: 1, end: 5 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        };
+        let chunks = vec![
+            CodeChunk {
+                id: "source-chunk".into(),
+                file_id: source.id.clone(),
+                range: LineRange { start: 1, end: 5 },
+                language: Language::Rust,
+                text: "pub struct RateValidator;".into(),
+                symbol_id: Some(symbol.id.clone()),
+            },
+            CodeChunk {
+                id: "caller-chunk".into(),
+                file_id: caller.id.clone(),
+                range: LineRange { start: 10, end: 12 },
+                language: Language::Rust,
+                text: "let validator = RateValidator::new();".into(),
+                symbol_id: None,
+            },
+        ];
+        let occurrence = SymbolOccurrence {
+            symbol_id: symbol.id.clone(),
+            file_id: caller.id.clone(),
+            range: Some(LineRange { start: 10, end: 10 }),
+            source_range: None,
+            is_definition: false,
+            confidence: Confidence::High,
+            provenance,
+        };
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: repo_id,
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 2,
+            symbol_count: 1,
+            chunk_count: chunks.len(),
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[source, caller],
+                symbols: &[symbol],
+                occurrences: &[occurrence],
+                chunks: &chunks,
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        store
+    }
+
+    fn impact_record(report: &ImpactReport) -> &Evidence {
+        report
+            .evidence
+            .iter()
+            .find(|item| item.id.0 == "impact:src/rates.rs")
+            .expect("impact evidence record")
+    }
+
+    #[test]
+    fn impact_evidence_takes_the_source_type_of_its_exact_references() {
+        for source in [
+            EvidenceSourceType::Scip,
+            EvidenceSourceType::TreeSitter,
+            EvidenceSourceType::Lsp,
+        ] {
+            let store = index_one_reference(source.clone());
+            let report = ImpactEngine::new(&store)
+                .for_file(Path::new("src/rates.rs"))
+                .unwrap();
+
+            let record = impact_record(&report);
+            assert_eq!(record.source_type, source, "{record:?}");
+            let reference = report
+                .direct_impacts
+                .iter()
+                .find(|result| result.is_exact_reference())
+                .expect("exact-reference direct impact");
+            assert_eq!(reference.exact_reference_provenance.as_ref(), Some(&source));
+        }
+    }
+
+    #[test]
+    fn an_occurrence_from_a_non_exact_source_is_not_an_exact_reference() {
+        let store = index_one_reference(EvidenceSourceType::Heuristic);
+        let report = ImpactEngine::new(&store)
+            .for_file(Path::new("src/rates.rs"))
+            .unwrap();
+
+        assert_eq!(
+            impact_record(&report).source_type,
+            EvidenceSourceType::Lexical
+        );
+        assert!(!report
+            .direct_impacts
+            .iter()
+            .any(SearchResult::is_exact_reference));
+        assert!(!report
+            .risk_report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("exact indexed symbol reference")));
     }
 
     #[test]
@@ -1841,12 +2232,12 @@ mod tests {
             .direct_impacts
             .iter()
             .any(|result| result.path == Path::new("src/publisher.rs")
-                && result.match_reason.contains("exact symbol reference")));
+                && result.exact_reference_provenance == Some(EvidenceSourceType::Scip)));
         assert_eq!(
             report
                 .direct_impacts
                 .iter()
-                .filter(|result| is_exact_reference_result(result))
+                .filter(|result| result.is_exact_reference())
                 .count(),
             1,
             "three call sites in one file group into one exact-reference entry"

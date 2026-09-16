@@ -83,6 +83,7 @@ impl SearchIndex for MemorySearchIndex {
                     evidence_ids,
                     "lexical phrase/token score adjusted for generated and vendor paths",
                 )],
+                exact_reference_provenance: None,
             });
         }
         results.sort_by(|a, b| {
@@ -275,6 +276,7 @@ fn push_regex_matches(
                 evidence_ids,
                 "direct regex line match",
             )],
+            exact_reference_provenance: None,
         });
     }
 }
