@@ -1492,6 +1492,7 @@ fn hydrate_hits(
                 evidence_refs,
                 "cosine similarity from local semantic vector index",
             )],
+            exact_reference_provenance: None,
         });
     }
     Ok(results)

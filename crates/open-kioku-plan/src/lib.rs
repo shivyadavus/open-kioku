@@ -981,7 +981,7 @@ fn negative_evidence_for_plan(
                 scope: "exact_references".into(),
                 inspected_sources: vec![
                     "retrieval_trace.authority".into(),
-                    "impact.match_reason".into(),
+                    "impact.exact_reference_provenance".into(),
                     "evidence.source_type".into(),
                 ],
                 reason: "plan has no explicit exact symbol reference or SCIP evidence".into(),
@@ -1096,14 +1096,15 @@ fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
     parts.join("; ")
 }
 
-/// Exact references a plan can point at: exact-authority selections in the pack, indexed
-/// symbol references among the impacts, SCIP-sourced evidence, and proven dependents in
-/// another file. Result prose is never consulted; a substring test for "scip" used to fire on
-/// a lexical impact hit whose query variant named the target file's `scip_setup_report`. A
-/// proven edge counts only when it is cross-file, authoritative, unambiguous, and of a kind
-/// that references a symbol (see [`references_a_symbol`]): a same-file edge, such as
-/// `USES_TYPE` between two of the target's own symbols, is the target referring to itself and
-/// says nothing the selection does not, and an ambiguous edge is not proof.
+/// Exact references a plan can point at: exact-authority selections in the pack, impacts
+/// carrying `exact_reference_provenance`, evidence from an exact reference source (SCIP,
+/// tree-sitter, LSP), and proven dependents in another file. Result prose is never consulted;
+/// a substring test for "scip" used to fire on a lexical impact hit whose query variant named
+/// the target file's `scip_setup_report`. A proven edge counts only when it is cross-file,
+/// authoritative, unambiguous, and of a kind that references a symbol (see
+/// [`references_a_symbol`]): a same-file edge, such as `USES_TYPE` between two of the target's
+/// own symbols, is the target referring to itself and says nothing the selection does not, and
+/// an ambiguous edge is not proof.
 fn exact_reference_count(
     diagnostics: &open_kioku_core::RetrievalDiagnostics,
     primary_context: &[SearchResult],
@@ -1127,11 +1128,11 @@ fn exact_reference_count(
             .direct_impacts
             .iter()
             .chain(impact.indirect_impacts.iter())
-            .filter(|result| open_kioku_impact::is_exact_reference_result(result))
+            .filter(|result| result.is_exact_reference())
             .count()
         + evidence
             .iter()
-            .filter(|item| item.source_type == open_kioku_core::EvidenceSourceType::Scip)
+            .filter(|item| item.source_type.is_exact_reference_source())
             .count()
 }
 
@@ -2912,6 +2913,7 @@ mod tests {
                 vec!["test evidence".into()],
                 "test fixture",
             )],
+            exact_reference_provenance: None,
         }
     }
 
@@ -3236,6 +3238,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut exact = test_search_result("src/caller.rs");
         exact.match_reason = "exact symbol reference via SCIP".into();
+        exact.exact_reference_provenance = Some(open_kioku_core::EvidenceSourceType::Scip);
         direct_impacts.push(exact);
         let impact_with = |direct_impacts: Vec<SearchResult>, indirect: &[&str]| ImpactReport {
             proven_impact: Vec::new(),
@@ -3379,6 +3382,7 @@ mod tests {
                 vec!["test evidence".into()],
                 "test fixture",
             )],
+            exact_reference_provenance: None,
         };
         let context = ContextPack {
             task: "token".into(),
@@ -3544,6 +3548,7 @@ mod tests {
                 vec!["test evidence".into()],
                 "test fixture",
             )],
+            exact_reference_provenance: None,
         };
         let context = ContextPack {
             task:
@@ -3813,6 +3818,8 @@ mod tests {
     fn indexed_symbol_references_and_cross_file_proven_dependents_count_as_exact() {
         let mut reference_hit = test_search_result("src/publisher.rs");
         reference_hit.match_reason = "exact symbol reference via tree-sitter".into();
+        reference_hit.exact_reference_provenance =
+            Some(open_kioku_core::EvidenceSourceType::TreeSitter);
         let (_, mut impact) = lexical_impact("token", Vec::new(), reference_hit);
         let diagnostics = open_kioku_core::RetrievalDiagnostics::default();
         assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
