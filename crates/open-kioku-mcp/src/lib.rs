@@ -11,23 +11,26 @@ use open_kioku_context::{
 };
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_contract::{
-    ChangeContractV1, ContractId, ContractStore, FsContractStore, StoredContractRecord,
+    ChangeContractV1, ContractId, ContractStore, FsContractStore, StoreError, StoredContractRecord,
 };
 use open_kioku_core::{
     Confidence, ContextHandleId, GraphEdgeType, GraphNodeType, PlanReport, PolicyCheckReport,
     StatusDetail,
 };
+use open_kioku_errors::OkError;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::{
     ChangeVerifier, ContractVerificationReport, ContractVerifier, PatchPlanner, VerifyChangeInput,
 };
-use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat, PreflightFormat, PreflightReport};
+use open_kioku_plan::{
+    ContractBuilder, PlanEngine, PlanFormat, PlanOrigin, PreflightFormat, PreflightReport,
+};
 use open_kioku_search_regex::{regex_search_index, search_chunks, MAX_REGEX_SCAN_FILES};
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_sentry::{disabled_response, unimplemented_response, SentryConfig};
-use open_kioku_storage::generations::{not_indexed_message, not_indexed_status};
+use open_kioku_storage::generations::{not_indexed_message, IndexRefusalState};
 use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::{SymbolEngine, SYMBOL_CONTEXT_SURROUNDING_LINES};
@@ -231,23 +234,37 @@ where
 #[derive(Default)]
 struct IndexProbe {
     store: Option<SqliteStore>,
-    failure: Option<String>,
+    failure: Option<ProbeFailure>,
+}
+
+/// Why the last probe could not serve the index: the state a refusal reports as `data.state`,
+/// and the error text it reports as the message.
+struct ProbeFailure {
+    state: IndexRefusalState,
+    message: String,
 }
 
 impl IndexProbe {
     fn refresh(&mut self, repo: &Path) {
-        match SqliteStore::open_repo_index(repo) {
+        match SqliteStore::probe_repo_index(repo) {
             Ok(store) => {
                 self.store = store;
                 self.failure = None;
             }
-            Err(err) => {
-                let message = err.to_string();
-                if self.failure.as_deref() != Some(message.as_str()) {
+            Err(refusal) => {
+                let message = refusal.error.to_string();
+                let repeated = self
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.message == message);
+                if !repeated {
                     eprintln!("open-kioku mcp: index unavailable: {message}");
                 }
                 self.store = None;
-                self.failure = Some(message);
+                self.failure = Some(ProbeFailure {
+                    state: refusal.state,
+                    message,
+                });
             }
         }
     }
@@ -268,7 +285,7 @@ enum ServedIndex<'a> {
     /// Never indexed: `repo_status` says so, every other tool names `ok index`.
     Unindexed,
     /// The index exists but the last probe could not serve it, for this reason.
-    Unavailable(&'a str),
+    Unavailable(&'a ProbeFailure),
 }
 
 async fn handle_line(
@@ -330,7 +347,7 @@ async fn handle_request_with_timeout(
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(json!({"code": json_rpc_error_code(&err), "message": err.to_string()})),
+            error: Some(json_rpc_error(&err)),
         }),
         Err(_) => Some(JsonRpcResponse {
             jsonrpc: "2.0",
@@ -341,6 +358,54 @@ async fn handle_request_with_timeout(
             ),
         }),
     }
+}
+
+/// A tool call refused because of the index's state rather than its arguments. It keeps the
+/// message the refusal always carried and adds the state and the next step, which the error
+/// object reports as `data` so a client branches on `data.state` instead of the text.
+#[derive(Debug)]
+struct ToolRefusal {
+    message: String,
+    data: ToolRefusalData,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolRefusalData {
+    state: IndexRefusalState,
+    next_step: String,
+}
+
+impl ToolRefusal {
+    fn error(repo: &Path, state: IndexRefusalState, message: String) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            message,
+            data: ToolRefusalData {
+                state,
+                next_step: state.next_step(repo),
+            },
+        })
+    }
+}
+
+impl std::fmt::Display for ToolRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ToolRefusal {}
+
+/// The JSON-RPC error object for a failed request. A refusal caused by the index's state
+/// carries `data: {state, next_step}`; every other failure is the code and the message.
+fn json_rpc_error(err: &anyhow::Error) -> Value {
+    let mut error = json!({"code": json_rpc_error_code(err), "message": err.to_string()});
+    if let Some(refusal) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ToolRefusal>())
+    {
+        error["data"] = json!(refusal.data);
+    }
+    error
 }
 
 /// JSON-RPC `-32602` (invalid params) when the failure is the caller's arguments, the
@@ -356,6 +421,30 @@ fn json_rpc_error_code(err: &anyhow::Error) -> i64 {
     } else {
         -32000
     }
+}
+
+/// The error for an argument the caller got wrong: `-32602` on the wire.
+fn invalid_input(message: impl Into<String>) -> anyhow::Error {
+    OkError::InvalidInput(message.into()).into()
+}
+
+/// A JSON argument the caller supplied, decoded. One that does not decode is the caller's
+/// input, named by its argument, not a tool failure.
+fn caller_json_value<T: serde::de::DeserializeOwned>(
+    argument: &str,
+    value: &Value,
+) -> anyhow::Result<T> {
+    serde_json::from_value(value.clone())
+        .map_err(|err| invalid_input(format!("`{argument}` is malformed: {err}")))
+}
+
+/// [`caller_json_value`] for an argument that carries JSON as a string.
+fn caller_json_str<T: serde::de::DeserializeOwned>(
+    argument: &str,
+    json: &str,
+) -> anyhow::Result<T> {
+    serde_json::from_str(json)
+        .map_err(|err| invalid_input(format!("`{argument}` is malformed: {err}")))
 }
 
 fn store_idle_expired(last_request: Instant) -> bool {
@@ -409,7 +498,9 @@ async fn dispatch_request(
     match store {
         ServedIndex::Ready(store) => dispatch(repo, store, config, method, params).await,
         ServedIndex::Unindexed => dispatch_unindexed(repo, config, method, params),
-        ServedIndex::Unavailable(failure) => dispatch_unavailable(config, method, params, failure),
+        ServedIndex::Unavailable(failure) => {
+            dispatch_unavailable(repo, config, method, params, failure)
+        }
     }
 }
 
@@ -418,14 +509,15 @@ async fn dispatch_request(
 /// probe's own message, because an `indexed: false` here would send the client to `ok index`
 /// while one may be running.
 fn dispatch_unavailable(
+    repo: &Path,
     config: &OkConfig,
     method: &str,
     params: Value,
-    failure: &str,
+    failure: &ProbeFailure,
 ) -> anyhow::Result<Value> {
     let refuse = |name: &str| {
         if retired_tool_guidance(name).is_none() && tool_category(name).is_some() {
-            anyhow::anyhow!("{failure}")
+            ToolRefusal::error(repo, failure.state, failure.message.clone())
         } else {
             unknown_method_error(name)
         }
@@ -462,17 +554,32 @@ fn dispatch_unindexed(
             .and_then(Value::as_str)
             .unwrap_or_default()
         {
-            "repo_status" => Ok(tool_response(json!(not_indexed_status(repo)))),
+            "repo_status" => Ok(tool_response(unindexed_repo_status(
+                repo,
+                params.get("arguments").unwrap_or(&Value::Null),
+            )?)),
             other => Err(unindexed_method_error(repo, other)),
         },
-        "repo_status" => Ok(json!(not_indexed_status(repo))),
+        "repo_status" => unindexed_repo_status(repo, &params),
         other => Err(unindexed_method_error(repo, other)),
     }
 }
 
+/// `repo_status` with no index to serve. `detail` is still checked, so an unknown value is the
+/// same error indexed or not, and the status carries the withdrawal reason when the database
+/// has rows whose manifest was withdrawn.
+fn unindexed_repo_status(repo: &Path, params: &Value) -> anyhow::Result<Value> {
+    status_detail(params)?;
+    Ok(json!(SqliteStore::repo_not_indexed_status(repo)?))
+}
+
 fn unindexed_method_error(repo: &Path, name: &str) -> anyhow::Error {
     if retired_tool_guidance(name).is_none() && tool_category(name).is_some() {
-        return anyhow::anyhow!("{}", not_indexed_message(repo));
+        return ToolRefusal::error(
+            repo,
+            IndexRefusalState::NotIndexed,
+            not_indexed_message(repo),
+        );
     }
     unknown_method_error(name)
 }
@@ -539,16 +646,11 @@ async fn dispatch(
             // 1.4 MB of a 1.5 MB payload, sent before an agent's first real question. The
             // manifest keeps every entry; `ok --json status --full` is the CLI equivalent.
             // Validated before the unindexed answer so a bad value is an error either way.
-            let detail = match optional_str(&params, "detail")? {
-                None => StatusDetail::Summary,
-                Some(value) => StatusDetail::parse(value).ok_or_else(|| {
-                    anyhow::anyhow!("unsupported detail `{value}`; expected summary or full")
-                })?,
-            };
+            let detail = status_detail(&params)?;
             // A store without a manifest is not an index. `serve` never hands one over, but
             // the answer for it is the unindexed status, not a serialized `null`.
             let Some(manifest) = store.manifest()? else {
-                return Ok(json!(not_indexed_status(repo)));
+                return Ok(json!(store.not_indexed_status(repo)?));
             };
             let compatibility = open_kioku_core::classify_analysis_semantics(
                 manifest.analysis_semantics.as_ref(),
@@ -634,9 +736,9 @@ async fn dispatch(
             "code" | "graph" => search_tool(repo, store, &params),
             "semantic" => semantic_search_tool(repo, store, config, &params),
             "hybrid" => hybrid_search_tool(repo, store, config, &params),
-            other => anyhow::bail!(
+            other => Err(invalid_input(format!(
                 "unknown `mode` `{other}` for search_code; expected one of code, graph, semantic, hybrid"
-            ),
+            ))),
         },
         "regex_search" => regex_search_tool(store, &params),
         "build_context_pack" => {
@@ -676,10 +778,10 @@ async fn dispatch(
                 .map(|store| store.retrieve(&ContextHandleId::new(handle)))
                 .transpose()?
                 .flatten()
-                .with_context(|| {
-                    format!(
+                .ok_or_else(|| {
+                    OkError::InvalidInput(format!(
                         "no context handle `{handle}` is stored for this repository; handles come from build_context_pack with compress=true"
-                    )
+                    ))
                 })?;
             Ok(json!(retrieved))
         }
@@ -689,8 +791,8 @@ async fn dispatch(
             // to. It accepts a plan the caller already holds so a saved plan
             // becomes a contract without re-planning.
             if bool_arg(&params, "persist") {
-                let plan = contract_plan_from_params(repo, store, config, &params)?;
-                let contract = ContractBuilder::from_plan(&plan)?;
+                let (plan, origin) = contract_plan_from_params(repo, store, config, &params)?;
+                let contract = ContractBuilder::from_plan_with_origin(&plan, origin)?;
                 let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
                 let should_store = params.get("store").and_then(Value::as_bool).unwrap_or(true);
                 if should_store {
@@ -708,24 +810,28 @@ async fn dispatch(
                 return format_contract_create_output(&output, format_arg(&params, "json"));
             }
 
+            // `detail` is the caller's argument, checked before anything reads the index, so an
+            // unknown value is reported as such whatever state the index is in.
+            let detail = params
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("plan");
+            if !matches!(detail, "plan" | "preflight" | "patch") {
+                return Err(OkError::InvalidInput(format!(
+                    "unknown `detail` `{detail}` for plan_change; expected one of plan, preflight, patch"
+                ))
+                .into());
+            }
             // A plan's relationship claims come from the graph. Refuse up front rather than
             // let a stale index produce a plan whose "structurally proven dependents"
             // sentence is silently absent.
             require_authoritative_relationships(store)?;
             let task = required_str(&params, "task")?;
-            let detail = params
-                .get("detail")
-                .and_then(Value::as_str)
-                .unwrap_or("plan");
             if detail == "patch" {
                 return Ok(json!(
                     PatchPlanner::new(config, store as &dyn OkStore).plan(task)?
                 ));
             }
-            anyhow::ensure!(
-                matches!(detail, "plan" | "preflight"),
-                "unknown `detail` `{detail}` for plan_change; expected one of plan, preflight, patch"
-            );
 
             let task = if let Some(since) = params.get("since").and_then(Value::as_str) {
                 task_with_changed_ranges(repo, task, since)?
@@ -824,7 +930,7 @@ async fn dispatch(
         "dependency_path" => {
             require_authoritative_relationships(store)?;
             let from = required_str(&params, "from")?;
-            let from = resolve_graph_node(store, from)?;
+            let from = open_kioku_graph::resolve_graph_node(store, from)?;
             // Without a destination there is no route to trace, so the answer
             // is the node's direct neighbourhood instead.
             let Some(to) = params.get("to").and_then(Value::as_str) else {
@@ -836,7 +942,7 @@ async fn dispatch(
                     "evidence_source": "sqlite_graph_store"
                 }));
             };
-            let to = resolve_graph_node(store, to)?;
+            let to = open_kioku_graph::resolve_graph_node(store, to)?;
             Ok(json!({
                 "from": from,
                 "to": to,
@@ -1225,7 +1331,7 @@ fn regex_search_tool(store: &dyn MetadataStore, params: &Value) -> anyhow::Resul
         .get("pattern")
         .and_then(Value::as_str)
         .filter(|pattern| !pattern.is_empty())
-        .context("`regex_search` requires a non-empty `pattern`")?;
+        .ok_or_else(|| invalid_input("`regex_search` requires a non-empty `pattern`"))?;
     let limit = limit(params);
     let offset = offset(params);
     let fetched = search_fetch_limit(limit, offset);
@@ -1250,16 +1356,16 @@ fn regex_search_tool(store: &dyn MetadataStore, params: &Value) -> anyhow::Resul
     paged_slice_response_with_metadata("results", scan.results, metadata)
 }
 
-/// `query` (or the older `pattern` spelling), refused when blank: an empty query returned an
-/// empty success, which read as "nothing in the repository matches".
+/// `query` (or the older `pattern` spelling), refused when blank or absent through the check
+/// `ok search` uses, with its message: an empty query returned an empty success, which read as
+/// "nothing in the repository matches".
 fn search_query(params: &Value) -> anyhow::Result<&str> {
-    params
+    let query = params
         .get("query")
         .or_else(|| params.get("pattern"))
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .context("`search_code` requires a non-empty `query`")
+        .unwrap_or_default();
+    Ok(open_kioku_storage::require_search_query(query)?)
 }
 
 fn search_results(
@@ -1692,19 +1798,19 @@ fn tool_description(name: &str, base: &str) -> String {
 /// from.
 fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
-        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files considered under the current policy versus indexed per language, each omission attributed to a skip reason, policy exclusions such as hidden or ignored files counted beside the ratio with their top directories and governing setting, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). `quality.quality_notes` and `quality.skipped_paths` are `{total, by_kind|by_reason, sample}` summaries by default.", json!({"type":"object","properties":{"detail":{"type":"string","enum":["summary","full"],"description":"How much of the manifest's per-item lists to return. 'summary' (default) replaces quality.quality_notes with {total, by_kind, sample} and quality.skipped_paths with {total, by_reason, sample}, each sample at most 20 entries drawn across every kind or reason; 'full' returns every note and skipped path as the manifest stores them. An unknown value is a tool error."}}})),
+        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files considered under the current policy versus indexed per language, each omission attributed to a skip reason, policy exclusions such as hidden or ignored files counted beside the ratio with their top directories and governing setting, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). `quality.quality_notes` and `quality.skipped_paths` are `{total, by_kind|by_reason, sample}` summaries by default.", json!({"type":"object","properties":{"detail":{"type":"string","enum":["summary","full"],"description":"How much of the manifest's per-item lists to return. 'summary' (default) replaces quality.quality_notes with {total, by_kind, sample} and quality.skipped_paths with {total, by_reason, sample}, each sample at most 20 entries drawn across every kind or reason; 'full' returns every note and skipped path as the manifest stores them. An unknown value is an invalid-params error (-32602)."}}})),
         ("list_files", "List indexed files with relative path, size in bytes, and language, or pass one `path` to get that file's indexed detail instead: its file record plus every code chunk covering it, with line ranges. A path that is not indexed returns a null file and an explicit caveat rather than an empty success.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of a single file to describe in detail (e.g. 'src/main.rs'). When set, `limit` and `offset` are ignored and the response carries the file record and its chunks."},"limit":{"type":"integer","description":"Maximum number of files to return when listing. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching files to skip when listing. Defaults to 0."}}})),
-        ("search_code", "Search indexed code through one of four evidence modes: lexical BM25 over code chunks, indexed graph-node documents, the local semantic vector index, or a hybrid merge of lexical and semantic candidates deduplicated by path and re-sorted by combined score. Semantic and hybrid modes report `semantic_status` and fall back to lexical-only results when the vector index is not ready. Every result carries path, line range, snippet, score, per-signal score_breakdown, and evidence_refs.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query: terms, identifiers, routes, config keys, or a natural-language description when mode is semantic or hybrid."},"mode":{"type":"string","enum":["code","graph","semantic","hybrid"],"description":"Which evidence to search. 'code' (default) is lexical BM25 over indexed chunks and file paths; 'graph' searches indexed graph-node documents; 'semantic' searches the local vector index; 'hybrid' merges lexical and semantic candidates. An unknown mode is a tool error."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
-        ("regex_search", "Match a regular expression line by line against indexed chunk text, in path order, returning exact single-line hits with file path, line number, and the matching line. Regions the indexer did not chunk are not searched, and the response carries that caveat plus a warning when the bounded walk stopped early.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is returned as a tool error. Example: 'fn\\s+main' to find main function declarations."},"limit":{"type":"integer","description":"Maximum number of matching lines to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching lines to skip before returning results. Defaults to 0."}}})),
+        ("search_code", "Search indexed code through one of four evidence modes: lexical BM25 over code chunks, indexed graph-node documents, the local semantic vector index, or a hybrid merge of lexical and semantic candidates deduplicated by path and re-sorted by combined score. Semantic and hybrid modes report `semantic_status` and fall back to lexical-only results when the vector index is not ready. Every result carries path, line range, snippet, score, per-signal score_breakdown, and evidence_refs.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query: terms, identifiers, routes, config keys, or a natural-language description when mode is semantic or hybrid."},"mode":{"type":"string","enum":["code","graph","semantic","hybrid"],"description":"Which evidence to search. 'code' (default) is lexical BM25 over indexed chunks and file paths; 'graph' searches indexed graph-node documents; 'semantic' searches the local vector index; 'hybrid' merges lexical and semantic candidates. An unknown mode is an invalid-params error (-32602)."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
+        ("regex_search", "Match a regular expression line by line against indexed chunk text, in path order, returning exact single-line hits with file path, line number, and the matching line. Regions the indexer did not chunk are not searched, and the response carries that caveat plus a warning when the bounded walk stopped early.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is an invalid-params error (-32602). Example: 'fn\\s+main' to find main function declarations."},"limit":{"type":"integer","description":"Maximum number of matching lines to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching lines to skip before returning results. Defaults to 0."}}})),
         ("search_symbols", "List or substring-filter the indexed symbol table (functions, classes, structs, traits, interfaces) with pagination, returning symbol name, kind, file path, and line range. Matching is case-insensitive substring against name and qualified name, ordered by qualified name: it is not fuzzy and the results are not ranked, so an approximate name does not match. Omitting `query` pages through every indexed symbol.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring matched case-insensitively against symbol names and qualified names. Omit to list all symbols ordered by qualified name. Not fuzzy: a name that shares no substring with the query does not match."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100. Use with offset for pagination."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
         ("get_definition", "Retrieve the indexed definition record for a symbol (function, class, struct, trait, module) by name: its file, line range, kind, qualified name, confidence, and provenance. With include_body=true it also joins the symbol back to the indexed chunk text covering it, returning the definition body with the line range it spans plus up to ten indexed lines above and below it verbatim; anything that could not be recovered from the index is stated in `caveats` rather than returned as a shorter body.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."},"include_body":{"type":"boolean","description":"Set true to return the definition body and the indexed lines around it alongside the record. Defaults to false, which returns the record only."}}})),
-        ("get_references", "Retrieve evidence about how one resolved symbol is used, in sections that keep their provenance apart: `references` returns indexed occurrences, each with its own provenance and confidence; `callers` and `callees` return persisted CALLS graph edges in the named direction; `implementations` returns verified implementation sites from persisted IMPLEMENTS facts with parser provenance. Every section names its own evidence_source and caveats, because an empty occurrence list and an empty IMPLEMENTS list are different claims.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol to gather usage evidence for. For implementations this is the interface, trait, abstract class, or protocol name."},"kind":{"type":"string","enum":["references","callers","callees","implementations","all"],"description":"Which evidence sections to return. Defaults to 'references'. 'all' returns every section in one response, each still labelled with its own evidence_source. An unknown kind is a tool error."},"limit":{"type":"integer","description":"Maximum number of entries per section. Defaults to 20, capped at 100."}}})),
+        ("get_references", "Retrieve evidence about how one resolved symbol is used, in sections that keep their provenance apart: `references` returns indexed occurrences, each with its own provenance and confidence; `callers` and `callees` return persisted CALLS graph edges in the named direction; `implementations` returns verified implementation sites from persisted IMPLEMENTS facts with parser provenance. Every section names its own evidence_source and caveats, because an empty occurrence list and an empty IMPLEMENTS list are different claims.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol to gather usage evidence for. For implementations this is the interface, trait, abstract class, or protocol name."},"kind":{"type":"string","enum":["references","callers","callees","implementations","all"],"description":"Which evidence sections to return. Defaults to 'references'. 'all' returns every section in one response, each still labelled with its own evidence_source. An unknown kind is an invalid-params error (-32602)."},"limit":{"type":"integer","description":"Maximum number of entries per section. Defaults to 20, capped at 100."}}})),
         ("dependency_path", "Trace the shortest dependency or reference path between two files or symbols from the persisted graph, or, when `to` is omitted, list the direct dependency graph neighbours (imports and dependents) of `from` instead.", json!({"type":"object","required":["from"],"properties":{"from":{"type":"string","description":"The starting node path or symbol name."},"to":{"type":"string","description":"The target node path or symbol name. Omit to return the direct neighbours of `from` rather than a route between two nodes."},"limit":{"type":"integer","description":"Maximum number of neighbours to return when `to` is omitted. Defaults to 20, capped at 100."}}})),
         ("impact_analysis", "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact).", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze for downstream impact (e.g., 'src/auth/handler.rs')."}}})),
         ("explain_flow", "Return graph-backed endpoint-to-call flow evidence, plus a heuristic architecture summary. Each flow contains an indexed endpoint and a bounded directed CALLS path.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum endpoint flows to return. Defaults to 20, capped at 100."}}})),
         ("build_context_pack", "Assemble a ranked context pack of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task. Returns Markdown by default, sized for an agent's context window. With compress=true it stores the original snippets under the .ok data directory and returns compact handles instead, which retrieve_context expands on demand.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for (e.g., 'refactor the authentication middleware to support OAuth2')."},"compress":{"type":"boolean","description":"Set true to store snippets locally and return short handles instead of inline source, reducing token count. Defaults to false. This is the only path that writes."},"limit":{"type":"integer","description":"Maximum number of context items to gather. Defaults to 20. Raise it when the pack missed a file you expected; it controls coverage, not rendering cost."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Output format. Defaults to 'markdown', which carries the same evidence as 'json' at a small fraction of the context cost and is what an agent should read. Ask for 'json' only when the result will be parsed rather than read - for example a plan saved for verify_change. 'toon' is token-optimized notation. With compress=true the default is 'json' and 'markdown' is not produced."}}})),
         ("retrieve_context", "Retrieve the original uncompressed source code snippet associated with a compressed context handle.", json!({"type":"object","required":["handle"],"properties":{"handle":{"type":"string","description":"The handle ID returned by build_context_pack with compress=true."}}})),
-        ("plan_change", "Generate an evidence-backed pre-edit plan for a task: primary files to edit, expected impact, changed-line ranges, edit boundaries, and recommended test targets. `detail` chooses between the full plan, a concise preflight decision, and a patch plan that writes nothing. With persist=true the plan is turned into a versioned ChangeContractV1, stored under .ok/contracts by default, which verify_change can later hold the actual edit to.", json!({"type":"object","properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan. Required unless persist=true is given an existing `plan` or `plan_json`."},"detail":{"type":"string","enum":["plan","preflight","patch"],"description":"Which artifact to return. 'plan' (default) is the full evidence-backed report; 'preflight' is one concise start decision with verdict, confirmed edit files, risks, and evidence quality; 'patch' is a patch plan that writes no files. Ignored when persist=true. An unknown value is a tool error."},"persist":{"type":"boolean","description":"Set true to build a versioned change contract from the plan instead of returning the plan itself. Defaults to false. This is the only path that writes."},"store":{"type":"boolean","description":"With persist=true, whether the contract is written under .ok/contracts. Defaults to true; set false for a transient contract that is returned but not stored."},"plan":{"type":"object","description":"With persist=true, an inline PlanReport object to build the contract from instead of planning afresh."},"plan_json":{"type":"string","description":"With persist=true, a JSON-encoded PlanReport to build the contract from instead of planning afresh."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon","html","text"],"description":"Output format. The full plan defaults to 'markdown', which is what an agent should read; ask for 'json' when the plan will be saved and passed to verify_change. Preflight defaults to 'json' and also accepts 'markdown', 'html', and 'text'. Contracts default to 'json'."}}})),
+        ("plan_change", "Generate an evidence-backed pre-edit plan for a task: primary files to edit, expected impact, changed-line ranges, edit boundaries, and recommended test targets. `detail` chooses between the full plan, a concise preflight decision, and a patch plan that writes nothing. With persist=true the plan is turned into a versioned ChangeContractV1, stored under .ok/contracts by default, which verify_change can later hold the actual edit to.", json!({"type":"object","properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan. Required unless persist=true is given an existing `plan` or `plan_json`."},"detail":{"type":"string","enum":["plan","preflight","patch"],"description":"Which artifact to return. 'plan' (default) is the full evidence-backed report; 'preflight' is one concise start decision with verdict, confirmed edit files, risks, and evidence quality; 'patch' is a patch plan that writes no files. Ignored when persist=true. An unknown value is an invalid-params error (-32602)."},"persist":{"type":"boolean","description":"Set true to build a versioned change contract from the plan instead of returning the plan itself. Defaults to false. This is the only path that writes."},"store":{"type":"boolean","description":"With persist=true, whether the contract is written under .ok/contracts. Defaults to true; set false for a transient contract that is returned but not stored."},"plan":{"type":"object","description":"With persist=true, an inline PlanReport object to build the contract from instead of planning afresh."},"plan_json":{"type":"string","description":"With persist=true, a JSON-encoded PlanReport to build the contract from instead of planning afresh."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon","html","text"],"description":"Output format. The full plan defaults to 'markdown', which is what an agent should read; ask for 'json' when the plan will be saved and passed to verify_change. Preflight defaults to 'json' and also accepts 'markdown', 'html', and 'text'. Contracts default to 'json'."}}})),
         ("verify_change", "Verify what actually changed against what was declared. Checks an actual unified diff or changed file list against a saved PlanReport or against a stored or inline change contract, covering boundary constraints, expected file coverage, API surface stability, and dependency policy. Supplying an existing verification report instead explains that report - decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests - without verifying anything. Optionally executes configured validation commands and persists timestamped attestation records.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport to verify against."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport to verify against."},"contract_id":{"type":"string","description":"Id of a contract stored under .ok/contracts to verify against. Stored ids append verification records to that contract."},"contract":{"type":"object","description":"Inline ChangeContractV1 or StoredContractRecord object to verify against."},"contract_json":{"type":"string","description":"JSON-encoded ChangeContractV1 or StoredContractRecord to verify against."},"verification":{"type":"object","description":"An existing ContractVerificationReport to explain. When present, nothing is verified."},"verification_json":{"type":"string","description":"A JSON-encoded ContractVerificationReport to explain. When present, nothing is verified."},"explain":{"type":"boolean","description":"Set true with a contract to return the explanation of the resulting verification report rather than the report itself. Defaults to false."},"diff":{"type":"string","description":"The unified diff (git diff format) showing the actual changes to verify."},"since_plan":{"type":"string","description":"Git revision or range (e.g., 'HEAD~1', 'abc123..def456') used with git diff --unified=0 to derive changed files and diff input automatically."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files. Used when diff is not provided."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers supporting the change."},"validation_attestations":{"type":"array","items":{"type":"object"},"description":"Previously recorded validation attestations to replay during contract verification."},"traceability_strict":{"type":"boolean","description":"Set true to reject any evidence references not present in the saved plan or contract, enforcing full traceability. Defaults to false (lenient mode allows extra evidence)."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API surface changes (additions, removals, signature modifications) and flag them as warnings. Defaults to false."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph changes and flag forbidden dependency additions based on architecture policy. Defaults to false; a configured policy enables it anyway."},"run_commands":{"type":"boolean","description":"Set true to execute shell validation commands (test runners, linters) defined in the plan or contract on the local machine. Commands run synchronously and their exit codes are recorded. Defaults to false."},"write_attestation":{"type":"boolean","description":"Set true together with run_commands to persist timestamped pass/fail attestation records under .ok/contracts/validation/. With a contract it requires a stored contract_id. Defaults to false."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format for contract verification and for explanations. Defaults to json."}}})),
         ("find_tests_for_change", "Identify the test files that should be run to validate a change, ranked by relevance from naming conventions, import relationships, and co-change history. With a `path` the ranking is for that changed file; without one it reports the repository-wide stored test evidence.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs'). Omit for the repository-wide test evidence."},"limit":{"type":"integer","description":"Maximum number of test file recommendations to return, ranked by relevance. Defaults to 20."}}})),
         ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher, or, when called with no `query`, return the versioned evidence schema instead: supported node types, edge types, query properties, and the Tier-1 relationship-semantic capability matrix. (Note: the DSL is NOT full Cypher.) Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","properties":{"query":{"type":"string","description":"The graph query string to execute. Omit or leave empty to return the evidence schema instead of running a query."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
@@ -2062,15 +2168,30 @@ fn optional_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<Option<&'a s
     match params.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value.as_str())),
-        Some(other) => anyhow::bail!("`{key}` must be a string, got {other}"),
+        Some(other) => Err(invalid_input(format!(
+            "`{key}` must be a string, got {other}"
+        ))),
     }
+}
+
+/// `repo_status`'s `detail`, `summary` when absent. An unknown value is the caller's input.
+fn status_detail(params: &Value) -> anyhow::Result<StatusDetail> {
+    let Some(value) = optional_str(params, "detail")? else {
+        return Ok(StatusDetail::Summary);
+    };
+    StatusDetail::parse(value).ok_or_else(|| {
+        OkError::InvalidInput(format!(
+            "unsupported detail `{value}`; expected summary or full"
+        ))
+        .into()
+    })
 }
 
 fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str> {
     params
         .get(key)
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing required string argument `{key}`"))
+        .ok_or_else(|| invalid_input(format!("missing required string argument `{key}`")))
 }
 
 fn changed_ranges_since(repo: &Path, since: &str) -> anyhow::Result<Vec<open_kioku_git::DiffFile>> {
@@ -2185,21 +2306,25 @@ fn contract_plan_from_params(
     store: &SqliteStore,
     config: &OkConfig,
     params: &Value,
-) -> anyhow::Result<PlanReport> {
+) -> anyhow::Result<(PlanReport, PlanOrigin)> {
     let task = params.get("task").and_then(Value::as_str);
     let plan = params.get("plan").filter(|value| !value.is_null());
     let plan_json = params.get("plan_json").and_then(Value::as_str);
     let selectors = task.is_some() as u8 + plan.is_some() as u8 + plan_json.is_some() as u8;
-    anyhow::ensure!(
-        selectors == 1,
-        "plan_change with persist=true requires exactly one of `task`, `plan`, or `plan_json`"
-    );
+    if selectors != 1 {
+        return Err(invalid_input(
+            "plan_change with persist=true requires exactly one of `task`, `plan`, or `plan_json`",
+        ));
+    }
 
     if let Some(plan) = plan {
-        return Ok(serde_json::from_value(plan.clone())?);
+        return Ok((caller_json_value("plan", plan)?, PlanOrigin::Supplied));
     }
     if let Some(plan_json) = plan_json {
-        return Ok(serde_json::from_str(plan_json)?);
+        return Ok((
+            caller_json_str("plan_json", plan_json)?,
+            PlanOrigin::Supplied,
+        ));
     }
 
     let mut task = task.unwrap_or_default().to_string();
@@ -2212,11 +2337,12 @@ fn contract_plan_from_params(
         .with_history_store(Some(store))
         .build(&task, limit)?;
     context.architecture_policy = configured_architecture_policy_report(repo, store)?;
-    Ok(PlanEngine::new(store as &dyn OkStore)
+    let plan = PlanEngine::new(store as &dyn OkStore)
         .with_history_store(Some(store))
         .with_memory_facts(memory_facts)
         .with_memory_enabled(config.memory.enabled)
-        .plan_from_context(&task, limit, context)?)
+        .plan_from_context(&task, limit, context)?;
+    Ok((plan, PlanOrigin::Generated))
 }
 
 fn verify_change_contract_tool(
@@ -2228,7 +2354,9 @@ fn verify_change_contract_tool(
     let (contract, stored) = contract_from_params(&contract_store, params)?;
     let write_attestation = bool_arg(params, "write_attestation");
     if write_attestation && !stored {
-        anyhow::bail!("write_attestation requires a stored `contract_id`");
+        return Err(invalid_input(
+            "write_attestation requires a stored `contract_id`",
+        ));
     }
 
     let mut changed_files = path_array_arg(params, "changed_files")
@@ -2253,7 +2381,7 @@ fn verify_change_contract_tool(
         || architecture_policy.is_some();
     let validation_attestations = params
         .get("validation_attestations")
-        .map(|value| serde_json::from_value(value.clone()))
+        .map(|value| caller_json_value("validation_attestations", value))
         .transpose()?
         .unwrap_or_default();
     let index_dir = default_index_dir(repo);
@@ -2303,13 +2431,24 @@ fn contract_from_params(
     let contract_json = params.get("contract_json").and_then(Value::as_str);
     let selectors =
         contract_id.is_some() as u8 + contract.is_some() as u8 + contract_json.is_some() as u8;
-    anyhow::ensure!(
-        selectors == 1,
-        "contract input requires exactly one of `contract_id`, `contract`, or `contract_json`"
-    );
+    if selectors != 1 {
+        return Err(invalid_input(
+            "contract input requires exactly one of `contract_id`, `contract`, or `contract_json`",
+        ));
+    }
 
     if let Some(id) = contract_id {
-        return Ok((store.load(&ContractId::new(id))?, true));
+        // An id Open Kioku issued that this repository does not hold is the caller's input, as
+        // an unknown context handle is; any other store failure stays the tool's.
+        let contract = store
+            .load(&ContractId::new(id))
+            .map_err(|err| match err {
+                StoreError::NotFound(id) => invalid_input(format!(
+                    "no contract `{id}` is stored for this repository; contract ids come from plan_change with persist=true"
+                )),
+                other => anyhow::Error::from(other),
+            })?;
+        return Ok((contract, true));
     }
     if let Some(contract) = contract {
         return Ok((contract_from_value(contract.clone())?, false));
@@ -2324,7 +2463,7 @@ fn contract_from_value(value: Value) -> anyhow::Result<ChangeContractV1> {
     if let Ok(contract) = serde_json::from_value::<ChangeContractV1>(value.clone()) {
         return Ok(contract);
     }
-    let record: StoredContractRecord = serde_json::from_value(value)?;
+    let record: StoredContractRecord = caller_json_value("contract", &value)?;
     Ok(record.contract)
 }
 
@@ -2332,7 +2471,7 @@ fn contract_from_json(json: &str) -> anyhow::Result<ChangeContractV1> {
     if let Ok(contract) = serde_json::from_str::<ChangeContractV1>(json) {
         return Ok(contract);
     }
-    let record: StoredContractRecord = serde_json::from_str(json)?;
+    let record: StoredContractRecord = caller_json_str("contract_json", json)?;
     Ok(record.contract)
 }
 
@@ -2342,12 +2481,14 @@ fn verification_report_from_params(params: &Value) -> anyhow::Result<ContractVer
         .or_else(|| params.get("report"))
         .filter(|value| !value.is_null())
     {
-        return Ok(serde_json::from_value(report.clone())?);
+        return caller_json_value("verification", report);
     }
     if let Some(json) = params.get("verification_json").and_then(Value::as_str) {
-        return Ok(serde_json::from_str(json)?);
+        return caller_json_str("verification_json", json);
     }
-    anyhow::bail!("explain_verification requires `verification` object or `verification_json`")
+    Err(invalid_input(
+        "explain_verification requires `verification` object or `verification_json`",
+    ))
 }
 
 fn explain_verification_report(
@@ -2453,7 +2594,9 @@ fn format_contract_create_output(
         "markdown" => Ok(json!(render_contract_create_markdown(output))),
         "toon" => Ok(json!(render_contract_create_toon(output))),
         "json" => Ok(json!(output)),
-        other => anyhow::bail!("unsupported contract format `{other}`"),
+        other => Err(invalid_input(format!(
+            "unsupported contract format `{other}`"
+        ))),
     }
 }
 
@@ -2465,7 +2608,9 @@ fn format_contract_verification_output(
         "markdown" => Ok(json!(render_contract_verification_markdown(report))),
         "toon" => Ok(json!(render_contract_verification_toon(report))),
         "json" => Ok(json!(report)),
-        other => anyhow::bail!("unsupported contract format `{other}`"),
+        other => Err(invalid_input(format!(
+            "unsupported contract format `{other}`"
+        ))),
     }
 }
 
@@ -2477,7 +2622,9 @@ fn format_verification_explanation(
         "markdown" => Ok(json!(render_verification_explanation_markdown(explanation))),
         "toon" => Ok(json!(render_verification_explanation_toon(explanation))),
         "json" => Ok(json!(explanation)),
-        other => anyhow::bail!("unsupported verification explanation format `{other}`"),
+        other => Err(invalid_input(format!(
+            "unsupported verification explanation format `{other}`"
+        ))),
     }
 }
 
@@ -2781,12 +2928,14 @@ fn push_toon_list(out: &mut String, name: &str, values: &[String]) {
 
 fn plan_from_params(params: &Value) -> anyhow::Result<PlanReport> {
     if let Some(plan) = params.get("plan") {
-        return Ok(serde_json::from_value(plan.clone())?);
+        return caller_json_value("plan", plan);
     }
     if let Some(plan_json) = params.get("plan_json").and_then(Value::as_str) {
-        return Ok(serde_json::from_str(plan_json)?);
+        return caller_json_str("plan_json", plan_json);
     }
-    anyhow::bail!("verify_change requires `plan` object or `plan_json` string")
+    Err(invalid_input(
+        "verify_change requires `plan` object or `plan_json` string",
+    ))
 }
 
 fn confidence_arg(params: &Value) -> Confidence {
@@ -2802,37 +2951,6 @@ fn confidence_arg(params: &Value) -> Confidence {
         "exact" => Confidence::Exact,
         _ => Confidence::Medium,
     }
-}
-
-/// Resolve a path, symbol name, or explicit `file:`/`symbol:` node id to a graph node id.
-/// A name that resolves to nothing is an error: passing it through produced an empty edge
-/// list that read as "these two are unconnected" when the truth was "this is not in the
-/// index". The same check backs `ok path`.
-fn resolve_graph_node<S>(store: &S, query: &str) -> anyhow::Result<String>
-where
-    S: MetadataStore + GraphStore + ?Sized,
-{
-    if query.starts_with("file:") || query.starts_with("symbol:") {
-        return match store.node_by_id(query)? {
-            Some(_) => Ok(query.to_string()),
-            None => anyhow::bail!(
-                "`{query}` is not a node in the indexed dependency graph; it may be excluded, unsupported, or added since the last `ok index`"
-            ),
-        };
-    }
-    if let Some(file) = store.get_file_by_path(Path::new(query))? {
-        return Ok(format!("file:{}", file.path.display()));
-    }
-    if let Some(symbol) = store
-        .list_symbols(Some(query), 10, 0)?
-        .into_iter()
-        .find(|symbol| symbol.name == query || symbol.qualified_name.ends_with(query))
-    {
-        return Ok(format!("symbol:{}", symbol.id.0));
-    }
-    anyhow::bail!(
-        "`{query}` is not an indexed file path or symbol name; it may be excluded, unsupported, or added since the last `ok index`"
-    )
 }
 
 /// The three kinds of evidence an agent asks for about one resolved symbol,
@@ -2854,13 +2972,14 @@ where
         .get("kind")
         .and_then(Value::as_str)
         .unwrap_or("references");
-    anyhow::ensure!(
-        matches!(
-            kind,
-            "references" | "callers" | "callees" | "implementations" | "all"
-        ),
-        "unknown `kind` `{kind}` for get_references; expected one of references, callers, callees, implementations, all"
-    );
+    if !matches!(
+        kind,
+        "references" | "callers" | "callees" | "implementations" | "all"
+    ) {
+        return Err(invalid_input(format!(
+            "unknown `kind` `{kind}` for get_references; expected one of references, callers, callees, implementations, all"
+        )));
+    }
     let limit = limit(params);
     let engine = SymbolEngine::new(store);
     let wanted = |section: &str| kind == section || kind == "all";
@@ -3532,6 +3651,11 @@ mod tests {
         let search = &calls[1]["error"];
         assert_eq!(search["code"], -32000);
         assert_eq!(search["message"], not_indexed_message(&repo));
+        assert_eq!(search["data"]["state"], "not_indexed");
+        assert_eq!(search["data"]["next_step"], expected_next_step);
+        for refused in &calls[2..4] {
+            assert!(refused["error"].get("data").is_none(), "{refused}");
+        }
         assert!(search["message"]
             .as_str()
             .unwrap()
@@ -3629,6 +3753,14 @@ mod tests {
         for index in [0, 2] {
             let error = &responses[index]["error"];
             assert_eq!(error["code"], -32000, "{responses:?}");
+            assert_eq!(error["data"]["state"], "index_unavailable", "{responses:?}");
+            assert!(
+                error["data"]["next_step"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("ok doctor {}", repo.display())),
+                "{responses:?}"
+            );
             let message = error["message"].as_str().unwrap();
             assert!(message.contains("database"), "{message}");
             assert!(
@@ -3639,6 +3771,7 @@ mod tests {
         assert!(responses[1]["result"]["tools"].is_array(), "{responses:?}");
         let unknown = responses[3]["error"]["message"].as_str().unwrap();
         assert!(unknown.contains("unknown MCP method or tool"), "{unknown}");
+        assert!(responses[3]["error"].get("data").is_none(), "{responses:?}");
     }
 
     /// While `.ok/index.lock` is held and no manifest is published, every tool says the
@@ -3675,6 +3808,10 @@ mod tests {
         for response in &responses[1..] {
             assert_eq!(response["error"]["code"], -32000, "{response}");
             assert_eq!(response["error"]["message"], expected, "{response}");
+            assert_eq!(
+                response["error"]["data"]["state"], "indexing_in_progress",
+                "{response}"
+            );
         }
 
         // Released however the writer ended, and a file a killed writer left behind holds
@@ -3767,6 +3904,10 @@ mod tests {
                 serde_json::from_str(&responses.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(second["error"]["code"], -32000, "{second}");
             assert_eq!(second["error"]["message"], expected, "{second}");
+            assert_eq!(
+                second["error"]["data"]["state"], "indexing_in_progress",
+                "{second}"
+            );
 
             drop(lock);
             client_input
@@ -3824,11 +3965,355 @@ mod tests {
         for response in &responses {
             assert_eq!(response["error"]["code"], -32000, "{response}");
             assert_eq!(response["error"]["message"], expected, "{response}");
+            assert_eq!(
+                response["error"]["data"]["state"], "index_newer_than_binary",
+                "{response}"
+            );
+            assert!(
+                response["error"]["data"]["next_step"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("upgrade Open Kioku"),
+                "{response}"
+            );
+        }
+    }
+
+    /// A database whose schema is newer than this binary reads is the same state as a newer
+    /// manifest: the client is told to upgrade or rebuild, not that the index is broken.
+    #[tokio::test]
+    async fn sqlite_schema_from_a_newer_open_kioku_is_refused_as_newer_than_the_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        let db = repo.join(".ok/index.sqlite");
+        SqliteStore::open(&db)
+            .unwrap()
+            .put_manifest(&fixture_manifest())
+            .unwrap();
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .pragma_update(
+                None,
+                "user_version",
+                open_kioku_storage_sqlite::SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION + 1,
+            )
+            .unwrap();
+
+        let responses = responses_for(
+            &repo,
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"main"}}}"#,
+                "\n"
+            ),
+        )
+        .await;
+        let error = &responses[0]["error"];
+        assert_eq!(error["code"], -32000, "{error}");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("newer than supported"),
+            "{error}"
+        );
+        assert_eq!(error["data"]["state"], "index_newer_than_binary", "{error}");
+    }
+
+    /// A manifest withdrawn after a failed incremental update is still "not indexed", with the
+    /// recorded reason on `repo_status` and the not-indexed refusal on every other tool.
+    #[tokio::test]
+    async fn withdrawn_manifest_reports_its_reason_on_repo_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        store.put_manifest(&fixture_manifest()).unwrap();
+        store.withdraw_manifest("the search stage failed").unwrap();
+        drop(store);
+
+        let responses = responses_for(
+            &repo,
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":2,"method":"repo_status","params":{"detail":"everything"}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"main"}}}"#,
+                "\n"
+            ),
+        )
+        .await;
+        assert_eq!(responses.len(), 3, "{responses:?}");
+        let status = &responses[0]["result"]["structuredContent"];
+        assert_eq!(status["indexed"], false, "{status}");
+        assert_eq!(status["reason"], "the search stage failed", "{status}");
+        assert_eq!(status["next_step"], format!("ok index {}", repo.display()));
+        assert_eq!(responses[1]["error"]["code"], -32602, "{}", responses[1]);
+        assert_eq!(
+            responses[2]["error"]["data"]["state"], "not_indexed",
+            "{}",
+            responses[2]
+        );
+    }
+
+    /// `dependency_path` answers with the node ids the shared resolver gives, which is the
+    /// resolver `ok path` calls.
+    #[tokio::test]
+    async fn dependency_path_resolves_nodes_through_the_shared_resolver() {
+        let fixture = McpSnapshotFixture::new();
+        for (from, to) in [
+            ("src/billing.rs", "src/routes.rs"),
+            ("publish_invoice_event", "archive_invoice_event"),
+        ] {
+            let expected_from = open_kioku_graph::resolve_graph_node(&fixture.store, from).unwrap();
+            let expected_to = open_kioku_graph::resolve_graph_node(&fixture.store, to).unwrap();
+            let response = dispatch(
+                &fixture.repo,
+                &fixture.store,
+                &fixture.config,
+                "dependency_path",
+                json!({"from": from, "to": to}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response["from"], expected_from, "{response}");
+            assert_eq!(response["to"], expected_to, "{response}");
+            assert_eq!(
+                response["edges"],
+                json!(fixture
+                    .store
+                    .shortest_path(&expected_from, &expected_to, 12)
+                    .unwrap()),
+                "{response}"
+            );
+        }
+    }
+
+    async fn call_fixture_tool(
+        fixture: &McpSnapshotFixture,
+        name: &str,
+        arguments: Value,
+    ) -> JsonRpcResponse {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": name,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        })
+        .to_string();
+        handle_line(
+            &fixture.repo,
+            ServedIndex::Ready(&fixture.store),
+            &fixture.config,
+            &request,
+        )
+        .await
+        .expect("a request with an id is answered")
+    }
+
+    #[tokio::test]
+    async fn unknown_detail_and_a_supplied_plan_the_builder_rejects_are_invalid_params() {
+        let fixture = McpSnapshotFixture::new();
+        for (name, arguments) in [
+            ("repo_status", json!({"detail": "everything"})),
+            (
+                "plan_change",
+                json!({"task": "publish invoice", "detail": "everything"}),
+            ),
+        ] {
+            let error = call_fixture_tool(&fixture, name, arguments)
+                .await
+                .error
+                .expect("an unknown detail is refused");
+            assert_eq!(error["code"], -32602, "{name}: {error}");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("invalid input: "),
+                "{name}: {error}"
+            );
+            assert!(error.get("data").is_none(), "{name}: {error}");
+        }
+
+        let plan = call_fixture_tool(
+            &fixture,
+            "plan_change",
+            json!({"task": "publish invoice", "format": "json"}),
+        )
+        .await;
+        let mut plan =
+            plan.result.expect("plan_change should succeed")["structuredContent"].clone();
+        // No primary context and no allowed files: the builder refuses the plan whether or not
+        // evidence references remain.
+        plan["primary_context"] = json!([]);
+        plan["recommended_change_boundary"]["allowed_files"] = json!([]);
+        for arguments in [
+            json!({"persist": true, "store": false, "plan": plan.clone()}),
+            json!({"persist": true, "store": false, "plan_json": plan.to_string()}),
+        ] {
+            let error = call_fixture_tool(&fixture, "plan_change", arguments)
+                .await
+                .error
+                .expect("the supplied plan is refused");
+            assert_eq!(error["code"], -32602, "{error}");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("invalid input: contract generation requires"),
+                "{error}"
+            );
+        }
+    }
+
+    /// Every other argument the caller can get wrong is invalid params too: an unknown
+    /// enumerated value, a missing or wrongly typed argument, a selector given none or several
+    /// of its inputs, a JSON argument that does not decode, and a pattern that does not parse.
+    #[tokio::test]
+    async fn malformed_and_missing_arguments_are_invalid_params() {
+        let fixture = McpSnapshotFixture::new();
+        for (name, arguments, expected) in [
+            (
+                "search_code",
+                json!({"query": "invoice", "mode": "fuzzy"}),
+                "unknown `mode`",
+            ),
+            (
+                "get_references",
+                json!({"query": "publish_invoice_event", "kind": "callsites"}),
+                "unknown `kind`",
+            ),
+            (
+                "get_definition",
+                json!({}),
+                "missing required string argument `query`",
+            ),
+            (
+                "retrieve_context",
+                json!({"handle": 7}),
+                "missing required string argument `handle`",
+            ),
+            (
+                "list_files",
+                json!({"path": 123}),
+                "`path` must be a string",
+            ),
+            (
+                "regex_search",
+                json!({"pattern": ""}),
+                "requires a non-empty `pattern`",
+            ),
+            (
+                "regex_search",
+                json!({"pattern": "pub fn ("}),
+                "regex parse error",
+            ),
+            (
+                "plan_change",
+                json!({"persist": true}),
+                "requires exactly one of `task`, `plan`, or `plan_json`",
+            ),
+            (
+                "plan_change",
+                json!({"persist": true, "plan_json": "{"}),
+                "`plan_json` is malformed",
+            ),
+            (
+                "plan_change",
+                json!({"persist": true, "plan": {"task": 1}}),
+                "`plan` is malformed",
+            ),
+            (
+                "verify_change",
+                json!({"changed_files": ["src/billing.rs"]}),
+                "requires `plan` object or `plan_json` string",
+            ),
+            (
+                "verify_change",
+                json!({"plan_json": "{", "changed_files": ["src/billing.rs"]}),
+                "`plan_json` is malformed",
+            ),
+            (
+                "verify_change",
+                json!({"contract_id": "c", "contract_json": "{}"}),
+                "requires exactly one of `contract_id`, `contract`, or `contract_json`",
+            ),
+            (
+                "verify_change",
+                json!({"contract_json": "{"}),
+                "`contract_json` is malformed",
+            ),
+            (
+                "verify_change",
+                json!({"verification_json": "{"}),
+                "`verification_json` is malformed",
+            ),
+            (
+                "verify_change",
+                json!({"contract_id": "missing", "changed_files": ["src/billing.rs"]}),
+                "no contract `missing` is stored",
+            ),
+        ] {
+            let error = call_fixture_tool(&fixture, name, arguments)
+                .await
+                .error
+                .unwrap_or_else(|| {
+                    panic!("{name} accepted an argument that should say {expected}")
+                });
+            assert_eq!(error["code"], -32602, "{name}: {error}");
+            let message = error["message"].as_str().unwrap();
+            assert!(
+                message.starts_with("invalid input: ") && message.contains(expected),
+                "{name}: {message}"
+            );
+        }
+    }
+
+    /// Mistakes that only show once a contract exists: an output format no renderer produces,
+    /// and an attestation write without a stored contract.
+    #[tokio::test]
+    async fn contract_argument_mistakes_are_invalid_params() {
+        let fixture = McpSnapshotFixture::new();
+        let created = call_fixture_tool(
+            &fixture,
+            "plan_change",
+            json!({"task": "publish invoice", "persist": true, "store": false}),
+        )
+        .await;
+        let contract = created.result.expect("the fixture plan becomes a contract")
+            ["structuredContent"]["contract"]
+            .clone();
+        for (arguments, expected) in [
+            (
+                json!({"task": "publish invoice", "persist": true, "store": false, "format": "yaml"}),
+                "unsupported contract format `yaml`",
+            ),
+            (
+                json!({"contract": contract, "changed_files": ["src/billing.rs"], "write_attestation": true}),
+                "write_attestation requires a stored `contract_id`",
+            ),
+        ] {
+            let name = if arguments.get("contract").is_some() {
+                "verify_change"
+            } else {
+                "plan_change"
+            };
+            let error = call_fixture_tool(&fixture, name, arguments)
+                .await
+                .error
+                .unwrap_or_else(|| {
+                    panic!("{name} accepted an argument that should say {expected}")
+                });
+            assert_eq!(error["code"], -32602, "{name}: {error}");
+            assert!(
+                error["message"].as_str().unwrap().contains(expected),
+                "{name}: {error}"
+            );
         }
     }
 
     #[tokio::test]
-    async fn search_code_refuses_a_blank_query() {
+    async fn search_code_refuses_a_blank_query_as_invalid_params() {
         let store = SqliteStore::open(":memory:").unwrap();
         let config = OkConfig::default();
         for params in [json!({"query": ""}), json!({"query": "   "}), json!({})] {
@@ -3840,10 +4325,12 @@ mod tests {
                 params.clone(),
             )
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
+            assert_eq!(json_rpc_error_code(&error), -32602, "{params}: {error}");
             assert!(
-                error.contains("requires a non-empty `query`"),
+                error
+                    .to_string()
+                    .contains(open_kioku_storage::BLANK_SEARCH_QUERY_MESSAGE),
                 "{params}: {error}"
             );
         }
@@ -3878,8 +4365,11 @@ mod tests {
         ] {
             let error = dispatch(Path::new("."), &store, &config, "dependency_path", params)
                 .await
-                .unwrap_err()
-                .to_string();
+                .unwrap_err();
+            // A repository lookup that found nothing, like an unknown symbol name: not the
+            // caller's argument.
+            assert_eq!(json_rpc_error_code(&error), -32000, "{error}");
+            let error = error.to_string();
             assert!(error.contains(missing), "{error}");
             assert!(error.contains("ok index"), "{error}");
         }
@@ -3898,8 +4388,9 @@ mod tests {
             json!({"handle": "bogus"}),
         )
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+        assert_eq!(json_rpc_error_code(&error), -32602, "{error}");
+        let error = error.to_string();
         assert!(error.contains("no context handle `bogus`"), "{error}");
         assert!(
             !temp.path().join(".ok").exists(),
@@ -5004,6 +5495,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(unknown.to_string().contains("unknown `kind`"));
+        assert_eq!(json_rpc_error_code(&unknown), -32602, "{unknown}");
     }
 
     #[tokio::test]
@@ -5029,6 +5521,7 @@ mod tests {
                 error.to_string().contains("must be a string"),
                 "{tool} should name the type it wanted: {error}"
             );
+            assert_eq!(json_rpc_error_code(&error), -32602, "{tool}: {error}");
         }
 
         // An absent parameter still selects the broader answer it was folded in

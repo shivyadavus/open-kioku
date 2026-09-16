@@ -949,6 +949,19 @@ fn owner_identity(owner: &open_kioku_core::Owner) -> String {
         .to_ascii_lowercase()
 }
 
+/// The refusal every search surface (`ok search`, MCP `search_code`) gives a blank query.
+pub const BLANK_SEARCH_QUERY_MESSAGE: &str = "search requires a non-empty query";
+
+/// The query a search surface answers, trimmed. A blank query is refused as the caller's
+/// input: an empty result for it would read as "nothing in the repository matches".
+pub fn require_search_query(query: &str) -> Result<&str> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(OkError::InvalidInput(BLANK_SEARCH_QUERY_MESSAGE.into()));
+    }
+    Ok(query)
+}
+
 pub trait SearchIndex: Send + Sync {
     fn rebuild(&mut self, chunks: &[CodeChunk], files: &[File], symbols: &[Symbol]) -> Result<()>;
     fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;

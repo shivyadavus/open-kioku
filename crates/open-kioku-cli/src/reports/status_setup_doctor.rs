@@ -1128,10 +1128,20 @@ fn doctor_report(repo: &Path) -> DoctorReport {
         // No database, or a database without a manifest (what a 4.0.0 read surface left
         // behind): the unindexed case, in the unindexed words, not a warning about a manifest.
         Ok(None) => {
+            // With the withdrawal reason when there is one, as `repo_status` reports it: the
+            // rows survived and the next run rebuilds. A store that cannot report the reason
+            // still gets the plain sentence rather than failing the whole diagnostic.
+            let message = match SqliteStore::repo_not_indexed_status(&repo) {
+                Ok(status) => match status.reason {
+                    Some(reason) => format!("{}; {reason}", status.message),
+                    None => status.message,
+                },
+                Err(_) => open_kioku_storage::generations::not_indexed_message(&repo),
+            };
             checks.push(DoctorCheck {
                 name: "index",
                 status: CheckStatus::Fail,
-                message: open_kioku_storage::generations::not_indexed_message(&repo),
+                message,
             });
             next_steps.push(format!(
                 "Run `ok index {}` before connecting an MCP client.",

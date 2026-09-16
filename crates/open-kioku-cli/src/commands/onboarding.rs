@@ -275,7 +275,13 @@ fn check_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
             false,
         ),
     };
-    let index_ready = SqliteStore::open_repo_index(repo)?.is_some();
+    // An index that exists but cannot be served (unreadable, being built, written by a newer
+    // Open Kioku) is a failed check to report beside the others, not a reason to abort them.
+    let (index_status, index_detail, index_ready) = match SqliteStore::open_repo_index(repo) {
+        Ok(Some(_)) => ("passed", "local SQLite index".to_string(), true),
+        Ok(None) => ("missing", "local SQLite index".to_string(), false),
+        Err(err) => ("failed", format!("local SQLite index cannot be served: {err}"), false),
+    };
     let mcp_ready = if index_ready { mcp_server_reachable(repo)? } else { false };
     let ready = config_ready && skill_ready && index_ready && mcp_ready;
     // `--apply` refuses the two mismatch states before it does anything, so recommending it
@@ -295,7 +301,7 @@ fn check_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
         checks: vec![
             agent_setup_check("config", config_status, config_detail),
             agent_setup_check("skill", skill_status, skill_detail),
-            agent_setup_check("index", check_status(index_ready), "local SQLite index"),
+            agent_setup_check("index", index_status, index_detail),
             agent_setup_check("mcp_stdio", check_status(mcp_ready), "MCP initialize response"),
         ],
         next_step: if ready {
@@ -841,6 +847,10 @@ fn check_status(ready: bool) -> &'static str {
     if ready { "passed" } else { "missing" }
 }
 
+fn agent_setup_check_line(check: &AgentSetupCheck) -> String {
+    format!("- [{}] {}: {}", check.status, check.name, check.detail)
+}
+
 fn print_agent_setup_report(report: &AgentSetupReport, cli_json: bool) -> anyhow::Result<()> {
     if cli_json {
         println!("{}", serde_json::to_string_pretty(report)?);
@@ -851,7 +861,7 @@ fn print_agent_setup_report(report: &AgentSetupReport, cli_json: bool) -> anyhow
     println!("MCP config: {}", report.config_path.display());
     println!("Guidance: {}", report.skill_path.display());
     for check in &report.checks {
-        println!("- [{}] {}: {}", check.status, check.name, check.detail);
+        println!("{}", agent_setup_check_line(check));
     }
     println!("\n{}", report.next_step);
     Ok(())
@@ -1039,6 +1049,24 @@ mod onboarding_tests {
         let skill = report.checks.iter().find(|check| check.name == "skill").unwrap();
         assert_eq!(skill.status, "mismatch");
         assert!(!report.next_step.contains("--apply"), "{}", report.next_step);
+    }
+
+    #[test]
+    fn check_reports_an_unopenable_index_as_failed_instead_of_aborting() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".ok")).unwrap();
+        fs::write(repo.join(".ok/index.sqlite"), b"this is not a sqlite database").unwrap();
+
+        let report = check_agent_setup(McpClient::Claude, repo)
+            .expect("an index that cannot be opened is a failed check, not an aborted one");
+        let index = report.checks.iter().find(|check| check.name == "index").unwrap();
+        assert_eq!(index.status, "failed");
+        let line = agent_setup_check_line(index);
+        assert!(line.starts_with("- [failed] index: local SQLite index cannot be served: "), "{line}");
+        let mcp = report.checks.iter().find(|check| check.name == "mcp_stdio").unwrap();
+        assert_eq!(mcp.status, "missing");
+        assert!(!report.ready);
     }
 
     #[test]
