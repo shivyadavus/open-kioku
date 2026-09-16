@@ -13,9 +13,11 @@ use std::path::Path;
 
 pub mod buffer;
 pub mod query;
+mod resolve;
 pub mod schema;
 
 pub use buffer::{GraphBuffer, GraphBufferMergeReport, WorkerGraphBuffer};
+pub use resolve::resolve_graph_node;
 #[derive(Default, Clone)]
 pub struct InMemoryGraph {
     pub nodes: HashMap<String, GraphNode>,

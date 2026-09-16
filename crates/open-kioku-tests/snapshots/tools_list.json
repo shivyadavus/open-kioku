@@ -20,7 +20,7 @@
         "inputSchema": {
           "properties": {
             "detail": {
-              "description": "How much of the manifest's per-item lists to return. 'summary' (default) replaces quality.quality_notes with {total, by_kind, sample} and quality.skipped_paths with {total, by_reason, sample}, each sample at most 20 entries drawn across every kind or reason; 'full' returns every note and skipped path as the manifest stores them. An unknown value is a tool error.",
+              "description": "How much of the manifest's per-item lists to return. 'summary' (default) replaces quality.quality_notes with {total, by_kind, sample} and quality.skipped_paths with {total, by_reason, sample}, each sample at most 20 entries drawn across every kind or reason; 'full' returns every note and skipped path as the manifest stores them. An unknown value is an invalid-params error (-32602).",
               "enum": [
                 "summary",
                 "full"
@@ -132,7 +132,7 @@
               "type": "integer"
             },
             "mode": {
-              "description": "Which evidence to search. 'code' (default) is lexical BM25 over indexed chunks and file paths; 'graph' searches indexed graph-node documents; 'semantic' searches the local vector index; 'hybrid' merges lexical and semantic candidates. An unknown mode is a tool error.",
+              "description": "Which evidence to search. 'code' (default) is lexical BM25 over indexed chunks and file paths; 'graph' searches indexed graph-node documents; 'semantic' searches the local vector index; 'hybrid' merges lexical and semantic candidates. An unknown mode is an invalid-params error (-32602).",
               "enum": [
                 "code",
                 "graph",
@@ -205,7 +205,7 @@
               "type": "integer"
             },
             "pattern": {
-              "description": "A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is returned as a tool error. Example: 'fn\\s+main' to find main function declarations.",
+              "description": "A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is an invalid-params error (-32602). Example: 'fn\\s+main' to find main function declarations.",
               "type": "string"
             }
           },
@@ -367,7 +367,7 @@
         "inputSchema": {
           "properties": {
             "kind": {
-              "description": "Which evidence sections to return. Defaults to 'references'. 'all' returns every section in one response, each still labelled with its own evidence_source. An unknown kind is a tool error.",
+              "description": "Which evidence sections to return. Defaults to 'references'. 'all' returns every section in one response, each still labelled with its own evidence_source. An unknown kind is an invalid-params error (-32602).",
               "enum": [
                 "references",
                 "callers",
@@ -710,7 +710,7 @@
         "inputSchema": {
           "properties": {
             "detail": {
-              "description": "Which artifact to return. 'plan' (default) is the full evidence-backed report; 'preflight' is one concise start decision with verdict, confirmed edit files, risks, and evidence quality; 'patch' is a patch plan that writes no files. Ignored when persist=true. An unknown value is a tool error.",
+              "description": "Which artifact to return. 'plan' (default) is the full evidence-backed report; 'preflight' is one concise start decision with verdict, confirmed edit files, risks, and evidence quality; 'patch' is a patch plan that writes no files. Ignored when persist=true. An unknown value is an invalid-params error (-32602).",
               "enum": [
                 "plan",
                 "preflight",

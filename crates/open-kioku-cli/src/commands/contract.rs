@@ -5,9 +5,30 @@ struct BoundaryVerificationOutcome {
     evidence_refs: Vec<String>,
 }
 
+/// The error for an argument the caller got wrong: exit code 2, as MCP answers `-32602`.
+fn caller_input_error(message: impl Into<String>) -> anyhow::Error {
+    open_kioku_errors::OkError::InvalidInput(message.into()).into()
+}
+
+/// A stored contract by the id Open Kioku issued for it. An id this repository does not hold is
+/// the caller's input (exit 2), as it is `-32602` for MCP `verify_change`; any other store
+/// failure stays a runtime failure.
+fn load_stored_contract(store: &FsContractStore, id: &str) -> anyhow::Result<ChangeContractV1> {
+    store.load(&ContractId::new(id)).map_err(|err| match err {
+        open_kioku_contract::StoreError::NotFound(id) => caller_input_error(format!(
+            "no contract `{id}` is stored for this repository; contract ids come from `ok contract create`"
+        )),
+        other => other.into(),
+    })
+}
+
+/// A saved plan. A file that cannot be read stays an I/O failure; one that reads but is not a
+/// plan is the caller's input.
 fn load_saved_plan(path: &Path) -> anyhow::Result<PlanReport> {
     let bytes = fs::read(path)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    serde_json::from_slice(&bytes).map_err(|err| {
+        caller_input_error(format!("{} is not a valid saved plan: {err}", path.display()))
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -49,8 +70,9 @@ fn handle_contract_command(
             format,
         } => {
             let store = open_store(repo)?;
-            let plan = contract_plan_from_input(repo, &store, task, plan, plan_json, limit)?;
-            let mut contract = ContractBuilder::from_plan(&plan)?;
+            let (plan, origin) =
+                contract_plan_from_input(repo, &store, task, plan, plan_json, limit)?;
+            let mut contract = ContractBuilder::from_plan_with_origin(&plan, origin)?;
             let _governed_adrs = annotate_contract_with_adrs(&mut contract, &plan, repo)?;
             let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
             let stored = !no_store;
@@ -89,7 +111,9 @@ fn handle_contract_command(
             let (contract, stored) =
                 load_contract_input(&contract_store, id, contract, contract_json)?;
             if write_attestation && !stored {
-                anyhow::bail!("--write-attestation requires a stored contract --id");
+                return Err(caller_input_error(
+                    "--write-attestation requires a stored contract --id",
+                ));
             }
             let unified_diff = if let Some(since) = since_plan.as_deref() {
                 for change in changed_ranges_since(repo, since)? {
@@ -153,7 +177,7 @@ fn handle_contract_command(
         }
         ContractCommand::Show { id, format } | ContractCommand::Export { id, format } => {
             let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
-            let contract = contract_store.load(&ContractId::new(id))?;
+            let contract = load_stored_contract(&contract_store, &id)?;
             print_contract_output(&contract, effective_contract_format(json, format))?;
         }
     }
@@ -175,10 +199,15 @@ fn contract_plan_from_input(
     plan: Option<PathBuf>,
     plan_json: Option<String>,
     limit: usize,
-) -> anyhow::Result<PlanReport> {
+) -> anyhow::Result<(PlanReport, open_kioku_plan::PlanOrigin)> {
+    use open_kioku_plan::PlanOrigin;
     match (task, plan, plan_json) {
-        (None, Some(path), None) => load_saved_plan(&path),
-        (None, None, Some(json)) => Ok(serde_json::from_str(&json)?),
+        (None, Some(path), None) => Ok((load_saved_plan(&path)?, PlanOrigin::Supplied)),
+        (None, None, Some(json)) => Ok((
+            serde_json::from_str(&json)
+                .map_err(|err| caller_input_error(format!("--plan-json is malformed: {err}")))?,
+            PlanOrigin::Supplied,
+        )),
         (Some(task), None, None) => {
             let context = build_context_pack(repo, store, &task, limit)?;
             let index_dir = default_index_dir(repo);
@@ -187,14 +216,17 @@ fn contract_plan_from_input(
             } else {
                 None
             };
-            Ok(PlanEngine::new(store as &dyn OkStore)
+            let plan = PlanEngine::new(store as &dyn OkStore)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
                 .with_history_store(Some(store))
                 .with_memory_facts(RepoMemoryStore::search_repo(repo, &task, 8)?)
                 .with_memory_enabled(OkConfig::load_from_repo(repo)?.memory.enabled)
-                .plan_from_context(&task, limit, context)?)
+                .plan_from_context(&task, limit, context)?;
+            Ok((plan, PlanOrigin::Generated))
         }
-        _ => anyhow::bail!("provide exactly one of TASK, --plan, or --plan-json"),
+        _ => Err(caller_input_error(
+            "provide exactly one of TASK, --plan, or --plan-json",
+        )),
     }
 }
 
@@ -205,10 +237,12 @@ fn load_contract_input(
     contract_json: Option<String>,
 ) -> anyhow::Result<(ChangeContractV1, bool)> {
     match (id, contract, contract_json) {
-        (Some(id), None, None) => Ok((store.load(&ContractId::new(id))?, true)),
+        (Some(id), None, None) => Ok((load_stored_contract(store, &id)?, true)),
         (None, Some(path), None) => Ok((parse_contract_json(&fs::read_to_string(path)?)?, false)),
         (None, None, Some(json)) => Ok((parse_contract_json(&json)?, false)),
-        _ => anyhow::bail!("provide exactly one of --id, --contract, or --contract-json"),
+        _ => Err(caller_input_error(
+            "provide exactly one of --id, --contract, or --contract-json",
+        )),
     }
 }
 
@@ -216,7 +250,8 @@ fn parse_contract_json(json: &str) -> anyhow::Result<ChangeContractV1> {
     if let Ok(contract) = serde_json::from_str::<ChangeContractV1>(json) {
         return Ok(contract);
     }
-    let record: StoredContractRecord = serde_json::from_str(json)?;
+    let record: StoredContractRecord = serde_json::from_str(json)
+        .map_err(|err| caller_input_error(format!("contract JSON is malformed: {err}")))?;
     Ok(record.contract)
 }
 

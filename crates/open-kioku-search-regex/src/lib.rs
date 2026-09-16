@@ -215,8 +215,10 @@ pub fn regex_search_file(
     Ok(results)
 }
 
+/// A pattern that does not parse is the caller's input: `ok search --regex` exits 2 and MCP
+/// `regex_search` returns invalid params, rather than reporting a search failure.
 fn compile(pattern: &str) -> Result<Regex> {
-    Regex::new(pattern).map_err(|err| OkError::Search(err.to_string()))
+    Regex::new(pattern).map_err(|err| OkError::InvalidInput(err.to_string()))
 }
 
 /// Where a block of text sits in the file it came from, so a match is reported
@@ -648,9 +650,16 @@ mod tests {
     fn indexed_regex_scan_rejects_an_invalid_pattern() {
         let error = regex_search_index(&two_file_store(), "fn (", 20).unwrap_err();
 
+        // The pattern is the caller's argument, not a failure of the search.
         assert!(
-            error.to_string().contains("search error"),
-            "expected a search error, got: {error}"
+            error.is_invalid_input(),
+            "expected invalid input, got: {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .starts_with("invalid input: regex parse error"),
+            "{error}"
         );
     }
 
