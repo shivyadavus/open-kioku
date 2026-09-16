@@ -700,6 +700,17 @@ fn render_verify_html(report: &ChangeVerificationReport, adrs: &[AdrRecord]) -> 
         );
     }
     html_string_section(&mut out, "Changed Symbols", &report.changed_symbols);
+    // Listed in full, as JSON does: a change outside every symbol must not be capped away.
+    out.push_str("<section class=\"panel\"><h2>Changed Regions Without a Symbol</h2>");
+    if report.changed_regions_without_symbol.is_empty() {
+        out.push_str("<p>None.</p></section>");
+    } else {
+        out.push_str("<p>No indexed symbol range covers these changed lines.</p><ul>");
+        for region in &report.changed_regions_without_symbol {
+            out.push_str(&format!("<li><code>{}</code></li>", escape_html(region)));
+        }
+        out.push_str("</ul></section>");
+    }
     html_finding_section(&mut out, "Boundary Failures", &report.boundary_violations);
     html_finding_section(&mut out, "Warnings", &report.warnings);
     html_finding_section(&mut out, "Missing Tests", &report.missing_tests);

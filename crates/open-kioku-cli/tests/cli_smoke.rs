@@ -2761,6 +2761,55 @@ fn demo_creates_indexed_sample_repo() {
     assert!(verify_pass.contains("\"evidence_quality\""));
     assert!(verify_pass.contains("\"changed_symbols\""));
 
+    // A comment-only hunk past every symbol of `src/auth.rs` has no symbol to name; the text
+    // and HTML reports list it as JSON does rather than showing nothing for the change.
+    let comment_diff_path = repo.join("auth-comment.diff");
+    fs::write(
+        &comment_diff_path,
+        "diff --git a/src/auth.rs b/src/auth.rs\n--- a/src/auth.rs\n+++ b/src/auth.rs\n@@ -200,0 +201 @@\n+// trailing note\n",
+    )
+    .unwrap();
+    let verify_region_text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("verify")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--diff")
+            .arg(&comment_diff_path);
+        command
+    });
+    assert!(
+        verify_region_text.contains(
+            "Changed regions without a symbol (no indexed symbol range covers these lines):\n  - src/auth.rs:201-201\n"
+        ),
+        "{verify_region_text}"
+    );
+    let verify_region_html = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("verify")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--format")
+            .arg("html")
+            .arg("--diff")
+            .arg(&comment_diff_path);
+        command
+    });
+    assert!(
+        verify_region_html.contains("<h2>Changed Regions Without a Symbol</h2>"),
+        "{verify_region_html}"
+    );
+    assert!(
+        verify_region_html.contains("<li><code>src/auth.rs:201-201</code></li>"),
+        "{verify_region_html}"
+    );
+
     let verify_warn = run({
         let mut command = ok();
         command
