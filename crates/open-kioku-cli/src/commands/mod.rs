@@ -306,10 +306,13 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     }
                 }
             } else {
-                println!(
-                    "{}",
-                    open_kioku_storage::generations::not_indexed_message(&repo)
-                );
+                // The sentence MCP `repo_status` returns, and why the manifest was withdrawn
+                // when it was: the rows are still there and the next run rebuilds them.
+                let status = SqliteStore::repo_not_indexed_status(&repo)?;
+                println!("{}", status.message);
+                if let Some(reason) = status.reason {
+                    println!("{reason}");
+                }
             }
             if exit_code && !doctor.as_ref().map(|report| report.ok).unwrap_or(true) {
                 anyhow::bail!("Open Kioku status has failing readiness checks");

@@ -199,29 +199,49 @@ impl SqliteStore {
         if !path.is_file() {
             return Self::unindexed(repo);
         }
-        let store = match Self::open_existing(&path) {
+        let store = match Self::open_for_probe(&path) {
             Ok(store) => store,
-            Err(error) => {
-                let state = if sqlite_schema_is_newer(&path) {
-                    IndexRefusalState::IndexNewerThanBinary
-                } else {
-                    IndexRefusalState::IndexUnavailable
-                };
-                return Err(IndexOpenRefusal { state, error });
-            }
+            Err(error) => return Err(Self::unservable(repo, &path, None, error)),
         };
+        // `initialize` is what refuses a database this binary cannot read, and the probe does
+        // not run it. Serving one anyway would answer from a schema we do not understand, so
+        // the probe applies the same check, with the same sentence.
+        if let Some(version) = newer_sqlite_schema(&path) {
+            return Err(IndexOpenRefusal {
+                state: IndexRefusalState::IndexNewerThanBinary,
+                error: OkError::Storage(newer_sqlite_schema_message(version)),
+            });
+        }
         match store.manifest() {
             Ok(Some(_)) => Ok(Some(store)),
             Ok(None) => Self::unindexed(repo),
-            Err(error) => {
-                let state = if store.stored_manifest_is_newer() {
-                    IndexRefusalState::IndexNewerThanBinary
-                } else {
-                    IndexRefusalState::IndexUnavailable
-                };
-                Err(IndexOpenRefusal { state, error })
-            }
+            Err(error) => Err(Self::unservable(repo, &path, Some(&store), error)),
         }
+    }
+
+    /// Why an index that exists cannot be served, for either the open or the manifest read.
+    ///
+    /// A newer schema is decided by the index itself. Otherwise a live writer explains it:
+    /// `ok index` and `ok watch` hold the lock across the write transaction a reader can fail
+    /// on, so reporting an unavailable index there would tell the agent to rebuild while
+    /// `ok doctor` on the same state says wait. The error text is the one every read surface
+    /// prints either way; only the state and the next step differ.
+    fn unservable(
+        repo: &Path,
+        path: &Path,
+        store: Option<&Self>,
+        error: OkError,
+    ) -> IndexOpenRefusal {
+        let newer = newer_sqlite_schema(path).is_some()
+            || store.is_some_and(|store| store.stored_manifest_is_newer());
+        let state = if newer {
+            IndexRefusalState::IndexNewerThanBinary
+        } else if open_kioku_storage::generations::index_write_in_progress(repo) {
+            IndexRefusalState::IndexingInProgress
+        } else {
+            IndexRefusalState::IndexUnavailable
+        };
+        IndexOpenRefusal { state, error }
     }
 
     /// No manifest is "not indexed" unless a writer holds the lock: the manifest is the last
@@ -261,7 +281,7 @@ impl SqliteStore {
         if !status.index_path.is_file() {
             return Ok(status);
         }
-        let reason = Self::open_existing(&status.index_path)?.manifest_withdrawal()?;
+        let reason = Self::open_for_probe(&status.index_path)?.manifest_withdrawal()?;
         Ok(NotIndexedStatus { reason, ..status })
     }
 
@@ -274,18 +294,42 @@ impl SqliteStore {
     }
 
     fn open_with_flags(path: PathBuf, flags: rusqlite::OpenFlags) -> Result<Self> {
+        let store = Self::connect(path, flags)?;
+        store.initialize()?;
+        Ok(store)
+    }
+
+    /// A connection and nothing else: no `initialize`, so no DDL and no write transaction.
+    fn connect(path: PathBuf, flags: rusqlite::OpenFlags) -> Result<Self> {
         let connection = Connection::open_with_flags(&path, flags).map_err(storage_err)?;
         connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(storage_err)?;
-        let store = Self {
+        Ok(Self {
             path,
             connection: Mutex::new(connection),
             semantics_verdict: Mutex::new(None),
             similarity_statics: Mutex::new(None),
-        };
-        store.initialize()?;
-        Ok(store)
+        })
+    }
+
+    /// The open every probe uses: it never creates the file and never runs `initialize`, so
+    /// answering "can this index be served" adds no table, index or trigger to someone's
+    /// database and takes no write transaction. Read-only first, because a read-only surface
+    /// must not write to answer a question; a read-only open of a WAL database whose `-shm` is
+    /// gone (the usual state once the writer has exited) fails, and that case falls back to a
+    /// read-write connection which still runs no schema statement.
+    fn open_for_probe(path: &Path) -> Result<Self> {
+        let read_only =
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        match Self::connect(path.to_path_buf(), read_only) {
+            Ok(store) => Ok(store),
+            Err(_) => Self::connect(
+                path.to_path_buf(),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -434,11 +478,17 @@ impl SqliteStore {
     /// The reason recorded by the last [`withdraw_manifest`](Self::withdraw_manifest), and only
     /// while the index is withdrawn: `None` whenever a manifest is published, whatever row is
     /// left in the table.
+    ///
+    /// A database without the table has no withdrawal to report, and a probe must not create
+    /// one to find that out, so the table is checked rather than assumed.
     pub fn manifest_withdrawal(&self) -> Result<Option<String>> {
         let conn = self
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        if !table_exists(&conn, "manifest_withdrawals")? {
+            return Ok(None);
+        }
         conn.query_row(
             "SELECT reason FROM manifest_withdrawals
              WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM manifests)",
@@ -2587,14 +2637,21 @@ pub struct IndexOpenRefusal {
 /// Whether the database at `path` declares a `user_version` newer than this binary reads.
 /// Only consulted to classify an open that already failed, through a read-only connection, so
 /// a file that cannot be read at all is `false` and stays an unavailable index.
-fn sqlite_schema_is_newer(path: &Path) -> bool {
-    let Ok(conn) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-    else {
-        return false;
-    };
-    let version: rusqlite::Result<i64> =
-        conn.pragma_query_value(None, "user_version", |row| row.get(0));
-    version.is_ok_and(|version| version > SQLITE_SUPPORTED_SCHEMA_VERSION)
+fn newer_sqlite_schema(path: &Path) -> Option<i64> {
+    let conn =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .ok()?;
+    (version > SQLITE_SUPPORTED_SCHEMA_VERSION).then_some(version)
+}
+
+/// What every surface says about a database whose schema this binary does not read. The probe
+/// runs no `initialize`, so it applies the check itself and must say the same sentence.
+fn newer_sqlite_schema_message(version: i64) -> String {
+    format!(
+        "sqlite schema version {version} is newer than supported version {SQLITE_SUPPORTED_SCHEMA_VERSION}"
+    )
 }
 
 fn replace_index_rows(
@@ -4137,9 +4194,7 @@ fn ensure_supported_sqlite_schema(conn: &Connection) -> Result<()> {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(storage_err)?;
     if version > SQLITE_SUPPORTED_SCHEMA_VERSION {
-        return Err(OkError::Storage(format!(
-            "sqlite schema version {version} is newer than supported version {SQLITE_SUPPORTED_SCHEMA_VERSION}"
-        )));
+        return Err(OkError::Storage(newer_sqlite_schema_message(version)));
     }
     Ok(())
 }
@@ -6209,6 +6264,108 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state(temp.path()), IndexRefusalState::IndexNewerThanBinary);
+    }
+
+    /// An index that cannot be opened or read while a writer holds the lock is an index being
+    /// built, not a broken one: telling the agent to rebuild would contradict `ok doctor`.
+    #[test]
+    fn a_live_writer_explains_an_index_that_cannot_be_read() {
+        use open_kioku_storage::generations::{IndexRefusalState, IndexWriteLock};
+        let state = |repo: &std::path::Path| {
+            SqliteStore::probe_repo_index(repo)
+                .err()
+                .expect("the index is refused")
+                .state
+        };
+
+        // A database that is not one, with no writer: unavailable.
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join(".ok/index.sqlite");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        std::fs::write(&db, b"this is not a sqlite database").unwrap();
+        assert_eq!(state(temp.path()), IndexRefusalState::IndexUnavailable);
+
+        // The same database while `ok index` or `ok watch` holds the lock: being built.
+        let lock = IndexWriteLock::acquire(temp.path(), Duration::from_millis(10)).unwrap();
+        assert_eq!(state(temp.path()), IndexRefusalState::IndexingInProgress);
+        drop(lock);
+
+        // The snapshot-import window: the file is replaced under the probe while the importer
+        // holds the lock.
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join(".ok/index.sqlite");
+        SqliteStore::open(&db)
+            .unwrap()
+            .put_manifest(&make_manifest())
+            .unwrap();
+        let lock = IndexWriteLock::acquire(temp.path(), Duration::from_millis(10)).unwrap();
+        std::fs::write(&db, b"half an imported snapshot").unwrap();
+        assert_eq!(state(temp.path()), IndexRefusalState::IndexingInProgress);
+        drop(lock);
+        assert_eq!(state(temp.path()), IndexRefusalState::IndexUnavailable);
+    }
+
+    /// Probing answers without writing: it adds nothing to an index that does not carry the
+    /// withdrawal table, and it serves a database this process may not write to.
+    #[test]
+    fn probing_creates_no_schema_and_works_on_a_read_only_database() {
+        fn withdrawal_tables(db: &std::path::Path) -> i64 {
+            Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'manifest_withdrawals'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let db = repo.join(".ok/index.sqlite");
+        let store = SqliteStore::open(&db).unwrap();
+        store.put_manifest(&make_manifest()).unwrap();
+        drop(store);
+        // An index written before the withdrawal table existed.
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch("DROP TABLE manifest_withdrawals;")
+            .unwrap();
+
+        let probed = SqliteStore::probe_repo_index(repo)
+            .expect("the index is served")
+            .expect("the manifest is published");
+        assert_eq!(probed.manifest_withdrawal().unwrap(), None);
+        drop(probed);
+        assert_eq!(
+            withdrawal_tables(&db),
+            0,
+            "probing must not create the withdrawal table"
+        );
+
+        // A database this process may not write to. Rollback journalling first: a read-only
+        // open of a WAL database whose `-shm` is gone cannot work at all, which is why the
+        // probe keeps a read-write fallback for that case rather than refusing the index.
+        Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))
+            .unwrap();
+        let mut perms = std::fs::metadata(&db).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&db, perms).unwrap();
+
+        let probed = SqliteStore::probe_repo_index(repo)
+            .expect("a read-only index is served")
+            .expect("the manifest is published");
+        assert_eq!(probed.manifest_withdrawal().unwrap(), None);
+        drop(probed);
+        assert_eq!(withdrawal_tables(&db), 0);
+
+        let mut perms = std::fs::metadata(&db).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&db, perms).unwrap();
     }
 
     #[test]

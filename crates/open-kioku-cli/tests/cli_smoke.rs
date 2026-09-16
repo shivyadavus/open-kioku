@@ -4466,6 +4466,51 @@ fn caller_argument_errors_exit_2_and_return_invalid_params() {
     }
 }
 
+/// A manifest `ok watch` withdrew after a failed incremental update: the rows are still there,
+/// so every surface says why, rather than describing a repository nobody has indexed.
+#[test]
+fn withdrawn_manifest_reports_its_reason_on_cli_and_mcp() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
+    let reason = "an incremental update replaced the changed files' rows and then failed";
+    open_kioku_storage_sqlite::SqliteStore::open(&db)
+        .unwrap()
+        .withdraw_manifest(reason)
+        .unwrap();
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("status");
+        command
+    });
+    assert!(
+        status.contains("repository is not indexed") && status.contains(reason),
+        "{status}"
+    );
+
+    let status_json: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    }))
+    .unwrap();
+    assert_eq!(status_json["indexed"], false, "{status_json}");
+    assert_eq!(status_json["reason"], reason, "{status_json}");
+
+    let (doctor, _stderr) = run_failure({
+        let mut command = ok();
+        command.arg("doctor").arg(&repo);
+        command
+    });
+    assert!(doctor.contains(reason), "{doctor}");
+
+    let response = mcp_repo_status(&repo);
+    assert_eq!(
+        response["result"]["structuredContent"]["reason"], reason,
+        "{response}"
+    );
+}
+
 /// `ok path` and MCP `dependency_path` resolve their arguments through one function, so the
 /// same names give the same route on both surfaces.
 #[test]
