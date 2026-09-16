@@ -73,6 +73,22 @@ impl DiffFile {
             .filter_map(|hunk| hunk.new_range.clone())
             .collect()
     }
+
+    /// Paths whose content this change adds, modifies or removes: both sides of a rename,
+    /// the removed path of a deletion, and only the destination of a copy.
+    pub fn changed_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(2);
+        if let Some(new_path) = &self.new_path {
+            paths.push(new_path.clone());
+        }
+        if let Some(old_path) = &self.old_path {
+            let removed = self.new_path.is_none() || self.status == GitChangeKind::Renamed;
+            if removed && self.new_path.as_ref() != Some(old_path) {
+                paths.push(old_path.clone());
+            }
+        }
+        paths
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,7 +282,18 @@ fn run_diff_unified_zero(root: impl AsRef<Path>, revision: Option<&str>) -> Resu
         .arg(root)
         .args(["-c", "core.quotePath=true"])
         .arg("diff")
-        .args(["--unified=0", "--no-ext-diff", "--no-textconv"])
+        .args([
+            "--unified=0",
+            "--no-ext-diff",
+            "--no-textconv",
+            // `color.diff=always` would wrap every line in escape codes the parser cannot read.
+            "--no-color",
+            "--find-renames",
+            // Pinned so `diff.noprefix`, `diff.mnemonicPrefix` or `diff.srcPrefix` cannot make
+            // one path read as two, which the parser would take for a rename.
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+        ])
         .args(revision_args(revision))
         .output()
         .map_err(|err| OkError::Repository(format!("git diff failed: {err}")))?;
@@ -584,7 +611,7 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
             pending.rename_score = None;
             return;
         }
-        let status = pending.status.unwrap_or_else(|| {
+        let status = pending.status.take().unwrap_or_else(|| {
             if pending.old_path.is_none() {
                 GitChangeKind::Added
             } else if pending.new_path.is_none() {
@@ -606,9 +633,16 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
 
     let mut files = Vec::new();
     let mut pending = PendingDiff::default();
+    let mut hunk = HunkBody::default();
     for line in patch.lines() {
-        if line.starts_with("diff --git ") {
+        if hunk.take(line) {
+            // A hunk's content lines are never headers: a removed `-- x` or an added `++ y`
+            // reads as `--- x` or `+++ y` and names no path.
+        } else if line.starts_with("diff --git ") {
             finish(&mut files, &mut pending);
+        } else if let Some(header) = line.strip_prefix("@@ ") {
+            pending.hunks.push(parse_diff_hunk(line)?);
+            hunk = HunkBody::start(header);
         } else if line.starts_with("new file mode ") {
             pending.status = Some(GitChangeKind::Added);
         } else if line.starts_with("deleted file mode ") {
@@ -621,20 +655,73 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
         } else if let Some(value) = line.strip_prefix("rename to ") {
             pending.new_path = Some(parse_patch_path(value, None)?);
             pending.status = Some(GitChangeKind::Renamed);
+        } else if let Some(value) = line.strip_prefix("copy from ") {
+            pending.old_path = Some(parse_patch_path(value, None)?);
+            pending.status = Some(GitChangeKind::Copied);
+        } else if let Some(value) = line.strip_prefix("copy to ") {
+            pending.new_path = Some(parse_patch_path(value, None)?);
+            pending.status = Some(GitChangeKind::Copied);
         } else if let Some(value) = line.strip_prefix("--- ") {
-            if value != "/dev/null" {
+            // `rename from`/`copy from` already name the pre-edit path exactly.
+            if value != "/dev/null" && pending.old_path.is_none() {
                 pending.old_path = Some(parse_patch_path(value, Some("a/"))?);
             }
         } else if let Some(value) = line.strip_prefix("+++ ") {
-            if value != "/dev/null" {
+            if value != "/dev/null" && pending.new_path.is_none() {
                 pending.new_path = Some(parse_patch_path(value, Some("b/"))?);
             }
-        } else if line.starts_with("@@ ") {
-            pending.hunks.push(parse_diff_hunk(line)?);
         }
     }
     finish(&mut files, &mut pending);
     Ok(files)
+}
+
+/// The lines a hunk still holds, from the counts in its `@@ -a,b +c,d @@` header (an omitted
+/// count is 1). While any remain, a line is content whatever it starts with; once both reach
+/// zero, the next line is a header again.
+#[derive(Default)]
+struct HunkBody {
+    old: u32,
+    new: u32,
+}
+
+impl HunkBody {
+    fn start(header: &str) -> Self {
+        let mut parts = header.split_whitespace();
+        let count = |side: Option<&str>, marker: char| -> u32 {
+            side.and_then(|side| side.strip_prefix(marker))
+                .and_then(|side| match side.split_once(',') {
+                    Some((_, count)) => count.parse::<u32>().ok(),
+                    None => Some(1),
+                })
+                .unwrap_or(0)
+        };
+        let old = count(parts.next(), '-');
+        let new = count(parts.next(), '+');
+        Self { old, new }
+    }
+
+    /// Whether `line` is content of this hunk, counting it off if so. A line the remaining
+    /// counts cannot place, such as `diff --git`, ends the hunk.
+    fn take(&mut self, line: &str) -> bool {
+        if self.old == 0 && self.new == 0 {
+            return false;
+        }
+        match line.as_bytes().first() {
+            Some(b'-') if self.old > 0 => self.old -= 1,
+            Some(b'+') if self.new > 0 => self.new -= 1,
+            Some(b' ') | None if self.old > 0 && self.new > 0 => {
+                self.old -= 1;
+                self.new -= 1;
+            }
+            Some(b'\\') => {}
+            _ => {
+                *self = Self::default();
+                return false;
+            }
+        }
+        true
+    }
 }
 
 fn parse_diff_hunk(header: &str) -> Result<DiffHunk> {
@@ -1063,6 +1150,160 @@ mod tests {
         assert_eq!(
             files[3].new_path.as_deref(),
             Some(Path::new("src/after.rs"))
+        );
+    }
+
+    #[test]
+    fn changed_paths_name_both_sides_of_a_rename_and_only_the_destination_of_a_copy() {
+        let files = parse_unified_zero_diff(
+            "diff --git a/src/old.rs b/src/new.rs\n\
+             similarity index 100%\n\
+             rename from src/old.rs\n\
+             rename to src/new.rs\n\
+             diff --git a/src/template.rs b/src/copy.rs\n\
+             similarity index 100%\n\
+             copy from src/template.rs\n\
+             copy to src/copy.rs\n\
+             diff --git a/src/gone.rs b/src/gone.rs\n\
+             deleted file mode 100644\n\
+             --- a/src/gone.rs\n\
+             +++ /dev/null\n\
+             @@ -1 +0,0 @@\n\
+             -gone();\n\
+             diff --git a/src/lib.rs b/src/lib.rs\n\
+             --- a/src/lib.rs\n\
+             +++ b/src/lib.rs\n\
+             @@ -1 +1 @@\n\
+             -old();\n\
+             +new();\n",
+        )
+        .unwrap();
+
+        let changed = files
+            .iter()
+            .map(|file| (file.status, file.changed_paths()))
+            .collect::<Vec<_>>();
+        let paths = |paths: &[&str]| {
+            paths
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            changed,
+            vec![
+                (GitChangeKind::Renamed, paths(&["src/new.rs", "src/old.rs"])),
+                (GitChangeKind::Copied, paths(&["src/copy.rs"])),
+                (GitChangeKind::Deleted, paths(&["src/gone.rs"])),
+                (GitChangeKind::Modified, paths(&["src/lib.rs"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn unified_zero_diff_hunk_lines_that_look_like_file_headers_name_no_path() {
+        let files = parse_unified_zero_diff(
+            "diff --git a/db/schema.sql b/db/schema.sql\n\
+             --- a/db/schema.sql\n\
+             +++ b/db/schema.sql\n\
+             @@ -3 +3 @@\n\
+             --- legacy index\n\
+             +++ replacement index\n\
+             diff --git a/db/old.sql b/db/new.sql\n\
+             similarity index 91%\n\
+             rename from db/old.sql\n\
+             rename to db/new.sql\n\
+             --- a/db/old.sql\n\
+             +++ b/db/new.sql\n\
+             @@ -1 +1 @@\n\
+             --- dropped view\n\
+             +++ kept view\n",
+        )
+        .unwrap();
+
+        let changed = files
+            .iter()
+            .map(|file| (file.status, file.changed_paths(), file.hunks.len()))
+            .collect::<Vec<_>>();
+        let paths = |paths: &[&str]| {
+            paths
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            changed,
+            vec![
+                (GitChangeKind::Modified, paths(&["db/schema.sql"]), 1),
+                (
+                    GitChangeKind::Renamed,
+                    paths(&["db/new.sql", "db/old.sql"]),
+                    1
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn unified_zero_diff_paths_ignore_local_prefix_and_color_config() {
+        let dir = initialized_repo();
+        write(dir.path(), "src/lib.rs", "fn one() {}\n");
+        commit_all(dir.path(), "one");
+        run(dir.path(), &["config", "diff.mnemonicPrefix", "true"]);
+        run(dir.path(), &["config", "diff.srcPrefix", "old/"]);
+        run(dir.path(), &["config", "diff.dstPrefix", "new/"]);
+        run(dir.path(), &["config", "color.diff", "always"]);
+        write(dir.path(), "src/lib.rs", "fn one() {}\nfn two() {}\n");
+
+        let changed = diff_unified_zero_since(dir.path(), "HEAD").unwrap();
+
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        assert_eq!(changed[0].status, GitChangeKind::Modified, "{changed:?}");
+        assert_eq!(
+            changed[0].changed_paths(),
+            vec![std::path::PathBuf::from("src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn unified_zero_diff_hunk_counts_decide_where_content_ends() {
+        let files = parse_unified_zero_diff(
+            "diff --git a/src/a.rs b/src/a.rs\n\
+             --- a/src/a.rs\n\
+             +++ b/src/a.rs\n\
+             @@ -1 +1 @@\n\
+             --- one\n\
+             \\ No newline at end of file\n\
+             +++ two\n\
+             \\ No newline at end of file\n\
+             diff --git a/src/b.rs b/src/b.rs\n\
+             --- a/src/b.rs\n\
+             +++ b/src/b.rs\n\
+             @@ -2,2 +2 @@\n\
+             --- gone\n\
+             --- also gone\n\
+             +++ kept\n",
+        )
+        .unwrap();
+
+        let changed = files
+            .iter()
+            .map(|file| (file.status, file.changed_paths(), file.hunks.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            changed,
+            vec![
+                (
+                    GitChangeKind::Modified,
+                    vec![std::path::PathBuf::from("src/a.rs")],
+                    1
+                ),
+                (
+                    GitChangeKind::Modified,
+                    vec![std::path::PathBuf::from("src/b.rs")],
+                    1
+                ),
+            ]
         );
     }
 

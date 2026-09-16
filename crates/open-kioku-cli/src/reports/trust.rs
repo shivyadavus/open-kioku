@@ -692,6 +692,13 @@ fn render_verify_html(report: &ChangeVerificationReport, adrs: &[AdrRecord]) -> 
         report.changed_files.len()
     ));
     html_path_section(&mut out, "Changed Files", &report.changed_files);
+    if !report.previous_paths.is_empty() {
+        html_list_section(
+            &mut out,
+            "Renamed and Copied Files",
+            &previous_path_lines(&report.previous_paths),
+        );
+    }
     html_string_section(&mut out, "Changed Symbols", &report.changed_symbols);
     html_finding_section(&mut out, "Boundary Failures", &report.boundary_violations);
     html_finding_section(&mut out, "Warnings", &report.warnings);
