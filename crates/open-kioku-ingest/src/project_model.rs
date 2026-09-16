@@ -99,6 +99,54 @@ impl ProjectModelDiscovery for ProjectModel {
     }
 }
 
+/// The crate name a Rust path may spell instead of `crate::`, from a Cargo manifest.
+///
+/// That name is the **library target's**, which `[lib] name` sets independently of the package:
+/// a package `foo-utils` with `[lib] name = "baz"` is `baz::` in a path and never `foo_utils::`.
+/// `[package] name` is the fallback, since a manifest without a `[lib]` table takes the target
+/// name from the package. A workspace-only manifest has neither, a `[[bin]]` name is a different
+/// target, and `name.workspace = true` is not a name.
+fn cargo_package_name(content: &str) -> Option<String> {
+    let mut section = "";
+    let (mut package, mut lib) = (None, None);
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(table) = line.strip_prefix('[') {
+            section = if table.starts_with("package]") {
+                "package"
+            } else if table.starts_with("lib]") {
+                "lib"
+            } else {
+                ""
+            };
+            continue;
+        }
+        if section.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "name" {
+            continue;
+        }
+        let Some(quoted) = value.trim().strip_prefix('"') else {
+            continue;
+        };
+        let Some((name, _)) = quoted.split_once('"') else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        match section {
+            "lib" => lib = Some(name.to_string()),
+            _ => package = Some(name.to_string()),
+        }
+    }
+    lib.or(package)
+}
+
 fn repo_relative_path(path: &Path, repo_root: &Path) -> PathBuf {
     path.strip_prefix(repo_root).unwrap_or(path).to_path_buf()
 }
@@ -150,7 +198,9 @@ fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
                             current,
                             Language::Rust,
                             vec![current.join("src")],
-                            None,
+                            fs::read_to_string(&path)
+                                .ok()
+                                .and_then(|content| cargo_package_name(&content)),
                         );
                     }
                     "go.mod" => {
@@ -292,5 +342,58 @@ mod tests {
             model.module_path_from_file(file, &Language::Go),
             "github.com/acme/orders/internal"
         );
+    }
+
+    #[test]
+    fn rust_roots_carry_the_cargo_package_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/app/src")).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/app\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("crates/app/Cargo.toml"),
+            "[package]\nname = \"demo-crate\" # the package\nversion = \"0.1.0\"\n\n[[bin]]\nname = \"tool\"\n",
+        )
+        .unwrap();
+
+        // A renamed library target is the name a path spells, not the package name.
+        std::fs::create_dir_all(dir.path().join("crates/renamed/src")).unwrap();
+        std::fs::write(
+            dir.path().join("crates/renamed/Cargo.toml"),
+            "[package]\nname = \"foo-utils\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"baz\"\n",
+        )
+        .unwrap();
+        // A subtree with no manifest of its own belongs to the nearest manifest above it.
+        std::fs::create_dir_all(dir.path().join("examples/snippet")).unwrap();
+        std::fs::write(
+            dir.path().join("examples/snippet/main.rs"),
+            "fn main() {}\n",
+        )
+        .unwrap();
+
+        let model = ProjectModel::discover(dir.path());
+        let member = model
+            .nearest_root_for(Path::new("crates/app/src/lib.rs"), Language::Rust)
+            .expect("the member is a Rust project root");
+        assert_eq!(member.package_name.as_deref(), Some("demo-crate"));
+        let renamed = model
+            .nearest_root_for(Path::new("crates/renamed/src/lib.rs"), Language::Rust)
+            .expect("the renamed member is a Rust project root");
+        assert_eq!(renamed.package_name.as_deref(), Some("baz"));
+        // The manifest-less subtree is attributed to the workspace root rather than to no root,
+        // so an in-crate path there is answered by that root's module tree, not by the
+        // repository-path fall-through.
+        let snippet = model
+            .nearest_root_for(Path::new("examples/snippet/main.rs"), Language::Rust)
+            .expect("a manifest-less subtree takes the nearest manifest above it");
+        assert_eq!(snippet.path, Path::new(""));
+        // A workspace manifest names no package, and `[[bin]]` names a target rather than one.
+        let workspace = model
+            .nearest_root_for(Path::new("Cargo.toml"), Language::Rust)
+            .expect("the workspace root is a Rust project root");
+        assert_eq!(workspace.package_name, None);
     }
 }

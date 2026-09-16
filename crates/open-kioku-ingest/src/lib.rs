@@ -706,6 +706,16 @@ impl Indexer {
             &scope_index,
         );
         import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
+        // Import bindings and file-level import edges follow the same declared module tree, and
+        // `rust_modules` borrows the project model that moves into `semantic_repo` below.
+        let rust_import_targets = imports::rust_import_edge_targets(
+            &import_sites,
+            &symbol_index,
+            &scope_index,
+            &rust_modules,
+        );
+        let resolver_report =
+            resolver::resolve_imports(&root, &files, &symbols, &imports, &rust_import_targets)?;
         let binding_index = open_kioku_resolution::BindingIndex::build(bindings.clone());
         let mut inheritance_index =
             open_kioku_resolution::InheritanceIndex::build(inheritance_sites.clone());
@@ -749,7 +759,6 @@ impl Indexer {
         inheritance_index.bind_parents_with_repository(&symbol_index, &semantic_repo);
 
         let resolution_mode = config.index.resolution_mode;
-        let resolver_report = resolver::resolve_imports(&root, &files, &symbols, &imports)?;
         let resolver_fact_count = resolver_report.analysis_facts.len();
         analysis_facts.extend(resolver_report.analysis_facts.clone());
 

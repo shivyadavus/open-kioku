@@ -6,9 +6,15 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const ANALYSIS_SEMANTICS_DESCRIPTOR_VERSION: u32 = 1;
 pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v1";
 pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v2";
+/// v3: a Rust `use` path inside the importing file's own crate resolves through that crate's
+/// declared module tree, so its `IMPORTS` edge names the file declaring the module or the item;
+/// v2 resolved such a path against the repository-root `src/` and fell back to the crate root,
+/// which stored proven edges into a file that declares nothing the path names.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v3";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
-pub const GRAPH_EMISSION_SEMANTICS_VERSION: &str = "ri3-graph-emission-v1";
+/// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
+/// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
+pub const GRAPH_EMISSION_SEMANTICS_VERSION: &str = "ri3-graph-emission-v2";
 pub const EXACT_INDEX_INGESTION_SEMANTICS_VERSION: &str = "exact-occurrence-v1";
 pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1";
 /// v2: test targets are callables with a test annotation in the attribute stack above them,

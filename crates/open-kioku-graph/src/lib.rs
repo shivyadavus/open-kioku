@@ -242,10 +242,29 @@ impl InMemoryGraph {
             }
             buffer.insert_edge(edge);
         }
+        // Which import rows the import resolver answered with an `IMPORTS` fact: a file it
+        // resolved to, or an explicit abstention. That fact is the claim about the import, so the
+        // syntax node below must not make a second authoritative claim about the same row. The
+        // abstention case is the dangerous one: its fact edge carries the same target node as the
+        // syntax edge, and merging unions relationship proofs, so a binding asserted here would
+        // upgrade a recorded absence into an authoritative edge whose message reads `unresolved`.
+        // Read from the resolver's own output rather than re-derived from the path text, which
+        // cannot tell an in-crate spelling such as `my_crate::auth` from an external one.
+        let resolver_answered = analysis_facts
+            .iter()
+            .filter(|fact| {
+                fact.edge_type == GraphEdgeType::Imports
+                    && fact.source.starts_with("open-kioku-import-resolver/")
+            })
+            .filter_map(|fact| Some((fact.file_id.0.as_str(), fact.range.as_ref()?.start)))
+            .collect::<std::collections::HashSet<_>>();
         for import in imports {
             let Some(file) = files_by_id.get(import.file_id.0.as_str()) else {
                 continue;
             };
+            let proves_module = !import.range.as_ref().is_some_and(|range| {
+                resolver_answered.contains(&(import.file_id.0.as_str(), range.start))
+            });
             let target_node = GraphNode {
                 id: analysis_node_id(GraphNodeType::Module, &import.imported),
                 node_type: GraphNodeType::Module,
@@ -280,15 +299,17 @@ impl InMemoryGraph {
                 },
                 ..Default::default()
             };
-            let mut proof = RelationshipProof::new(
-                RelationshipProofKind::ModuleOrPackageBinding,
-                "static_import_syntax",
-                1,
-            );
-            proof.source_range = Some(file_range);
-            proof.evidence_ids.push(evidence_id);
-            edge.set_relationship_proofs(vec![proof])
-                .expect("static import proof must serialize to JSON");
+            if proves_module {
+                let mut proof = RelationshipProof::new(
+                    RelationshipProofKind::ModuleOrPackageBinding,
+                    "static_import_syntax",
+                    1,
+                );
+                proof.source_range = Some(file_range);
+                proof.evidence_ids.push(evidence_id);
+                edge.set_relationship_proofs(vec![proof])
+                    .expect("static import proof must serialize to JSON");
+            }
             buffer.insert_edge(edge);
         }
         for rel in resolved_relationships {
@@ -1577,7 +1598,10 @@ mod ri3_static_import_authority_tests {
         };
         let import = Import {
             file_id: file.id.clone(),
-            imported: "crate::domain".into(),
+            // An external path names a module outside this repository, so this node is the only
+            // record of it and keeps its binding. A path of the file's own crate proves no module
+            // from syntax: see `rust_in_crate_item_import_asserts_no_module_binding`.
+            imported: "serde::de".into(),
             range: Some(LineRange::single(3)),
             confidence: Confidence::Exact,
         };
@@ -1606,8 +1630,8 @@ mod ri3_static_import_authority_tests {
 mod ri3_import_resolution_authority_tests {
     use super::InMemoryGraph;
     use open_kioku_core::{
-        AnalysisFact, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType,
-        Language, LineRange, RelationshipProofKind, RepositoryId,
+        AnalysisFact, Confidence, EvidenceSourceType, File, FileId, GraphEdge, GraphEdgeType,
+        GraphNodeType, Import, Language, LineRange, RelationshipProofKind, RepositoryId,
     };
     use std::path::PathBuf;
 
@@ -1663,22 +1687,25 @@ mod ri3_import_resolution_authority_tests {
 
     #[test]
     fn unresolved_import_analysis_fact_remains_untrusted() {
+        // The row is supplied, as indexing always supplies one: the resolver's abstention and the
+        // syntax edge share a target node, and merging unions relationship proofs, so this is the
+        // shape in which a binding asserted by the syntax edge would upgrade a recorded absence.
         let source = file("source", "src/domain/mod.rs");
-        let fact = AnalysisFact {
-            id: "unresolved-import".into(),
-            file_id: source.id.clone(),
-            symbol_id: None,
-            target: "crate::missing".into(),
-            target_kind: GraphNodeType::Module,
-            edge_type: GraphEdgeType::Imports,
-            range: Some(LineRange::single(1)),
-            confidence: Confidence::Low,
-            source: "open-kioku-import-resolver/unresolved".into(),
-            source_type: EvidenceSourceType::StaticAnalysis,
-            message: "unresolved import".into(),
-        };
-
-        let graph = InMemoryGraph::from_index_with_analysis(&[source], &[], &[], &[], &[], &[fact]);
+        let graph = InMemoryGraph::from_index_with_analysis(
+            std::slice::from_ref(&source),
+            &[],
+            &[],
+            &[],
+            &[import(&source, "crate::missing")],
+            &[resolver_import_fact(
+                &source,
+                "crate::missing",
+                GraphNodeType::Module,
+                "unresolved",
+                Confidence::Low,
+                "unresolved import `crate::missing`",
+            )],
+        );
         let edge = graph
             .edges
             .iter()
@@ -1687,5 +1714,109 @@ mod ri3_import_resolution_authority_tests {
 
         assert!(!edge.is_authoritative_relationship());
         assert!(!edge.has_relationship_proof_kind(RelationshipProofKind::ImportBinding));
+        assert!(!edge.has_relationship_proof_kind(RelationshipProofKind::ModuleOrPackageBinding));
+        assert!(
+            edge.evidence.message.contains("unresolved"),
+            "the merged edge still reports the abstention: {}",
+            edge.evidence.message
+        );
+    }
+
+    fn import(source: &File, imported: &str) -> Import {
+        Import {
+            file_id: source.id.clone(),
+            imported: imported.into(),
+            range: Some(LineRange::single(1)),
+            confidence: Confidence::High,
+        }
+    }
+
+    /// The import resolver's answer about the row at line 1 of `source`.
+    fn resolver_import_fact(
+        source: &File,
+        target: &str,
+        target_kind: GraphNodeType,
+        strategy: &str,
+        confidence: Confidence,
+        message: &str,
+    ) -> AnalysisFact {
+        AnalysisFact {
+            id: format!("import-resolution:{target}:{strategy}"),
+            file_id: source.id.clone(),
+            symbol_id: None,
+            target: target.into(),
+            target_kind,
+            edge_type: GraphEdgeType::Imports,
+            range: Some(LineRange::single(1)),
+            confidence,
+            source: format!("open-kioku-import-resolver/{strategy}").into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: message.into(),
+        }
+    }
+
+    /// The syntax `IMPORTS` edge for one row, with whatever the resolver said about it.
+    fn syntax_import_edge(imported: &str, facts: &[AnalysisFact]) -> GraphEdge {
+        let source = file("source", "src/session.rs");
+        let graph = InMemoryGraph::from_index_with_analysis(
+            std::slice::from_ref(&source),
+            &[],
+            &[],
+            &[],
+            &[import(&source, imported)],
+            facts,
+        );
+        graph
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.edge_type == GraphEdgeType::Imports
+                    && graph
+                        .nodes
+                        .get(&edge.to.0)
+                        .is_some_and(|node| node.node_type == GraphNodeType::Module)
+            })
+            .expect("every import row stays inspectable evidence")
+            .clone()
+    }
+
+    #[test]
+    fn an_import_the_resolver_answered_asserts_no_module_binding() {
+        // Whatever the resolver answered is the claim about the import; a module node asserting
+        // the same row would be a second authoritative claim. This holds for every spelling the
+        // resolver treats as in-crate, including the package's own crate name, which a check on
+        // `crate`/`self`/`super` alone would miss and stamp as external.
+        let source = file("source", "src/session.rs");
+        for (path, target) in [
+            ("crate::auth::issue_token", "src/auth.rs"),
+            ("crate::auth::*", "src/auth.rs"),
+            ("open_kioku_demo::auth", "src/auth.rs"),
+        ] {
+            let edge = syntax_import_edge(
+                path,
+                &[resolver_import_fact(
+                    &source,
+                    target,
+                    GraphNodeType::File,
+                    "rust-item-module",
+                    Confidence::High,
+                    "resolved import",
+                )],
+            );
+            assert!(
+                !edge.has_relationship_proof_kind(RelationshipProofKind::ModuleOrPackageBinding),
+                "`{path}` must not assert a module beside the resolver's file edge"
+            );
+            assert!(!edge.is_authoritative_relationship(), "`{path}`");
+        }
+    }
+
+    #[test]
+    fn an_import_the_resolver_left_to_this_node_keeps_its_module_binding() {
+        // A builtin or external package produces a `DEPENDS_ON` fact, not an `IMPORTS` one, so
+        // this node is the only record of the import and stays authoritative.
+        let edge = syntax_import_edge("std::fmt", &[]);
+        assert!(edge.has_relationship_proof_kind(RelationshipProofKind::ModuleOrPackageBinding));
+        assert!(edge.is_authoritative_relationship());
     }
 }

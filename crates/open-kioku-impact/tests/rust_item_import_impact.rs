@@ -200,3 +200,67 @@ fn associated_function_call_through_an_imported_type_is_proven_impact() {
     );
     assert_eq!(call_impact.authority, RelationshipAuthority::Authoritative);
 }
+
+#[test]
+fn item_and_glob_imports_are_proven_impact_of_the_module_that_declares_them() {
+    // `src/lib.rs` declares the modules and re-exports the item; `src/auth.rs` declares it. The
+    // import edge belongs to the declaring file, and the crate root must not collect it.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (path, content) in [
+        (
+            "Cargo.toml",
+            "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub mod auth;\npub mod session;\n\npub use auth::issue_token;\n",
+        ),
+        ("src/auth.rs", AUTH),
+        (
+            "src/session.rs",
+            "use crate::auth::issue_token;\nuse crate::auth::*;\n\npub fn open_session(user: &str) -> String {\n    issue_token(user).0\n}\n",
+        ),
+    ] {
+        let absolute = root.join(path);
+        std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        std::fs::write(absolute, content).unwrap();
+    }
+    let (store, _) = index_into_store(root);
+    let impact_of = |path: &str| {
+        ImpactEngine::new(&store)
+            .with_graph_store(Some(&store))
+            .for_file(Path::new(path))
+            .unwrap()
+    };
+
+    let declaring = impact_of("src/auth.rs");
+    let import_impact = declaring
+        .proven_impact
+        .iter()
+        .find(|impact| {
+            impact.edge_type == GraphEdgeType::Imports && impact.path.ends_with("session.rs")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the importing file is missing from the declaring module's proven impact: {:?}",
+                declaring.proven_impact
+            )
+        });
+    assert_eq!(
+        import_impact.authority,
+        RelationshipAuthority::Authoritative
+    );
+    assert!(import_impact
+        .proof_kinds
+        .contains(&RelationshipProofKind::ImportBinding));
+
+    let crate_root = impact_of("src/lib.rs");
+    assert!(
+        !crate_root.proven_impact.iter().any(|impact| {
+            impact.edge_type == GraphEdgeType::Imports && impact.path.ends_with("session.rs")
+        }),
+        "the crate root declares none of the imported names: {:?}",
+        crate_root.proven_impact
+    );
+}

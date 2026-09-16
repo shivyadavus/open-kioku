@@ -124,6 +124,11 @@ fn produce_live_relationship_case(
                 require_fixture_source_files_indexed(case, &fixture, &snapshot)?;
             }
         }
+        if case.relationship == GraphEdgeType::Imports {
+            if let Some(fixture) = rust_import_edge_fixture(&case.scenario) {
+                require_fixture_source_files_indexed(case, &fixture, &snapshot)?;
+            }
+        }
         inject_reference_fixture_occurrence(case, &mut snapshot)?;
         if case.scenario == "metamorphic_b" {
             // Exercise order independence after parsing/indexing: graph construction and proof
@@ -547,7 +552,19 @@ fn live_fixture_files(case: &RelationshipBenchCase) -> anyhow::Result<Vec<(PathB
         GraphEdgeType::UsesType => live_type_fixture(case.language, positive_syntax),
         GraphEdgeType::Implements => live_implements_fixture(case.language, positive_syntax),
         GraphEdgeType::Extends => live_extends_fixture(case.language, positive_syntax),
-        GraphEdgeType::Imports => live_import_fixture(case.language, positive_syntax, false),
+        GraphEdgeType::Imports => match rust_import_edge_fixture(&case.scenario) {
+            Some(fixture) => {
+                if case.language != RelationshipBenchLanguage::Rust {
+                    anyhow::bail!(
+                        "{} is defined only for a Rust IMPORTS case, got {:?}",
+                        case.scenario,
+                        case.language
+                    );
+                }
+                fixture
+            }
+            None => live_import_fixture(case.language, positive_syntax, false),
+        },
         GraphEdgeType::DependsOn => live_import_fixture(case.language, positive_syntax, true),
         other => anyhow::bail!("unsupported live relationship fixture family: {other:?}"),
     };
@@ -1079,6 +1096,55 @@ fn live_import_fixture(
         no_import_source(language)
     };
     vec![(PathBuf::from(main_path(language)), content)]
+}
+
+/// Multi-file Rust packages for the file-level `IMPORTS` edge of a `use` path inside the importing
+/// crate. The crate's declared module tree, not the path text, decides which file the edge names.
+fn rust_import_edge_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
+    const PACKAGE: &str = "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    const AUTH: &str = "pub struct Token;\n\npub fn issue_token() -> Token {\n    Token\n}\n";
+    let files: Vec<(&str, &str)> = match scenario {
+        // The crate root declares the modules and declares none of the imported names.
+        "cross_module_item_import" => vec![
+            ("Cargo.toml", PACKAGE),
+            ("src/lib.rs", "pub mod auth;\npub mod session;\n"),
+            ("src/auth.rs", AUTH),
+            (
+                "src/session.rs",
+                "use crate::auth::issue_token;\n\npub fn open_session() {\n    issue_token();\n}\n",
+            ),
+        ],
+        "glob_module_import" => vec![
+            ("Cargo.toml", PACKAGE),
+            ("src/lib.rs", "pub mod auth;\npub mod session;\n"),
+            ("src/auth.rs", AUTH),
+            (
+                "src/session.rs",
+                "use crate::auth::*;\n\npub fn open_session() {\n    issue_token();\n}\n",
+            ),
+        ],
+        // `crate::issue_token` reaches the item only through the crate root's re-export, which no
+        // module declaration proves; the crate root must not absorb the edge.
+        "crate_root_reexport_fallback" => vec![
+            ("Cargo.toml", PACKAGE),
+            (
+                "src/lib.rs",
+                "pub mod api;\npub mod auth;\n\npub use auth::issue_token;\n",
+            ),
+            ("src/auth.rs", AUTH),
+            (
+                "src/api.rs",
+                "use crate::issue_token;\n\npub fn login() {\n    issue_token();\n}\n",
+            ),
+        ],
+        _ => return None,
+    };
+    Some(
+        files
+            .into_iter()
+            .map(|(path, content)| (PathBuf::from(path), content.to_string()))
+            .collect(),
+    )
 }
 
 fn import_source(language: RelationshipBenchLanguage, _dependency: bool) -> String {

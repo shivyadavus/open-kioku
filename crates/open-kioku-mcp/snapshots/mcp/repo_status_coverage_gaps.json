@@ -5,7 +5,7 @@
     "analysis_semantics": {
       "descriptor": {
         "exact_index_ingestion_version": "exact-occurrence-v1",
-        "graph_emission_version": "ri3-graph-emission-v1",
+        "graph_emission_version": "ri3-graph-emission-v2",
         "language_adapter_versions": {
           "go": "ri3-language-semantics-v1",
           "java": "ri3-language-semantics-v1",
@@ -24,20 +24,20 @@
         },
         "project_resolver_version": "project-resolver-v1",
         "proof_policy_version": "ri3-proof-policy-v1",
-        "relationship_resolver_version": "ri3-relationship-resolver-v2",
+        "relationship_resolver_version": "ri3-relationship-resolver-v3",
         "stable_identity_version": "stable-identity-v1",
         "version": 1
       },
-      "fingerprint": "199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d"
+      "fingerprint": "f009a1581917f9a6eba790501d8394d0aa941f61cd99022f40cf0112bc1f520b"
     },
     "analysis_semantics_status": {
       "affected_components": [],
       "affected_languages": [],
-      "current_fingerprint": "199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d",
+      "current_fingerprint": "f009a1581917f9a6eba790501d8394d0aa941f61cd99022f40cf0112bc1f520b",
       "reasons": [],
       "recommended_action": "none",
       "status": "compatible",
-      "stored_fingerprint": "199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d"
+      "stored_fingerprint": "f009a1581917f9a6eba790501d8394d0aa941f61cd99022f40cf0112bc1f520b"
     },
     "chunk_count": 1,
     "coverage": {
