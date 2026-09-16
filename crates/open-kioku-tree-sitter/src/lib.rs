@@ -1,7 +1,8 @@
 use open_kioku_core::{
     Binding, BindingId, CallSite, CallSiteId, Confidence, EvidenceSourceType, ExportSite, File,
-    ImportSite, ImportedName, InheritanceKind, InheritanceSite, Language, LineRange, ReceiverKind,
-    Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId, SymbolKind, SyntaxFacts, Visibility,
+    ImportSite, ImportedName, InheritanceKind, InheritanceSite, Language, LineRange,
+    ModuleDeclarationSite, ReceiverKind, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId,
+    SymbolKind, SyntaxFacts, Visibility,
 };
 use open_kioku_errors::{OkError, Result};
 use sha2::{Digest, Sha256};
@@ -306,6 +307,12 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
                 pushed_type = Some(type_sym_id);
             }
         }
+    }
+
+    // Recorded before the item's own scope is pushed, so the declaration carries its enclosing
+    // scope.
+    if file.language == Language::Rust && node.kind() == "mod_item" {
+        extract_rust_module_declaration(file, content.as_bytes(), node, ctx, out);
     }
 
     if let Some(scope_kind) = is_scope_node(file, node) {
@@ -879,7 +886,7 @@ fn extract_binding(
                 let declared_type = node
                     .child_by_field_name("type")
                     .and_then(|t| t.utf8_text(source_bytes).ok())
-                    .map(|s| s.to_string());
+                    .and_then(|text| rust_declared_type(node, text, source_bytes));
                 let inferred_type = node
                     .child_by_field_name("value")
                     .and_then(|v| infer_type_from_expr(file, source_bytes, v));
@@ -894,7 +901,9 @@ fn extract_binding(
                 let declared_type = node
                     .child_by_field_name("type")
                     .and_then(|t| t.utf8_text(source_bytes).ok())
-                    .map(|s| s.trim_start_matches('&').trim().to_string());
+                    .and_then(|text| {
+                        rust_declared_type(node, text.trim_start_matches('&').trim(), source_bytes)
+                    });
                 if let Some(n) = name {
                     extracted.push((n, declared_type, None));
                 }
@@ -958,6 +967,46 @@ fn extract_binding(
     }
 }
 
+/// A Rust binding's written type, unless it names a type parameter of an enclosing function, impl
+/// or trait: in `fn f<Token: Parse>(t: Token)` the type of `t` is generic, not an item named
+/// `Token`.
+fn rust_declared_type(binding: Node<'_>, type_text: &str, source: &[u8]) -> Option<String> {
+    let base = type_text.trim_start_matches('&').trim();
+    let base = base.strip_prefix("mut ").unwrap_or(base).trim();
+    let base = base.split('<').next().unwrap_or(base).trim();
+    if rust_enclosing_type_parameters(binding, source)
+        .iter()
+        .any(|name| name == base)
+    {
+        None
+    } else {
+        Some(type_text.to_string())
+    }
+}
+
+fn rust_enclosing_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut current = node.parent();
+    while let Some(ancestor) = current {
+        if let Some(parameters) = ancestor.child_by_field_name("type_parameters") {
+            let mut cursor = parameters.walk();
+            for parameter in named_children(&mut cursor) {
+                if parameter.kind() != "type_parameter" {
+                    continue;
+                }
+                if let Some(name) = parameter
+                    .child_by_field_name("name")
+                    .and_then(|name| name.utf8_text(source).ok())
+                {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        current = ancestor.parent();
+    }
+    names
+}
+
 fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<String> {
     let kind = expr.kind();
     match file.language {
@@ -973,10 +1022,13 @@ fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<St
         Language::Rust => {
             if kind == "call_expression" {
                 if let Some(function) = expr.child_by_field_name("function") {
+                    // Recorded as the whole call path, `Foo::bar()`: the call names `Foo` but may
+                    // return anything, so resolution proves the type from `bar`'s signature.
                     if function.kind() == "scoped_identifier" {
-                        if let Some(path) = function.child_by_field_name("path") {
-                            return path.utf8_text(source).ok().map(|s| s.to_string());
-                        }
+                        return function
+                            .utf8_text(source)
+                            .ok()
+                            .map(|path| format!("{path}()"));
                     }
                 }
             } else if kind == "struct_expression" {
@@ -1027,6 +1079,10 @@ fn extract_import(
     if !is_import {
         return;
     }
+    if file.language == Language::Rust {
+        extract_rust_use(file, source_bytes, node, ctx, out);
+        return;
+    }
 
     let range = node_source_range(node);
     let mut module_source = String::new();
@@ -1047,34 +1103,6 @@ fn extract_import(
                 } else {
                     module_source = text.to_string();
                     if let Some(last) = text.split('.').next_back() {
-                        bindings.push(ImportedName {
-                            imported: last.to_string(),
-                            local: last.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-        Language::Rust => {
-            if let Ok(text) = node.utf8_text(source_bytes) {
-                let text = text
-                    .trim_start_matches("pub")
-                    .trim_start_matches("use")
-                    .trim_end_matches(';')
-                    .trim();
-                module_source = text.to_string();
-                if text.ends_with("::*") {
-                    is_glob = true;
-                } else if let Some(last) = text.split("::").last() {
-                    if last.contains(" as ") {
-                        let parts: Vec<&str> = last.split(" as ").collect();
-                        if parts.len() == 2 {
-                            bindings.push(ImportedName {
-                                imported: parts[0].trim().to_string(),
-                                local: parts[1].trim().to_string(),
-                            });
-                        }
-                    } else {
                         bindings.push(ImportedName {
                             imported: last.to_string(),
                             local: last.to_string(),
@@ -1225,6 +1253,188 @@ fn extract_import(
             range,
         });
     }
+}
+
+fn extract_rust_module_declaration(
+    file: &File,
+    source: &[u8],
+    node: Node<'_>,
+    ctx: &ParseContext,
+    out: &mut SyntaxFacts,
+) {
+    let Some(name) = node
+        .child_by_field_name("name")
+        .and_then(|name| name.utf8_text(source).ok())
+    else {
+        return;
+    };
+    out.module_declarations.push(ModuleDeclarationSite {
+        file_id: file.id.clone(),
+        scope_id: ctx.current_scope(),
+        name: name.to_string(),
+        has_body: node.child_by_field_name("body").is_some(),
+        has_path_attribute: rust_item_has_path_attribute(node, source),
+        range: node_source_range(node),
+    });
+}
+
+/// Outer attributes precede an item as siblings in tree-sitter-rust. Any of them that sets `path`,
+/// including through `cfg_attr`, moves the module file off its default location; a false match
+/// only withholds a binding.
+fn rust_item_has_path_attribute(node: Node<'_>, source: &[u8]) -> bool {
+    let mut sibling = node.prev_named_sibling();
+    while let Some(previous) = sibling {
+        match previous.kind() {
+            "attribute_item" => {
+                let text = previous
+                    .utf8_text(source)
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .collect::<String>();
+                if text.contains("path=") {
+                    return true;
+                }
+            }
+            "line_comment" | "block_comment" => {}
+            _ => return false,
+        }
+        sibling = previous.prev_named_sibling();
+    }
+    false
+}
+
+/// One path a Rust `use` declaration imports, with its `as` alias.
+struct RustUseLeaf {
+    path: String,
+    alias: Option<String>,
+    is_glob: bool,
+}
+
+/// Emits one import site per path a Rust `use` declaration imports. `use a::{b, c as d}` binds
+/// two names from two paths, and import resolution reads a site's `source` as the full path of
+/// what it binds, so a grouped declaration cannot share one site.
+fn extract_rust_use(
+    file: &File,
+    source: &[u8],
+    node: Node<'_>,
+    ctx: &ParseContext,
+    out: &mut SyntaxFacts,
+) {
+    let Some(argument) = node.child_by_field_name("argument") else {
+        return;
+    };
+    let mut leaves = Vec::new();
+    collect_rust_use_leaves(argument, source, "", &mut leaves);
+    let range = node_source_range(node);
+    for leaf in leaves {
+        let bindings = if leaf.is_glob {
+            Vec::new()
+        } else {
+            rust_use_binding(&leaf).into_iter().collect()
+        };
+        let imported_path = if leaf.is_glob {
+            join_rust_use_path(&leaf.path, "*")
+        } else {
+            leaf.path
+        };
+        out.imports.push(ImportSite {
+            file_id: file.id.clone(),
+            scope_id: ctx.current_scope(),
+            source: imported_path,
+            bindings,
+            is_glob: leaf.is_glob,
+            is_type_only: false,
+            range: range.clone(),
+        });
+    }
+}
+
+fn collect_rust_use_leaves(
+    node: Node<'_>,
+    source: &[u8],
+    prefix: &str,
+    out: &mut Vec<RustUseLeaf>,
+) {
+    let path_of = |field: &str| {
+        node.child_by_field_name(field)
+            .and_then(|child| rust_use_path_text(child, source))
+    };
+    match node.kind() {
+        "use_as_clause" => {
+            if let (Some(path), Some(alias)) = (path_of("path"), path_of("alias")) {
+                out.push(RustUseLeaf {
+                    path: join_rust_use_path(prefix, &path),
+                    alias: Some(alias),
+                    is_glob: false,
+                });
+            }
+        }
+        "use_wildcard" => {
+            let path = node
+                .named_child(0)
+                .and_then(|child| rust_use_path_text(child, source))
+                .unwrap_or_default();
+            out.push(RustUseLeaf {
+                path: join_rust_use_path(prefix, &path),
+                alias: None,
+                is_glob: true,
+            });
+        }
+        "scoped_use_list" => {
+            let prefix = join_rust_use_path(prefix, &path_of("path").unwrap_or_default());
+            if let Some(list) = node.child_by_field_name("list") {
+                collect_rust_use_leaves(list, source, &prefix, out);
+            }
+        }
+        "use_list" => {
+            let mut cursor = node.walk();
+            for child in named_children(&mut cursor) {
+                collect_rust_use_leaves(child, source, prefix, out);
+            }
+        }
+        "identifier" | "scoped_identifier" | "crate" | "self" | "super" => {
+            if let Some(path) = rust_use_path_text(node, source) {
+                out.push(RustUseLeaf {
+                    path: join_rust_use_path(prefix, &path),
+                    alias: None,
+                    is_glob: false,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rust_use_path_text(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let text = node
+        .utf8_text(source)
+        .ok()?
+        .split_whitespace()
+        .collect::<String>();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Joins a `use` list prefix and a path inside the list; `self` in a list names the prefix.
+fn join_rust_use_path(prefix: &str, path: &str) -> String {
+    match (prefix, path) {
+        ("", path) => path.to_string(),
+        (prefix, "" | "self") => prefix.to_string(),
+        (prefix, path) => format!("{prefix}::{path}"),
+    }
+}
+
+fn rust_use_binding(leaf: &RustUseLeaf) -> Option<ImportedName> {
+    let imported = leaf.path.rsplit("::").next()?;
+    let local = leaf.alias.as_deref().unwrap_or(imported);
+    // `as _` brings a trait into scope without naming it, and a bare `crate`, `self` or `super`
+    // names no item.
+    if matches!(local, "_" | "crate" | "self" | "super") {
+        return None;
+    }
+    Some(ImportedName {
+        imported: imported.to_string(),
+        local: local.to_string(),
+    })
 }
 
 fn extract_export(
@@ -1532,6 +1742,198 @@ mod ri3_rust_module_receiver_tests {
 
         assert_eq!(call.receiver.as_deref(), Some("crate::storage"));
         assert_eq!(call.receiver_kind, ReceiverKind::Module);
+    }
+}
+
+#[cfg(test)]
+mod ri3_rust_use_import_site_tests {
+    use super::parse_file;
+    use open_kioku_core::{File, FileId, ImportSite, ImportedName, Language, RepositoryId};
+
+    fn rust_import_sites(source: &str) -> Vec<ImportSite> {
+        let file = File {
+            id: FileId::new("file:src/session.rs"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/session.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        parse_file(&file, source)
+            .expect("Rust import fixture should parse")
+            .imports
+    }
+
+    fn name(imported: &str, local: &str) -> ImportedName {
+        ImportedName {
+            imported: imported.into(),
+            local: local.into(),
+        }
+    }
+
+    #[test]
+    fn rust_item_import_site_keeps_the_full_path_and_binds_the_last_segment() {
+        let sites = rust_import_sites("use crate::auth::issue_token;\n");
+        assert_eq!(sites.len(), 1, "{sites:?}");
+        assert_eq!(sites[0].source, "crate::auth::issue_token");
+        assert_eq!(sites[0].bindings, vec![name("issue_token", "issue_token")]);
+        assert!(!sites[0].is_glob);
+    }
+
+    #[test]
+    fn rust_grouped_import_emits_one_site_per_imported_path() {
+        let sites = rust_import_sites(
+            "use crate::auth::{issue_token, Token as AuthToken, keys::{rotate}, self};\n",
+        );
+        let sources = sites
+            .iter()
+            .map(|site| site.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sources,
+            vec![
+                "crate::auth::issue_token",
+                "crate::auth::Token",
+                "crate::auth::keys::rotate",
+                "crate::auth",
+            ]
+        );
+        let bindings = sites
+            .iter()
+            .map(|site| site.bindings.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bindings,
+            vec![
+                vec![name("issue_token", "issue_token")],
+                vec![name("Token", "AuthToken")],
+                vec![name("rotate", "rotate")],
+                vec![name("auth", "auth")],
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_module_declarations_record_body_path_attribute_and_enclosing_scope() {
+        let file = File {
+            id: FileId::new("file:src/lib.rs"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/lib.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "pub mod auth;\n#[cfg(test)]\nmod tests {\n    mod nested;\n}\n#[path = \"store_v2.rs\"]\nmod store;\n/// Platform glue.\n#[cfg_attr(unix, path = \"unix.rs\")]\nmod platform;\n",
+        )
+        .expect("Rust module fixture should parse");
+        let declaration = |name: &str| {
+            facts
+                .module_declarations
+                .iter()
+                .find(|declaration| declaration.name == name)
+                .unwrap_or_else(|| {
+                    panic!("`mod {name}` declaration: {:?}", facts.module_declarations)
+                })
+        };
+
+        let auth = declaration("auth");
+        assert!(!auth.has_body && !auth.has_path_attribute);
+        let tests = declaration("tests");
+        assert!(tests.has_body && !tests.has_path_attribute);
+        let nested = declaration("nested");
+        assert!(!nested.has_body);
+        assert_ne!(
+            nested.scope_id, auth.scope_id,
+            "nested sits in the inline module's scope"
+        );
+        assert!(declaration("store").has_path_attribute);
+        assert!(declaration("platform").has_path_attribute);
+    }
+
+    #[test]
+    fn rust_aliased_import_binds_the_alias_to_the_item() {
+        let sites =
+            rust_import_sites("use crate::auth::issue_token as mint;\nuse std::io::Write as _;\n");
+        assert_eq!(sites.len(), 2, "{sites:?}");
+        assert_eq!(sites[0].source, "crate::auth::issue_token");
+        assert_eq!(sites[0].bindings, vec![name("issue_token", "mint")]);
+        assert_eq!(sites[1].source, "std::io::Write");
+        assert!(sites[1].bindings.is_empty(), "{:?}", sites[1].bindings);
+    }
+
+    #[test]
+    fn rust_glob_and_visibility_qualified_imports_keep_only_their_paths() {
+        let sites =
+            rust_import_sites("pub(crate) use super::*;\npub use self::auth::issue_token;\n");
+        assert_eq!(sites.len(), 2, "{sites:?}");
+        assert_eq!(sites[0].source, "super::*");
+        assert!(sites[0].is_glob);
+        assert!(sites[0].bindings.is_empty());
+        assert_eq!(sites[1].source, "self::auth::issue_token");
+        assert_eq!(sites[1].bindings, vec![name("issue_token", "issue_token")]);
+    }
+}
+
+#[cfg(test)]
+mod ri3_rust_binding_type_tests {
+    use super::parse_file;
+    use open_kioku_core::{Binding, File, FileId, Language, RepositoryId};
+
+    fn rust_bindings(source: &str) -> Vec<Binding> {
+        let file = File {
+            id: FileId::new("file:src/caller.rs"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/caller.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        parse_file(&file, source)
+            .expect("Rust binding fixture should parse")
+            .bindings
+    }
+
+    fn binding<'b>(bindings: &'b [Binding], name: &str) -> &'b Binding {
+        bindings
+            .iter()
+            .find(|binding| binding.name == name)
+            .unwrap_or_else(|| panic!("binding `{name}`: {bindings:?}"))
+    }
+
+    #[test]
+    fn rust_path_call_initializer_is_recorded_as_the_whole_call_path() {
+        let bindings = rust_bindings(
+            "pub fn run() {\n    let handle = Server::spawn();\n    let config = Config { port: 1 };\n}\n",
+        );
+        let handle = binding(&bindings, "handle");
+        assert_eq!(handle.declared_type, None);
+        assert_eq!(handle.inferred_type.as_deref(), Some("Server::spawn()"));
+        assert_eq!(
+            binding(&bindings, "config").inferred_type.as_deref(),
+            Some("Config")
+        );
+    }
+
+    #[test]
+    fn rust_type_naming_an_enclosing_type_parameter_is_not_recorded() {
+        let bindings = rust_bindings(
+            "pub fn parse<Token: Parse>(token: Token, raw: &Raw) {\n    let copy: Token = token;\n}\n\nimpl<Item> Queue<Item> {\n    pub fn push(&mut self, item: Item) {}\n}\n",
+        );
+        assert_eq!(binding(&bindings, "token").declared_type, None);
+        assert_eq!(binding(&bindings, "copy").declared_type, None);
+        assert_eq!(binding(&bindings, "item").declared_type, None);
+        assert_eq!(
+            binding(&bindings, "raw").declared_type.as_deref(),
+            Some("Raw")
+        );
     }
 }
 

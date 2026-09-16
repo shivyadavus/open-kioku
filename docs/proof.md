@@ -44,8 +44,8 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | --- | ---: |
 | Mode | `full` |
 | Analysis semantics | `Compatible` |
-| Stored semantics fingerprint | `5202b4492143f6f0f0783b6253c38bafd7dfe2f8361d6c6d0f5cac9cb82b89fe` |
-| Current semantics fingerprint | `5202b4492143f6f0f0783b6253c38bafd7dfe2f8361d6c6d0f5cac9cb82b89fe` |
+| Stored semantics fingerprint | `bae3d079094ab15c45c150bc63a9c93f6bb38408baa2c34fc906eb69ee3b8f16` |
+| Current semantics fingerprint | `bae3d079094ab15c45c150bc63a9c93f6bb38408baa2c34fc906eb69ee3b8f16` |
 | Graph rebuild required | `false` |
 | Files | 5 |
 | Symbols | 8 |
@@ -53,23 +53,23 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | Skipped paths | 0 |
 | Coverage | 3 of 3 programming-language files indexed (100.0%); 6 of 6 recognised files indexed (100.0%) overall |
 | Tests | 2 |
-| Imports | 4 |
+| Imports | 5 |
 | SCIP indexes imported | 0 |
 | SCIP exact references | 0 |
-| Static analysis facts | 34 |
+| Static analysis facts | 35 |
 
-Indexed at `2026-09-15 20:08:03.172604 UTC`.
+Indexed at `2026-09-16 01:02:58.775180 UTC`.
 
 Build systems: `cargo`.
 
 Local signal notes:
 - build systems detected: cargo
-- language static analysis facts detected: 34
-- import resolver facts detected: 3
+- language static analysis facts detected: 35
+- import resolver facts detected: 4
 - symbol registry facts detected: 24
 - complexity/similarity relationship facts detected: 7
 
-Quality notes (190): scip: 1, symbol_registry_caveat: 138, symbol_registry_unresolved: 51
+Quality notes (196): scip: 1, symbol_registry_caveat: 138, symbol_registry_unresolved: 57
 
 - [scip] SCIP disabled; symbol references use tree-sitter/import heuristics
 - [symbol_registry_caveat] symbol registry caveat for `10000` via unresolved: no registry candidate matched
@@ -171,7 +171,7 @@ Quality notes (190): scip: 1, symbol_registry_caveat: 138, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `proven` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `provider` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `quality` via unresolved: no registry candidate matched
-- 90 additional quality notes omitted; use `ok status --markdown --full` or `ok status --json --full` for every note.
+- 96 additional quality notes omitted; use `ok status --markdown --full` or `ok status --json --full` for every note.
 
 ## Readiness Checks
 
@@ -179,12 +179,12 @@ Quality notes (190): scip: 1, symbol_registry_caveat: 138, symbol_registry_unres
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
-| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-15 20:08:03.172604 UTC |
+| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-16 01:02:58.775180 UTC |
 | `pass` | `graph` | relationship graph present |
-| `pass` | `analysis-semantics` | compatible; fingerprint 5202b4492143f6f0f0783b6253c38bafd7dfe2f8361d6c6d0f5cac9cb82b89fe |
+| `pass` | `analysis-semantics` | compatible; fingerprint bae3d079094ab15c45c150bc63a9c93f6bb38408baa2c34fc906eb69ee3b8f16 |
 | `pass` | `generations` | legacy layout (adopts the generation layout on the next `ok index`) |
 | `pass` | `semantic-lifecycle` | semantic search is disabled in ok.toml (explicit local opt-in) |
-| `warn` | `quality` | SCIP exact references unavailable; 2 tests, 4 imports indexed |
+| `warn` | `quality` | SCIP exact references unavailable; 2 tests, 5 imports indexed |
 | `pass` | `coverage` | 3 of 3 programming-language files indexed (100.0%); 6 of 6 recognised files indexed (100.0%) overall |
 | `pass` | `config` | loaded /private/tmp/open-kioku-proof/ok.toml |
 | `pass` | `grammars` | parsers available for Rust |
@@ -243,8 +243,8 @@ target/debug/ok setup audit /tmp/open-kioku-proof --markdown
 | --- | --- | --- | --- |
 | `pass` | `build` | detected cargo | None |
 | `pass` | `tests` | 2 indexed test target(s) | None |
-| `pass` | `imports` | 4 indexed import edge(s) | None |
-| `pass` | `static` | 34 language-specific static analysis fact(s) | None |
+| `pass` | `imports` | 5 indexed import edge(s) | None |
+| `pass` | `static` | 35 language-specific static analysis fact(s) | None |
 | `warn` | `git-history` | 0 git co-change fact(s) from local history | Keep repository history available and enable `[history].enabled = true`, then rerun `ok index .`. |
 | `pass` | `validation` | indexed validation candidates available | None |
 

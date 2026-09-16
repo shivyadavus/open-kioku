@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const ANALYSIS_SEMANTICS_DESCRIPTOR_VERSION: u32 = 1;
 pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v1";
 pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v1";
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v2";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 pub const GRAPH_EMISSION_SEMANTICS_VERSION: &str = "ri3-graph-emission-v1";
 pub const EXACT_INDEX_INGESTION_SEMANTICS_VERSION: &str = "exact-occurrence-v1";
@@ -14,7 +14,9 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// v2: test targets are callables with a test annotation in the attribute stack above them,
 /// not every symbol of a file that mentions `#[test]`; indexes built with v1 persisted wrong
 /// targets and must be rebuilt rather than partially refreshed.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v2";
+/// v3: a Rust `use` declaration emits one import site per imported path, and `mod` items are
+/// recorded as module declarations; v2 indexes lack both.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v3";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

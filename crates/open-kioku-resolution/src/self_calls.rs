@@ -12,7 +12,7 @@ pub(crate) fn resolve_self_member_outcome(
     };
 
     if let Some(receiver_member) = self_receiver_member(call) {
-        let mut type_names = BTreeSet::new();
+        let mut field_types = BTreeSet::new();
         for field_id in
             crate::typed_calls::find_members_by_name(ctx, &parent_type_id, receiver_member)
         {
@@ -23,30 +23,31 @@ pub(crate) fn resolve_self_member_outcome(
             {
                 let signature = signature.trim();
                 if !signature.is_empty() {
-                    type_names.insert(signature.to_string());
+                    field_types.insert(signature.to_string());
                 }
             }
         }
-        if let Some(binding) =
-            ctx.bindings
-                .resolve_before(&call.scope_id, receiver_member, &call.range, ctx.scopes)
-        {
-            if let Some(type_name) = binding
-                .declared_type
-                .as_deref()
-                .or(binding.inferred_type.as_deref())
-            {
-                let type_name = type_name.trim();
-                if !type_name.is_empty() {
-                    type_names.insert(type_name.to_string());
-                }
-            }
-        }
-        if !type_names.is_empty() {
+        if !field_types.is_empty() {
             return crate::typed_calls::resolve_type_names_member_outcome(
                 call,
                 ctx,
-                &type_names.into_iter().collect::<Vec<_>>(),
+                &field_types.into_iter().collect::<Vec<_>>(),
+            );
+        }
+        // A local binding that shares the field's name is not the field. Its type still yields
+        // candidates, but not the receiver-type proof that would make them structural truth.
+        if let Some((type_name, _)) = ctx
+            .bindings
+            .resolve_before(&call.scope_id, receiver_member, &call.range, ctx.scopes)
+            .and_then(|binding| {
+                crate::typed_calls::binding_receiver_type(ctx, &call.scope_id, binding)
+            })
+        {
+            return crate::typed_calls::resolve_type_names_member_outcome_with(
+                call,
+                ctx,
+                &[type_name],
+                false,
             );
         }
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
