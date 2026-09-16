@@ -1056,6 +1056,172 @@ reason = "domain cannot import api"
 }
 
 #[test]
+fn verify_git_checks_both_sides_of_a_rename() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join("src/secrets")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn load_config() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    let keys = "pub fn signing_key() -> &'static str {\n    \"fixture\"\n}\n\npub fn verifying_key() -> &'static str {\n    \"fixture-public\"\n}\n\npub fn key_id() -> u32 {\n    7\n}\n";
+    fs::write(repo.join("src/secrets/keys.rs"), keys).unwrap();
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["config", "user.email", "cli@example.com"]);
+    git(&repo, &["config", "user.name", "CLI Test"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    // Verification must pair both sides of the rename without relying on this setting, and
+    // without local path prefixes turning one side into two paths or forced colour hiding them.
+    git(&repo, &["config", "diff.renames", "false"]);
+    git(&repo, &["config", "diff.mnemonicPrefix", "true"]);
+    git(&repo, &["config", "diff.srcPrefix", "old/"]);
+    git(&repo, &["config", "diff.dstPrefix", "new/"]);
+    git(&repo, &["config", "color.diff", "always"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "initial"]);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+
+    let plan_json = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("plan")
+            .arg("signing key")
+            .arg("--limit")
+            .arg("5");
+        command
+    });
+    let mut plan: serde_json::Value = serde_json::from_str(&plan_json).unwrap();
+    let boundary = &mut plan["recommended_change_boundary"];
+    boundary["allowed_files"] = serde_json::json!(["src/lib.rs", "src/keys.rs"]);
+    boundary["caution_files"] = serde_json::json!([]);
+    boundary["caution_rules"] = serde_json::json!([]);
+    boundary["forbidden_files"] = serde_json::json!([]);
+    boundary["forbidden_rules"] =
+        serde_json::json!([{"pattern": "src/secrets/**", "reason": "secrets stay in place"}]);
+    let plan_path = temp.path().join("plan.json");
+    fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
+
+    git(&repo, &["mv", "src/secrets/keys.rs", "src/keys.rs"]);
+    // An edit alongside the move makes git write `---`/`+++` lines, which carry the prefixes.
+    fs::write(repo.join("src/keys.rs"), keys.replace("    7\n", "    8\n")).unwrap();
+
+    let assert_both_sides_checked = |report: &serde_json::Value| {
+        assert_eq!(report["verdict"], "fail", "{report}");
+        assert_eq!(
+            report["previous_paths"],
+            serde_json::json!([{
+                "path": "src/keys.rs",
+                "previous_path": "src/secrets/keys.rs",
+                "kind": "rename"
+            }]),
+            "{report}"
+        );
+        assert_eq!(
+            report["changed_files"],
+            serde_json::json!(["src/keys.rs", "src/secrets/keys.rs"]),
+            "{report}"
+        );
+        let violation = report["boundary_violations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| {
+                finding["kind"] == "forbidden_boundary" && finding["path"] == "src/secrets/keys.rs"
+            })
+            .unwrap_or_else(|| {
+                panic!("the previous path is not held to the forbidden rule: {report}")
+            });
+        assert!(
+            violation["reason"]
+                .as_str()
+                .unwrap()
+                .contains("renamed to `src/keys.rs`"),
+            "{violation}"
+        );
+    };
+
+    let (stdout, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("verify")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--git");
+        command
+    });
+    assert!(stderr.contains("change verification failed"), "{stderr}");
+    assert_both_sides_checked(&serde_json::from_str(&stdout).unwrap());
+
+    let mcp_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "tools/call",
+        "params": {
+            "name": "verify_change",
+            "arguments": {"plan": plan, "since_plan": "HEAD"}
+        }
+    })
+    .to_string();
+    let mcp_verify = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).arg("mcp").arg("serve");
+            command
+        },
+        &(mcp_request + "\n"),
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_verify.trim()).unwrap();
+    assert_both_sides_checked(&response["result"]["structuredContent"]);
+
+    let impact = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("impact")
+            .arg("--since")
+            .arg("HEAD");
+        command
+    });
+    let impact: serde_json::Value = serde_json::from_str(&impact).unwrap();
+    assert_eq!(
+        impact["changed_files"][0]["old_path"], "src/secrets/keys.rs",
+        "{impact}"
+    );
+    assert_eq!(
+        impact["changed_files"][0]["new_path"], "src/keys.rs",
+        "{impact}"
+    );
+    assert_eq!(
+        impact["impact_reports"].as_array().unwrap().len(),
+        2,
+        "a rename is analysed at its new and its previous path: {impact}"
+    );
+}
+
+#[test]
 fn architecture_policy_bench_scores_checked_in_corpus() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fixture = root.join("benchmarks/architecture-policy-fixture");

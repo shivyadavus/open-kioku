@@ -93,9 +93,7 @@ fn handle_contract_command(
             }
             let unified_diff = if let Some(since) = since_plan.as_deref() {
                 for change in changed_ranges_since(repo, since)? {
-                    if let Some(path) = change.new_path.or(change.old_path) {
-                        changed.push(path);
-                    }
+                    changed.extend(change.changed_paths());
                 }
                 verify_diff_since(repo, diff.as_deref(), since)?
             } else {
@@ -622,10 +620,23 @@ fn verify_diff_input(
         diffs.push(fs::read_to_string(path)?);
     }
     if include_git_diff {
+        // Rename detection, fixed path prefixes and uncoloured output are requested rather than
+        // left to local git config, so the report pairs both sides of a rename whatever that
+        // config says.
         let output = ProcessCommand::new("git")
             .arg("-C")
             .arg(repo)
-            .args(["diff", "--unified=0", "--no-ext-diff", "--relative", "HEAD"])
+            .args([
+                "diff",
+                "--unified=0",
+                "--no-ext-diff",
+                "--no-color",
+                "--find-renames",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "--relative",
+                "HEAD",
+            ])
             .output()?;
         if !output.status.success() {
             anyhow::bail!(
@@ -660,6 +671,10 @@ fn verify_diff_since(
             "diff",
             "--unified=0",
             "--no-ext-diff",
+            "--no-color",
+            "--find-renames",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "--relative",
             "--end-of-options",
         ])
@@ -705,12 +720,16 @@ fn task_with_changed_ranges(repo: &Path, task: &str, since: &str) -> anyhow::Res
 }
 
 fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
-    let path = change
-        .new_path
-        .as_ref()
-        .or(change.old_path.as_ref())
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<unknown>".into());
+    let path = match (&change.old_path, &change.new_path) {
+        (Some(old), Some(new)) if old != new => {
+            format!("{} (from {})", new.display(), old.display())
+        }
+        (old, new) => new
+            .as_ref()
+            .or(old.as_ref())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<unknown>".into()),
+    };
     let ranges = change
         .hunks
         .iter()
@@ -740,11 +759,31 @@ fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
     }
 }
 
+fn previous_path_lines(previous_paths: &[open_kioku_patch::PreviousPath]) -> Vec<String> {
+    previous_paths
+        .iter()
+        .map(|previous| {
+            let relation = match previous.kind {
+                open_kioku_patch::PreviousPathKind::Rename => "renamed from",
+                open_kioku_patch::PreviousPathKind::Copy => "copied from",
+            };
+            format!(
+                "{} {relation} {}",
+                previous.path.display(),
+                previous.previous_path.display()
+            )
+        })
+        .collect()
+}
+
 fn print_verify_report(report: &ChangeVerificationReport) {
     println!("Verification: {:?}", report.verdict);
     println!("Changed files: {}", report.changed_files.len());
     for path in &report.changed_files {
         println!("  - {}", path.display());
+    }
+    for line in previous_path_lines(&report.previous_paths) {
+        println!("  - {line}");
     }
     if !report.changed_symbols.is_empty() {
         println!("Changed symbols:");
