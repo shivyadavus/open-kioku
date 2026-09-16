@@ -73,6 +73,7 @@ impl InheritanceIndex {
                     &edge.parent_name,
                     symbols,
                     repository,
+                    None,
                 );
                 edge.parent_id = match candidates.as_slice() {
                     [candidate] => Some(candidate.target.clone()),

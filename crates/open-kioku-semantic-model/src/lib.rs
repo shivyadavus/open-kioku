@@ -78,6 +78,23 @@ pub enum ImportOrigin {
     Unknown,
 }
 
+/// Local name under which the import registry records a glob import (`use a::*;`), so name lookup
+/// can tell that a glob in scope may supply a name.
+pub const GLOB_IMPORT_LOCAL_NAME: &str = "*";
+
+/// The rule that set an import binding's `target_file` or `target_symbol`, so a resolver can name
+/// the evidence a relationship through the binding rests on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ImportBindingRule {
+    /// Unresolved, or resolved from the module-key map and a name match in the target file.
+    #[default]
+    ModuleKey,
+    /// A Rust `use` path followed through declared file modules from the importer's crate root.
+    RustModulePath,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ImportBinding {
     pub file_id: FileId,
@@ -92,6 +109,8 @@ pub struct ImportBinding {
     pub is_type_only: bool,
     pub is_glob: bool,
     pub evidence: Vec<EvidenceId>,
+    #[serde(default)]
+    pub rule: ImportBindingRule,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]

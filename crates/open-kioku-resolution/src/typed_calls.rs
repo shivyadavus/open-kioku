@@ -1,9 +1,9 @@
-use crate::context::ResolutionContext;
+use crate::context::{ResolutionContext, ScopedImport};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
 use open_kioku_core::{
-    CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, Language, LineRange,
-    RelationshipProof, RelationshipProofKind, ScopeId, SymbolId, SymbolKind,
+    Binding, CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, Language,
+    LineRange, RelationshipProof, RelationshipProofKind, ScopeId, SymbolId, SymbolKind,
 };
 use std::collections::BTreeMap;
 
@@ -14,6 +14,8 @@ pub(crate) fn resolve_typed_receiver_outcome(
     let Some(receiver) = call.receiver.as_deref() else {
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
     };
+    // `self.field` is looked up by a local binding of the field's name, which is not the field.
+    let through_self_field = receiver.starts_with("self.");
     let lookup_name = receiver
         .trim_start_matches("this.")
         .trim_start_matches("self.")
@@ -26,15 +28,100 @@ pub(crate) fn resolve_typed_receiver_outcome(
         return imported_receiver_outcome(call, ctx, lookup_name);
     };
 
-    let Some(type_name) = binding
-        .declared_type
-        .as_deref()
-        .or(binding.inferred_type.as_deref())
-    else {
+    let Some((type_name, proven)) = binding_receiver_type(ctx, &call.scope_id, binding) else {
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
     };
 
-    resolve_named_type_member_outcome(call, ctx, type_name)
+    resolve_type_names_member_outcome_with(call, ctx, &[type_name], proven && !through_self_field)
+}
+
+/// The receiver type a binding gives, and whether the index proves it. A written type does; an
+/// inferred one does when `inferred_receiver_type` can prove it.
+pub(crate) fn binding_receiver_type(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    binding: &Binding,
+) -> Option<(String, bool)> {
+    if let Some(declared) = binding
+        .declared_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|declared| !declared.is_empty())
+    {
+        return Some((declared.to_string(), true));
+    }
+    let inferred = binding
+        .inferred_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|inferred| !inferred.is_empty())?;
+    Some(inferred_receiver_type(ctx, scope_id, inferred))
+}
+
+/// The type an initializer gives its binding, and whether the index proves it.
+///
+/// A constructor form the parser recognizes (`Foo { .. }`, `new Foo()`, the `self` parameter) is
+/// proof. A Rust path call, recorded as `Foo::bar()`, is proof of `Foo` only when every `bar` on
+/// every `Foo` candidate returns `Self` or `Foo` by its indexed signature: `Server::spawn()`
+/// returning a `ServerHandle` must not type its binding as `Server`.
+fn inferred_receiver_type(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    inferred: &str,
+) -> (String, bool) {
+    let Some(call_path) = inferred.strip_suffix("()") else {
+        return (inferred.to_string(), true);
+    };
+    let Some((owner, constructor)) = call_path.rsplit_once("::") else {
+        return (call_path.to_string(), false);
+    };
+    let owner_name = owner.rsplit("::").next().unwrap_or(owner);
+    let owner_types = collect_type_candidates(ctx, scope_id, owner);
+    let constructors = owner_types
+        .iter()
+        .flat_map(|type_id| find_members_by_name(ctx, type_id, constructor))
+        .collect::<Vec<_>>();
+    // `#[derive(Default)]` adds no indexed member, but `Default::default` returns `Self` by the
+    // trait's definition. It proves a struct, enum or alias; a module path such as
+    // `config::default()` is a function call, not a constructor.
+    if constructors.is_empty() && constructor == "default" {
+        let proven = !owner_types.is_empty()
+            && owner_types.iter().all(|type_id| {
+                ctx.symbols
+                    .get(type_id)
+                    .is_some_and(|symbol| symbol.kind == SymbolKind::Class)
+            });
+        return (owner.to_string(), proven);
+    }
+    let proven = !constructors.is_empty()
+        && constructors.iter().all(|id| {
+            ctx.symbols
+                .get(id)
+                .and_then(|symbol| symbol.signature.as_deref())
+                .and_then(rust_signature_return_type)
+                .is_some_and(|returns| returns == "Self" || returns == owner_name)
+        });
+    (owner.to_string(), proven)
+}
+
+/// The return type in a Rust function signature as the parser records it, `fn(<params>) <type>`.
+fn rust_signature_return_type(signature: &str) -> Option<&str> {
+    let after_fn = signature.strip_prefix("fn")?;
+    let mut depth = 0usize;
+    for (index, ch) in after_fn.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    let returns = after_fn[index + 1..].trim();
+                    return (!returns.is_empty()).then_some(returns);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 pub(crate) fn resolve_static_member_outcome(
@@ -231,6 +318,18 @@ pub(crate) fn resolve_type_names_member_outcome(
     ctx: &ResolutionContext<'_>,
     type_names: &[String],
 ) -> ResolutionOutcome {
+    resolve_type_names_member_outcome_with(call, ctx, type_names, true)
+}
+
+/// Member calls on a receiver of one of `type_names`. `receiver_type_proven` is false when the
+/// receiver's type is a candidate the index cannot prove; its members are then reported without
+/// the receiver-type proof, so they cannot become structural truth.
+pub(crate) fn resolve_type_names_member_outcome_with(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    type_names: &[String],
+    receiver_type_proven: bool,
+) -> ResolutionOutcome {
     let mut type_candidates = Vec::new();
     for type_name in type_names {
         type_candidates.extend(collect_type_candidates(ctx, &call.scope_id, type_name));
@@ -246,7 +345,11 @@ pub(crate) fn resolve_type_names_member_outcome(
     }
     normalize_symbol_ids(&mut direct_targets);
     if !direct_targets.is_empty() {
-        return evaluate_direct_member_targets(call, ctx, direct_targets);
+        return if receiver_type_proven {
+            evaluate_direct_member_targets(call, ctx, direct_targets)
+        } else {
+            evaluate_unproven_member_targets(call, ctx, direct_targets)
+        };
     }
 
     let mut inherited_targets = Vec::new();
@@ -267,10 +370,12 @@ pub(crate) fn imported_receiver_outcome(
     receiver: &str,
 ) -> ResolutionOutcome {
     let mut targets = Vec::new();
-    let import_bindings =
-        ctx.repository
-            .imports
-            .lookup(ctx.file_id, Some(&call.scope_id), receiver);
+    let import_bindings = match ctx.scoped_import(&call.scope_id, receiver, |binding| {
+        binding.target_file.is_some() || binding.resolved_module.is_some()
+    }) {
+        ScopedImport::Resolved(bindings) => bindings,
+        ScopedImport::NotImported | ScopedImport::Unresolved => Vec::new(),
+    };
 
     for binding in import_bindings {
         if let Some(module_id) = &binding.resolved_module {
@@ -395,6 +500,42 @@ pub(crate) fn evaluate_direct_member_targets(
     evaluate_candidates(&GraphEdgeType::Calls, candidates)
 }
 
+/// Members of a receiver type the index does not prove. They are kept as candidates with the
+/// containing-type proof only; without the receiver-type proof they stay below authoritative.
+fn evaluate_unproven_member_targets(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    targets: Vec<SymbolId>,
+) -> ResolutionOutcome {
+    let candidate_count = targets.len();
+    let ambiguity = ambiguity_strings(&targets);
+    let candidates = targets
+        .into_iter()
+        .map(|target| {
+            let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::High);
+            candidate.evidence.push(ResolutionEvidence {
+                kind: ResolutionEvidenceKind::TypedBinding,
+                source_type: EvidenceSourceType::TreeSitter,
+                file_range: call_file_range(call, ctx),
+                symbol_id: Some(target.clone()),
+                message: "method candidate from a receiver type the index does not prove".into(),
+            });
+            candidate.proofs.push(call_site_proof(call, ctx, &target));
+            candidate.proofs.push(proof(
+                RelationshipProofKind::ContainingType,
+                "direct_member_of_unproven_receiver_type",
+                call,
+                ctx,
+                &target,
+                candidate_count,
+                &ambiguity,
+            ));
+            candidate
+        })
+        .collect();
+    evaluate_candidates(&GraphEdgeType::Calls, candidates)
+}
+
 pub(crate) fn evaluate_inherited_targets(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
@@ -435,7 +576,25 @@ pub(crate) fn collect_type_candidates(
     scope_id: &ScopeId,
     type_name: &str,
 ) -> Vec<SymbolId> {
-    let mut candidates = BTreeMap::<String, SymbolId>::new();
+    collect_type_candidate_origins(ctx, scope_id, type_name)
+        .into_iter()
+        .map(|(target, _)| target)
+        .collect()
+}
+
+/// Type candidates for `type_name` at `scope_id`, each with whether an import binding reached it.
+pub(crate) fn collect_type_candidate_origins(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    type_name: &str,
+) -> Vec<(SymbolId, bool)> {
+    let mut candidates = BTreeMap::<String, (SymbolId, bool)>::new();
+    let mut add = |target: &SymbolId, via_import: bool| {
+        candidates
+            .entry(target.0.clone())
+            .or_insert_with(|| (target.clone(), false))
+            .1 |= via_import;
+    };
 
     if let Some(file_symbols) = ctx.symbols.by_file.get(ctx.file_id) {
         for id in file_symbols {
@@ -445,36 +604,37 @@ pub(crate) fn collect_type_candidates(
                 .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
                 .unwrap_or(false)
             {
-                candidates.insert(id.0.clone(), id.clone());
+                add(id, false);
             }
         }
     }
 
-    for binding in ctx
-        .repository
-        .imports
-        .lookup(ctx.file_id, Some(scope_id), type_name)
-    {
-        if let Some(target) = &binding.target_symbol {
-            if ctx
-                .symbols
-                .get(target)
-                .map(|symbol| is_type_symbol(&symbol.kind))
-                .unwrap_or(false)
-            {
-                candidates.insert(target.0.clone(), target.clone());
+    // As for bare calls, the nearest import of the name in scope decides.
+    if let ScopedImport::Resolved(bindings) = ctx.scoped_import(scope_id, type_name, |binding| {
+        binding.target_symbol.is_some() || binding.target_file.is_some()
+    }) {
+        for binding in bindings {
+            if let Some(target) = &binding.target_symbol {
+                if ctx
+                    .symbols
+                    .get(target)
+                    .map(|symbol| is_type_symbol(&symbol.kind))
+                    .unwrap_or(false)
+                {
+                    add(target, true);
+                }
             }
-        }
-        if let Some(target_file) = &binding.target_file {
-            if let Some(file_symbols) = ctx.symbols.by_file.get(target_file) {
-                for id in file_symbols {
-                    if ctx
-                        .symbols
-                        .get(id)
-                        .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
-                        .unwrap_or(false)
-                    {
-                        candidates.insert(id.0.clone(), id.clone());
+            if let Some(target_file) = &binding.target_file {
+                if let Some(file_symbols) = ctx.symbols.by_file.get(target_file) {
+                    for id in file_symbols {
+                        if ctx
+                            .symbols
+                            .get(id)
+                            .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
+                            .unwrap_or(false)
+                        {
+                            add(id, true);
+                        }
                     }
                 }
             }
@@ -489,7 +649,7 @@ pub(crate) fn collect_type_candidates(
                 .map(|symbol| is_type_symbol(&symbol.kind))
                 .unwrap_or(false)
             {
-                candidates.insert(id.0.clone(), id.clone());
+                add(id, false);
             }
         }
     }
@@ -796,6 +956,151 @@ mod tests {
                 "symbol:method:a.run".to_string(),
                 "symbol:method:b.run".to_string()
             ]
+        );
+    }
+
+    fn with_receiver_binding<T>(
+        symbols: Vec<Symbol>,
+        inferred_type: &str,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
+        let file_id = FileId::new("file:src/lib.rs");
+        let scopes = ScopeIndex::build(vec![Scope {
+            id: ScopeId::new("scope:file"),
+            file_id: file_id.clone(),
+            parent_id: None,
+            owner_symbol_id: None,
+            kind: ScopeKind::File,
+            range: SourceRange {
+                start_line: 1,
+                start_column: 1,
+                end_line: 100,
+                end_column: 1,
+            },
+        }]);
+        let bindings = BindingIndex::build(vec![Binding {
+            id: BindingId::new("binding:svc"),
+            file_id: file_id.clone(),
+            scope_id: ScopeId::new("scope:file"),
+            name: "svc".into(),
+            declared_type: None,
+            inferred_type: Some(inferred_type.into()),
+            range: SourceRange {
+                start_line: 10,
+                start_column: 1,
+                end_line: 10,
+                end_column: 20,
+            },
+        }]);
+        let symbol_index = SymbolIndex::build(symbols);
+        let inheritance = InheritanceIndex::build(Vec::new());
+        let repository = open_kioku_semantic_model::SemanticRepository::new();
+        let semantics = open_kioku_languages::semantics_for(&Language::Rust).unwrap();
+        let context = ResolutionContext::new(
+            &file_id,
+            std::path::Path::new("src/lib.rs"),
+            None,
+            Language::Rust,
+            &repository,
+            &symbol_index,
+            &scopes,
+            &bindings,
+            &inheritance,
+            semantics,
+        );
+        test(&context)
+    }
+
+    #[test]
+    fn inferred_path_call_receiver_is_proven_only_by_the_constructor_signature() {
+        // `let svc = Service::open(..);` then `svc.run()`.
+        let symbols = |signature: &str| {
+            vec![
+                type_symbol("symbol:type:Service", "Service"),
+                method_symbol("symbol:method:Service.run", "symbol:type:Service"),
+                Symbol {
+                    name: "open".into(),
+                    signature: Some(signature.into()),
+                    ..method_symbol("symbol:method:Service.open", "symbol:type:Service")
+                },
+            ]
+        };
+        for (signature, proven) in [
+            ("fn() Self", true),
+            ("fn(port: u16) Service", true),
+            ("fn() ServiceHandle", false),
+            ("fn() Option<Self>", false),
+        ] {
+            with_receiver_binding(symbols(signature), "Service::open()", |ctx| {
+                match resolve_typed_receiver_outcome(&call(), ctx) {
+                    ResolutionOutcome::Proven { candidate } => {
+                        assert!(proven, "`{signature}` must not prove the receiver type");
+                        assert_eq!(candidate.target_symbol_id.0, "symbol:method:Service.run");
+                    }
+                    ResolutionOutcome::Unresolved { candidates, .. } => {
+                        assert!(!proven, "`{signature}` proves the receiver type");
+                        assert_eq!(candidates.len(), 1, "the member stays a candidate");
+                    }
+                    other => panic!("`{signature}`: unexpected outcome {other:?}"),
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn self_field_receiver_matched_through_a_local_binding_is_not_proven() {
+        // `self.svc.run()` where only a local `svc: Service` binding exists.
+        with_context(
+            vec![
+                type_symbol("symbol:type:Service", "Service"),
+                method_symbol("symbol:method:Service.run", "symbol:type:Service"),
+            ],
+            |ctx| {
+                let call = CallSite {
+                    receiver: Some("self.svc".into()),
+                    ..call()
+                };
+                match resolve_typed_receiver_outcome(&call, ctx) {
+                    ResolutionOutcome::Unresolved { candidates, .. } => {
+                        assert_eq!(candidates.len(), 1)
+                    }
+                    other => panic!("expected an unproven candidate, got {other:?}"),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn derived_default_proves_a_struct_receiver_but_not_a_module_path() {
+        // `let svc = Service::default();` with `#[derive(Default)]`: no indexed `default` member.
+        with_receiver_binding(
+            vec![
+                type_symbol("symbol:type:Service", "Service"),
+                method_symbol("symbol:method:Service.run", "symbol:type:Service"),
+            ],
+            "Service::default()",
+            |ctx| match resolve_typed_receiver_outcome(&call(), ctx) {
+                ResolutionOutcome::Proven { candidate } => {
+                    assert_eq!(candidate.target_symbol_id.0, "symbol:method:Service.run")
+                }
+                other => panic!("expected a proven call on a derived default, got {other:?}"),
+            },
+        );
+
+        // `let svc = config::default();` names a module function, not a constructor.
+        with_receiver_binding(
+            vec![
+                Symbol {
+                    kind: SymbolKind::Module,
+                    ..type_symbol("symbol:module:config", "config")
+                },
+                method_symbol("symbol:method:config.run", "symbol:module:config"),
+            ],
+            "config::default()",
+            |ctx| match resolve_typed_receiver_outcome(&call(), ctx) {
+                ResolutionOutcome::Unresolved { candidates, .. } => assert_eq!(candidates.len(), 1),
+                other => panic!("expected an unproven candidate, got {other:?}"),
+            },
         );
     }
 }
