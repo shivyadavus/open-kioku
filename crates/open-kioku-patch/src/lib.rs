@@ -324,7 +324,13 @@ impl<'a> ChangeVerifier<'a> {
             symbols: changed_symbols,
             regions_without_symbol: changed_regions_without_symbol,
             granularity_warnings,
-        } = changed_symbols(self.store, &changed_files, &changed_regions, &scoped_paths)?;
+        } = changed_symbols(
+            self.store,
+            &changed_files,
+            &changed_regions,
+            &scoped_paths,
+            input.unified_diff.as_deref(),
+        )?;
         let recommended_tests = recommended_tests(self.store, &changed_files)?;
         let missing_tests = missing_tests(plan, &recommended_tests);
         let changed_impact = changed_impact(self.store, self.search_index, plan, &changed_files)?;
@@ -3324,14 +3330,26 @@ struct ChangedSymbols {
 }
 
 /// Symbols whose indexed ranges overlap a changed region, innermost per region so a module
-/// or class symbol cannot stand in for the whole file. A path with no regions falls back to
-/// every symbol in the file and says so; a region no symbol covers is reported, not dropped.
+/// or class symbol cannot stand in for the whole file, plus any symbol the region covers
+/// entirely, since a hunk that replaces a whole `impl` changed the `impl` itself. A path with
+/// no regions falls back to every symbol in the file and says why; a region no symbol covers
+/// is reported, not dropped.
 fn changed_symbols(
     store: &dyn MetadataStore,
     changed_files: &[PathBuf],
     changed_regions: &BTreeMap<PathBuf, Vec<ChangedRegion>>,
     scoped_paths: &BTreeSet<PathBuf>,
+    unified_diff: Option<&str>,
 ) -> Result<ChangedSymbols> {
+    // A path the supplied diff names but states no hunk for, once the scoped sides of a text
+    // rename are skipped below: a binary or mode-only entry. That is a different caveat from a
+    // path no diff described at all.
+    let diff_paths = unified_diff
+        .map(changed_files_from_unified_diff)
+        .unwrap_or_default()
+        .iter()
+        .map(|path| normalize_path(path))
+        .collect::<BTreeSet<_>>();
     let mut symbols = BTreeSet::new();
     let mut regions_without_symbol = Vec::new();
     let mut granularity_warnings = Vec::new();
@@ -3352,10 +3370,12 @@ fn changed_symbols(
         let ranged = file_symbols.iter().any(|symbol| symbol.range.is_some());
         if regions.is_empty() || !ranged {
             if !file_symbols.is_empty() {
-                let reason = if regions.is_empty() {
-                    "no diff was supplied for this path, so changed_symbols lists every symbol in the file"
-                } else {
+                let reason = if !regions.is_empty() {
                     "indexed symbols for this path carry no line ranges, so changed_symbols lists every symbol in the file"
+                } else if diff_paths.contains(&normalize_path(path)) {
+                    "the supplied diff has no hunk ranges for this path (a binary or mode-only entry), so changed_symbols lists every symbol in the file"
+                } else {
+                    "no diff was supplied for this path, so changed_symbols lists every symbol in the file"
                 };
                 granularity_warnings.push(VerificationFinding {
                     path: Some(path.clone()),
@@ -3376,19 +3396,20 @@ fn changed_symbols(
                 .iter()
                 .filter(|symbol| symbol_overlaps_region(symbol, region))
                 .collect::<Vec<_>>();
-            let innermost = overlapping
+            let attributed = overlapping
                 .iter()
                 .filter(|symbol| {
-                    !overlapping
-                        .iter()
-                        .any(|other| other.id != symbol.id && symbol_contains(symbol, other))
+                    region_covers_symbol(symbol, region)
+                        || !overlapping
+                            .iter()
+                            .any(|other| other.id != symbol.id && symbol_contains(symbol, other))
                 })
                 .map(|symbol| symbol.qualified_name.clone())
                 .collect::<Vec<_>>();
-            if innermost.is_empty() {
+            if attributed.is_empty() {
                 regions_without_symbol.push(region_label(path, region));
             }
-            symbols.extend(innermost);
+            symbols.extend(attributed);
         }
     }
     Ok(ChangedSymbols {
@@ -3396,6 +3417,17 @@ fn changed_symbols(
         regions_without_symbol,
         granularity_warnings,
     })
+}
+
+/// Whether one side of `region` spans every line of `symbol`'s indexed range.
+fn region_covers_symbol(symbol: &Symbol, region: &ChangedRegion) -> bool {
+    let Some(range) = &symbol.range else {
+        return false;
+    };
+    [&region.new, &region.old]
+        .into_iter()
+        .flatten()
+        .any(|side| side.start <= range.start && range.end <= side.end)
 }
 
 fn region_label(path: &Path, region: &ChangedRegion) -> String {
@@ -4749,6 +4781,13 @@ rename to src/menu.rs
             granularity[0].path.as_deref(),
             Some(Path::new("src/handler.rs"))
         );
+        assert!(
+            granularity[0]
+                .reason
+                .starts_with("no diff was supplied for this path"),
+            "{}",
+            granularity[0].reason
+        );
         // The warning states how precisely the change was attributed; it does not move the verdict.
         assert_eq!(report.verdict, with_diff_verdict);
     }
@@ -4823,6 +4862,131 @@ rename to src/menu.rs
         );
     }
 
+    #[test]
+    fn a_hunk_replacing_a_whole_impl_lists_the_impl_beside_its_methods() {
+        let mut store = store_with_handler_symbols();
+        store.symbols.extend([
+            handler_symbol("Cart", SymbolKind::Class, 22, 38),
+            handler_symbol("add", SymbolKind::Method, 24, 28),
+            handler_symbol("remove", SymbolKind::Method, 30, 36),
+        ]);
+        // `-22,17 +22,19`: the whole `impl` (22-38) was replaced; the module around it was not.
+        let whole = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -22,17 +22,19 @@\n-impl Cart {}\n+impl Cart {}\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            whole.changed_symbols,
+            vec![
+                "handler::Cart".to_string(),
+                "handler::add".to_string(),
+                "handler::remove".to_string()
+            ]
+        );
+
+        // An edit inside one method still names only that method.
+        let partial = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -25 +25 @@\n-a\n+b\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert_eq!(partial.changed_symbols, vec!["handler::add".to_string()]);
+    }
+
+    #[test]
+    fn a_binary_or_mode_only_entry_is_not_called_a_missing_diff() {
+        // Neither entry states a hunk, and neither is a side of a text rename, so each falls
+        // back to file granularity: the diff named the path but described no lines of it.
+        for diff in [
+            "diff --git a/src/handler.rs b/src/handler.rs\nold mode 100644\nnew mode 100755\n",
+            "diff --git a/src/handler.rs b/src/handler.rs\nindex 0f1d0e1..9a2b3c4 100644\nBinary files a/src/handler.rs and b/src/handler.rs differ\n",
+        ] {
+            let store = store_with_handler_symbols();
+            let report = verify_handler(
+                &store,
+                VerifyChangeInput {
+                    unified_diff: Some(diff.into()),
+                    ..Default::default()
+                },
+            );
+
+            let reasons = report
+                .warnings
+                .iter()
+                .filter(|warning| {
+                    warning.kind == SYMBOL_GRANULARITY_WARNING
+                        && warning.path.as_deref() == Some(Path::new("src/handler.rs"))
+                })
+                .map(|warning| warning.reason.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(reasons.len(), 1, "{diff}: {:?}", report.warnings);
+            assert!(
+                reasons[0].starts_with("the supplied diff has no hunk ranges for this path"),
+                "{diff}: {}",
+                reasons[0]
+            );
+            assert!(!reasons[0].contains("no diff was supplied"), "{diff}");
+        }
+    }
+
+    #[test]
+    fn a_binary_rename_reports_file_granularity_with_the_diff_supplied_reason() {
+        // Git reports a binary pair without hunks even when its content changed, so a binary
+        // rename is not a side whose changed lines the diff states: it falls back to file
+        // granularity, and the reason is the supplied diff, not a missing one.
+        let store = store_with_handler_symbols();
+        let report = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/old_handler.rs b/src/handler.rs\nsimilarity index 78%\nrename from src/old_handler.rs\nrename to src/handler.rs\nindex 0f1d0e1..9a2b3c4 100644\nBinary files a/src/old_handler.rs and b/src/handler.rs differ\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            report.previous_paths,
+            vec![PreviousPath {
+                path: PathBuf::from("src/handler.rs"),
+                previous_path: PathBuf::from("src/old_handler.rs"),
+                kind: PreviousPathKind::Rename,
+            }]
+        );
+        assert_eq!(
+            report.changed_symbols,
+            vec![
+                "handler::checkout".to_string(),
+                "handler::handler".to_string(),
+                "handler::refund".to_string()
+            ]
+        );
+
+        let reasons = report
+            .warnings
+            .iter()
+            .filter(|warning| {
+                warning.kind == SYMBOL_GRANULARITY_WARNING
+                    && warning.path.as_deref() == Some(Path::new("src/handler.rs"))
+            })
+            .map(|warning| warning.reason.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(reasons.len(), 1, "{:?}", report.warnings);
+        assert!(
+            reasons[0].starts_with("the supplied diff has no hunk ranges for this path"),
+            "{}",
+            reasons[0]
+        );
+    }
     #[test]
     fn an_edit_to_a_low_ranked_lexical_impact_is_outside_the_boundary() {
         let store = RuntimeStore::new().without_runtime();

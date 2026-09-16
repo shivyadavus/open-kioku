@@ -826,6 +826,12 @@ fn print_verify_report(report: &ChangeVerificationReport) {
             println!("  - {symbol}");
         }
     }
+    if !report.changed_regions_without_symbol.is_empty() {
+        println!("Changed regions without a symbol (no indexed symbol range covers these lines):");
+        for region in &report.changed_regions_without_symbol {
+            println!("  - {region}");
+        }
+    }
     if !report.traceability.is_empty() {
         println!("Traceability:");
         for trace in &report.traceability {

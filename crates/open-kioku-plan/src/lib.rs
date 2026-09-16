@@ -1262,6 +1262,15 @@ fn is_docs_or_test_path(path: &str) -> bool {
 /// matching the eight caution files a context pack names.
 const MAX_LEXICAL_CAUTION_FILES: usize = 8;
 
+/// Refs one allowed or caution rule lists from its own path's evidence. A grouped impact entry
+/// carries the evidence lines of up to five chunks of its path, and ten keeps such an entry
+/// whole in the common two-lines-per-chunk case; `evidence_by_section` still lists every ref.
+const MAX_RULE_EVIDENCE_REFS: usize = 10;
+
+/// Refs a rule with no evidence of its own borrows from the plan's boundary list, matching the
+/// fallback `ContractBuilder` uses.
+const MAX_RULE_FALLBACK_EVIDENCE_REFS: usize = 3;
+
 fn change_boundary(
     primary_context: &[SearchResult],
     relevant_symbols: &[Symbol],
@@ -1325,21 +1334,23 @@ fn change_boundary(
     let allowed_files = allowed.into_iter().collect::<Vec<_>>();
     let caution_files = caution.into_iter().collect::<Vec<_>>();
     let allowed_symbols = allowed_symbols_for_boundary(relevant_symbols, &allowed_files);
+    // A rule with no evidence of its own borrows from the plan's capped boundary list, not the
+    // context boundary's uncapped one, so every borrowed ref is in `evidence_by_section.boundary`.
+    let evidence_refs = boundary_evidence_refs(primary_context, &impact.direct_impacts);
     let allowed_rules = boundary_file_rules(
         &allowed_files,
         primary_context,
         &context_boundary.allowed_rules,
         "primary context matched the requested edit intent",
-        &context_boundary.evidence_refs,
+        &evidence_refs,
     );
     let caution_rules = caution_file_rules(
         &caution_files,
         impact,
         &context_boundary.caution_rules,
         "downstream impact candidate should be reviewed before editing",
-        &context_boundary.evidence_refs,
+        &evidence_refs,
     );
-    let evidence_refs = boundary_evidence_refs(primary_context, &impact.direct_impacts);
 
     ChangeBoundary {
         allowed_files,
@@ -1390,17 +1401,17 @@ fn boundary_file_rules(
         .iter()
         .map(|path| {
             if let Some(rule) = upstream_rules.iter().find(|rule| rule.path == *path) {
-                return rule.clone();
+                return capped_upstream_rule(rule);
             }
-            let mut evidence_refs = stable_refs(
-                evidence_results
-                    .iter()
-                    .filter(|result| result.path == *path)
-                    .flat_map(|result| result.derived_evidence_ids()),
+            let (evidence_refs, evidence_refs_omitted) = rule_evidence_refs(
+                stable_refs(
+                    evidence_results
+                        .iter()
+                        .filter(|result| result.path == *path)
+                        .flat_map(|result| result.derived_evidence_ids()),
+                ),
+                fallback_evidence_refs,
             );
-            if evidence_refs.is_empty() {
-                evidence_refs = stable_refs(fallback_evidence_refs.iter().cloned());
-            }
             let symbols = evidence_results
                 .iter()
                 .filter(|result| result.path == *path)
@@ -1413,6 +1424,7 @@ fn boundary_file_rules(
                 path: path.clone(),
                 reason: fallback_reason.into(),
                 evidence_refs,
+                evidence_refs_omitted,
                 symbols,
             }
         })
@@ -1430,7 +1442,7 @@ fn caution_file_rules(
         .iter()
         .map(|path| {
             if let Some(rule) = upstream_rules.iter().find(|rule| rule.path == *path) {
-                return rule.clone();
+                return capped_upstream_rule(rule);
             }
             let impact_results = impact
                 .direct_impacts
@@ -1438,14 +1450,14 @@ fn caution_file_rules(
                 .chain(impact.indirect_impacts.iter())
                 .filter(|result| result.path == *path)
                 .collect::<Vec<_>>();
-            let mut evidence_refs = stable_refs(
-                impact_results
-                    .iter()
-                    .flat_map(|result| result.derived_evidence_ids()),
+            let (evidence_refs, evidence_refs_omitted) = rule_evidence_refs(
+                stable_refs(
+                    impact_results
+                        .iter()
+                        .flat_map(|result| result.derived_evidence_ids()),
+                ),
+                fallback_evidence_refs,
             );
-            if evidence_refs.is_empty() {
-                evidence_refs = stable_refs(fallback_evidence_refs.iter().cloned());
-            }
             // RI3.7: caution wording distinguishes structurally proven dependents from
             // possible (heuristic) ones instead of presenting both with equal certainty.
             let proven = impact
@@ -1474,6 +1486,7 @@ fn caution_file_rules(
                     "impact analysis linked this file to the primary edit candidates".into()
                 },
                 evidence_refs,
+                evidence_refs_omitted,
                 symbols: impact_results
                     .iter()
                     .filter_map(|result| result.symbol.as_ref())
@@ -1484,6 +1497,70 @@ fn caution_file_rules(
             }
         })
         .collect()
+}
+
+/// A rule's own refs under `MAX_RULE_EVIDENCE_REFS`, or, when its path has none, the first refs
+/// of the plan's boundary list under `MAX_RULE_FALLBACK_EVIDENCE_REFS`; with the count the cap
+/// left out, so a shortened list is never mistaken for the whole evidence.
+fn rule_evidence_refs(own: Vec<String>, fallback: &[String]) -> (Vec<String>, usize) {
+    if own.is_empty() {
+        capped_refs(fallback.to_vec(), MAX_RULE_FALLBACK_EVIDENCE_REFS)
+    } else {
+        capped_refs(own, MAX_RULE_EVIDENCE_REFS)
+    }
+}
+
+fn capped_refs(mut refs: Vec<String>, limit: usize) -> (Vec<String>, usize) {
+    // File order, so a capped list keeps the first lines of each path; as text `:10-12` would
+    // sort before `:2-4`.
+    refs.sort_by(|left, right| compare_evidence_refs(left, right));
+    let omitted = refs.len().saturating_sub(limit);
+    refs.truncate(limit);
+    (refs, omitted)
+}
+
+/// The path, start line, end line and evidence-line index of a `search:` ref.
+type SearchRefParts<'a> = (&'a str, u32, u32, u32);
+
+/// Sort key for an evidence ref: its scheme, the parsed `search:` shape when it has one, and
+/// the raw text, so refs of any other shape stay in string order within their scheme.
+type EvidenceRefKey<'a> = (&'a str, Option<SearchRefParts<'a>>, &'a str);
+
+/// Orders refs by scheme, then `search:<path>:<start>-<end>:<index>` refs by path and numeric
+/// start, end and index. A ref of any other shape keeps string order within its scheme.
+fn compare_evidence_refs(left: &str, right: &str) -> std::cmp::Ordering {
+    fn key(evidence_ref: &str) -> EvidenceRefKey<'_> {
+        let scheme = evidence_ref
+            .split_once(':')
+            .map_or(evidence_ref, |(scheme, _)| scheme);
+        (scheme, parsed_search_ref(evidence_ref), evidence_ref)
+    }
+    key(left).cmp(&key(right))
+}
+
+fn parsed_search_ref(evidence_ref: &str) -> Option<SearchRefParts<'_>> {
+    let rest = evidence_ref.strip_prefix("search:")?;
+    // The path may itself hold `:`, so the range and index are taken from the right.
+    let (rest, index) = rest.rsplit_once(':')?;
+    let (path, range) = rest.rsplit_once(':')?;
+    let (start, end) = range.split_once('-')?;
+    Some((
+        path,
+        start.parse().ok()?,
+        end.parse().ok()?,
+        index.parse().ok()?,
+    ))
+}
+
+/// An upstream rule keeps its own refs under the same cap, adding what the cap drops to any
+/// count it already carried.
+fn capped_upstream_rule(rule: &BoundaryFileRule) -> BoundaryFileRule {
+    let (evidence_refs, omitted) = capped_refs(rule.evidence_refs.clone(), MAX_RULE_EVIDENCE_REFS);
+    BoundaryFileRule {
+        evidence_refs,
+        evidence_refs_omitted: rule.evidence_refs_omitted + omitted,
+        ..rule.clone()
+    }
 }
 
 fn default_forbidden_boundary_rules() -> Vec<BoundaryForbiddenRule> {
@@ -1535,13 +1612,11 @@ fn default_forbidden_boundary_rules() -> Vec<BoundaryForbiddenRule> {
 }
 
 fn boundary_evidence_refs(primary: &[SearchResult], impacts: &[SearchResult]) -> Vec<String> {
-    let mut refs = primary
+    let refs = primary
         .iter()
         .chain(impacts.iter())
-        .flat_map(|result| result.derived_evidence_ids())
-        .collect::<Vec<_>>();
-    refs.sort();
-    refs.dedup();
+        .flat_map(|result| result.derived_evidence_ids());
+    let mut refs = file_ordered_refs(refs);
     refs.truncate(50);
     refs
 }
@@ -1557,7 +1632,7 @@ fn evidence_by_section(
     let mut sections = BTreeMap::new();
     sections.insert(
         "primary_context".into(),
-        stable_refs(
+        file_ordered_refs(
             primary_context
                 .iter()
                 .flat_map(|result| result.derived_evidence_ids()),
@@ -1565,7 +1640,7 @@ fn evidence_by_section(
     );
     sections.insert(
         "impact".into(),
-        stable_refs(
+        file_ordered_refs(
             impact
                 .direct_impacts
                 .iter()
@@ -1576,7 +1651,7 @@ fn evidence_by_section(
     );
     sections.insert(
         "validation".into(),
-        stable_refs(validation.iter().flat_map(|test| {
+        file_ordered_refs(validation.iter().flat_map(|test| {
             if test.evidence_refs.is_empty() {
                 vec![format!("test:{}", test.id)]
             } else {
@@ -1586,11 +1661,11 @@ fn evidence_by_section(
     );
     sections.insert(
         "boundary".into(),
-        stable_refs(boundary.evidence_refs.clone()),
+        file_ordered_refs(boundary.evidence_refs.clone()),
     );
     sections.insert(
         "negative_evidence".into(),
-        stable_refs(negative_evidence.iter().map(|item| {
+        file_ordered_refs(negative_evidence.iter().map(|item| {
             format!(
                 "negative:{}:{}",
                 item.scope,
@@ -1600,13 +1675,23 @@ fn evidence_by_section(
     );
     sections.insert(
         "history".into(),
-        stable_refs(
+        file_ordered_refs(
             history_components
                 .iter()
                 .flat_map(|component| component.evidence_ids.clone()),
         ),
     );
     sections
+}
+
+/// Refs deduplicated in file order (`compare_evidence_refs`), so any cap taken from the list keeps
+/// the first lines of each path.
+fn file_ordered_refs(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut refs = values.into_iter().collect::<Vec<_>>();
+    refs.sort_by(|left, right| compare_evidence_refs(left, right));
+    // `compare_evidence_refs` orders distinct strings apart, so equal refs are adjacent.
+    refs.dedup();
+    refs
 }
 
 fn stable_refs(values: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -2117,7 +2202,7 @@ fn write_html_boundary_files(out: &mut String, files: &[BoundaryFileRule]) {
             "<li><code>{}</code>: {}<br><small>evidence: {}</small></li>",
             html_escape(&file.path.display().to_string()),
             html_escape(&file.reason),
-            html_escape(&evidence_refs_text(&file.evidence_refs))
+            html_escape(&rule_evidence_text(file))
         ));
     }
     out.push_str("</ul>");
@@ -2570,6 +2655,17 @@ fn evidence_refs_text(refs: &[String]) -> String {
     }
 }
 
+/// A rule's listed refs with the count its cap left out, so a short list does not read as the
+/// whole evidence.
+fn rule_evidence_text(rule: &BoundaryFileRule) -> String {
+    let listed = evidence_refs_text(&rule.evidence_refs);
+    if rule.evidence_refs_omitted == 0 {
+        listed
+    } else {
+        format!("{listed} (+{} more not listed)", rule.evidence_refs_omitted)
+    }
+}
+
 fn write_boundary_text(out: &mut String, boundary: &ChangeBoundary) {
     out.push_str("\nEdit boundary:\n");
     out.push_str("  allowed files:\n");
@@ -2581,7 +2677,7 @@ fn write_boundary_text(out: &mut String, boundary: &ChangeBoundary) {
                 "  - {} [{}; evidence {}]\n",
                 rule.path.display(),
                 one_line(&rule.reason),
-                evidence_refs_text(&rule.evidence_refs)
+                rule_evidence_text(rule)
             ));
         }
     }
@@ -2594,7 +2690,7 @@ fn write_boundary_text(out: &mut String, boundary: &ChangeBoundary) {
                 "  - {} [{}; evidence {}]\n",
                 rule.path.display(),
                 one_line(&rule.reason),
-                evidence_refs_text(&rule.evidence_refs)
+                rule_evidence_text(rule)
             ));
         }
     }
@@ -2634,7 +2730,7 @@ fn write_markdown_boundary(out: &mut String, boundary: &ChangeBoundary) {
                 "- `{}`\n  - reason: {}\n  - evidence: `{}`\n",
                 rule.path.display(),
                 one_line(&rule.reason),
-                evidence_refs_text(&rule.evidence_refs)
+                rule_evidence_text(rule)
             ));
             if !rule.symbols.is_empty() {
                 out.push_str(&format!(
@@ -2653,7 +2749,7 @@ fn write_markdown_boundary(out: &mut String, boundary: &ChangeBoundary) {
                 "- `{}`\n  - reason: {}\n  - evidence: `{}`\n",
                 rule.path.display(),
                 one_line(&rule.reason),
-                evidence_refs_text(&rule.evidence_refs)
+                rule_evidence_text(rule)
             ));
         }
     }
@@ -3345,6 +3441,228 @@ mod tests {
             .iter()
             .any(|rule| rule.pattern == "vendor/**" && !rule.reason.is_empty()));
         assert!(!boundary.expansion_requirements.is_empty());
+    }
+
+    #[test]
+    fn boundary_rules_cite_only_their_own_capped_refs() {
+        // Twenty primary results give the plan a boundary list well past the fallback cap.
+        let primary = (0..20)
+            .map(|rank| test_search_result(&format!("src/primary_{rank:02}.rs")))
+            .collect::<Vec<_>>();
+        // One impact path with more evidence lines than a rule lists, one with a single line.
+        let mut wide = test_search_result("src/wide.rs");
+        wide.evidence = (0..12).map(|line| format!("reference {line}")).collect();
+        let narrow = test_search_result("src/narrow.rs");
+        let impact = ImpactReport {
+            proven_impact: Vec::new(),
+            possible_impact: Vec::new(),
+            target: "src/primary_00.rs".into(),
+            direct_impacts: vec![wide, narrow.clone()],
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        // The context boundary names a caution path the impact report does not hold and carries
+        // its own uncapped ref list, which no rule may copy.
+        let context_boundary = ChangeBoundary {
+            caution_files: vec![PathBuf::from("src/upstream_only.rs")],
+            evidence_refs: (0..80)
+                .map(|index| format!("context:unrelated:{index}"))
+                .collect(),
+            ..Default::default()
+        };
+
+        let boundary = change_boundary(&primary, &[], &impact, &context_boundary);
+        let sections = evidence_by_section(&primary, &impact, &[], &boundary, &[], &[]);
+        let boundary_section = sections["boundary"].iter().collect::<BTreeSet<_>>();
+
+        for rule in boundary
+            .allowed_rules
+            .iter()
+            .chain(boundary.caution_rules.iter())
+        {
+            assert!(
+                rule.evidence_refs.len() <= MAX_RULE_EVIDENCE_REFS,
+                "{rule:?}"
+            );
+            let own = primary
+                .iter()
+                .chain(impact.direct_impacts.iter())
+                .filter(|result| result.path == rule.path)
+                .flat_map(|result| result.derived_evidence_ids())
+                .collect::<BTreeSet<_>>();
+            for evidence_ref in &rule.evidence_refs {
+                assert!(
+                    own.contains(evidence_ref) || boundary_section.contains(evidence_ref),
+                    "{} cites {evidence_ref}, which neither its path nor the plan boundary holds",
+                    rule.path.display()
+                );
+            }
+        }
+        let caution_rule = |path: &str| {
+            boundary
+                .caution_rules
+                .iter()
+                .find(|rule| rule.path == Path::new(path))
+                .unwrap_or_else(|| {
+                    panic!("no caution rule for {path}: {:?}", boundary.caution_rules)
+                })
+        };
+
+        // Past the cap: ten of its twelve refs, all its own, and the two left out counted.
+        let wide_rule = caution_rule("src/wide.rs");
+        assert_eq!(wide_rule.evidence_refs.len(), MAX_RULE_EVIDENCE_REFS);
+        assert_eq!(wide_rule.evidence_refs_omitted, 2);
+        assert!(wide_rule
+            .evidence_refs
+            .iter()
+            .all(|evidence_ref| evidence_ref.starts_with("search:src/wide.rs:")));
+
+        // Within the cap: exactly its own ref, nothing borrowed from other paths.
+        let narrow_rule = caution_rule("src/narrow.rs");
+        assert_eq!(narrow_rule.evidence_refs, narrow.derived_evidence_ids());
+        assert_eq!(narrow_rule.evidence_refs_omitted, 0);
+
+        // No evidence of its own: a few refs of the plan's capped boundary list, the rest
+        // counted, and never the context boundary's unrelated list.
+        let upstream_rule = caution_rule("src/upstream_only.rs");
+        assert_eq!(
+            upstream_rule.evidence_refs.len(),
+            MAX_RULE_FALLBACK_EVIDENCE_REFS
+        );
+        assert!(upstream_rule
+            .evidence_refs
+            .iter()
+            .all(|evidence_ref| boundary_section.contains(evidence_ref)));
+        assert_eq!(
+            upstream_rule.evidence_refs_omitted,
+            boundary.evidence_refs.len() - MAX_RULE_FALLBACK_EVIDENCE_REFS
+        );
+        assert_ne!(upstream_rule.evidence_refs, boundary.evidence_refs);
+        assert!(!upstream_rule
+            .evidence_refs
+            .iter()
+            .any(|evidence_ref| evidence_ref.starts_with("context:unrelated:")));
+    }
+
+    #[test]
+    fn capped_rule_refs_keep_the_first_lines_of_a_path() {
+        let impact_at = |starts: &[u32]| ImpactReport {
+            proven_impact: Vec::new(),
+            possible_impact: Vec::new(),
+            target: "src/auth.rs".into(),
+            direct_impacts: starts
+                .iter()
+                .map(|start| {
+                    let mut result = test_search_result("src/lines.rs");
+                    result.line_range = Some(LineRange {
+                        start: *start,
+                        end: start + 2,
+                    });
+                    result
+                })
+                .collect(),
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        let lines_rule = |starts: &[u32]| {
+            change_boundary(
+                &[test_search_result("src/auth.rs")],
+                &[],
+                &impact_at(starts),
+                &ChangeBoundary::default(),
+            )
+            .caution_rules
+            .into_iter()
+            .find(|rule| rule.path == Path::new("src/lines.rs"))
+            .expect("src/lines.rs is a caution file")
+        };
+
+        // As text `:10-12` sorts before `:2-4`; in file order line 2 comes first.
+        assert_eq!(
+            lines_rule(&[10, 2]).evidence_refs,
+            vec![
+                "search:src/lines.rs:2-4:0".to_string(),
+                "search:src/lines.rs:10-12:0".to_string()
+            ]
+        );
+
+        // Past the cap, the refs kept are the path's first ten lines, not the first ten as text.
+        let starts = (1..=12).map(|rank| rank * 2).collect::<Vec<u32>>();
+        let rule = lines_rule(&starts);
+        let expected = starts[..MAX_RULE_EVIDENCE_REFS]
+            .iter()
+            .map(|start| format!("search:src/lines.rs:{start}-{}:0", start + 2))
+            .collect::<Vec<_>>();
+        assert_eq!(rule.evidence_refs, expected);
+        assert_eq!(rule.evidence_refs_omitted, 2);
+
+        // Other shapes keep string order within their scheme; schemes stay in string order.
+        let mut mixed = vec![
+            "test:b".to_string(),
+            "search:src/a.rs:10-12:0".to_string(),
+            "region:adjacent-unit:3-6".to_string(),
+            "search:src/a.rs:2-4:1".to_string(),
+            "region:adjacent-unit:12-16".to_string(),
+            "search:src/a.rs:2-4:0".to_string(),
+        ];
+        mixed.sort_by(|left, right| compare_evidence_refs(left, right));
+        assert_eq!(
+            mixed,
+            vec![
+                "region:adjacent-unit:12-16",
+                "region:adjacent-unit:3-6",
+                "search:src/a.rs:2-4:0",
+                "search:src/a.rs:2-4:1",
+                "search:src/a.rs:10-12:0",
+                "test:b",
+            ]
+        );
+
+        // The plan's 50-ref boundary list keeps a path's first fifty lines too, so the refs a rule
+        // borrows are the first lines; as text `:60-60` would outrank `:7-7`, `:8-8` and `:9-9`.
+        let primary = (1..=60)
+            .map(|start| {
+                let mut result = test_search_result("src/big.rs");
+                result.line_range = Some(LineRange { start, end: start });
+                result
+            })
+            .collect::<Vec<_>>();
+        let context_boundary = ChangeBoundary {
+            caution_files: vec![PathBuf::from("src/upstream_only.rs")],
+            ..Default::default()
+        };
+        let no_impact = impact_at(&[]);
+        let boundary = change_boundary(&primary, &[], &no_impact, &context_boundary);
+        let first_lines = |count: u32| {
+            (1..=count)
+                .map(|line| format!("search:src/big.rs:{line}-{line}:0"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(boundary.evidence_refs, first_lines(50));
+        let sections = evidence_by_section(&primary, &no_impact, &[], &boundary, &[], &[]);
+        assert_eq!(sections["boundary"], first_lines(50));
+        assert_eq!(sections["primary_context"], first_lines(60));
+        let upstream_rule = boundary
+            .caution_rules
+            .iter()
+            .find(|rule| rule.path == Path::new("src/upstream_only.rs"))
+            .expect("src/upstream_only.rs is a caution file");
+        assert_eq!(upstream_rule.evidence_refs, first_lines(3));
+        assert_eq!(upstream_rule.evidence_refs_omitted, 47);
     }
 
     #[test]

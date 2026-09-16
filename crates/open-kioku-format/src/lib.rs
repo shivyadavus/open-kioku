@@ -557,7 +557,7 @@ fn push_path_list(out: &mut String, name: &str, paths: &[PathBuf]) {
 
 fn push_boundary_rules(out: &mut String, boundary: &ChangeBoundary) {
     out.push_str(&format!(
-        "allowed_rules[{}]{{path,reason,evidence_refs,symbols}}:\n",
+        "allowed_rules[{}]{{path,reason,evidence_refs,evidence_refs_omitted,symbols}}:\n",
         boundary.allowed_rules.len()
     ));
     for rule in &boundary.allowed_rules {
@@ -567,12 +567,13 @@ fn push_boundary_rules(out: &mut String, boundary: &ChangeBoundary) {
                 rule.path.display().to_string(),
                 rule.reason.clone(),
                 rule.evidence_refs.join("|"),
+                rule.evidence_refs_omitted.to_string(),
                 rule.symbols.join("|"),
             ],
         );
     }
     out.push_str(&format!(
-        "caution_rules[{}]{{path,reason,evidence_refs,symbols}}:\n",
+        "caution_rules[{}]{{path,reason,evidence_refs,evidence_refs_omitted,symbols}}:\n",
         boundary.caution_rules.len()
     ));
     for rule in &boundary.caution_rules {
@@ -582,6 +583,7 @@ fn push_boundary_rules(out: &mut String, boundary: &ChangeBoundary) {
                 rule.path.display().to_string(),
                 rule.reason.clone(),
                 rule.evidence_refs.join("|"),
+                rule.evidence_refs_omitted.to_string(),
                 rule.symbols.join("|"),
             ],
         );
@@ -845,7 +847,9 @@ mod tests {
         ));
         assert!(rendered.contains("evidence_by_section"));
         assert!(rendered.contains("allowed_files[1]{path}:"));
-        assert!(rendered.contains("allowed_rules[0]{path,reason,evidence_refs,symbols}:"));
+        assert!(rendered.contains(
+            "allowed_rules[0]{path,reason,evidence_refs,evidence_refs_omitted,symbols}:"
+        ));
         assert!(rendered.contains("forbidden_rules[0]{pattern,reason,evidence_refs}:"));
     }
 }
