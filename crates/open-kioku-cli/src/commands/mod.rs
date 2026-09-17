@@ -249,6 +249,15 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         "coverage".into(),
                         serde_json::to_value(manifest.quality.coverage.as_ref())?,
                     );
+                    // The coverage verdict context packs and plans price, mirrored by MCP
+                    // `repo_status`. Absent with `coverage`, so a missing record never reads
+                    // as a repository without gaps.
+                    if let Some(coverage) = manifest.quality.coverage.as_ref() {
+                        object.insert(
+                            "coverage_gaps".into(),
+                            serde_json::to_value(coverage.gaps())?,
+                        );
+                    }
                     // Also mirrored: the fingerprint above passes on a pre-4.0 index whose
                     // edges were discarded on open, so the marker is reported beside it.
                     object.insert(
