@@ -757,12 +757,17 @@ fn compact_runtime_message(message: &str) -> Option<String> {
     Some(value.chars().take(160).collect())
 }
 
+/// Message tokens containing one of these have their value redacted. Content redaction
+/// (`crate::redaction`) must cover each of them as a key; a test holds the two together.
+pub(crate) const MESSAGE_SECRET_KEY_PATTERNS: [&str; 5] =
+    ["password=", "token=", "secret=", "api_key=", "apikey="];
+
 pub fn redact_secrets(message: &str) -> String {
     message
         .split_whitespace()
         .map(|token| {
             let lower = token.to_ascii_lowercase();
-            if ["password=", "token=", "secret=", "api_key=", "apikey="]
+            if MESSAGE_SECRET_KEY_PATTERNS
                 .iter()
                 .any(|prefix| lower.contains(prefix))
             {

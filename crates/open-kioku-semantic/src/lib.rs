@@ -1130,6 +1130,25 @@ pub fn provider_from_config(config: &SemanticConfig) -> Result<Option<Box<dyn Em
     )?))
 }
 
+/// Removes the semantic vector store. Its target text and embedding cache are built from
+/// indexed chunks, so a store built before secret-value redaction holds values the index no
+/// longer does; clearing the database's free pages without clearing this would leave a
+/// partially compacted index describing itself as redacted (#379). `ok semantic index`
+/// rebuilds it from the redacted chunks. Returns whether anything was there.
+pub fn discard_vector_store(repo: &Path) -> Result<bool> {
+    let root = open_kioku_storage::generations::resolve_index_location(repo).vectors_root();
+    if !root.exists() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(&root).map_err(|err| {
+        OkError::Storage(format!(
+            "removing the semantic vector store at {} failed: {err}",
+            root.display()
+        ))
+    })?;
+    Ok(true)
+}
+
 pub fn ensure_enabled(config: &SemanticConfig) -> Result<()> {
     provider_from_config(config).and_then(|provider| {
         provider
@@ -1516,8 +1535,9 @@ fn excluded_path(file: &File) -> bool {
         || path.contains("/target/")
         || path.ends_with("lock")
         || path.ends_with(".lock")
-        || path.contains(".env")
-        || path.contains("secret")
+        // The discovery rule, so the semantic corpus and the lexical index agree: a file named
+        // for a secret is embedded from its redacted chunks, key material never.
+        || open_kioku_core::is_secret_like_path(&file.path)
 }
 
 fn source_index_fingerprint(store: &dyn MetadataStore) -> Result<String> {

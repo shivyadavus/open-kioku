@@ -35,6 +35,20 @@ fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<Snap
             index_path.display()
         );
     }
+    // `--quality fast` copies the database file as it is, free pages included, so an index
+    // that still holds bytes an earlier release stored before secret-value redaction would be
+    // shipped with them. `--quality best` rewrites the database through `VACUUM INTO`.
+    if matches!(quality, SnapshotQuality::Fast)
+        && open_kioku_storage::MetadataStore::manifest(&store)?
+            .is_some_and(|manifest| manifest.needs_pre_redaction_compaction())
+    {
+        anyhow::bail!(
+            "index at {} still holds bytes stored before secret-value redaction; `--quality \
+             fast` copies the database file as it is, free pages included. Run `ok index` to \
+             clear them, or export with `--quality best`, which rewrites the database.",
+            index_path.display()
+        );
+    }
     drop(store);
 
     let artifact_dir = snapshot_artifact_dir(&repo);

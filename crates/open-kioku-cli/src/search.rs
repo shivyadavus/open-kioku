@@ -67,10 +67,16 @@ fn regex_search(
         results: scan.results,
         truncated: scan.files_capped,
         warnings: Vec::new(),
-        caveats: vec![format!(
-            "the pattern was evaluated over indexed chunk text from {} file(s), not the working tree; regions the indexer did not chunk were not searched",
-            scan.files_scanned
-        )],
+        caveats: [
+            Some(format!(
+                "the pattern was evaluated over indexed chunk text from {} file(s), not the working tree; regions the indexer did not chunk were not searched",
+                scan.files_scanned
+            )),
+            redaction_caveat(store),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
     };
     if scan.files_capped {
         report.warnings.push(format!(
@@ -108,8 +114,15 @@ fn ranked_search_report(
         results: page.results,
         truncated: !warnings.is_empty(),
         warnings,
-        caveats: Vec::new(),
+        caveats: redaction_caveat(store).into_iter().collect(),
     })
+}
+
+/// The redaction caveat the MCP search tools attach, from the same function in
+/// `open_kioku_core`, so the human surface is no less honest than the agent surface (#379).
+fn redaction_caveat(store: &dyn MetadataStore) -> Option<String> {
+    let manifest = store.manifest().ok().flatten()?;
+    open_kioku_core::redaction_search_caveat(manifest.quality.redacted_files)
 }
 
 fn ranked_search_results(

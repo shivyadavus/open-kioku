@@ -60,12 +60,14 @@
       "import_count": 0,
       "index_mode": "full",
       "junit_reports": 0,
+      "pending_pre_redaction_compaction": false,
       "phase_reports": [],
       "quality_notes": {
         "by_kind": {},
         "sample": [],
         "total": 0
       },
+      "redacted_files": null,
       "runtime_analysis_facts": 0,
       "scip_enabled": false,
       "scip_exact_references": 0,
