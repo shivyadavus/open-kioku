@@ -385,7 +385,9 @@ enum GraphCommand {
 enum SnapshotCommand {
     /// Export the current index as a compressed snapshot plus metadata under .ok.
     Export {
-        /// Compression trade-off: best (smallest artifact) or fast.
+        /// Size/time trade-off: best rebuilds the database compactly and compresses harder
+        /// (smallest artifact, slowest); fast copies its pages as they are and compresses
+        /// lightly. Both export one committed state of the index.
         #[arg(long, value_enum, default_value_t = SnapshotQuality::Best)]
         quality: SnapshotQuality,
     },
