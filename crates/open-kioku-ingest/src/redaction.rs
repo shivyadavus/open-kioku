@@ -24,6 +24,10 @@
 //!    machine-generated (see [`is_high_entropy_token`]). Prose keeps rules 1-3 but not this
 //!    one, so commit hashes and digests cited in Markdown stay searchable.
 //!
+//! A secret-named key whose last word names where the secret lives rather than the secret —
+//! `auth_token_env`, `password_file`, `token_path`, `secretName` — keeps its value, for the
+//! same reason a `${DB_PASSWORD}` reference does.
+//!
 //! `null`, booleans, a bare variable reference (`${DB_PASSWORD}`, `$DB_PASSWORD`), and an
 //! unquoted number under a quantity-named key (`max_tokens: 4096`, `token_limit: 12`) are not
 //! values and stay, so the place a secret is injected remains searchable. A number under a
@@ -271,7 +275,9 @@ impl Redactor {
                 Some(b'"' | b'\'') => {
                     let quote = bytes[start];
                     let close = closing_quote(bytes, start + 1, quote).unwrap_or(bytes.len());
-                    if !is_non_secret_literal(&line[start + 1..close]) {
+                    let inner = &line[start + 1..close];
+                    let locator = is_secret_locator_key(key.name) && is_locator_value(inner);
+                    if !is_non_secret_literal(inner) && !locator {
                         out.push_str(&line[copied..start + 1]);
                         out.push_str(REDACTION_MARKER);
                         copied = close;
@@ -280,7 +286,8 @@ impl Redactor {
                     at = (close + 1).min(bytes.len());
                 }
                 _ if is_non_secret_literal(value_core)
-                    || (is_plain_number(value_core) && is_quantity_key(key.name)) =>
+                    || (is_plain_number(value_core) && is_quantity_key(key.name))
+                    || (is_secret_locator_key(key.name) && is_locator_value(value_core)) =>
                 {
                     at = bytes.len();
                 }
@@ -534,6 +541,23 @@ fn is_secret_key(name: &str) -> bool {
     }) || last_word_is_key(name)
 }
 
+/// A secret-named key whose last word names *where* the secret lives rather than the secret:
+/// `auth_token_env` names an environment variable, `password_file` or `token_path` a file.
+/// The name alone never exempts a value — `password_file = "hunter2"` is a password, and a
+/// short or numeric secret clears neither bar of the entropy rule — so the value must look
+/// like a locator too (see [`is_locator_value`]). This repository's own `ok.toml` names the
+/// Sentry token's environment variable, which is what the pair of rules keeps readable.
+fn is_secret_locator_key(name: &str) -> bool {
+    let normalized = name
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|byte| char::from(byte.to_ascii_lowercase()))
+        .collect::<String>();
+    ["env", "envvar", "variable", "file", "path", "name"]
+        .iter()
+        .any(|word| normalized.len() > word.len() && normalized.ends_with(word))
+}
+
 /// A key whose last word is `key` after at least one other word: `signing_key`, `master-key`,
 /// `ssl.key`, `encryptionKey`. The path rule used to block file names ending in `_key`; a bare
 /// `key:` (a Kubernetes `secretKeyRef` field, a map entry) is not matched.
@@ -687,6 +711,22 @@ fn is_quantity_key(name: &str) -> bool {
     ]
     .iter()
     .any(|word| normalized.contains(word))
+}
+
+/// A value that names where a secret lives rather than holding one: an environment variable
+/// (`SENTRY_AUTH_TOKEN`, upper-case with underscores) or a filesystem path (`/run/secrets/db`).
+/// Anything else under a locator-named key is redacted like any other value, so a secret
+/// written under `password_file` or `pin_file` is not kept by the name alone.
+fn is_locator_value(value: &str) -> bool {
+    let value = value.trim();
+    if value.len() < 2 {
+        return false;
+    }
+    let environment_variable = value.bytes().any(|byte| byte.is_ascii_uppercase())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    environment_variable || value.contains('/') || value.contains('\\')
 }
 
 /// An unquoted integer or float (`4096`, `-3.5`, `1e6`, `1_000`): a typed number such as a
@@ -1024,6 +1064,47 @@ mod tests {
     /// Two narrowings that are each safe alone compose into a hole: the path rule no longer
     /// keeps `docs/SECRETS.md` out of the index, and prose does not run the entropy rule, so a
     /// pasted token with no key, URL or PEM header around it would be indexed as written.
+    /// `ok init` writes `auth_token_env = "SENTRY_AUTH_TOKEN"` into every repository's
+    /// `ok.toml`; redacting it reported the product's own config as holding a secret. The key
+    /// alone must not exempt anything, though: the value has to look like a locator too.
+    #[test]
+    fn a_locator_key_keeps_only_a_locator_value() {
+        for kept in [
+            "auth_token_env: SENTRY_AUTH_TOKEN\n",
+            "auth_token_env = \"SENTRY_AUTH_TOKEN\"\n",
+            "password_file: /run/secrets/db\n",
+            "token_path: /var/run/token\n",
+        ] {
+            let result = redact_secret_values(kept, ContentKind::Config);
+            assert_eq!(result.text, kept, "{kept}");
+            assert_eq!(result.redactions, 0, "{kept}");
+        }
+        // A secret written under a locator-named key is still a secret. None of these reach
+        // the entropy rule: two are too short for it and one is all digits.
+        for redacted_case in [
+            ("password_file: hunter2\n", "password_file: [REDACTED]\n"),
+            ("token_path: abc123\n", "token_path: [REDACTED]\n"),
+            // Secret-named and locator-named, but the value is a number: the exemption must
+            // not keep it. (`pin_file` would be kept, but only because `pin` names no secret
+            // at all -- a limit documented in docs/security-model.md, not this exemption.)
+            ("password_file: 4859\n", "password_file: [REDACTED]\n"),
+            ("secretName: db-credentials\n", "secretName: [REDACTED]\n"),
+        ] {
+            assert_eq!(
+                redacted(redacted_case.0),
+                redacted_case.1,
+                "{}",
+                redacted_case.0
+            );
+        }
+        let token = striding(ALNUM, 32, 17, 5);
+        let pointed_at = format!("token_file: {token}\n");
+        assert!(
+            !redacted(&pointed_at).contains(&token),
+            "a long secret under a locator key is still redacted: {pointed_at}"
+        );
+    }
+
     #[test]
     fn a_secret_named_prose_file_is_read_under_the_config_rules() {
         let token = striding(ALNUM, 32, 17, 5);
