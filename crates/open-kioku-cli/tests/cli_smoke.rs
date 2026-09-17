@@ -6055,6 +6055,22 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
     assert!(by_key.contains(config_path), "{by_key}");
     assert!(by_key.contains("[REDACTED]"), "{by_key}");
     assert_secrets_absent("ok search by key", &by_key, &secrets);
+    // One sentence from one function: the human surface reports the same redaction state as
+    // the agent surface, checked against the MCP response below.
+    let by_key_json: serde_json::Value = serde_json::from_str(&by_key).unwrap();
+    let cli_caveat = by_key_json["caveats"]
+        .as_array()
+        .expect("ok search --json carries caveats")
+        .iter()
+        .find_map(|caveat| {
+            let caveat = caveat.as_str()?;
+            caveat.contains("[REDACTED]").then(|| caveat.to_string())
+        })
+        .unwrap_or_else(|| panic!("ok search reports the redaction caveat: {by_key}"));
+    assert!(
+        cli_caveat.starts_with("1 data, config, or prose file(s)"),
+        "{cli_caveat}"
+    );
     for secret in secrets {
         let by_value = run({
             let mut command = ok();
@@ -6155,6 +6171,10 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
     };
     assert!(by_id(1).to_string().contains(config_path), "{mcp}");
     assert!(by_id(5).to_string().contains(config_path), "{mcp}");
+    assert!(
+        mcp.contains(&cli_caveat),
+        "search_code reports the same redaction caveat as `ok search`: {mcp}"
+    );
     assert_eq!(
         by_id(4)["result"]["structuredContent"]["quality"]["redacted_files"],
         1,

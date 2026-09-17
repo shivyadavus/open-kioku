@@ -3117,6 +3117,20 @@ pub fn is_secret_like_path(path: &Path) -> bool {
     })
 }
 
+/// The caveat every search surface attaches when the index holds redacted values. A query for
+/// a value that was replaced returns nothing, and without this an empty answer reads as "absent
+/// from the repository" rather than "absent from what the index stores". `ok search`,
+/// `ok search --regex`, MCP `search_code` and `regex_search` all render this one text, so they
+/// cannot disagree about the same index (#379).
+pub fn redaction_search_caveat(redacted_files: Option<usize>) -> Option<String> {
+    let redacted = redacted_files?;
+    (redacted > 0).then(|| {
+        format!(
+            "{redacted} data, config, or prose file(s) are indexed with secret-like values replaced by `[REDACTED]`, so a redacted value cannot be found by searching for it"
+        )
+    })
+}
+
 /// A path whose name says it holds credentials: a component containing `secret`, `credential`
 /// or `password`, or one ending in `_key` or `-key`. This no longer decides whether a file is
 /// indexed ([`is_secret_like_path`] does) — it decides how the file's content is read. A file

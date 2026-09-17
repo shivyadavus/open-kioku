@@ -1315,17 +1315,11 @@ fn structured_content_for(value: Value, text: &str, text_truncated: bool) -> Val
     }
 }
 
-/// Searching redacted text finds the keys, never the values: a query for a credential that was
-/// replaced returns nothing, and without this the empty answer reads as "absent from this
-/// repository" rather than "absent from what the index stores".
+/// Searching redacted text finds the keys, never the values. The sentence comes from
+/// `open_kioku_core`, which `ok search` renders too, so the two surfaces report one state.
 fn redaction_caveat(store: &dyn MetadataStore) -> Option<String> {
     let manifest = store.manifest().ok().flatten()?;
-    let redacted = manifest.quality.redacted_files?;
-    (redacted > 0).then(|| {
-        format!(
-            "{redacted} data, config, or prose file(s) are indexed with secret-like values replaced by `[REDACTED]`, so a redacted value cannot be found by searching for it"
-        )
-    })
+    open_kioku_core::redaction_search_caveat(manifest.quality.redacted_files)
 }
 
 /// Evaluates the caller's pattern over the indexed corpus instead of handing it

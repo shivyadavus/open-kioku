@@ -46,6 +46,6 @@ Limits:
 
 The `[security] redact_secrets` setting does not govern any of this: content redaction is unconditional, and the flag only decides whether the *path* of a file skipped by the secret-path rule is shown in the skip list. `ok index`, `ok status`, and `ok doctor` report how many files had values replaced, and `ok --json status` and MCP `repo_status` carry the count as `quality.redacted_files`. A manifest written before redaction existed has no count: `ok status` says it is not recorded, and `ok doctor` warns that the index stored those files as read and says to run `ok index`.
 
-A search cannot find a redacted value, and an empty result is not evidence the value is absent from the repository: MCP `search_code` and `regex_search` carry a caveat naming how many files hold redacted values whenever the index holds any.
+A search cannot find a redacted value, and an empty result is not evidence the value is absent from the repository. `ok search`, `ok search --regex`, MCP `search_code` and `regex_search` all carry a caveat naming how many files hold redacted values whenever the index holds any; it is one sentence from `open_kioku_core::redaction_search_caveat`, so the human and agent surfaces cannot disagree about the same index.
 
 For the agent-facing threat model, including prompt injection, memory poisoning, MCP over-permissioning, and context-handle handling, see [`docs/guides/security-threat-model.md`](guides/security-threat-model.md).
