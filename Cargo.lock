@@ -2611,16 +2611,19 @@ version = "4.0.0"
 dependencies = [
  "chrono",
  "clap",
+ "open-kioku-config",
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-format",
  "open-kioku-impact",
  "open-kioku-ranking",
  "open-kioku-search-regex",
+ "open-kioku-search-tantivy",
  "open-kioku-storage",
  "open-kioku-storage-sqlite",
  "open-kioku-tests",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -32,9 +32,9 @@
               "search:src/billing.rs:7-9:1"
             ],
             "normalized_value": "<score>",
-            "rationale": "BM25 score from local Tantivy index",
+            "rationale": "BM25 or lexical score from indexed text",
             "raw_value": "<score>",
-            "signal": "bm25_relevance",
+            "signal": "text_relevance",
             "weight": "<score>"
           },
           {
@@ -44,9 +44,9 @@
               "search:src/billing.rs:7-9:1"
             ],
             "normalized_value": "<score>",
-            "rationale": "query variant, path, symbol, or graph-node boost applied to lexical result",
+            "rationale": "source-like paths and symbol-bounded chunks are better primary edit candidates",
             "raw_value": "<score>",
-            "signal": "query_variant_boost",
+            "signal": "boundary_fit",
             "weight": "<score>"
           }
         ],
