@@ -6067,10 +6067,31 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
             caveat.contains("[REDACTED]").then(|| caveat.to_string())
         })
         .unwrap_or_else(|| panic!("ok search reports the redaction caveat: {by_key}"));
-    assert!(
-        cli_caveat.starts_with("1 data, config, or prose file(s)"),
-        "{cli_caveat}"
+    // Derived from the function every surface renders, not copied: a wording change cannot
+    // leave this green against stale text.
+    let expected_caveat = open_kioku_core::redaction_search_caveat(Some(1))
+        .expect("one redacted file produces a caveat");
+    assert_eq!(
+        cli_caveat, expected_caveat,
+        "`ok search --json` renders the shared caveat sentence"
     );
+
+    // The surface a person actually uses. Asserting the printed `caveat: ` line, not merely
+    // that the sentence appears somewhere, so removing the print loop fails this.
+    let by_key_text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("search")
+            .arg("access_key_id");
+        command
+    });
+    assert!(
+        by_key_text.contains(&format!("caveat: {expected_caveat}")),
+        "`ok search` prints the redaction caveat on its default output: {by_key_text}"
+    );
+    assert_secrets_absent("ok search text output", &by_key_text, &secrets);
     for secret in secrets {
         let by_value = run({
             let mut command = ok();
