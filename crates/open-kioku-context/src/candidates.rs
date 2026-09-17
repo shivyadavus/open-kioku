@@ -791,6 +791,21 @@ fn dedup_strings(mut values: Vec<String>) -> Vec<String> {
     values
 }
 
+/// Repository position: path, then line range. Comparators apply it after every measured key,
+/// so it only decides between candidates that tie on all of them, and it decides the same way
+/// on every index of the same tree.
+pub(crate) fn compare_result_position(left: &SearchResult, right: &SearchResult) -> Ordering {
+    let bounds = |result: &SearchResult| {
+        result
+            .line_range
+            .as_ref()
+            .map(|range| (range.start, range.end))
+    };
+    left.path
+        .cmp(&right.path)
+        .then_with(|| bounds(left).cmp(&bounds(right)))
+}
+
 fn normalize_candidate_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_string()
 }
@@ -832,6 +847,40 @@ mod tests {
         LineRange, NodeId, Symbol, SymbolId, SymbolKind, Visibility,
     };
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn result_position_orders_by_path_then_line_range() {
+        let mut later = result("src/b.rs", 0.5, None);
+        later.line_range = Some(LineRange { start: 9, end: 12 });
+        let earlier = result("src/b.rs", 0.5, None);
+        let other = result("src/a.rs", 0.5, None);
+        let mut unranged = result("src/b.rs", 0.5, None);
+        unranged.line_range = None;
+        let inputs = vec![later, earlier, unranged, other];
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for mut results in [inputs, reversed] {
+            results.sort_by(compare_result_position);
+            let order = results
+                .iter()
+                .map(|result| {
+                    (
+                        result.path.to_string_lossy().into_owned(),
+                        result.line_range.as_ref().map(|range| range.start),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                order,
+                vec![
+                    ("src/a.rs".to_string(), Some(1)),
+                    ("src/b.rs".to_string(), None),
+                    ("src/b.rs".to_string(), Some(1)),
+                    ("src/b.rs".to_string(), Some(9)),
+                ]
+            );
+        }
+    }
 
     fn result(path: &str, score: f32, symbol: Option<&str>) -> SearchResult {
         SearchResult {

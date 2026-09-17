@@ -436,6 +436,10 @@ fn sort_and_truncate(hits: &mut Vec<VectorHit>, limit: usize) {
             .partial_cmp(&left.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.target_id.cmp(&right.target_id))
+            // Several vectors can share a target; exact-flat search visits records in hash
+            // order, which differs per process, so the id settles which of them survive the
+            // truncation.
+            .then_with(|| left.id.cmp(&right.id))
     });
     hits.truncate(limit.max(1));
 }
@@ -463,6 +467,24 @@ fn usearch_error(error: impl std::fmt::Display) -> OkError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equal_hits_for_one_target_are_ordered_by_vector_id() {
+        let hit = |id: u64, target: &str| VectorHit {
+            id: VectorId(id),
+            target_id: target.into(),
+            target_kind: "chunk".into(),
+            score: 0.5,
+        };
+        let inputs = vec![hit(9, "src/b.rs"), hit(3, "src/b.rs"), hit(7, "src/a.rs")];
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for mut hits in [inputs, reversed] {
+            sort_and_truncate(&mut hits, 2);
+            let kept = hits.iter().map(|hit| hit.id.0).collect::<Vec<_>>();
+            assert_eq!(kept, vec![7, 3]);
+        }
+    }
 
     fn record(id: u64, target: &str, kind: &str, vector: &[f32]) -> VectorRecord {
         VectorRecord {
