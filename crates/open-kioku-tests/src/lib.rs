@@ -1395,19 +1395,19 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         std::fs::write(root.join("settings.gradle"), "").unwrap();
-        std::fs::create_dir_all(root.join("plugins/ml")).unwrap();
-        std::fs::write(root.join("plugins/ml/build.gradle"), "").unwrap();
+        std::fs::create_dir_all(root.join("plugins/mesh")).unwrap();
+        std::fs::write(root.join("plugins/mesh/build.gradle"), "").unwrap();
 
         let command = super::gradle_test_command(
             root,
-            Path::new("plugins/ml/src/test/java/com/acme/ml/inference/assignment/planning/AssignmentPlannerTests.java"),
-            "AssignmentPlannerTests",
+            Path::new("plugins/mesh/src/test/java/com/acme/mesh/routing/capacity/allocation/CapacityAllocatorTests.java"),
+            "CapacityAllocatorTests",
         )
         .unwrap();
 
         assert_eq!(
             command,
-            "./gradlew :plugins:ml:test --tests com.acme.ml.inference.assignment.planning.AssignmentPlannerTests"
+            "./gradlew :plugins:mesh:test --tests com.acme.mesh.routing.capacity.allocation.CapacityAllocatorTests"
         );
     }
 
