@@ -6261,17 +6261,24 @@ fn indexing_over_an_index_written_before_redaction_drops_its_unredacted_bytes() 
     let stale_vectors = vectors_root.join("current/ids.json");
     fs::write(&stale_vectors, format!("[{{\"text\": \"{value}\"}}]")).unwrap();
 
-    let holds_value = |path: &std::path::Path| {
-        fs::read(path)
-            .map(|bytes| String::from_utf8_lossy(&bytes).contains(value.as_str()))
-            .unwrap_or(false)
+    // Whatever file under `.ok` still holds the value, named. A path captured before the run
+    // is the wrong instrument here: `ok index` migrates a legacy `.ok/index.sqlite` into a
+    // generation directory the first time it runs over one, so checking the old path after the
+    // move reports "the bytes are gone" because the file moved, not because it was compacted.
+    let holder = |needle: &str| -> Option<std::path::PathBuf> {
+        walkdir::WalkDir::new(repo.join(".ok"))
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .find(|entry| {
+                fs::read(entry.path())
+                    .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+                    .unwrap_or(false)
+            })
+            .map(|entry| entry.path().to_path_buf())
     };
-    let wal = database.with_file_name(format!(
-        "{}-wal",
-        database.file_name().unwrap().to_string_lossy()
-    ));
     assert!(
-        holds_value(&database),
+        holder(&value).is_some(),
         "the fixture holds the value as an earlier release stored it"
     );
     let status = run({
@@ -6288,10 +6295,25 @@ fn indexing_over_an_index_written_before_redaction_drops_its_unredacted_bytes() 
         command
     });
 
-    assert!(!holds_value(&database), "free pages still hold the value");
-    assert!(!holds_value(&wal), "the WAL still holds the value");
+    if let Some(path) = holder(&value) {
+        panic!(
+            "a file under .ok still holds the value stored before redaction: {}",
+            path.display()
+        );
+    }
+    // Re-resolved, because the run may have moved the index into a generation directory. It
+    // must exist: an assertion against a database that is simply absent would pass for the
+    // wrong reason, which is the failure this test previously had.
+    let database = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
     assert!(
-        !stale_vectors.exists(),
+        database.exists(),
+        "the published index database is where this run left it"
+    );
+    assert!(
+        walkdir::WalkDir::new(repo.join(".ok"))
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .all(|entry| entry.file_name() != "ids.json"),
         "the vector store built before redaction is discarded"
     );
     let status = run({
