@@ -22,3 +22,6 @@ open-kioku-search-regex = { version = "4.0.0", path = "../open-kioku-search-rege
 open-kioku-storage = { version = "4.0.0", path = "../open-kioku-storage" }
 open-kioku-tests = { version = "4.0.0", path = "../open-kioku-tests" }
 serde_json.workspace = true
+
+[dev-dependencies]
+open-kioku-storage-sqlite = { version = "4.0.0", path = "../open-kioku-storage-sqlite" }

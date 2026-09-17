@@ -1084,6 +1084,9 @@ fn contract_validation_targets(contract: &ChangeContractV1) -> Vec<TestTarget> {
         .iter()
         .enumerate()
         .map(|(index, test)| TestTarget {
+            // A contract names its required tests itself; nothing was extracted from a file, so
+            // the target has no test-file or registration provenance to carry.
+            origin: open_kioku_core::TestTargetOrigin::Symbol,
             selection_tier: open_kioku_core::TestSelectionTier::default(),
             tier_justification: Vec::new(),
             id: test.target.clone(),
@@ -3474,15 +3477,13 @@ fn symbol_contains(outer: &Symbol, inner: &Symbol) -> bool {
 fn recommended_tests(store: &dyn OkStore, changed_files: &[PathBuf]) -> Result<Vec<TestTarget>> {
     let selector = TestSelector::new(store);
     let mut tests = Vec::new();
-    let mut seen = BTreeSet::new();
     for path in changed_files {
-        for test in selector.for_changed_path_with_evidence(path, 8)? {
-            if seen.insert(test.id.clone()) {
-                tests.push(test);
-            }
-        }
+        tests.extend(selector.for_changed_path_with_evidence(path, 8)?);
     }
-    Ok(tests)
+    // The plan's predicate, not its bounds. Verify keeps every plausible recommendation: capping
+    // here would let a verdict pass because the unplanned targets fell past a limit, and the
+    // plan's per-file suite preference would drop registration targets that sit beside a helper.
+    Ok(open_kioku_plan::plausible_validation_targets(tests))
 }
 
 fn missing_tests(plan: &PlanReport, recommended_tests: &[TestTarget]) -> Vec<VerificationFinding> {
@@ -3774,6 +3775,7 @@ mod tests {
         edges: Vec<GraphEdge>,
         fact: AnalysisFact,
         facts: Vec<AnalysisFact>,
+        test_targets: Vec<TestTarget>,
     }
 
     impl RuntimeStore {
@@ -3811,6 +3813,7 @@ mod tests {
                 edges: Vec::new(),
                 fact: fact.clone(),
                 facts: vec![fact],
+                test_targets: Vec::new(),
             }
         }
 
@@ -3841,6 +3844,11 @@ mod tests {
             self
         }
 
+        fn with_test_target(mut self, target: TestTarget) -> Self {
+            self.test_targets.push(target);
+            self
+        }
+
         fn ensure_file(&mut self, path: &str) -> File {
             if let Some(file) = self.files.iter().find(|file| file.path == Path::new(path)) {
                 return file.clone();
@@ -3858,6 +3866,133 @@ mod tests {
             self.files.push(file.clone());
             file
         }
+    }
+
+    fn registration_target(name: &str, file_id: &str, disabled: bool) -> TestTarget {
+        TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
+            id: format!("registration:{name}"),
+            name: name.into(),
+            file_id: FileId::new(file_id),
+            range: Some(LineRange { start: 1, end: 2 }),
+            command: Some("npm test".into()),
+            confidence: if disabled {
+                Confidence::Low
+            } else {
+                Confidence::High
+            },
+            reason: "test registration call in a test-path file".into(),
+            evidence_refs: Vec::new(),
+            score_breakdown: Vec::new(),
+            origin: if disabled {
+                open_kioku_core::TestTargetOrigin::DisabledRegistrationCall
+            } else {
+                open_kioku_core::TestTargetOrigin::RegistrationCall
+            },
+        }
+    }
+
+    fn file_symbol_target(name: &str, file_id: &str, confidence: Confidence) -> TestTarget {
+        TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
+            id: format!("file-symbol:{name}"),
+            name: name.into(),
+            file_id: FileId::new(file_id),
+            range: Some(LineRange { start: 1, end: 2 }),
+            command: Some("cargo test".into()),
+            confidence,
+            reason: "test-like path, annotation, or naming convention".into(),
+            evidence_refs: Vec::new(),
+            score_breakdown: Vec::new(),
+            origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+        }
+    }
+
+    /// Verify must recommend every plausible test, not the plan's bounded selection. A change
+    /// touching two files whose second file contributes only unplanned tests used to pass
+    /// silently once the first file filled the plan's cap: exit 0 would have meant "the first
+    /// eight recommendations were planned".
+    #[test]
+    fn verify_recommends_past_the_plans_cap_so_the_verdict_cannot_hide_unplanned_tests() {
+        let mut store = RuntimeStore::new()
+            .with_file_text("tests/alpha_test.rs", "fn alpha_one() {}")
+            .with_file_text("tests/beta_test.rs", "fn beta_one() {}");
+        let planned = (0..8)
+            .map(|index| {
+                file_symbol_target(
+                    &format!("alpha_case_{index}"),
+                    "tests_alpha_test_rs",
+                    Confidence::High,
+                )
+            })
+            .collect::<Vec<_>>();
+        let unplanned = (0..6)
+            .map(|index| {
+                file_symbol_target(
+                    &format!("beta_case_{index}"),
+                    "tests_beta_test_rs",
+                    Confidence::Medium,
+                )
+            })
+            .collect::<Vec<_>>();
+        for target in planned.iter().chain(unplanned.iter()) {
+            store = store.with_test_target(target.clone());
+        }
+
+        let recommended = recommended_tests(
+            &store,
+            &[PathBuf::from("src/alpha.rs"), PathBuf::from("src/beta.rs")],
+        )
+        .unwrap();
+        let names = recommended
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for target in planned.iter().chain(unplanned.iter()) {
+            assert!(names.contains(target.name.as_str()), "{}", target.name);
+        }
+        // Exactly the fourteen, so the assertion cannot pass because the stem match pulled every
+        // target in for both paths and the count merely looked large enough.
+        assert_eq!(names.len(), 14, "{names:?}");
+        assert_eq!(recommended.len(), 14, "{recommended:?}");
+
+        let mut plan = plan_with_validation_command("cargo test");
+        plan.validation = planned;
+        let missing = missing_tests(&plan, &recommended);
+        assert_eq!(missing.len(), 6, "{missing:?}");
+    }
+
+    /// `ok verify` recommends what the plan would have planned. A test registered by a runner
+    /// call is plannable, so it must not be reported as missing; a disabled one is planned by
+    /// neither side, so it must not be recommended either.
+    #[test]
+    fn recommended_tests_keep_a_registered_test_and_drop_a_disabled_one() {
+        let store = RuntimeStore::new()
+            .with_file_text("tests/rates_test.ts", "test(\"rounds half up\", () => {});")
+            .with_test_target(registration_target(
+                "rounds half up",
+                "tests_rates_test_ts",
+                false,
+            ))
+            .with_test_target(registration_target(
+                "skips stale rows",
+                "tests_rates_test_ts",
+                true,
+            ));
+
+        let recommended = recommended_tests(&store, &[PathBuf::from("src/rates.ts")]).unwrap();
+        let names = recommended
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"rounds half up"), "{names:?}");
+        assert!(!names.contains(&"skips stale rows"), "{names:?}");
+
+        let mut plan = plan_with_validation_command("npm test");
+        plan.validation = recommended.clone();
+        assert!(missing_tests(&plan, &recommended).is_empty());
     }
 
     impl MetadataStore for RuntimeStore {
@@ -3912,7 +4047,7 @@ mod tests {
         }
 
         fn tests(&self) -> Result<Vec<TestTarget>> {
-            Ok(Vec::new())
+            Ok(self.test_targets.clone())
         }
 
         fn imports(&self) -> Result<Vec<Import>> {
@@ -5764,6 +5899,7 @@ rename to src/menu.rs
             reason: "validate handler change".into(),
             evidence_refs: vec!["boundary:allow".into()],
             score_breakdown: Vec::new(),
+            origin: Default::default(),
         }];
         plan.evidence_by_section
             .insert("validation".into(), vec!["boundary:allow".into()]);

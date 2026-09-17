@@ -485,6 +485,9 @@ impl<'a> BuiltinCandidateContext<'a> {
                 )
             }
         };
+        if let Some(caveat) = validation_unavailable_reason(&tests) {
+            return CandidateStream::unavailable(RetrievalSourceKind::Validation, caveat);
+        }
         let files_by_id = self
             .files
             .iter()
@@ -492,6 +495,8 @@ impl<'a> BuiltinCandidateContext<'a> {
             .collect::<BTreeMap<_, _>>();
         let mut scored = tests
             .into_iter()
+            // A disabled test is not evidence that anything was validated.
+            .filter(|test| test.counts_as_validation_evidence())
             .filter_map(|test| {
                 let haystack = format!(
                     "{} {} {}",
@@ -1221,6 +1226,23 @@ fn is_overlap_stopword(term: &str) -> bool {
                 | "make"
                 | "made"
         )
+}
+
+/// Why this index cannot supply validation evidence, when it cannot: no test target at all, or
+/// none the runner would execute. It is decided from the indexed targets alone, never from a
+/// census of files, so the diagnostics can never call validation unavailable while the pack
+/// carries a validation target.
+fn validation_unavailable_reason(tests: &[TestTarget]) -> Option<&'static str> {
+    if tests.is_empty() {
+        return Some("no test targets are indexed for this repository");
+    }
+    if !tests
+        .iter()
+        .any(|test| test.counts_as_validation_evidence())
+    {
+        return Some("every indexed test target is a disabled test the runner skips");
+    }
+    None
 }
 
 fn term_overlap(terms: &[String], haystack: &str) -> usize {

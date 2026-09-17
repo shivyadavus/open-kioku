@@ -1150,7 +1150,13 @@ impl Indexer {
             root: &root,
             config,
             scip_report: scip_report.as_ref(),
-            test_count: tests.len(),
+            // `ok status` reports this as the repository's indexed tests. A disabled test is
+            // not validation evidence, so counting it would read as ready while every pack says
+            // validation is unavailable.
+            test_count: tests
+                .iter()
+                .filter(|test| test.counts_as_validation_evidence())
+                .count(),
             import_count: imports.len(),
             analysis: AnalysisCounts {
                 static_facts: static_analysis_facts,
@@ -3385,6 +3391,49 @@ class Util {
             .phase_reports
             .iter()
             .any(|report| report.phase == "scan" && report.skipped >= 4));
+    }
+
+    /// `ok status` reports `quality.test_count` as the repository's indexed tests. A test the
+    /// runner skips is not validation evidence, so a repository of `test.todo` stubs must not
+    /// read as ready while every pack reports validation unavailable.
+    #[test]
+    fn indexed_test_count_excludes_disabled_registration_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/rates.ts"),
+            "export function convertCurrency(amount: number, rate: number): number {\n  return Math.round(amount * rate);\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/rates.test.ts"),
+            "test(\"rounds half up\", () => {\n  expect(convertCurrency(2, 1.5)).toBe(3);\n});\n\ntest.todo(\"handles negative rates\");\n\nit.skip(\"handles zero\", () => {});\n",
+        )
+        .unwrap();
+
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.history.enabled = false;
+
+        let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+        let names = snapshot
+            .tests
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"rounds half up"), "{names:?}");
+        assert!(names.contains(&"handles negative rates"), "{names:?}");
+        let enabled = snapshot
+            .tests
+            .iter()
+            .filter(|test| test.counts_as_validation_evidence())
+            .count();
+        assert_eq!(snapshot.manifest.quality.test_count, enabled);
+        assert!(
+            snapshot.manifest.quality.test_count < snapshot.tests.len(),
+            "the disabled stubs must not be counted: {names:?}"
+        );
     }
 
     #[test]
