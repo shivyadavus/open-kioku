@@ -13,15 +13,18 @@ categories.workspace = true
 [dependencies]
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
+open-kioku-config = { version = "4.0.0", path = "../open-kioku-config" }
 open-kioku-core = { version = "4.0.0", path = "../open-kioku-core" }
 open-kioku-errors = { version = "4.0.0", path = "../open-kioku-errors" }
 open-kioku-format = { version = "4.0.0", path = "../open-kioku-format" }
 open-kioku-impact = { version = "4.0.0", path = "../open-kioku-impact" }
 open-kioku-ranking = { version = "4.0.0", path = "../open-kioku-ranking" }
 open-kioku-search-regex = { version = "4.0.0", path = "../open-kioku-search-regex" }
+open-kioku-search-tantivy = { version = "4.0.0", path = "../open-kioku-search-tantivy" }
 open-kioku-storage = { version = "4.0.0", path = "../open-kioku-storage" }
 open-kioku-tests = { version = "4.0.0", path = "../open-kioku-tests" }
 serde_json.workspace = true
 
 [dev-dependencies]
 open-kioku-storage-sqlite = { version = "4.0.0", path = "../open-kioku-storage-sqlite" }
+tempfile.workspace = true

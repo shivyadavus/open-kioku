@@ -97,12 +97,20 @@ the unit.
 
 ## Text relevance scale (advisory)
 
-On the search path (`ok search`, `ok eval`, `ok prove`, and the retrieval benchmark's `fusion`
-strategy), `text_relevance` is the raw boosted BM25 score. That score is unbounded. The other
+On the search path (`ok search` and MCP `search_code`, which share
+`open_kioku_context::search::ranked_search`, plus `ok eval`, `ok prove`, and the retrieval
+benchmark's `fusion` strategy), `text_relevance` is the raw boosted BM25 score. That score is unbounded. The other
 signals are bounded, except `boundary_fit`'s 18.0 tier and the `path_quality` penalty, which is
 a share of the raw score. A bounded signal can therefore reorder only candidates whose lexical
 scores are nearly tied. Context packs are unaffected, because they fuse candidate streams by
 rank.
+
+`ok search` and `search_code` rank a candidate pool of `4 × (offset + limit)` per source,
+clamped to 100..500 (`open_kioku_context::search::candidate_depth`). The benchmarks rank
+`ranking_candidate_limit`, clamped to 100..200. The two are equal for any page ending at 50
+results or sooner, which covers every benchmark case, so the frozen baselines measure the pool
+the product uses for those pages. A larger page — `ok search --limit 170`, or a `search_code`
+page reaching past result 50 — ranks a deeper pool than any benchmark measures.
 
 `ok retrieval-bench` measures two alternatives beside `fusion`. They are reported under
 `stream_ablations` and excluded from `benchmarks/retrieval-baseline.json` and the release

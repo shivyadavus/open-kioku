@@ -132,7 +132,8 @@ enum Command {
         /// Search the local semantic vector index instead of lexical BM25 (needs `ok semantic index`).
         #[arg(long, default_value_t = false)]
         semantic: bool,
-        /// Merge lexical and semantic candidates, deduplicated by path and re-sorted by combined score.
+        /// Rank lexical and semantic candidates together, one result per file, by the configured
+        /// [ranking] weights.
         #[arg(long, default_value_t = false)]
         hybrid: bool,
     },

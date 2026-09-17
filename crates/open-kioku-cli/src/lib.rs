@@ -5,7 +5,12 @@ use open_kioku_architecture::{
 };
 use open_kioku_config::{
     load_architecture_policy, load_architecture_policy_from_path, ArchitecturePolicy, OkConfig,
-    PolicySource, RankingConfig, ScipMode,
+    PolicySource, ScipMode,
+};
+use open_kioku_context::search::{
+    annotate_candidates_with_git_history, lexical_candidates, ranked_search,
+    ranking_candidate_limit, top_unique_paths, top_unique_paths_merging,
+    without_git_history_candidates, RankedSearchRequest, SearchMode, SemanticCandidates,
 };
 use open_kioku_context::{expanded_task_search_terms, ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
@@ -22,9 +27,8 @@ use open_kioku_core::{
     NodeId, Owner, OwnerSuggestion, OwnershipEvidence, OwnershipReport, OwnershipSourceType,
     PlanReport, PolicyCheckReport, PolicyComponentMatch, PolicyExemptionEvidence, PolicyViolation,
     ProvenanceTouch, QualityNote, ReviewerAvailability, ReviewerEvidence, ReviewerRole,
-    ReviewerSuggestionReport, ScoreComponent, SearchResult, SimilarChangeQuery,
-    SimilarChangeReport, StatusDetail, Symbol, SymbolId, SymbolProvenance, TestTarget,
-    INDEX_COVERAGE_WARN_PERCENT,
+    ReviewerSuggestionReport, SearchResult, SimilarChangeQuery, SimilarChangeReport, StatusDetail,
+    Symbol, SymbolId, SymbolProvenance, TestTarget, INDEX_COVERAGE_WARN_PERCENT,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -37,7 +41,7 @@ use open_kioku_patch::{
 use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat, PreflightFormat, PreflightReport};
 use open_kioku_ranking::{
     rerank_baseline, rerank_with_options, top_score_signals, RankingMode, RankingOptions,
-    RankingSignal, RankingWeights, TextRelevanceScale,
+    RankingSignal, TextRelevanceScale,
 };
 use open_kioku_search_regex::{regex_search_index, search_chunks, MAX_REGEX_SCAN_FILES};
 use open_kioku_search_tantivy::{

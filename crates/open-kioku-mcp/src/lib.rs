@@ -7,6 +7,7 @@ use open_kioku_context::{
         CandidateRequest, CandidateStream, ContextCandidateSource, SearchIndexCandidateSource,
         StreamCandidate, UnavailableCandidateSource,
     },
+    search::{ranked_search, RankedSearchRequest, SearchMode, SemanticCandidates},
     ContextPackBuilder,
 };
 use open_kioku_context_compress::ContextHandleStore;
@@ -26,7 +27,7 @@ use open_kioku_patch::{
 use open_kioku_plan::{
     ContractBuilder, PlanEngine, PlanFormat, PlanOrigin, PreflightFormat, PreflightReport,
 };
-use open_kioku_search_regex::{regex_search_index, search_chunks, MAX_REGEX_SCAN_FILES};
+use open_kioku_search_regex::{regex_search_index, MAX_REGEX_SCAN_FILES};
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_sentry::{disabled_response, unimplemented_response, SentryConfig};
@@ -681,7 +682,10 @@ async fn dispatch(
                 // coverage recording, so absence is never mistaken for 100%.
                 let coverage = manifest.quality.coverage.as_ref();
                 object.insert("coverage".into(), serde_json::to_value(coverage)?);
-                object.insert("languages".into(), json!(indexed_languages(store, coverage)?));
+                object.insert(
+                    "languages".into(),
+                    json!(indexed_languages(store, coverage)?),
+                );
                 // The whole semantic status, not a readiness summary. An agent
                 // about to trust vector results has to be able to ask which
                 // provider, model and artifact produced them, and the retired
@@ -710,7 +714,9 @@ async fn dispatch(
                 } else {
                     Vec::new()
                 };
-                return Ok(json!({"path": path, "file": file, "chunks": chunks, "caveats": caveats}));
+                return Ok(
+                    json!({"path": path, "file": file, "chunks": chunks, "caveats": caveats}),
+                );
             }
             let limit = limit(&params);
             let offset = offset(&params);
@@ -732,14 +738,7 @@ async fn dispatch(
                 offset,
             )?)
         }
-        "search_code" => match params.get("mode").and_then(Value::as_str).unwrap_or("code") {
-            "code" | "graph" => search_tool(repo, store, &params),
-            "semantic" => semantic_search_tool(repo, store, config, &params),
-            "hybrid" => hybrid_search_tool(repo, store, config, &params),
-            other => Err(invalid_input(format!(
-                "unknown `mode` `{other}` for search_code; expected one of code, graph, semantic, hybrid"
-            ))),
-        },
+        "search_code" => search_code_tool(repo, store, config, &params),
         "regex_search" => regex_search_tool(store, &params),
         "build_context_pack" => {
             let task = required_str(&params, "task")?;
@@ -1316,13 +1315,6 @@ fn structured_content_for(value: Value, text: &str, text_truncated: bool) -> Val
     }
 }
 
-fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow::Result<Value> {
-    let limit = limit(params);
-    let offset = offset(params);
-    let results = search_results(repo, store, params, search_fetch_limit(limit, offset))?;
-    paged_bounded_slice_response("results", results, limit, offset)
-}
-
 /// Evaluates the caller's pattern over the indexed corpus instead of handing it
 /// to the ranked lexical path. An agent that asks for a regex gets exact
 /// single-line matches, and gets told when the bounded walk stopped early.
@@ -1356,144 +1348,91 @@ fn regex_search_tool(store: &dyn MetadataStore, params: &Value) -> anyhow::Resul
     paged_slice_response_with_metadata("results", scan.results, metadata)
 }
 
-/// `query` (or the older `pattern` spelling), refused when blank or absent through the check
-/// `ok search` uses, with its message: an empty query returned an empty success, which read as
-/// "nothing in the repository matches".
+/// `query` (or the older `pattern` spelling). A key that is absent, or holds something other
+/// than a string, is the forgotten-argument mistake `get_definition` and `retrieve_context`
+/// report in those words. A key that is there and blank is refused through the check `ok search`
+/// uses, with its message: an empty query returned an empty success, which read as "nothing in
+/// the repository matches". Both are the caller's argument, so both are invalid params.
 fn search_query(params: &Value) -> anyhow::Result<&str> {
     let query = params
         .get("query")
         .or_else(|| params.get("pattern"))
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .ok_or_else(|| invalid_input("missing required string argument `query`"))?;
     Ok(open_kioku_storage::require_search_query(query)?)
 }
 
-fn search_results(
+/// `search_code` in every mode answers through the ranked search `ok search` runs, so a query's
+/// ordered results are the CLI's and a page at `offset` is a slice of that list (#448). The
+/// `[ranking]` weights are the ones `ok mcp serve` read from `ok.toml` when it started.
+fn search_code_tool(
     repo: &Path,
     store: &dyn MetadataStore,
+    config: &OkConfig,
     params: &Value,
-    fetch_limit: usize,
-) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
-    let query = search_query(params)?;
-    let mode = params.get("mode").and_then(Value::as_str).unwrap_or("code");
-    let index_dir = default_index_dir(repo);
-    if TantivySearchIndex::exists(&index_dir) {
-        let index = TantivySearchIndex::open_or_create(index_dir)?;
-        if mode == "graph" {
-            return Ok(index.search_graph(query, fetch_limit)?);
+) -> anyhow::Result<Value> {
+    let mode = match params.get("mode").and_then(Value::as_str).unwrap_or("code") {
+        "code" => SearchMode::Code,
+        "graph" => SearchMode::Graph,
+        "semantic" => SearchMode::Semantic,
+        "hybrid" => SearchMode::Hybrid,
+        other => {
+            return Err(invalid_input(format!(
+                "unknown `mode` `{other}` for search_code; expected one of code, graph, semantic, hybrid"
+            )))
         }
-        return Ok(index.search(query, fetch_limit)?);
-    }
-    if mode == "graph" {
-        anyhow::bail!("graph search index is missing; run `ok index .` first");
-    }
-    let files = store.list_files(usize::MAX, 0)?;
-    let chunks = store.all_chunks()?;
-    let symbols = store.list_symbols(None, usize::MAX, 0)?;
-    Ok(search_chunks(
-        &chunks,
-        &files,
-        &symbols,
-        query,
-        fetch_limit,
-    )?)
-}
-
-fn semantic_search_tool(
-    repo: &Path,
-    store: &dyn MetadataStore,
-    config: &OkConfig,
-    params: &Value,
-) -> anyhow::Result<Value> {
-    let query = required_str(params, "query")?;
-    let mut semantic_config = config.semantic.clone();
-    semantic_config.enabled = true;
-    let manager = SemanticIndexManager::new(repo, store, &semantic_config);
-    let status = manager.status();
-    if status.ready {
-        let limit = limit(params);
-        let offset = offset(params);
-        let results = manager.search(query, search_fetch_limit(limit, offset))?;
-        let mut response = paged_bounded_slice_response("results", results, limit, offset)?;
-        response["semantic_status"] = json!(status);
-        return Ok(response);
-    }
-    let mut response = paged_slice_response::<open_kioku_core::SearchResult>(
-        "results",
-        Vec::new(),
-        limit(params),
-        offset(params),
-    )?;
-    response["semantic_status"] = json!(status);
-    response["error"] = json!("semantic index is not ready; run `ok semantic index` first");
-    Ok(response)
-}
-
-fn hybrid_search_tool(
-    repo: &Path,
-    store: &dyn MetadataStore,
-    config: &OkConfig,
-    params: &Value,
-) -> anyhow::Result<Value> {
-    let query = required_str(params, "query")?;
+    };
     let limit = limit(params);
     let offset = offset(params);
-    let mut results = search_results(repo, store, params, search_fetch_limit(limit, offset))?;
-    let mut semantic_config = config.semantic.clone();
-    semantic_config.enabled = true;
-    let manager = SemanticIndexManager::new(repo, store, &semantic_config);
-    let status = manager.status();
-    if status.ready {
-        merge_semantic_results(
-            &mut results,
-            manager.search(query, search_fetch_limit(limit, offset))?,
-        );
-    }
-    results.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    let mut response = paged_bounded_slice_response("results", results, limit, offset)?;
-    response["semantic_status"] = json!(status);
-    Ok(response)
-}
-
-fn merge_semantic_results(
-    results: &mut Vec<open_kioku_core::SearchResult>,
-    semantic_results: Vec<open_kioku_core::SearchResult>,
-) {
-    for semantic in semantic_results {
-        if let Some(existing) = results
-            .iter_mut()
-            .find(|result| result.path == semantic.path)
-        {
-            for evidence in semantic.evidence {
-                if !existing.evidence.contains(&evidence) {
-                    existing.evidence.push(evidence);
-                }
-            }
-            for evidence_ref in semantic.evidence_refs {
-                if !existing.evidence_refs.contains(&evidence_ref) {
-                    existing.evidence_refs.push(evidence_ref);
-                }
-            }
-            for component in semantic.score_breakdown {
-                if !existing
-                    .score_breakdown
-                    .iter()
-                    .any(|existing| existing.signal == component.signal)
-                {
-                    existing.score_breakdown.push(component);
-                }
-            }
-            existing.reconcile_score_breakdown();
-        } else {
-            results.push(semantic);
+    // `limit: 0` stays an empty page with `has_more`, as every paged tool answers it; only the
+    // CLI reads `--limit 0` as every unique path.
+    let request = RankedSearchRequest {
+        query: search_query(params)?,
+        mode,
+        limit: Some(limit),
+        offset,
+    };
+    let (page, semantic_status) = if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
+        let mut semantic_config = config.semantic.clone();
+        semantic_config.enabled = true;
+        let manager = SemanticIndexManager::new(repo, store, &semantic_config);
+        let status = manager.status();
+        if mode == SearchMode::Semantic && !status.ready {
+            let mut response = paged_slice_response::<open_kioku_core::SearchResult>(
+                "results",
+                Vec::new(),
+                limit,
+                offset,
+            )?;
+            response["semantic_status"] = json!(status);
+            response["error"] = json!("semantic index is not ready; run `ok semantic index` first");
+            return Ok(response);
         }
+        let search = |query: &str, depth: usize| manager.search(query, depth);
+        let semantic = SemanticCandidates {
+            ready: status.ready,
+            search: &search,
+        };
+        let page = ranked_search(repo, store, &request, Some(&semantic), &config.ranking)?;
+        (page, Some(status))
+    } else {
+        let page = ranked_search(repo, store, &request, None, &config.ranking)?;
+        (page, None)
+    };
+    let mut metadata = PageMetadata::new(limit, offset, page.has_more);
+    // A page that ends the ranking can still fall short of the index: when a source filled its
+    // candidate window, matches past it were never ranked and no offset reaches them. `has_more`
+    // stays false, because the next page would come back empty, and the response says the list
+    // may be incomplete rather than implying it is all of them.
+    if let Some(warning) = page.truncation_warning() {
+        metadata.truncated = true;
+        metadata.warnings.push(warning);
     }
+    let mut response = paged_response("results", page.results, metadata)?;
+    if let Some(status) = semantic_status {
+        response["semantic_status"] = json!(status);
+    }
+    Ok(response)
 }
 
 fn tool_title(name: &str) -> String {
@@ -1765,7 +1704,7 @@ fn tool_description(name: &str, base: &str) -> String {
     let guidance = match name {
         "repo_status" => "Use first to check whether the local index exists, how much of the repository it covers, which languages it holds, and whether the semantic index is ready, before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
         "list_files" => "Use for a paginated inventory of what the index holds, or pass `path` for one file's indexed detail: its record plus every chunk covering it. Do NOT use to find files by keyword (use search_code) or for a symbol's definition (use get_definition). This is read-only and returns indexed data only.",
-        "search_code" => "Use as the single entry point for finding where something is handled. `mode` selects the evidence: `code` for lexical BM25 over indexed chunks, `graph` for indexed graph-node documents, `semantic` for the local vector index, `hybrid` for both merged and re-sorted. Semantic and hybrid fall back to lexical-only and say so in `semantic_status` when the vector index is not ready, so their extra recall is never assumed. Every result already carries `score_breakdown` and `evidence_refs`; there is no separate explain step. Do NOT use for literal patterns (use regex_search) or for a known symbol (use get_definition). This is read-only.",
+        "search_code" => "Use as the single entry point for finding where something is handled. `mode` selects the evidence: `code` for lexical BM25 over indexed chunks, `graph` for indexed graph-node documents, `semantic` for the local vector index, `hybrid` for lexical and semantic candidates ranked together. `code`, `semantic` and `hybrid` are ranked by the function `ok search` uses, with this repository's configured `[ranking]` weights, and return one result per file, its best-ranked chunk, not every chunk that matched; `graph` keeps the index's own order. A result is not always a text match: local git co-change history can contribute a file that matched no search term, marked `historical git co-change candidate` in `match_reason`, so read `match_reason` and `score_breakdown` before treating a result as a lexical hit. Semantic and hybrid fall back to lexical-only and say so in `semantic_status` when the vector index is not ready, so their extra recall is never assumed. A page ranked from a filled candidate window is reported as `truncated` with a warning, because matches past that window were never ranked. Every result already carries `score_breakdown` and `evidence_refs`; there is no separate explain step. Do NOT use for literal patterns (use regex_search) or for a known symbol (use get_definition). This is read-only.",
         "regex_search" => "Use when the target is a literal pattern and ranked guesses will not do. Every hit is exact, at confidence 1.0, and hits arrive in path order rather than by score. Do NOT use for ranked keyword search (use search_code), natural-language concept search (use search_code with mode=semantic or mode=hybrid), or broad candidate discovery (use search_code). Read the response caveats before concluding a pattern is absent from the repository. This is read-only.",
         "search_symbols" => "Use to browse the indexed symbol table, or filter it by a substring you already know; omit `query` to page through everything. Do NOT use when the query is only approximate: matching is case-insensitive substring, not fuzzy or ranked, so a name that shares no substring will not appear at all. For a symbol's defining record use get_definition, and for its usages use get_references. This is read-only and searches the local index only.",
         "get_definition" => "Use after resolving a symbol name, when knowing where it lives is enough. Set include_body=true when the definition text and the indexed lines around it are what the task needs, and read `caveats` before relying on that body: it names anything the index could not recover. Do NOT use for candidate discovery (use search_symbols) or for usages (use get_references). This is read-only.",
@@ -1800,7 +1739,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
         ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files considered under the current policy versus indexed per language, each omission attributed to a skip reason, policy exclusions such as hidden or ignored files counted beside the ratio with their top directories and governing setting, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). `quality.quality_notes` and `quality.skipped_paths` are `{total, by_kind|by_reason, sample}` summaries by default.", json!({"type":"object","properties":{"detail":{"type":"string","enum":["summary","full"],"description":"How much of the manifest's per-item lists to return. 'summary' (default) replaces quality.quality_notes with {total, by_kind, sample} and quality.skipped_paths with {total, by_reason, sample}, each sample at most 20 entries drawn across every kind or reason; 'full' returns every note and skipped path as the manifest stores them. An unknown value is an invalid-params error (-32602)."}}})),
         ("list_files", "List indexed files with relative path, size in bytes, and language, or pass one `path` to get that file's indexed detail instead: its file record plus every code chunk covering it, with line ranges. A path that is not indexed returns a null file and an explicit caveat rather than an empty success.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of a single file to describe in detail (e.g. 'src/main.rs'). When set, `limit` and `offset` are ignored and the response carries the file record and its chunks."},"limit":{"type":"integer","description":"Maximum number of files to return when listing. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching files to skip when listing. Defaults to 0."}}})),
-        ("search_code", "Search indexed code through one of four evidence modes: lexical BM25 over code chunks, indexed graph-node documents, the local semantic vector index, or a hybrid merge of lexical and semantic candidates deduplicated by path and re-sorted by combined score. Semantic and hybrid modes report `semantic_status` and fall back to lexical-only results when the vector index is not ready. Every result carries path, line range, snippet, score, per-signal score_breakdown, and evidence_refs.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query: terms, identifiers, routes, config keys, or a natural-language description when mode is semantic or hybrid."},"mode":{"type":"string","enum":["code","graph","semantic","hybrid"],"description":"Which evidence to search. 'code' (default) is lexical BM25 over indexed chunks and file paths; 'graph' searches indexed graph-node documents; 'semantic' searches the local vector index; 'hybrid' merges lexical and semantic candidates. An unknown mode is an invalid-params error (-32602)."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
+        ("search_code", "Search indexed code through one of four evidence modes: lexical BM25 over code chunks, indexed graph-node documents, the local semantic vector index, or lexical and semantic candidates ranked together. 'code', 'semantic' and 'hybrid' rank their candidates through the same function `ok search` uses, with the repository's configured `[ranking]` weights, and return one result per file, its best-ranked chunk; 'graph' returns the index's own order. Results can include a file that matched no search term, contributed by local git co-change history and named as such in its match_reason. Semantic and hybrid modes report `semantic_status` and fall back to lexical-only results when the vector index is not ready. A page ranked from a filled candidate window is reported as `truncated` with a warning. Every result carries path, line range, snippet, score, per-signal score_breakdown, and evidence_refs.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query: terms, identifiers, routes, config keys, or a natural-language description when mode is semantic or hybrid."},"mode":{"type":"string","enum":["code","graph","semantic","hybrid"],"description":"Which evidence to search. 'code' (default) is lexical BM25 over indexed chunks and file paths, ranked; 'graph' searches indexed graph-node documents in index order; 'semantic' searches the local vector index; 'hybrid' ranks lexical and semantic candidates together. An unknown mode is an invalid-params error (-32602)."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("regex_search", "Match a regular expression line by line against indexed chunk text, in path order, returning exact single-line hits with file path, line number, and the matching line. Regions the indexer did not chunk are not searched, and the response carries that caveat plus a warning when the bounded walk stopped early.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is an invalid-params error (-32602). Example: 'fn\\s+main' to find main function declarations."},"limit":{"type":"integer","description":"Maximum number of matching lines to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching lines to skip before returning results. Defaults to 0."}}})),
         ("search_symbols", "List or substring-filter the indexed symbol table (functions, classes, structs, traits, interfaces) with pagination, returning symbol name, kind, file path, and line range. Matching is case-insensitive substring against name and qualified name, ordered by qualified name: it is not fuzzy and the results are not ranked, so an approximate name does not match. Omitting `query` pages through every indexed symbol.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring matched case-insensitively against symbol names and qualified names. Omit to list all symbols ordered by qualified name. Not fuzzy: a name that shares no substring with the query does not match."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100. Use with offset for pagination."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
         ("get_definition", "Retrieve the indexed definition record for a symbol (function, class, struct, trait, module) by name: its file, line range, kind, qualified name, confidence, and provenance. With include_body=true it also joins the symbol back to the indexed chunk text covering it, returning the definition body with the line range it spans plus up to ten indexed lines above and below it verbatim; anything that could not be recovered from the index is stated in `caveats` rather than returned as a shorter body.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."},"include_body":{"type":"boolean","description":"Set true to return the definition body and the indexed lines around it alongside the record. Defaults to false, which returns the record only."}}})),
@@ -1930,21 +1869,6 @@ where
 {
     let has_more = values.len() > offset.saturating_add(limit);
     paged_slice_response_with_metadata(key, values, PageMetadata::new(limit, offset, has_more))
-}
-
-fn paged_bounded_slice_response<T>(
-    key: &str,
-    values: Vec<T>,
-    limit: usize,
-    offset: usize,
-) -> anyhow::Result<Value>
-where
-    T: Serialize,
-{
-    let has_more = values.len() > offset.saturating_add(limit);
-    let mut metadata = PageMetadata::new(limit, offset, has_more);
-    disclose_fetch_cap(&mut metadata, values.len());
-    paged_slice_response_with_metadata(key, values, metadata)
 }
 
 /// Reports the `search_fetch_limit` clamp on the response that the clamp shaped.
@@ -4316,7 +4240,7 @@ mod tests {
     async fn search_code_refuses_a_blank_query_as_invalid_params() {
         let store = SqliteStore::open(":memory:").unwrap();
         let config = OkConfig::default();
-        for params in [json!({"query": ""}), json!({"query": "   "}), json!({})] {
+        for params in [json!({"query": ""}), json!({"query": "   "})] {
             let error = dispatch(
                 Path::new("."),
                 &store,
@@ -4332,6 +4256,38 @@ mod tests {
                     .to_string()
                     .contains(open_kioku_storage::BLANK_SEARCH_QUERY_MESSAGE),
                 "{params}: {error}"
+            );
+        }
+    }
+
+    /// A `query` the caller never sent is a different mistake from one they sent empty, and it
+    /// is reported as every other tool reports a forgotten argument.
+    #[tokio::test]
+    async fn search_code_reports_an_absent_query_as_a_missing_argument() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        for params in [json!({}), json!({"query": 7}), json!({"mode": "hybrid"})] {
+            let error = dispatch(
+                Path::new("."),
+                &store,
+                &config,
+                "search_code",
+                params.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(json_rpc_error_code(&error), -32602, "{params}: {error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("missing required string argument `query`"),
+                "{params}: {error}"
+            );
+            assert!(
+                !error
+                    .to_string()
+                    .contains(open_kioku_storage::BLANK_SEARCH_QUERY_MESSAGE),
+                "an absent argument is not a blank query: {error}"
             );
         }
     }
@@ -5208,8 +5164,14 @@ mod tests {
         assert_eq!(page["warnings"], json!([]));
         assert_eq!(page["caveats"], json!([]));
 
-        let capped =
-            paged_bounded_slice_response("results", (0..MAX_MCP_FETCH).collect(), 2, 499).unwrap();
+        let mut capped_metadata = PageMetadata::new(2, 499, false);
+        disclose_fetch_cap(&mut capped_metadata, MAX_MCP_FETCH);
+        let capped = paged_slice_response_with_metadata(
+            "results",
+            (0..MAX_MCP_FETCH).collect::<Vec<_>>(),
+            capped_metadata,
+        )
+        .unwrap();
         assert_eq!(capped["results"], json!([499]));
         assert_eq!(capped["returned"], 1);
         assert_eq!(capped["has_more"], true);
