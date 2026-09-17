@@ -239,7 +239,9 @@ fn validation_artifacts(root: &Path) -> Vec<PathBuf> {
             continue;
         }
         artifacts.extend(
+            // Sorted so capped, first-wins fact selection does not depend on listing order.
             walkdir::WalkDir::new(base)
+                .sort_by_file_name()
                 .max_depth(5)
                 .into_iter()
                 .filter_map(|entry| entry.ok())

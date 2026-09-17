@@ -1590,6 +1590,16 @@ impl Indexer {
             coverage,
         } = ledger;
         let skipped = skipped_paths.len();
+        // The walk yields directory entries in filesystem order, which differs between copies
+        // of the same tree. Every later collection (chunks, symbols, search documents, storage
+        // rows) inherits this order, so it is fixed to repository paths here.
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        document_sections.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then_with(|| left.line_range.start.cmp(&right.line_range.start))
+                .then_with(|| left.line_range.end.cmp(&right.line_range.end))
+        });
         Ok(ScanResult {
             files,
             document_sections,
@@ -2333,6 +2343,9 @@ fn map_symbol_touches(
             .cmp(&commit_order.get(right.commit_id.0.as_str()))
             .then_with(|| left.file_path.cmp(&right.file_path))
             .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+            // Overloads share a qualified name in one file and commit; without the id they kept
+            // the hash order they were collected in.
+            .then_with(|| left.symbol_id.cmp(&right.symbol_id))
     });
     touches
 }

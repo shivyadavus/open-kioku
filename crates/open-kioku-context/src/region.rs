@@ -66,7 +66,13 @@ pub(crate) fn widen_selected_regions(
             .iter()
             .filter(|chunk| chunk.file_id == file.id)
             .collect::<Vec<_>>();
-        file_chunks.sort_by_key(|chunk| chunk.range.start);
+        file_chunks.sort_by(|left, right| {
+            (left.range.start, left.range.end, &left.id).cmp(&(
+                right.range.start,
+                right.range.end,
+                &right.id,
+            ))
+        });
         let file_symbols = symbols
             .iter()
             .filter(|symbol| symbol.file_id == file.id && symbol.range.is_some())
@@ -351,11 +357,19 @@ fn enclosing_symbol<'a>(
                 && symbol_range.end >= range.end
                 && (symbol_range.start < range.start || symbol_range.end > range.end)
         })
-        .min_by_key(|(_, symbol_range)| {
+        // Symbols spanning the same lines (a class and its sole member) tie on size and start;
+        // the id picks one regardless of the order the store listed them in.
+        .min_by(|(left, left_range), (right, right_range)| {
             (
-                symbol_range.end.saturating_sub(symbol_range.start),
-                symbol_range.start,
+                left_range.end.saturating_sub(left_range.start),
+                left_range.start,
+                &left.id,
             )
+                .cmp(&(
+                    right_range.end.saturating_sub(right_range.start),
+                    right_range.start,
+                    &right.id,
+                ))
         })
 }
 
@@ -488,6 +502,18 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+        }
+    }
+
+    #[test]
+    fn enclosing_symbols_with_identical_ranges_resolve_by_id() {
+        let file = file("f", "src/lib.rs");
+        let class = symbol("widget_b", &file, 1, 40);
+        let module = symbol("widget_a", &file, 1, 40);
+        let range = LineRange { start: 5, end: 9 };
+        for symbols in [vec![&class, &module], vec![&module, &class]] {
+            let (chosen, _) = enclosing_symbol(&symbols, &range).unwrap();
+            assert_eq!(chosen.id.0, "widget_a");
         }
     }
 

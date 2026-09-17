@@ -1,4 +1,4 @@
-use super::{CandidateRequest, CandidateStream, StreamCandidate};
+use super::{compare_result_position, CandidateRequest, CandidateStream, StreamCandidate};
 use crate::{search_candidates, TaskSearchIntent};
 use open_kioku_core::{
     identity::symbol_node_id, AnalysisFact, CodeChunk, DocumentSection, EvidenceSourceType, File,
@@ -7,6 +7,7 @@ use open_kioku_core::{
 };
 use open_kioku_ranking::rerank_baseline;
 use open_kioku_storage::{HistoryStore, OkStore};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -326,25 +327,7 @@ impl<'a> BuiltinCandidateContext<'a> {
                 ))
             })
             .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            right
-                .authority
-                .cmp(&left.authority)
-                .then_with(|| left.result.path.cmp(&right.result.path))
-                .then_with(|| {
-                    left.result
-                        .symbol
-                        .as_ref()
-                        .map(|symbol| &symbol.qualified_name)
-                        .cmp(
-                            &right
-                                .result
-                                .symbol
-                                .as_ref()
-                                .map(|symbol| &symbol.qualified_name),
-                        )
-                })
-        });
+        candidates.sort_by(compare_exact_symbol_candidates);
         candidates.truncate(request.limit);
         CandidateStream {
             source: RetrievalSourceKind::ExactSemantic,
@@ -527,12 +510,7 @@ impl<'a> BuiltinCandidateContext<'a> {
                 ))
             })
             .collect::<Vec<_>>();
-        scored.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| left.1.result.path.cmp(&right.1.result.path))
-        });
+        scored.sort_by(compare_overlap_candidates);
         CandidateStream::success(
             RetrievalSourceKind::Validation,
             scored
@@ -591,12 +569,7 @@ impl<'a> BuiltinCandidateContext<'a> {
                 ))
             })
             .collect::<Vec<_>>();
-        scored.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| left.1.result.path.cmp(&right.1.result.path))
-        });
+        scored.sort_by(compare_overlap_candidates);
         CandidateStream::success(
             RetrievalSourceKind::Runtime,
             scored
@@ -832,8 +805,39 @@ fn sort_history_candidates(candidates: &mut [StreamCandidate]) {
             .raw_score
             .unwrap_or_default()
             .total_cmp(&left.raw_score.unwrap_or_default())
-            .then_with(|| left.result.path.cmp(&right.result.path))
+            .then_with(|| compare_result_position(&left.result, &right.result))
     });
+}
+
+/// Authority first, then path, then the matched symbol's qualified name and id: two symbols
+/// can share a qualified name (overloads, re-declarations), and without the id their order was
+/// the order the store listed them in.
+fn compare_exact_symbol_candidates(left: &StreamCandidate, right: &StreamCandidate) -> Ordering {
+    right
+        .authority
+        .cmp(&left.authority)
+        .then_with(|| left.result.path.cmp(&right.result.path))
+        .then_with(|| candidate_symbol_identity(left).cmp(&candidate_symbol_identity(right)))
+}
+
+fn candidate_symbol_identity(candidate: &StreamCandidate) -> Option<(&str, &str)> {
+    candidate
+        .result
+        .symbol
+        .as_ref()
+        .map(|symbol| (symbol.qualified_name.as_str(), symbol.id.0.as_str()))
+}
+
+/// Descending vocabulary overlap, then repository position. One file can hold several tests or
+/// runtime facts with the same overlap, and without the line range their order was row order.
+fn compare_overlap_candidates<T: Ord>(
+    left: &(T, StreamCandidate),
+    right: &(T, StreamCandidate),
+) -> Ordering {
+    right
+        .0
+        .cmp(&left.0)
+        .then_with(|| compare_result_position(&left.1.result, &right.1.result))
 }
 
 fn indexed_document_stream(
@@ -1622,5 +1626,175 @@ mod indexed_document_stream_tests {
             .evidence
             .iter()
             .any(|value| value == "document heading path: Runtime > Rotation protocol"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use open_kioku_core::{Confidence, FileId, Language, SymbolId, SymbolKind, Visibility};
+
+    fn candidate(
+        path: &str,
+        start: u32,
+        authority: RetrievalAuthority,
+        symbol: Option<(&str, &str)>,
+    ) -> StreamCandidate {
+        let result = SearchResult {
+            path: path.into(),
+            line_range: Some(LineRange {
+                start,
+                end: start + 3,
+            }),
+            snippet: String::new(),
+            symbol: symbol.map(|(qualified_name, id)| Symbol {
+                id: SymbolId::new(id),
+                name: qualified_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(qualified_name)
+                    .into(),
+                qualified_name: qualified_name.into(),
+                kind: SymbolKind::Function,
+                file_id: FileId::new(path),
+                range: None,
+                language: Language::Rust,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::TreeSitter,
+                module_id: None,
+                parent_symbol_id: None,
+                scope_id: None,
+                signature: None,
+                visibility: Visibility::Unknown,
+            }),
+            score: 1.0,
+            match_reason: String::new(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
+        };
+        StreamCandidate::from_result(result, authority, "fixture")
+    }
+
+    fn positions(candidates: &[StreamCandidate]) -> Vec<(String, u32, Option<String>)> {
+        candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.result.path.to_string_lossy().into_owned(),
+                    candidate
+                        .result
+                        .line_range
+                        .as_ref()
+                        .map_or(0, |range| range.start),
+                    candidate
+                        .result
+                        .symbol
+                        .as_ref()
+                        .map(|symbol| symbol.id.0.clone()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exact_symbol_candidates_break_shared_qualified_names_on_symbol_id() {
+        let inputs = vec![
+            candidate(
+                "src/a.rs",
+                20,
+                RetrievalAuthority::Exact,
+                Some(("app::run", "symbol-b")),
+            ),
+            candidate(
+                "src/a.rs",
+                1,
+                RetrievalAuthority::Exact,
+                Some(("app::run", "symbol-a")),
+            ),
+            candidate(
+                "src/0.rs",
+                1,
+                RetrievalAuthority::Heuristic,
+                Some(("app::run", "symbol-c")),
+            ),
+        ];
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for mut candidates in [inputs, reversed] {
+            candidates.sort_by(compare_exact_symbol_candidates);
+            assert_eq!(
+                positions(&candidates),
+                vec![
+                    ("src/a.rs".into(), 1, Some("symbol-a".into())),
+                    ("src/a.rs".into(), 20, Some("symbol-b".into())),
+                    ("src/0.rs".into(), 1, Some("symbol-c".into())),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn overlap_candidates_break_equal_overlap_on_path_then_line_range() {
+        let inputs = vec![
+            (
+                2usize,
+                candidate("src/b.rs", 40, RetrievalAuthority::Heuristic, None),
+            ),
+            (
+                2,
+                candidate("src/b.rs", 5, RetrievalAuthority::Heuristic, None),
+            ),
+            (
+                3,
+                candidate("src/z.rs", 1, RetrievalAuthority::Heuristic, None),
+            ),
+            (
+                2,
+                candidate("src/a.rs", 90, RetrievalAuthority::Heuristic, None),
+            ),
+        ];
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for mut scored in [inputs, reversed] {
+            scored.sort_by(compare_overlap_candidates);
+            let candidates = scored
+                .into_iter()
+                .map(|(_, candidate)| candidate)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                positions(&candidates),
+                vec![
+                    ("src/z.rs".into(), 1, None),
+                    ("src/a.rs".into(), 90, None),
+                    ("src/b.rs".into(), 5, None),
+                    ("src/b.rs".into(), 40, None),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn history_candidates_break_equal_scores_on_path_then_line_range() {
+        let inputs = vec![
+            candidate("src/b.rs", 12, RetrievalAuthority::Corroborating, None),
+            candidate("src/b.rs", 2, RetrievalAuthority::Corroborating, None),
+            candidate("src/a.rs", 30, RetrievalAuthority::Corroborating, None),
+        ];
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for mut candidates in [inputs, reversed] {
+            sort_history_candidates(&mut candidates);
+            assert_eq!(
+                positions(&candidates),
+                vec![
+                    ("src/a.rs".into(), 30, None),
+                    ("src/b.rs".into(), 2, None),
+                    ("src/b.rs".into(), 12, None),
+                ]
+            );
+        }
     }
 }

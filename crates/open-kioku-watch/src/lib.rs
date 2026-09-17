@@ -227,7 +227,8 @@ pub fn reindex_repo_after_changes<'a>(
             // store replaces the changed files' edges and reconciles the rest by identity, so
             // an edge from an unchanged file to a symbol this change renamed goes too.
             let graph = graph_from_snapshot(&snapshot);
-            let nodes = graph.nodes.into_values().collect::<Vec<_>>();
+            let mut nodes = graph.nodes.into_values().collect::<Vec<_>>();
+            nodes.sort_unstable_by(|left, right| left.id.0.cmp(&right.id.0));
             match store.stage_files_index_with_graph(
                 PartialIndexUpdate {
                     manifest: &snapshot.manifest,
@@ -280,10 +281,9 @@ pub fn reindex_repo_after_changes<'a>(
 
         if !partial {
             let graph = graph_from_snapshot(&snapshot);
-            store.replace_graph(
-                &graph.nodes.values().cloned().collect::<Vec<_>>(),
-                &graph.edges,
-            )?;
+            let mut nodes = graph.nodes.values().cloned().collect::<Vec<_>>();
+            nodes.sort_unstable_by(|left, right| left.id.0.cmp(&right.id.0));
+            store.replace_graph(&nodes, &graph.edges)?;
         }
         if !partial || changed_file_count > 0 || deleted_file_count > 0 {
             // Rebuilt in place: the directory is removed first, so a failure here leaves no
@@ -350,10 +350,9 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     persist_full_snapshot(&store, &snapshot)?;
     store.put_history_snapshot(&history)?;
     let graph = graph_from_snapshot(&snapshot);
-    store.replace_graph(
-        &graph.nodes.values().cloned().collect::<Vec<_>>(),
-        &graph.edges,
-    )?;
+    let mut nodes = graph.nodes.values().cloned().collect::<Vec<_>>();
+    nodes.sort_unstable_by(|left, right| left.id.0.cmp(&right.id.0));
+    store.replace_graph(&nodes, &graph.edges)?;
     rebuild_disk_index(
         default_index_dir(root),
         &snapshot.chunks,

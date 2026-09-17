@@ -279,27 +279,36 @@ pub fn rerank_with_options(
             }
         }
     }
-    results.sort_by(|a, b| {
-        let (a_exact, b_exact) = options
-            .query
-            .as_deref()
-            .map(|query| {
-                (
-                    exact_identity_match(a, query),
-                    exact_identity_match(b, query),
-                )
-            })
-            .unwrap_or_default();
-        b_exact
-            .cmp(&a_exact)
-            .then_with(|| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.path.cmp(&b.path))
-    });
+    results.sort_by(|a, b| compare_reranked(a, b, options.query.as_deref()));
     results
+}
+
+/// Exact identity matches first, then descending score, then repository position (path, line
+/// range), so results that tie on everything measured keep one order across indexes.
+fn compare_reranked(a: &SearchResult, b: &SearchResult, query: Option<&str>) -> std::cmp::Ordering {
+    let (a_exact, b_exact) = query
+        .map(|query| {
+            (
+                exact_identity_match(a, query),
+                exact_identity_match(b, query),
+            )
+        })
+        .unwrap_or_default();
+    let bounds = |result: &SearchResult| {
+        result
+            .line_range
+            .as_ref()
+            .map(|range| (range.start, range.end))
+    };
+    b_exact
+        .cmp(&a_exact)
+        .then_with(|| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| a.path.cmp(&b.path))
+        .then_with(|| bounds(a).cmp(&bounds(b)))
 }
 
 pub fn top_score_signals(result: &SearchResult, limit: usize) -> Vec<String> {
@@ -1097,6 +1106,39 @@ mod tests {
                 "test fixture",
             )],
             exact_reference_provenance: None,
+        }
+    }
+
+    #[test]
+    fn rerank_breaks_equal_scores_on_path_then_line_range() {
+        let mut later_chunk = make_result("src/b.rs", 1.0);
+        later_chunk.line_range = Some(LineRange { start: 10, end: 20 });
+        let earlier_chunk = make_result("src/b.rs", 1.0);
+        let other_file = make_result("src/a.rs", 1.0);
+        let stronger = make_result("src/z.rs", 2.0);
+        let inputs = vec![later_chunk, stronger, earlier_chunk, other_file];
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for mut results in [inputs, reversed] {
+            results.sort_by(|a, b| super::compare_reranked(a, b, None));
+            let order = results
+                .iter()
+                .map(|result| {
+                    (
+                        result.path.to_string_lossy().into_owned(),
+                        result.line_range.as_ref().map(|range| range.start),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                order,
+                vec![
+                    ("src/z.rs".to_string(), Some(1)),
+                    ("src/a.rs".to_string(), Some(1)),
+                    ("src/b.rs".to_string(), Some(1)),
+                    ("src/b.rs".to_string(), Some(10)),
+                ]
+            );
         }
     }
 

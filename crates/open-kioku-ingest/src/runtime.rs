@@ -86,7 +86,9 @@ pub fn collect_runtime_analysis_facts(
         if !runtime_root.is_dir() {
             continue;
         }
+        // Sorted so the records kept under the cap do not depend on filesystem listing order.
         for entry in walkdir::WalkDir::new(&runtime_root)
+            .sort_by_file_name()
             .max_depth(3)
             .into_iter()
             .filter_map(|entry| entry.ok())

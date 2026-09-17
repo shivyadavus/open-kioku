@@ -110,7 +110,10 @@ fn index_repo_with_config(
     );
     // Move nodes out of the graph once; the previous per-call clones kept up to three copies of
     // the node set alive at the memory peak.
-    let nodes = graph.nodes.into_values().collect::<Vec<_>>();
+    let mut nodes = graph.nodes.into_values().collect::<Vec<_>>();
+    // The graph holds nodes in a hash map whose order differs per process; search documents
+    // are added in this order, so it is fixed to node ids.
+    nodes.sort_unstable_by(|left, right| left.id.0.cmp(&right.id.0));
     let edges = graph.edges;
     store.replace_graph(&nodes, &edges)?;
     drop(edges);
