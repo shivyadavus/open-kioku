@@ -362,6 +362,7 @@ mod tests {
             score_breakdown: vec![],
             selection_tier: crate::TestSelectionTier::default(),
             tier_justification: vec![],
+            origin: Default::default(),
         };
         assert_eq!(
             test_node_id(&test).0,

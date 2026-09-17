@@ -615,70 +615,96 @@ impl<'a> PlanEngine<'a> {
         primary_context: &[SearchResult],
         context: &ContextPack,
     ) -> Result<Vec<TestTarget>> {
-        let mut by_id = BTreeMap::new();
-        for test in &context.validation_plan.tests {
-            if is_plausible_test(test) {
-                by_id.insert(test.id.clone(), test.clone());
-            }
-        }
-
+        let mut candidates = context.validation_plan.tests.clone();
         let selector = TestSelector::new(self.store as &dyn MetadataStore);
         for result in validation_source_results(primary_context)
             .into_iter()
             .take(5)
         {
-            for test in selector.for_changed_path_with_evidence(&result.path, MAX_VALIDATION)? {
-                if is_plausible_test(&test) {
-                    by_id.entry(test.id.clone()).or_insert(test);
-                }
-            }
+            candidates
+                .extend(selector.for_changed_path_with_evidence(&result.path, MAX_VALIDATION)?);
         }
-
-        let tests = by_id.into_values().collect::<Vec<_>>();
-
-        // Group by file_id to prefer class-like test targets
-        let mut filtered = Vec::new();
-        let mut by_file: BTreeMap<FileId, Vec<TestTarget>> = BTreeMap::new();
-        for test in tests {
-            by_file.entry(test.file_id.clone()).or_default().push(test);
-        }
-        for (_, mut file_tests) in by_file {
-            let has_class_like = file_tests.iter().any(|t| {
-                t.name.len() > 8
-                    && t.name
-                        .chars()
-                        .next()
-                        .map(|c| c.is_uppercase())
-                        .unwrap_or(false)
-                    && t.name.chars().any(|c| c.is_lowercase())
-            });
-            if has_class_like {
-                file_tests.retain(|t| {
-                    t.name.len() > 8
-                        && t.name
-                            .chars()
-                            .next()
-                            .map(|c| c.is_uppercase())
-                            .unwrap_or(false)
-                        && t.name.chars().any(|c| c.is_lowercase())
-                });
-            }
-            filtered.extend(file_tests);
-        }
-
-        filtered.sort_by(|a, b| {
-            b.confidence
-                .score()
-                .partial_cmp(&a.confidence.score())
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        filtered.truncate(MAX_VALIDATION);
-        Ok(filtered)
+        Ok(select_validation_targets(candidates))
     }
 }
 
-fn is_plausible_test(test: &TestTarget) -> bool {
+/// Every target a surface may legitimately recommend: the shared predicate, deduplicated by id,
+/// and nothing else. `ok plan` and `ok verify` agree on what counts as a test through this, so a
+/// planned repository cannot collect `missing_test` findings for targets the predicate rejects.
+pub fn plausible_validation_targets(tests: Vec<TestTarget>) -> Vec<TestTarget> {
+    let mut seen = std::collections::BTreeSet::new();
+    tests
+        .into_iter()
+        .filter(is_plausible_test)
+        .filter(|test| seen.insert(test.id.clone()))
+        .collect()
+}
+
+/// A class-like name is usually a suite (`LedgerServiceTests`) worth preferring over the methods
+/// beside it.
+fn is_class_like_test(test: &TestTarget) -> bool {
+    test.name.len() > 8
+        && test
+            .name
+            .chars()
+            .next()
+            .map(|character| character.is_uppercase())
+            .unwrap_or(false)
+        && test.name.chars().any(|character| character.is_lowercase())
+}
+
+fn tier_rank(test: &TestTarget) -> u8 {
+    match test.selection_tier {
+        open_kioku_core::TestSelectionTier::Required => 0,
+        open_kioku_core::TestSelectionTier::Recommended => 1,
+        open_kioku_core::TestSelectionTier::Optional => 2,
+    }
+}
+
+/// The validation a plan records: plausible targets, the per-file preference for a suite name,
+/// ordered by selection tier before confidence so the cap keeps the best-evidenced targets, and
+/// the plan's bound. This narrowing is the plan's alone. `ok verify` shares the predicate through
+/// [`plausible_validation_targets`] but never these bounds: a capped recommendation would let
+/// exit 0 mean "the first few recommendations were planned".
+pub fn select_validation_targets(tests: Vec<TestTarget>) -> Vec<TestTarget> {
+    let mut by_file: BTreeMap<FileId, Vec<TestTarget>> = BTreeMap::new();
+    for test in plausible_validation_targets(tests) {
+        by_file.entry(test.file_id.clone()).or_default().push(test);
+    }
+
+    let mut selected = Vec::new();
+    for (_, mut file_tests) in by_file {
+        // In a file that registers its tests by call, the class-like name is a helper
+        // (`TestWrapper`), not a suite, and preferring it would drop the tests themselves.
+        let registers_by_call = file_tests.iter().any(|test| test.is_registration_call());
+        if !registers_by_call && file_tests.iter().any(is_class_like_test) {
+            file_tests.retain(is_class_like_test);
+        }
+        selected.extend(file_tests);
+    }
+
+    selected.sort_by(|left, right| {
+        tier_rank(left).cmp(&tier_rank(right)).then_with(|| {
+            right
+                .confidence
+                .score()
+                .partial_cmp(&left.confidence.score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.name.cmp(&right.name))
+        })
+    });
+    selected.truncate(MAX_VALIDATION);
+    selected
+}
+
+pub fn is_plausible_test(test: &TestTarget) -> bool {
+    // Provenance decides whenever the index knows where the target came from: a JUnit method in a
+    // test file (`shouldRoundHalfUp`) and a registered test ("rounds half up") are both tests no
+    // name heuristic recognises, and a disabled one is not evidence. The heuristics below judge
+    // only targets matched outside a test file, by annotation or naming convention.
+    if test.has_test_provenance() {
+        return test.counts_as_validation_evidence();
+    }
     let name = &test.name;
     // Filter out screaming snake case constants like AD_DOMAIN
     let is_screaming_snake = name
@@ -2927,6 +2953,7 @@ mod tests {
                 vec!["login-test".into()],
                 "test-like path",
             )],
+            origin: Default::default(),
         };
         let chunks = vec![
             CodeChunk {
@@ -4156,6 +4183,381 @@ mod tests {
                 reason: "calls edge into `issue_token` (exact call site)".into(),
             });
         assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
+    }
+
+    fn registration_test_target(name: &str, file_id: &str, disabled: bool) -> TestTarget {
+        TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
+            id: format!("registration:{name}"),
+            name: name.into(),
+            file_id: FileId::new(file_id),
+            range: Some(LineRange { start: 2, end: 4 }),
+            command: Some("npm test".into()),
+            confidence: if disabled {
+                Confidence::Low
+            } else {
+                Confidence::High
+            },
+            reason: "test registration call in a test-path file".into(),
+            evidence_refs: Vec::new(),
+            score_breakdown: Vec::new(),
+            origin: if disabled {
+                open_kioku_core::TestTargetOrigin::DisabledRegistrationCall
+            } else {
+                open_kioku_core::TestTargetOrigin::RegistrationCall
+            },
+        }
+    }
+
+    /// The per-file preference for a class-like name assumes it is a suite. In a file that
+    /// registers its tests by call, the class-like name is a helper (`TestWrapper`), so
+    /// preferring it would drop every test in the file.
+    #[test]
+    fn a_helper_beside_registration_calls_does_not_displace_them() {
+        let helper = registration_test_target("TestWrapper", "src/Button.test.tsx", false);
+        let helper = TestTarget {
+            origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+            ..helper
+        };
+        let first = registration_test_target("renders the label", "src/Button.test.tsx", false);
+        let second = registration_test_target("fires on click", "src/Button.test.tsx", false);
+
+        let selected = select_validation_targets(vec![helper, first, second]);
+        let names = selected
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"renders the label"), "{names:?}");
+        assert!(names.contains(&"fires on click"), "{names:?}");
+    }
+
+    /// A file whose targets are declared symbols keeps the suite preference: the class-like name
+    /// is the suite, and its methods are the cases beneath it.
+    #[test]
+    fn a_suite_name_still_wins_in_a_file_without_registration_calls() {
+        let suite = TestTarget {
+            origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+            ..registration_test_target("LedgerServiceTests", "src/test/java/LedgerTest.java", false)
+        };
+        let method = TestTarget {
+            origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+            ..registration_test_target("rounds", "src/test/java/LedgerTest.java", false)
+        };
+        let selected = select_validation_targets(vec![suite, method]);
+        let names = selected
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["LedgerServiceTests"], "{names:?}");
+    }
+
+    /// A registered test is named by a sentence, which every name heuristic here rejects. Its
+    /// provenance is what makes it plannable, and `ok verify` applies this same predicate.
+    #[test]
+    fn a_registration_test_is_plannable_and_a_disabled_one_is_not() {
+        let enabled = registration_test_target("rounds half up", "test/rates_test.ts", false);
+        assert!(is_plausible_test(&enabled));
+        let disabled = registration_test_target("skips stale rows", "test/rates_test.ts", true);
+        assert!(!is_plausible_test(&disabled));
+    }
+
+    /// The task shares vocabulary with the registered name, so the validation stream votes and
+    /// the `code_to_test` gate is satisfied; the point under test is that the plan keeps a target
+    /// whose name is a sentence, which its name heuristics would otherwise drop.
+    #[test]
+    fn a_typescript_repository_with_registration_tests_plans_validation() {
+        let store = typescript_registration_store();
+        let plan = PlanEngine::new(&store)
+            .plan("add tests covering rounds half up in convertCurrency", 10)
+            .unwrap();
+        assert!(
+            !plan.primary_context.is_empty(),
+            "the pack must not be blocked for this task"
+        );
+        assert!(
+            plan.validation
+                .iter()
+                .any(|test| test.name == "rounds half up"),
+            "{:?}",
+            plan.validation
+                .iter()
+                .map(|test| test.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A repository whose tests are declared symbols in a test file, as JUnit and
+    /// `unittest.TestCase` write them. The names carry no "test" token, so only provenance keeps
+    /// them plannable; before that, such repositories planned nothing and fell back to the
+    /// manual-validation placeholder while the context pack still listed the same targets.
+    #[test]
+    fn a_junit_style_repository_plans_validation() {
+        let store = test_file_symbol_store(
+            "src/main/java/com/acme/Rates.java",
+            Language::Java,
+            "convertCurrency",
+            "public final class Rates { public static int convertCurrency(int amount, double rate) { return Math.round(amount * rate); } }",
+            "src/test/java/com/acme/RatesTest.java",
+            &["shouldRoundHalfUp", "roundsTowardsEven"],
+        );
+        let plan = PlanEngine::new(&store)
+            .plan(
+                "add tests covering shouldRoundHalfUp in convertCurrency",
+                10,
+            )
+            .unwrap();
+        assert!(!plan.primary_context.is_empty(), "pack must not be blocked");
+        assert!(
+            plan.validation
+                .iter()
+                .any(|test| test.name == "shouldRoundHalfUp"),
+            "{:?}",
+            plan.validation
+                .iter()
+                .map(|test| test.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_python_unittest_repository_plans_validation() {
+        let store = test_file_symbol_store(
+            "app/service.py",
+            Language::Python,
+            "convert_currency",
+            "def convert_currency(amount, rate):\n    return round(amount * rate)\n",
+            "tests/test_service.py",
+            &["test_rounds_half_up"],
+        );
+        let plan = PlanEngine::new(&store)
+            .plan("add tests covering rounds half up in convert_currency", 10)
+            .unwrap();
+        assert!(!plan.primary_context.is_empty(), "pack must not be blocked");
+        assert!(
+            plan.validation
+                .iter()
+                .any(|test| test.name == "test_rounds_half_up"),
+            "{:?}",
+            plan.validation
+                .iter()
+                .map(|test| test.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A store whose test file holds declared-symbol targets, the shape JUnit and unittest
+    /// repositories index to.
+    fn test_file_symbol_store(
+        source_path: &str,
+        language: Language,
+        source_symbol: &str,
+        source_text: &str,
+        test_path: &str,
+        test_names: &[&str],
+    ) -> SqliteStore {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let repo_id = RepositoryId::new("repo");
+        let source = File {
+            id: FileId::new("source"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(source_path),
+            language: language.clone(),
+            size_bytes: 120,
+            content_hash: "source".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let test_file = File {
+            id: FileId::new("test-file"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(test_path),
+            language: language.clone(),
+            size_bytes: 120,
+            content_hash: "test-file".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let symbol = Symbol {
+            id: SymbolId::new("source-symbol"),
+            name: source_symbol.into(),
+            qualified_name: source_symbol.into(),
+            kind: SymbolKind::Function,
+            file_id: source.id.clone(),
+            range: Some(LineRange { start: 1, end: 3 }),
+            language: language.clone(),
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        };
+        let chunks = vec![CodeChunk {
+            id: "source-chunk".into(),
+            file_id: source.id.clone(),
+            range: LineRange { start: 1, end: 3 },
+            language: language.clone(),
+            text: source_text.into(),
+            symbol_id: Some(symbol.id.clone()),
+        }];
+        let tests = test_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| TestTarget {
+                selection_tier: open_kioku_core::TestSelectionTier::default(),
+                tier_justification: Vec::new(),
+                id: format!("test-file-symbol:{name}"),
+                name: (*name).into(),
+                file_id: test_file.id.clone(),
+                range: Some(LineRange {
+                    start: 2 + index as u32,
+                    end: 4 + index as u32,
+                }),
+                command: None,
+                confidence: Confidence::High,
+                reason: "test-like path, annotation, or naming convention".into(),
+                evidence_refs: Vec::new(),
+                score_breakdown: Vec::new(),
+                origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+            })
+            .collect::<Vec<_>>();
+        let quality = open_kioku_core::IndexQuality::default();
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: repo_id,
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 2,
+            symbol_count: 1,
+            chunk_count: chunks.len(),
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: quality.index_mode,
+            phase_reports: Vec::new(),
+            quality,
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[source, test_file],
+                symbols: &[symbol],
+                chunks: &chunks,
+                tests: &tests,
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        store
+    }
+
+    fn typescript_registration_store() -> SqliteStore {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let repo_id = RepositoryId::new("repo");
+        let source = File {
+            id: FileId::new("rates"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("src/rates.ts"),
+            language: Language::TypeScript,
+            size_bytes: 100,
+            content_hash: "rates".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let test_file = File {
+            id: FileId::new("rates-test"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("test/rates_test.ts"),
+            language: Language::TypeScript,
+            size_bytes: 100,
+            content_hash: "rates-test".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let convert = Symbol {
+            id: SymbolId::new("convert-currency"),
+            name: "convertCurrency".into(),
+            qualified_name: "src::rates::convertCurrency".into(),
+            kind: SymbolKind::Function,
+            file_id: source.id.clone(),
+            range: Some(LineRange { start: 1, end: 4 }),
+            language: Language::TypeScript,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        };
+        let chunks = vec![
+            CodeChunk {
+                id: "rates-convert".into(),
+                file_id: source.id.clone(),
+                range: LineRange { start: 1, end: 4 },
+                language: Language::TypeScript,
+                text: "export function convertCurrency(amount: number, rate: number): number { return Math.round(amount * rate); }".into(),
+                symbol_id: Some(convert.id.clone()),
+            },
+            CodeChunk {
+                id: "rates-test-chunk".into(),
+                file_id: test_file.id.clone(),
+                range: LineRange { start: 2, end: 4 },
+                language: Language::TypeScript,
+                text: "test(\"rounds half up\", () => { expect(convertCurrency(2, 1.5)).toBe(3); });".into(),
+                symbol_id: None,
+            },
+        ];
+        let quality = open_kioku_core::IndexQuality::default();
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: repo_id,
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 2,
+            symbol_count: 1,
+            chunk_count: chunks.len(),
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: quality.index_mode,
+            phase_reports: Vec::new(),
+            quality,
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[source, test_file.clone()],
+                symbols: &[convert],
+                chunks: &chunks,
+                tests: &[registration_test_target(
+                    "rounds half up",
+                    test_file.id.0.as_str(),
+                    false,
+                )],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        store
     }
 
     #[test]

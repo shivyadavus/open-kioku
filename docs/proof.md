@@ -44,8 +44,8 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | --- | ---: |
 | Mode | `full` |
 | Analysis semantics | `Compatible` |
-| Stored semantics fingerprint | `bae3d079094ab15c45c150bc63a9c93f6bb38408baa2c34fc906eb69ee3b8f16` |
-| Current semantics fingerprint | `bae3d079094ab15c45c150bc63a9c93f6bb38408baa2c34fc906eb69ee3b8f16` |
+| Stored semantics fingerprint | `199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d` |
+| Current semantics fingerprint | `199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d` |
 | Graph rebuild required | `false` |
 | Files | 5 |
 | Symbols | 8 |
@@ -58,7 +58,7 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | SCIP exact references | 0 |
 | Static analysis facts | 35 |
 
-Indexed at `2026-09-16 02:53:11.994548 UTC`.
+Indexed at `2026-09-16 03:34:39.998908 UTC`.
 
 Build systems: `cargo`.
 
@@ -69,7 +69,7 @@ Local signal notes:
 - symbol registry facts detected: 24
 - complexity/similarity relationship facts detected: 7
 
-Quality notes (197): scip: 1, symbol_registry_caveat: 138, symbol_registry_unresolved: 58
+Quality notes (198): scip: 1, symbol_registry_caveat: 138, symbol_registry_unresolved: 59
 
 - [scip] SCIP disabled; symbol references use tree-sitter/import heuristics
 - [symbol_registry_caveat] symbol registry caveat for `10000` via unresolved: no registry candidate matched
@@ -171,7 +171,7 @@ Quality notes (197): scip: 1, symbol_registry_caveat: 138, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `proven` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `provider` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `quality` via unresolved: no registry candidate matched
-- 97 additional quality notes omitted; use `ok status --markdown --full` or `ok status --json --full` for every note.
+- 98 additional quality notes omitted; use `ok status --markdown --full` or `ok status --json --full` for every note.
 
 ## Readiness Checks
 
@@ -179,9 +179,9 @@ Quality notes (197): scip: 1, symbol_registry_caveat: 138, symbol_registry_unres
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
-| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-16 02:53:11.994548 UTC |
+| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-16 03:34:39.998908 UTC |
 | `pass` | `graph` | relationship graph present |
-| `pass` | `analysis-semantics` | compatible; fingerprint bae3d079094ab15c45c150bc63a9c93f6bb38408baa2c34fc906eb69ee3b8f16 |
+| `pass` | `analysis-semantics` | compatible; fingerprint 199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d |
 | `pass` | `generations` | legacy layout (adopts the generation layout on the next `ok index`) |
 | `pass` | `semantic-lifecycle` | semantic search is disabled in ok.toml (explicit local opt-in) |
 | `warn` | `quality` | SCIP exact references unavailable; 2 tests, 5 imports indexed |

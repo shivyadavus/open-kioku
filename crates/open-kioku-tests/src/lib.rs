@@ -83,7 +83,14 @@ impl<'a> TestSelector<'a> {
         }
 
         let file_ids_vec = file_ids.into_iter().collect::<Vec<_>>();
-        self.store.tests_for_files(&file_ids_vec)
+        // The one funnel both selection paths use: a test the runner skips is not validation
+        // evidence, so no caller can recommend, rank, or require it.
+        Ok(self
+            .store
+            .tests_for_files(&file_ids_vec)?
+            .into_iter()
+            .filter(|test| test.counts_as_validation_evidence())
+            .collect())
     }
 
     pub fn for_changed_path(&self, path: &Path, limit: usize) -> Result<Vec<TestTarget>> {
@@ -461,6 +468,17 @@ impl<'a> TestSelector<'a> {
 /// evidence (collected in `strong_evidence`) can lift a test above Optional. Heuristic
 /// name/path similarity contributes to ranking but never to requiredness.
 fn assign_selection_tier(test: &mut TestTarget, score: f32, strong_evidence: Vec<String>) {
+    // Evidence that a disabled test overlaps the change says where it would run, not that it
+    // runs. Recommending it would read as "run this" for a test the runner skips, so it stays
+    // Optional and says why.
+    if !test.counts_as_validation_evidence() {
+        test.selection_tier = TestSelectionTier::Optional;
+        test.tier_justification = vec![
+            "the runner skips this test (`skip`, `todo`, `failing`), so running it validates nothing"
+                .into(),
+        ];
+        return;
+    }
     if strong_evidence.is_empty() {
         test.selection_tier = TestSelectionTier::Optional;
         test.tier_justification.clear();
@@ -1141,6 +1159,7 @@ mod tests {
                     vec!["ledger-service-test".into()],
                     "test-like path",
                 )],
+                origin: Default::default(),
             }],
         };
 
@@ -1154,6 +1173,100 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "LedgerServiceTests");
         assert_eq!(selected[0].confidence, Confidence::High);
+    }
+
+    fn origin_target(name: &str, origin: open_kioku_core::TestTargetOrigin) -> TestTarget {
+        TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
+            id: format!("target:{name}"),
+            name: name.into(),
+            file_id: FileId::new("test-file"),
+            range: None,
+            command: Some("npm test".into()),
+            confidence: Confidence::High,
+            reason: "test registration call in a test-path file".into(),
+            evidence_refs: Vec::new(),
+            score_breakdown: Vec::new(),
+            origin,
+        }
+    }
+
+    /// The filter lives in the selector's own funnel, so `find_tests_for_change`, `ok tests`,
+    /// plan and verify inherit it instead of each remembering to apply it.
+    #[test]
+    fn the_selector_never_returns_a_disabled_target() {
+        let store = FastStore {
+            tests: vec![
+                origin_target(
+                    "rounds half up",
+                    open_kioku_core::TestTargetOrigin::RegistrationCall,
+                ),
+                origin_target(
+                    "skips stale rows",
+                    open_kioku_core::TestTargetOrigin::DisabledRegistrationCall,
+                ),
+            ],
+        };
+
+        let selected = TestSelector::new(&store)
+            .for_changed_path_fast(Path::new("src/rates.ts"), 5)
+            .unwrap();
+        let names = selected
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"rounds half up"), "{names:?}");
+        assert!(!names.contains(&"skips stale rows"), "{names:?}");
+    }
+
+    /// Evidence that a disabled test overlaps the change says where it would run, not that it
+    /// runs. Requiring it would report validation that never happens, however strong the overlap.
+    #[test]
+    fn a_disabled_target_is_never_required_however_strong_the_evidence() {
+        let mut disabled = TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
+            id: "skipped".into(),
+            name: "skips stale rows".into(),
+            file_id: FileId::new("test-file"),
+            range: None,
+            command: Some("npm test".into()),
+            confidence: Confidence::Low,
+            reason: "disabled test registration call in a test-path file".into(),
+            evidence_refs: Vec::new(),
+            score_breakdown: Vec::new(),
+            origin: open_kioku_core::TestTargetOrigin::DisabledRegistrationCall,
+        };
+        super::assign_selection_tier(
+            &mut disabled,
+            0.99,
+            vec!["exact symbol reference overlap".into()],
+        );
+        assert_eq!(
+            disabled.selection_tier,
+            open_kioku_core::TestSelectionTier::Optional
+        );
+        assert!(
+            disabled
+                .tier_justification
+                .iter()
+                .any(|reason| reason.contains("skips this test")),
+            "{:?}",
+            disabled.tier_justification
+        );
+
+        let mut enabled = disabled.clone();
+        enabled.origin = open_kioku_core::TestTargetOrigin::RegistrationCall;
+        super::assign_selection_tier(
+            &mut enabled,
+            0.99,
+            vec!["exact symbol reference overlap".into()],
+        );
+        assert_eq!(
+            enabled.selection_tier,
+            open_kioku_core::TestSelectionTier::Required
+        );
     }
 
     #[test]
@@ -1442,6 +1555,7 @@ mod tests {
                 vec![name.into()],
                 "test target",
             )],
+            origin: Default::default(),
         }
     }
 
