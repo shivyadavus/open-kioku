@@ -679,6 +679,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 for warning in &report.warnings {
                     println!("warning: {warning}");
                 }
+                // And the same caveats, so the human surface is no less honest than `--json`
+                // and the MCP tools: a redacted value cannot be found by searching for it.
+                for caveat in &report.caveats {
+                    println!("caveat: {caveat}");
+                }
             })?;
         }
         Command::Semantic { command } => match command {
@@ -703,6 +708,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         "model download is blocked by security.deny_network; set security.deny_network = false and rerun with --allow-model-download"
                     );
                 }
+                // `ok index` discards a vector store built before redaction while holding this
+                // lock. Without it a semantic run can rebuild `vectors/` from the old index
+                // after that discard and before the manifest records the clearing done, leaving
+                // unredacted text on disk under a manifest that claims completion (#379).
+                let _lock = IndexWriteLock::acquire(&repo, IndexWriteLock::DEFAULT_WAIT)?;
                 let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
                 let report = if allow_model_download {
                     manager.index_with_model_download()?
@@ -729,6 +739,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         "model download is blocked by security.deny_network; set security.deny_network = false and rerun with --allow-model-download"
                     );
                 }
+                // Held for the same reason as `semantic index`: a rebuild must not race the
+                // clearing of a vector store built before redaction (#379).
+                let _lock = IndexWriteLock::acquire(&repo, IndexWriteLock::DEFAULT_WAIT)?;
                 let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
                 let report = if allow_model_download {
                     manager.rebuild_with_model_download()?

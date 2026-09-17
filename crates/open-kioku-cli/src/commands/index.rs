@@ -66,11 +66,12 @@ fn index_repo_with_config(
     // is published. Read before staging, which removes the previous manifest. The new manifest
     // carries the work as outstanding until it succeeds, so a blocked pass is retried by the
     // next run and `ok doctor` reports it meanwhile, instead of being silently forgotten.
-    let compact_after_publish = store
-        .manifest()
-        .ok()
-        .flatten()
-        .is_some_and(|previous| previous.needs_pre_redaction_compaction());
+    let compact_after_publish = match store.manifest() {
+        Ok(previous) => previous.is_some_and(|previous| previous.needs_pre_redaction_compaction()),
+        // Failing open here publishes `pending: false` over an index whose state is unknown and
+        // never retries. The clearing is idempotent, so assuming it is owed costs one pass.
+        Err(_) => true,
+    };
     snapshot.manifest.quality.pending_pre_redaction_compaction = compact_after_publish;
     // The manifest is the publication marker, written last (below) so a concurrent reader
     // never opens one whose graph or search index is still being written.

@@ -276,7 +276,11 @@ impl Redactor {
                     let quote = bytes[start];
                     let close = closing_quote(bytes, start + 1, quote).unwrap_or(bytes.len());
                     let inner = &line[start + 1..close];
-                    let locator = is_secret_locator_key(key.name) && is_locator_value(inner);
+                    // Config only: the exemption lives where the entropy backstop runs, so a
+                    // prose file cannot have a value with no rule covering it.
+                    let locator = self.kind == ContentKind::Config
+                        && is_secret_locator_key(key.name)
+                        && is_locator_value(inner);
                     if !is_non_secret_literal(inner) && !locator {
                         out.push_str(&line[copied..start + 1]);
                         out.push_str(REDACTION_MARKER);
@@ -287,7 +291,9 @@ impl Redactor {
                 }
                 _ if is_non_secret_literal(value_core)
                     || (is_plain_number(value_core) && is_quantity_key(key.name))
-                    || (is_secret_locator_key(key.name) && is_locator_value(value_core)) =>
+                    || (self.kind == ContentKind::Config
+                        && is_secret_locator_key(key.name)
+                        && is_locator_value(value_core)) =>
                 {
                     at = bytes.len();
                 }
@@ -548,14 +554,43 @@ fn is_secret_key(name: &str) -> bool {
 /// like a locator too (see [`is_locator_value`]). This repository's own `ok.toml` names the
 /// Sentry token's environment variable, which is what the pair of rules keeps readable.
 fn is_secret_locator_key(name: &str) -> bool {
-    let normalized = name
-        .bytes()
-        .filter(u8::is_ascii_alphanumeric)
-        .map(|byte| char::from(byte.to_ascii_lowercase()))
-        .collect::<String>();
-    ["env", "envvar", "variable", "file", "path", "name"]
-        .iter()
-        .any(|word| normalized.len() > word.len() && normalized.ends_with(word))
+    let words = key_words(name);
+    words.len() >= 2
+        && words.last().is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "env" | "var" | "variable" | "file" | "path" | "name"
+            )
+        })
+}
+
+/// A key's words: `_`, `-` and `.` separate them, and so does a camelCase hump, so `secretName`
+/// is `secret` then `name`. Matching whole words is what keeps `profile`, `username`,
+/// `hostname`, `filename`, `logfile` and `classpath` from reading as locator keys.
+fn key_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for ch in name.chars() {
+        if matches!(ch, '_' | '-' | '.') {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if ch.is_ascii_uppercase()
+            && current
+                .chars()
+                .last()
+                .is_some_and(|last| last.is_ascii_lowercase() || last.is_ascii_digit())
+        {
+            words.push(std::mem::take(&mut current));
+        }
+        current.push(ch.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 /// A key whose last word is `key` after at least one other word: `signing_key`, `master-key`,
@@ -719,14 +754,53 @@ fn is_quantity_key(name: &str) -> bool {
 /// written under `password_file` or `pin_file` is not kept by the name alone.
 fn is_locator_value(value: &str) -> bool {
     let value = value.trim();
-    if value.len() < 2 {
+    if value.len() < 2 || value.len() > 256 {
         return false;
     }
-    let environment_variable = value.bytes().any(|byte| byte.is_ascii_uppercase())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
-    environment_variable || value.contains('/') || value.contains('\\')
+    // The exemption subtracts from what the other rules keep; it never overrides them. A
+    // locator-shaped value carrying something machine-generated is a secret in a path.
+    if value
+        .split(|ch: char| matches!(ch, '/' | '\\' | '_' | '.' | '-'))
+        .any(is_high_entropy_token)
+    {
+        return false;
+    }
+    is_environment_variable_name(value) || is_explicit_path(value)
+}
+
+/// `SENTRY_AUTH_TOKEN`: upper case, at least two `_`-separated segments, each letters only and
+/// at most twelve characters. One segment is not enough — `HUNTERTWO` is a nine-letter
+/// passphrase that neither the length cap nor the entropy rule catches — so `token_env: TOKEN`
+/// is redacted, which is the documented cost of the boundary.
+fn is_environment_variable_name(value: &str) -> bool {
+    if value.len() > 64 {
+        return false;
+    }
+    let segments = value.split('_').collect::<Vec<_>>();
+    segments.len() >= 2
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && segment.len() <= 12
+                && segment.bytes().all(|byte| byte.is_ascii_uppercase())
+        })
+}
+
+/// `/run/secrets/db` or `./secrets/db`: absolute or explicitly relative, every segment
+/// word-like. A separator alone is not a path, so `s3cret/pw` and `a/b` are values.
+fn is_explicit_path(value: &str) -> bool {
+    if !(value.starts_with('/') || value.starts_with("./") || value.starts_with("../")) {
+        return false;
+    }
+    value
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
+        .all(|segment| {
+            segment.len() <= 64
+                && segment
+                    .split(|ch: char| matches!(ch, '.' | '-' | '_'))
+                    .filter(|part| !part.is_empty())
+                    .all(is_word_like_segment)
+        })
 }
 
 /// An unquoted integer or float (`4096`, `-3.5`, `1e6`, `1_000`): a typed number such as a
@@ -1065,8 +1139,10 @@ mod tests {
     /// keeps `docs/SECRETS.md` out of the index, and prose does not run the entropy rule, so a
     /// pasted token with no key, URL or PEM header around it would be indexed as written.
     /// `ok init` writes `auth_token_env = "SENTRY_AUTH_TOKEN"` into every repository's
-    /// `ok.toml`; redacting it reported the product's own config as holding a secret. The key
-    /// alone must not exempt anything, though: the value has to look like a locator too.
+    /// `ok.toml`, and redacting it reported the product's own config as holding a secret. The
+    /// exemption that keeps it must never be the only rule protecting a value, so it takes a
+    /// locator-named key, a value that parses wholly as a locator, and nothing inside that
+    /// value that looks machine-generated -- and it applies only where the entropy rule runs.
     #[test]
     fn a_locator_key_keeps_only_a_locator_value() {
         for kept in [
@@ -1074,35 +1150,79 @@ mod tests {
             "auth_token_env = \"SENTRY_AUTH_TOKEN\"\n",
             "password_file: /run/secrets/db\n",
             "token_path: /var/run/token\n",
+            "password_file: ./secrets/db.yaml\n",
         ] {
             let result = redact_secret_values(kept, ContentKind::Config);
             assert_eq!(result.text, kept, "{kept}");
             assert_eq!(result.redactions, 0, "{kept}");
         }
-        // A secret written under a locator-named key is still a secret. None of these reach
-        // the entropy rule: two are too short for it and one is all digits.
-        for redacted_case in [
+
+        // A separator somewhere is not a path, an upper-case run is not an environment
+        // variable, and none of these reach the entropy rule: two are under twenty characters,
+        // one is all digits, and an all-letter run is word-like by construction.
+        for (input, expected) in [
+            ("password_file: s3cret/pw\n", "password_file: [REDACTED]\n"),
+            ("token_path: a/b\n", "token_path: [REDACTED]\n"),
+            (
+                "password_file = \"CORRECTHORSEBATTERYSTAPLE\"\n",
+                "password_file = \"[REDACTED]\"\n",
+            ),
+            ("secretName: JBSWY3DPEHPK3PXP\n", "secretName: [REDACTED]\n"),
             ("password_file: hunter2\n", "password_file: [REDACTED]\n"),
             ("token_path: abc123\n", "token_path: [REDACTED]\n"),
-            // Secret-named and locator-named, but the value is a number: the exemption must
-            // not keep it. (`pin_file` would be kept, but only because `pin` names no secret
-            // at all -- a limit documented in docs/security-model.md, not this exemption.)
             ("password_file: 4859\n", "password_file: [REDACTED]\n"),
             ("secretName: db-credentials\n", "secretName: [REDACTED]\n"),
+            // One segment is not an environment variable name: `HUNTERTWO` would pass a
+            // length cap and the entropy rule alike, so `TOKEN` is redacted with it.
+            ("token_env: TOKEN\n", "token_env: [REDACTED]\n"),
+            ("password_env: HUNTERTWO\n", "password_env: [REDACTED]\n"),
         ] {
-            assert_eq!(
-                redacted(redacted_case.0),
-                redacted_case.1,
-                "{}",
-                redacted_case.0
-            );
+            assert_eq!(redacted(input), expected, "{input}");
         }
+
+        // A well-formed path carrying something machine-generated is a secret in a path.
         let token = striding(ALNUM, 32, 17, 5);
-        let pointed_at = format!("token_file: {token}\n");
-        assert!(
-            !redacted(&pointed_at).contains(&token),
-            "a long secret under a locator key is still redacted: {pointed_at}"
+        let in_a_path = format!("token_file: /var/run/{token}\n");
+        assert_eq!(
+            redacted(&in_a_path),
+            "token_file: [REDACTED]\n",
+            "{in_a_path}"
         );
+    }
+
+    /// Locator keys are matched as whole words. `profile` is not `file`, and inside a
+    /// secret-named block every key is treated as secret, so a loose match would have kept a
+    /// TOTP seed there.
+    #[test]
+    fn a_locator_key_is_matched_as_whole_words() {
+        let block = "credentials:\n  profile: JBSWY3DPEHPK3PXP\n  username: JBSWY3DPEHPK3PXP\n  logfile: JBSWY3DPEHPK3PXP\n  classpath: JBSWY3DPEHPK3PXP\n  filename: JBSWY3DPEHPK3PXP\n";
+        let result = redacted(block);
+        assert!(
+            !result.contains("JBSWY3DPEHPK3PXP"),
+            "a loose suffix match kept a value: {result}"
+        );
+        assert!(result.contains("  profile: [REDACTED]"), "{result}");
+    }
+
+    /// The exemption lives only where the entropy backstop runs. Prose has no entropy rule, so
+    /// a secret-named key there loses its value whatever shape the value has -- otherwise
+    /// `token_path:` in a Markdown runbook would be the one line with no rule covering it.
+    #[test]
+    fn prose_has_no_locator_exemption() {
+        let token = striding(ALNUM, 32, 17, 5);
+        let pasted = format!("token_path: ops/tokens/{token}\n");
+        let prose = redact_secret_values(&pasted, ContentKind::Prose);
+        assert!(!prose.text.contains(&token), "{}", prose.text);
+        assert_eq!(prose.text, "token_path: [REDACTED]\n");
+
+        // Even a well-formed locator: over-redaction in prose is the safe direction.
+        let path = "password_file: /run/secrets/db\n";
+        assert_eq!(
+            redact_secret_values(path, ContentKind::Prose).text,
+            "password_file: [REDACTED]\n"
+        );
+        // The same line in a config file keeps its path.
+        assert_eq!(redact_secret_values(path, ContentKind::Config).text, path);
     }
 
     #[test]

@@ -35,19 +35,31 @@ fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<Snap
             index_path.display()
         );
     }
-    // `--quality fast` copies the database file as it is, free pages included, so an index
-    // that still holds bytes an earlier release stored before secret-value redaction would be
-    // shipped with them. `--quality best` rewrites the database through `VACUUM INTO`.
-    if matches!(quality, SnapshotQuality::Fast)
-        && open_kioku_storage::MetadataStore::manifest(&store)?
-            .is_some_and(|manifest| manifest.needs_pre_redaction_compaction())
-    {
-        anyhow::bail!(
-            "index at {} still holds bytes stored before secret-value redaction; `--quality \
-             fast` copies the database file as it is, free pages included. Run `ok index` to \
-             clear them, or export with `--quality best`, which rewrites the database.",
-            index_path.display()
-        );
+    // Two different states, and only one of them `--quality best` can fix. An index written
+    // before secret-value redaction holds the values in live rows, and `VACUUM INTO` copies
+    // rows faithfully, so no export mode is safe until `ok index` rewrites them. An index that
+    // has been re-indexed owes only the clearing of free pages, which `best` drops on the way
+    // out and `fast` carries along with the file.
+    if let Some(manifest) = open_kioku_storage::MetadataStore::manifest(&store)? {
+        if manifest.predates_secret_redaction() {
+            anyhow::bail!(
+                "index at {} was written before secret-value redaction: its rows still hold \
+                 those values as read, and every export mode copies rows. Run `ok index` to \
+                 rebuild it with redaction, then export.",
+                index_path.display()
+            );
+        }
+        if manifest.quality.pending_pre_redaction_compaction
+            && matches!(quality, SnapshotQuality::Fast)
+        {
+            anyhow::bail!(
+                "index at {} still owes the clearing of bytes an earlier index stored as read; \
+                 `--quality fast` copies the database file as it is, free pages included. Run \
+                 `ok index` to clear them, or export with `--quality best`, which rewrites the \
+                 database and leaves those pages behind.",
+                index_path.display()
+            );
+        }
     }
     drop(store);
 
