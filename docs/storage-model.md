@@ -132,6 +132,28 @@ The MCP session survives the failed probe, and a session that already holds a st
 for the manifest before each request and probes again when it is gone, so it gives the same
 answer.
 
+### Snapshot export
+
+`ok snapshot export` is a reader. It takes no writer lock and does not checkpoint the index,
+so it runs alongside `ok index` and `ok watch`. Both qualities copy the database from inside
+one read transaction on a read-only connection, so the artifact holds one committed state,
+including commits still in the WAL, whatever a writer commits or checkpoints during the copy.
+The manifest is read from that copy, not from the live file: a state without one is refused
+with `indexing in progress` while a live writer holds the lock, and with `repository is not
+indexed` otherwise. The Tantivy index is not part of the artifact; import rebuilds it from the
+copied rows.
+
+| | `--quality best` (default) | `--quality fast` |
+|---|---|---|
+| Copy | `VACUUM INTO`: every table and index is rebuilt into a new file | SQLite online backup API, all pages in one step: pages are copied as they are |
+| Database size | Free pages dropped and b-trees packed | Same page count as the live file, free pages included |
+| Compression | zstd level 9 | zstd level 1 |
+| Result | Smaller artifact, longer export | Larger artifact, shorter export |
+
+The size gap is widest on an index that has had rows replaced since it was built, as
+`ok watch` does, because that is where free pages accumulate. The table is qualitative: no
+measured size or time ratio between the two qualities is published.
+
 Object-level deduplication of evidence was measured and rejected. Evidence objects are 1.0x
 distinct per edge — their `id` is a content hash and `indexed_at` is stamped per run — so a
 normalized evidence table keyed by evidence id would have added a join and a second

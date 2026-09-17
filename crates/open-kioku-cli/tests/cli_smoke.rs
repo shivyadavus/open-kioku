@@ -1930,6 +1930,14 @@ fn snapshot_export_refuses_a_store_whose_graph_awaits_a_rebuild() {
 
 #[test]
 fn snapshot_export_import_round_trip_rebuilds_search_and_bootstraps_index() {
+    // `best` rebuilds the database with `VACUUM INTO`; `fast` copies its pages with the online
+    // backup API. An artifact of either quality must import, serve search and bootstrap.
+    for (quality, compression_level) in [("best", 9), ("fast", 1)] {
+        assert_snapshot_round_trip(quality, compression_level);
+    }
+}
+
+fn assert_snapshot_round_trip(quality: &str, compression_level: i64) {
     let temp = snapshot_fixture_repo();
     let repo = temp.path();
     let artifact_path = repo.join(".ok/artifacts/index.snapshot.zst");
@@ -1946,15 +1954,15 @@ fn snapshot_export_import_round_trip_rebuilds_search_and_bootstraps_index() {
             .arg("snapshot")
             .arg("export")
             .arg("--quality")
-            .arg("best");
+            .arg(quality);
         command
     });
     let exported: serde_json::Value = serde_json::from_str(&exported).unwrap();
     assert_eq!(exported["ok"], true);
-    assert_eq!(exported["quality"], "best");
+    assert_eq!(exported["quality"], quality);
     assert_eq!(exported["metadata"]["artifact_kind"], "index-snapshot");
     assert_eq!(exported["metadata"]["schema_version"], "1.0.0");
-    assert_eq!(exported["metadata"]["compression_level"], 9);
+    assert_eq!(exported["metadata"]["compression_level"], compression_level);
     assert!(exported["metadata"]["file_count"].as_u64().unwrap() >= 1);
     assert!(exported["metadata"]["chunk_count"].as_u64().unwrap() >= 1);
     assert!(artifact_path.exists());
@@ -5579,6 +5587,191 @@ fn snapshot_import_moves_a_running_mcp_session_to_the_imported_index() {
 
     drop(stdin);
     server.wait().unwrap();
+}
+
+const EXPORT_LEDGER_ROWS_PER_BATCH: i64 = 10;
+const EXPORT_LEDGER_KEPT_BATCHES: i64 = 200;
+
+/// A thread committing ledger batches into `db` until `stop` is set: each transaction inserts
+/// a whole batch, deletes the oldest kept one and updates a totals row, so a copy mixing two
+/// committed states breaks a relation [`assert_export_ledger_is_one_committed_state`] checks.
+fn spawn_export_ledger_writer(
+    db: PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    committed: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> std::thread::JoinHandle<rusqlite::Result<()>> {
+    use std::sync::atomic::Ordering;
+    let mut conn = rusqlite::Connection::open(&db).unwrap();
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    conn.execute_batch(
+        "CREATE TABLE export_ledger (
+           batch INTEGER NOT NULL, slot INTEGER NOT NULL, payload BLOB NOT NULL,
+           PRIMARY KEY (batch, slot));
+         CREATE TABLE export_ledger_totals (
+           id INTEGER PRIMARY KEY CHECK (id = 1),
+           batches INTEGER NOT NULL, rows INTEGER NOT NULL);
+         INSERT INTO export_ledger_totals VALUES (1, 0, 0);
+         PRAGMA synchronous = OFF;
+         PRAGMA wal_autocheckpoint = 16;",
+    )
+    .unwrap();
+    std::thread::spawn(move || {
+        let mut batch = 0_i64;
+        while !stop.load(Ordering::SeqCst) {
+            let tx = conn.transaction()?;
+            for slot in 0..EXPORT_LEDGER_ROWS_PER_BATCH {
+                tx.execute(
+                    "INSERT INTO export_ledger (batch, slot, payload) \
+                     VALUES (?1, ?2, zeroblob(1024))",
+                    rusqlite::params![batch, slot],
+                )?;
+            }
+            let deleted = tx.execute(
+                "DELETE FROM export_ledger WHERE batch = ?1",
+                rusqlite::params![batch - EXPORT_LEDGER_KEPT_BATCHES],
+            )? as i64;
+            tx.execute(
+                "UPDATE export_ledger_totals \
+                 SET batches = batches + 1 - ?1, rows = rows + ?2 - ?3",
+                rusqlite::params![
+                    i64::from(deleted > 0),
+                    EXPORT_LEDGER_ROWS_PER_BATCH,
+                    deleted
+                ],
+            )?;
+            tx.commit()?;
+            committed.fetch_add(1, Ordering::SeqCst);
+            batch += 1;
+        }
+        Ok(())
+    })
+}
+
+fn assert_export_ledger_is_one_committed_state(db: &std::path::Path) {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    let partial_batches: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM (SELECT batch FROM export_ledger GROUP BY batch \
+             HAVING COUNT(*) <> ?1)",
+            [EXPORT_LEDGER_ROWS_PER_BATCH],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(partial_batches, 0, "a batch was exported partway through");
+    let (batches, rows, span): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT batch), COUNT(*), \
+             COALESCE(MAX(batch) - MIN(batch) + 1, 0) FROM export_ledger",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let totals: (i64, i64) = conn
+        .query_row(
+            "SELECT batches, rows FROM export_ledger_totals",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(totals, (batches, rows), "totals from another commit");
+    assert_eq!(span, batches, "the kept batches are not one window");
+    assert!(rows > 0, "the ledger was exported empty");
+}
+
+/// `--quality fast` exports one committed state while another connection keeps committing
+/// and checkpointing: every artifact expands to a database that passes `integrity_check`,
+/// holds whole ledger batches with matching totals, and carries its manifest, and the last
+/// one imports and serves search.
+#[test]
+fn snapshot_export_fast_copies_one_committed_state_while_a_writer_commits() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    let (temp, repo) = init_and_index_worker_repo();
+    let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
+    let stop = Arc::new(AtomicBool::new(false));
+    let committed = Arc::new(AtomicU64::new(0));
+    let writer = spawn_export_ledger_writer(db.clone(), Arc::clone(&stop), Arc::clone(&committed));
+    let waiting_since = std::time::Instant::now();
+    while committed.load(Ordering::SeqCst) < EXPORT_LEDGER_KEPT_BATCHES as u64 {
+        assert!(
+            !writer.is_finished(),
+            "the writer stopped before filling the ledger"
+        );
+        assert!(waiting_since.elapsed() < std::time::Duration::from_secs(60));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let expanded = temp.path().join("expanded.sqlite");
+    for _ in 0..3 {
+        let before = committed.load(Ordering::SeqCst);
+        let exported: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).arg("--json").args([
+                "snapshot",
+                "export",
+                "--quality",
+                "fast",
+            ]);
+            command
+        }))
+        .unwrap();
+        assert!(
+            committed.load(Ordering::SeqCst) > before,
+            "the writer must commit while the export runs for this test to mean anything"
+        );
+        assert_eq!(exported["quality"], "fast", "{exported}");
+        assert_eq!(exported["metadata"]["compression_level"], 1, "{exported}");
+
+        let _ = fs::remove_file(&expanded);
+        zstd::stream::copy_decode(
+            fs::File::open(repo.join(".ok/artifacts/index.snapshot.zst")).unwrap(),
+            fs::File::create(&expanded).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&expanded).unwrap().len(),
+            exported["metadata"]["original_size_bytes"]
+                .as_u64()
+                .unwrap()
+        );
+        assert_export_ledger_is_one_committed_state(&expanded);
+        let manifests: i64 = rusqlite::Connection::open(&expanded)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM manifests", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(manifests, 1);
+    }
+    stop.store(true, Ordering::SeqCst);
+    writer.join().unwrap().unwrap();
+
+    let imported: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .args(["snapshot", "import"]);
+        command
+    }))
+    .unwrap();
+    assert_eq!(imported["imported"], true, "{imported}");
+    assert_export_ledger_is_one_committed_state(&db);
+    let search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .args(["--json", "search", "Worker"]);
+        command
+    });
+    assert!(search.contains("src/lib.rs"), "{search}");
 }
 
 fn bump_manifest_schema_version(db_path: &std::path::Path) {
