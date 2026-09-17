@@ -1495,8 +1495,12 @@ impl Indexer {
                     ledger.indexed(&language, false);
                     // Documents are prose, redacted like every other non-source file before
                     // anything is derived from them (see `Indexer::parse_file`).
-                    let redacted =
-                        redaction::redact_secret_values(&content, redaction::ContentKind::Prose);
+                    // Prose unless the file's name says it holds credentials: the same rule
+                    // `parse_file` applies, so a pasted token in `docs/SECRETS.md` is redacted
+                    // whichever branch reads the file.
+                    let kind = redaction::ContentKind::for_file(&rel, &language)
+                        .unwrap_or(redaction::ContentKind::Prose);
+                    let redacted = redaction::redact_secret_values(&content, kind);
                     redacted_files += usize::from(redacted.redactions > 0);
                     document_sections.extend(build_document_sections(
                         &rel,
@@ -2039,6 +2043,8 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             resolution_quality: None,
             coverage: input.coverage,
             redacted_files: input.redacted_files,
+            // Set by the run that publishes this manifest, from the index it replaces.
+            pending_pre_redaction_compaction: false,
             quality_notes,
         }
     } else {
@@ -2073,6 +2079,8 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             resolution_quality: None,
             coverage: input.coverage,
             redacted_files: input.redacted_files,
+            // Set by the run that publishes this manifest, from the index it replaces.
+            pending_pre_redaction_compaction: false,
             quality_notes,
         }
     };

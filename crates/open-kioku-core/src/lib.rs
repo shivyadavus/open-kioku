@@ -3117,9 +3117,25 @@ pub fn is_secret_like_path(path: &Path) -> bool {
     })
 }
 
+/// A path whose name says it holds credentials: a component containing `secret`, `credential`
+/// or `password`, or one ending in `_key` or `-key`. This no longer decides whether a file is
+/// indexed ([`is_secret_like_path`] does) — it decides how the file's content is read. A file
+/// named for secrets is where a bare token is pasted, so `docs/SECRETS.md` and `secret_key.txt`
+/// are redacted under the config rules rather than the prose ones (#379).
+pub fn is_secret_named_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        value.contains("secret")
+            || value.contains("credential")
+            || value.contains("password")
+            || value.ends_with("_key")
+            || value.ends_with("-key")
+    })
+}
+
 #[cfg(test)]
 mod secret_path_tests {
-    use super::is_secret_like_path;
+    use super::{is_secret_like_path, is_secret_named_path};
     use std::path::Path;
 
     #[test]
@@ -3142,6 +3158,20 @@ mod secret_path_tests {
         }
         // Named for a secret but not key material: indexed, source as written and data,
         // config, and prose with secret-like values redacted.
+        // The looser name rule no longer decides indexing; it decides how content is read.
+        for named in [
+            "docs/SECRETS.md",
+            "secret_key.txt",
+            "notes/credentials.md",
+            "config/passwords.yaml",
+        ] {
+            assert!(is_secret_named_path(Path::new(named)), "{named}");
+            assert!(!is_secret_like_path(Path::new(named)), "{named}");
+        }
+        for ordinary in ["docs/architecture.md", "src/lib.rs", "config/app.yaml"] {
+            assert!(!is_secret_named_path(Path::new(ordinary)), "{ordinary}");
+        }
+
         for indexed in [
             "src/CredentialsProvider.java",
             "internal/secrets.go",
@@ -3950,6 +3980,13 @@ impl IndexManifest {
         self.quality.redacted_files.is_none()
     }
 
+    /// Whether this index still owes the one-time clearing of bytes stored before redaction:
+    /// it predates redaction, or a previous run's attempt did not finish. Publishing a
+    /// manifest that records the work as outstanding is what makes the next run retry it.
+    pub fn needs_pre_redaction_compaction(&self) -> bool {
+        self.predates_secret_redaction() || self.quality.pending_pre_redaction_compaction
+    }
+
     pub fn status_value(&self, detail: StatusDetail) -> serde_json::Result<serde_json::Value> {
         let mut value = serde_json::to_value(self)?;
         if detail == StatusDetail::Full {
@@ -4015,11 +4052,18 @@ pub struct IndexQuality {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<IndexCoverage>,
     /// Data, config and prose files indexed with at least one secret-like value replaced by
-    /// `[REDACTED]` before storage (`docs/security-model.md`). Absent on manifests written
-    /// before redaction existed: those indexes stored such files' values as read, so readers
-    /// must say "not recorded" rather than report zero.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `[REDACTED]` before storage (`docs/security-model.md`). `null` on manifests written
+    /// before redaction existed: those indexes stored such files' values as read. Serialized
+    /// even when absent, so a client reading `quality.redacted_files ?? 0` cannot render an
+    /// unredacted index as one with nothing to redact.
+    #[serde(default)]
     pub redacted_files: Option<usize>,
+    /// Bytes an index written before redaction stored as read are still to be cleared from the
+    /// database's free pages, its write-ahead log, and the semantic vector store. Set when a
+    /// run detects such an index and cleared only once that work succeeds, so a blocked pass is
+    /// retried by the next run instead of being reported as done.
+    #[serde(default)]
+    pub pending_pre_redaction_compaction: bool,
     /// Every note, typed by producer. Status payloads summarize this list; see
     /// `IndexManifest::status_value`.
     #[serde(default)]

@@ -68,6 +68,13 @@ fn config_and_prose_values_are_redacted_before_anything_is_derived_from_them() {
         "docs/setup.md",
         &format!("# Setup\n\nExport `STORAGE_TOKEN={token}` before running.\n"),
     );
+    // A bare token pasted into a file whose name says it holds secrets: no key, no URL and no
+    // PEM header, so only the file's name can decide that it is credential-bearing content.
+    write(
+        root,
+        "docs/SECRETS.md",
+        &format!("# Key rotation\n\nCurrent value:\n\n{token}\n"),
+    );
     // Named for a secret but not key material: indexed like any other config file.
     write(
         root,
@@ -138,7 +145,8 @@ fn config_and_prose_values_are_redacted_before_anything_is_derived_from_them() {
     ));
 
     let quality = &snapshot.manifest.quality;
-    assert_eq!(quality.redacted_files, Some(3));
+    assert_eq!(quality.redacted_files, Some(4));
+    assert!(!quality.pending_pre_redaction_compaction);
     let coverage = quality.coverage.as_ref().unwrap();
     assert!(!coverage.by_language["yaml"]
         .skipped

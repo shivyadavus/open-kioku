@@ -180,6 +180,9 @@ fn render_status_markdown(
                 .redacted_files
                 .map_or_else(|| "not recorded by this index".into(), |count| count.to_string())
         ));
+        if manifest.quality.pending_pre_redaction_compaction {
+            out.push_str("| Pre-redaction bytes | clearing outstanding; run `ok index` |\n");
+        }
         if let Some(excluded) = manifest
             .quality
             .coverage
@@ -1336,7 +1339,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                     coverage_check(quality.coverage.as_ref(), manifest.index_mode);
                 checks.push(check);
                 next_steps.extend(step);
-                let (check, step) = redaction_check(quality.redacted_files);
+                let (check, step) = redaction_check(quality);
                 checks.push(check);
                 next_steps.extend(step);
                 coverage = quality.coverage.clone();
@@ -1476,32 +1479,43 @@ fn doctor_report(repo: &Path) -> DoctorReport {
 }
 
 /// The redaction count as `ok index`, `ok status`, and `ok doctor` print it.
-fn redaction_summary(redacted_files: Option<usize>) -> String {
-    match redacted_files {
-        Some(0) => "no secret-like values found in indexed data, config, or prose files".into(),
+fn redaction_summary(quality: &open_kioku_core::IndexQuality) -> String {
+    let state = match quality.redacted_files {
+        // Not "none present": the rules do not cover a bare token in prose, a number under a
+        // key that reads as a quantity, or a format the index does not read.
+        Some(0) => "no value matched the redaction rules in the indexed data, config, or prose files (see docs/security-model.md for what the rules cover)".to_string(),
         Some(count) => format!(
             "{} data, config, or prose file(s) indexed with secret-like values replaced by [REDACTED]",
             group_thousands(count)
         ),
-        None => "not recorded; this index predates secret-value redaction, so its data, config, and prose files were stored as read".into(),
+        None => "not recorded; this index predates secret-value redaction, so its data, config, and prose files were stored as read".to_string(),
+    };
+    if quality.pending_pre_redaction_compaction {
+        return format!(
+            "{state}; clearing the bytes an earlier index stored as read is still outstanding, so they may remain in the database, its write-ahead log, and the semantic vector store"
+        );
     }
+    state
 }
 
-/// Redaction sits beside coverage. An index written before redaction existed warns rather
-/// than fails: it holds config values as read, and rebuilding it is the fix.
-fn redaction_check(redacted_files: Option<usize>) -> (DoctorCheck, Option<String>) {
-    let step = redacted_files.is_none().then(|| {
-        "Redaction: run `ok index .` so data, config, and prose files are stored with secret-like values replaced by [REDACTED].".to_string()
+/// Redaction sits beside coverage. An index written before redaction existed, or one whose
+/// clearing of pre-redaction bytes has not finished, warns rather than fails: it holds values
+/// as read, and running the index again is the fix.
+fn redaction_check(quality: &open_kioku_core::IndexQuality) -> (DoctorCheck, Option<String>) {
+    let outstanding =
+        quality.redacted_files.is_none() || quality.pending_pre_redaction_compaction;
+    let step = outstanding.then(|| {
+        "Redaction: run `ok index .` so data, config, and prose files are stored with secret-like values replaced by [REDACTED], and the bytes an earlier index stored as read are cleared from the database and the semantic vector store.".to_string()
     });
     (
         DoctorCheck {
             name: "redaction",
-            status: if redacted_files.is_some() {
-                CheckStatus::Pass
-            } else {
+            status: if outstanding {
                 CheckStatus::Warn
+            } else {
+                CheckStatus::Pass
             },
-            message: redaction_summary(redacted_files),
+            message: redaction_summary(quality),
         },
         step,
     )

@@ -24,9 +24,10 @@
 //!    machine-generated (see [`is_high_entropy_token`]). Prose keeps rules 1-3 but not this
 //!    one, so commit hashes and digests cited in Markdown stay searchable.
 //!
-//! `null`, booleans, unquoted numbers, and a bare variable reference (`${DB_PASSWORD}`,
-//! `$DB_PASSWORD`) are not values and stay, so `max_tokens: 4096` and the place a secret is
-//! injected remain searchable.
+//! `null`, booleans, a bare variable reference (`${DB_PASSWORD}`, `$DB_PASSWORD`), and an
+//! unquoted number under a quantity-named key (`max_tokens: 4096`, `token_limit: 12`) are not
+//! values and stay, so the place a secret is injected remains searchable. A number under a
+//! secret-named key that is not a quantity (`password: 123456`) is redacted like any value.
 
 use open_kioku_core::Language;
 use std::path::Path;
@@ -108,7 +109,12 @@ impl ContentKind {
         let config = matches!(language, Language::Yaml | Language::Json | Language::Toml)
             || matches!(extension.as_str(), "tf" | "tfvars" | "hcl")
             || name == "Dockerfile"
-            || name.starts_with("Dockerfile.");
+            || name.starts_with("Dockerfile.")
+            // A file whose name says it holds credentials gets the config rules whatever its
+            // format. The name rule no longer keeps `docs/SECRETS.md` or `secret_key.txt` out
+            // of the index, and a token pasted on its own line there carries no key, URL or
+            // PEM header for the other rules to match.
+            || open_kioku_core::is_secret_named_path(path);
         Some(if config { Self::Config } else { Self::Prose })
     }
 }
@@ -273,7 +279,9 @@ impl Redactor {
                     }
                     at = (close + 1).min(bytes.len());
                 }
-                _ if is_non_secret_literal(value_core) || is_plain_number(value_core) => {
+                _ if is_non_secret_literal(value_core)
+                    || (is_plain_number(value_core) && is_quantity_key(key.name)) =>
+                {
                     at = bytes.len();
                 }
                 Some(b'|' | b'>') if is_block_scalar_indicator(rest) => {
@@ -352,7 +360,6 @@ impl Redactor {
                 .bytes()
                 .all(|byte| matches!(byte, b'{' | b'}' | b'[' | b']' | b','))
             || is_non_secret_literal(core)
-            || (item == core && is_plain_number(core))
         {
             return line.to_string();
         }
@@ -639,8 +646,52 @@ fn is_non_secret_literal(value: &str) -> bool {
         || is_variable_reference(value)
 }
 
+/// Words that make a secret-named key a quantity rather than the secret itself: `max_tokens`,
+/// `token_limit`, `token_ttl_seconds`, `password_min_length`. Without this every number under
+/// such a key would be redacted; with it, a numeric secret (`password: 123456`,
+/// `access_token: 9876543210`) still is, because none of these words appears in its key.
+fn is_quantity_key(name: &str) -> bool {
+    let normalized = name
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|byte| char::from(byte.to_ascii_lowercase()))
+        .collect::<String>();
+    [
+        "max",
+        "min",
+        "limit",
+        "count",
+        "size",
+        "length",
+        "len",
+        "ttl",
+        "timeout",
+        "expiry",
+        "expires",
+        "seconds",
+        "minutes",
+        "hours",
+        "days",
+        "bytes",
+        "port",
+        "retry",
+        "retries",
+        "interval",
+        "budget",
+        "threshold",
+        "rotation",
+        "version",
+        "window",
+        "quota",
+        "tokens",
+    ]
+    .iter()
+    .any(|word| normalized.contains(word))
+}
+
 /// An unquoted integer or float (`4096`, `-3.5`, `1e6`, `1_000`): a typed number such as a
-/// limit or a port, not a credential string. A quoted string of digits is still a value.
+/// limit or a port, not a credential string. A quoted string of digits is still a value, and a
+/// number is only kept under a key [`is_quantity_key`] recognises.
 fn is_plain_number(value: &str) -> bool {
     let digits = |part: &str| {
         part.as_bytes().first().is_some_and(u8::is_ascii_digit)
@@ -946,16 +997,58 @@ mod tests {
     }
 
     #[test]
-    fn numbers_under_secret_named_keys_are_not_values() {
-        let text = "max_tokens: 4096\ntoken_limit: 12\ntoken_ttl_seconds: 3.5\n\"token_budget\": 1e6,\ncredentials:\n  port: 5432\n  - 8080\n";
-        let result = redact_secret_values(text, ContentKind::Config);
-        assert_eq!(result.text, text);
+    fn a_number_is_kept_only_where_its_key_reads_as_a_quantity() {
+        let quantities = "max_tokens: 4096\ntoken_limit: 12\ntoken_ttl_seconds: 3.5\n\"token_budget\": 1e6,\ncredentials:\n  port: 5432\n";
+        let result = redact_secret_values(quantities, ContentKind::Config);
+        assert_eq!(result.text, quantities);
         assert_eq!(result.redactions, 0);
+
+        // A number under a secret-named key that names no quantity is the secret itself.
+        assert_eq!(redacted("password: 123456\n"), "password: [REDACTED]\n");
+        assert_eq!(
+            redacted("access_token: 9876543210\n"),
+            "access_token: [REDACTED]\n"
+        );
+        // Inside a secret-named block a bare item has no key to read as a quantity.
+        assert_eq!(
+            redacted("credentials:\n  - 8080\n"),
+            "credentials:\n  - [REDACTED]\n"
+        );
         // A quoted string of digits is a string, and stays a value.
         assert_eq!(
             redacted("password: \"123456\"\n"),
             "password: \"[REDACTED]\"\n"
         );
+    }
+
+    /// Two narrowings that are each safe alone compose into a hole: the path rule no longer
+    /// keeps `docs/SECRETS.md` out of the index, and prose does not run the entropy rule, so a
+    /// pasted token with no key, URL or PEM header around it would be indexed as written.
+    #[test]
+    fn a_secret_named_prose_file_is_read_under_the_config_rules() {
+        let token = striding(ALNUM, 32, 17, 5);
+        let pasted = format!("# Key rotation\n\n{token}\n");
+
+        // Ordinary prose keeps a bare token: it is as likely a commit hash or a digest.
+        assert_eq!(
+            redact_secret_values(&pasted, ContentKind::Prose).text,
+            pasted
+        );
+
+        // The file's name is what decides, for Markdown and text as much as for YAML.
+        for named in ["docs/SECRETS.md", "notes/credentials.md", "secret_key.txt"] {
+            assert_eq!(
+                ContentKind::for_file(Path::new(named), &Language::Markdown),
+                Some(ContentKind::Config),
+                "{named}"
+            );
+        }
+        assert_eq!(
+            ContentKind::for_file(Path::new("docs/architecture.md"), &Language::Markdown),
+            Some(ContentKind::Prose)
+        );
+        let redacted_prose = redact_secret_values(&pasted, ContentKind::Config);
+        assert!(!redacted_prose.text.contains(&token), "{redacted_prose:?}");
     }
 
     #[test]

@@ -38,7 +38,7 @@ fn index_repo_with_config(
         );
     }
     let index_reporter = Arc::clone(&reporter);
-    let (snapshot, history) = Indexer::default().index_repo_with_history_mode_and_progress(
+    let (mut snapshot, history) = Indexer::default().index_repo_with_history_mode_and_progress(
         repo,
         &config,
         mode,
@@ -60,14 +60,18 @@ fn index_repo_with_config(
         ),
     );
     let store = open_store_for_write(repo)?;
-    // An index written before secret-value redaction stored data and config values as read;
-    // replacing its rows leaves those bytes in SQLite free pages, so it is compacted once the
-    // new manifest is published. Read before staging, which removes the previous manifest.
+    // An index written before secret-value redaction stored data and config values as read.
+    // Replacing its rows leaves those bytes in SQLite free pages and its write-ahead log, and
+    // the semantic vector store holds the same text, so both are cleared after the new manifest
+    // is published. Read before staging, which removes the previous manifest. The new manifest
+    // carries the work as outstanding until it succeeds, so a blocked pass is retried by the
+    // next run and `ok doctor` reports it meanwhile, instead of being silently forgotten.
     let compact_after_publish = store
         .manifest()
         .ok()
         .flatten()
-        .is_some_and(|previous| previous.predates_secret_redaction());
+        .is_some_and(|previous| previous.needs_pre_redaction_compaction());
+    snapshot.manifest.quality.pending_pre_redaction_compaction = compact_after_publish;
     // The manifest is the publication marker, written last (below) so a concurrent reader
     // never opens one whose graph or search index is still being written.
     store.stage_index_with_documents(
@@ -145,25 +149,43 @@ fn index_repo_with_config(
         report_index_stage(
             &reporter,
             "compact",
-            "compacting the database once to drop rows stored before secret-value redaction"
+            "clearing bytes stored before secret-value redaction from the database and the \
+             semantic vector store"
                 .to_string(),
         );
-        // The manifest is already published and the index is correct either way. A probe or
-        // another reader holding the database can make `VACUUM` or its checkpoint return
-        // busy; that is reported and retried by the next run, never a failed index.
-        if let Err(err) = store.vacuum() {
-            report_index_stage(
+        // The index itself is correct either way, so a reader holding the database never fails
+        // this run. It does leave the work outstanding in the published manifest, which is what
+        // makes the next run retry it.
+        match compact_pre_redaction_bytes(repo, &store) {
+            Ok(()) => {
+                snapshot.manifest.quality.pending_pre_redaction_compaction = false;
+                store.put_manifest(&snapshot.manifest)?;
+            }
+            Err(err) => report_index_stage(
                 &reporter,
                 "compact",
                 format!(
-                    "compacting the database failed ({err}); rows stored before secret-value \
-                     redaction stay in free pages until the next `ok index`"
+                    "clearing bytes stored before secret-value redaction failed ({err}); the \
+                     manifest records the work as outstanding, `ok doctor` reports it, and the \
+                     next `ok index` retries it"
                 ),
-            );
+            ),
         }
     }
     report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)
+}
+
+/// Everything an index written before secret-value redaction left behind: the semantic vector
+/// store, whose target text and embedding cache were built from unredacted chunks, and the
+/// database's free pages and write-ahead log. Both, or the work stays outstanding.
+fn compact_pre_redaction_bytes(
+    repo: &Path,
+    store: &open_kioku_storage_sqlite::SqliteStore,
+) -> anyhow::Result<()> {
+    open_kioku_semantic::discard_vector_store(repo)?;
+    store.vacuum()?;
+    Ok(())
 }
 
 fn parse_scip_mode(value: &str) -> anyhow::Result<ScipMode> {

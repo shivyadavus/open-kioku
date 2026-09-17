@@ -362,9 +362,11 @@ pub fn analysis_semantics_compatibility(
 pub fn partial_index_supported(previous: Option<&IndexManifest>, next: &IndexManifest) -> bool {
     previous.is_some_and(|previous| {
         // An index written before secret-value redaction holds data and config files as read;
-        // updating only the changed files would keep the rest unredacted under a manifest
-        // that counts redactions.
-        !previous.predates_secret_redaction()
+        // updating only the changed files would keep the rest unredacted under a manifest that
+        // counts redactions. One that still owes the clearing of those bytes is refused too:
+        // only a full rebuild runs that clearing, so a partial update would leave it owed for
+        // as long as the repository keeps changing.
+        !previous.needs_pre_redaction_compaction()
             && previous.schema_version == next.schema_version
             && previous.index_mode == next.index_mode
             && analysis_semantics_compatibility(Some(previous), next)
@@ -515,10 +517,19 @@ mod tests {
     fn partial_updates_are_refused_over_an_index_written_before_redaction() {
         let next = manifest(1);
         assert!(partial_index_supported(Some(&manifest(1)), &next));
-        let mut previous = manifest(1);
-        previous.quality.redacted_files = None;
-        assert!(previous.predates_secret_redaction());
-        assert!(!partial_index_supported(Some(&previous), &next));
+
+        let mut predates = manifest(1);
+        predates.quality.redacted_files = None;
+        assert!(predates.predates_secret_redaction());
+        assert!(!partial_index_supported(Some(&predates), &next));
+
+        // Redacted, but the clearing of what an earlier index stored as read is still owed:
+        // only a full rebuild runs it, so a partial update would leave it owed indefinitely.
+        let mut pending = manifest(1);
+        pending.quality.pending_pre_redaction_compaction = true;
+        assert!(!pending.predates_secret_redaction());
+        assert!(pending.needs_pre_redaction_compaction());
+        assert!(!partial_index_supported(Some(&pending), &next));
     }
 
     #[test]

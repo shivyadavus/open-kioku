@@ -352,8 +352,22 @@ impl SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         conn.execute_batch("VACUUM;").map_err(storage_err)?;
-        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        // `wal_checkpoint` does not fail when it is blocked: it returns `(busy, log,
+        // checkpointed)` with `busy = 1` and leaves the log in place. Discarding that row
+        // reported a compaction that had not happened, with the values still in the WAL.
+        let (busy, _log, _checkpointed): (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
             .map_err(storage_err)?;
+        if busy != 0 {
+            return Err(OkError::Storage(
+                "the write-ahead log could not be truncated because another connection is \
+                 reading the database; bytes stored before secret-value redaction may remain in \
+                 it"
+                .into(),
+            ));
+        }
         Ok(())
     }
 
@@ -6410,8 +6424,19 @@ mod tests {
             .expect("the manifest is published");
         assert_eq!(probed.manifest_withdrawal().unwrap(), None);
 
+        let wal = store.path().with_file_name(format!(
+            "{}-wal",
+            store.path().file_name().unwrap().to_string_lossy()
+        ));
         store.vacuum().unwrap();
 
+        // The point of the vacuum: a blocked checkpoint leaves the log in place and used to be
+        // reported as success, so the bytes it holds must be gone, not merely claimed gone.
+        let wal_bytes = std::fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0);
+        assert_eq!(
+            wal_bytes, 0,
+            "the write-ahead log is truncated while the probe holds its read connection"
+        );
         assert!(
             probed.manifest().unwrap().is_some(),
             "the probe still reads the index it opened before the vacuum"

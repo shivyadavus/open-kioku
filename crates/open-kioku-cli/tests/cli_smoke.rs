@@ -6235,6 +6235,12 @@ fn indexing_over_an_index_written_before_redaction_drops_its_unredacted_bytes() 
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
             .unwrap();
     }
+    // A vector store built before redaction holds the same values in its target text.
+    let vectors_root = open_kioku_storage::generations::resolve_index_location(repo).vectors_root();
+    fs::create_dir_all(vectors_root.join("current")).unwrap();
+    let stale_vectors = vectors_root.join("current/ids.json");
+    fs::write(&stale_vectors, format!("[{{\"text\": \"{value}\"}}]")).unwrap();
+
     let holds_value = |path: &std::path::Path| {
         fs::read(path)
             .map(|bytes| String::from_utf8_lossy(&bytes).contains(value.as_str()))
@@ -6264,6 +6270,10 @@ fn indexing_over_an_index_written_before_redaction_drops_its_unredacted_bytes() 
 
     assert!(!holds_value(&database), "free pages still hold the value");
     assert!(!holds_value(&wal), "the WAL still holds the value");
+    assert!(
+        !stale_vectors.exists(),
+        "the vector store built before redaction is discarded"
+    );
     let status = run({
         let mut command = ok();
         command.arg("--repo").arg(repo).arg("--json").arg("status");
@@ -6271,4 +6281,59 @@ fn indexing_over_an_index_written_before_redaction_drops_its_unredacted_bytes() 
     });
     let status: serde_json::Value = serde_json::from_str(&status).unwrap();
     assert_eq!(status["quality"]["redacted_files"], 1, "{status}");
+    assert_eq!(
+        status["quality"]["pending_pre_redaction_compaction"], false,
+        "a completed clearing is recorded as done: {status}"
+    );
+
+    // An index whose clearing did not finish keeps the work in its manifest, so `ok doctor`
+    // reports it and the next run retries it rather than treating it as done.
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let manifest: String = conn
+            .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        manifest["quality"]["pending_pre_redaction_compaction"] = serde_json::Value::Bool(true);
+        conn.execute(
+            "UPDATE manifests SET json = ?1 WHERE id = 1",
+            [manifest.to_string()],
+        )
+        .unwrap();
+    }
+    let doctor = run({
+        let mut command = ok();
+        command.arg("--json").arg("doctor").arg(repo);
+        command
+    });
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "redaction")
+        .expect("doctor has a redaction check");
+    assert_eq!(check["status"], "warn", "{check}");
+    assert!(
+        check["message"].as_str().unwrap().contains("outstanding"),
+        "{check}"
+    );
+
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(
+        status["quality"]["pending_pre_redaction_compaction"], false,
+        "the next run retried the outstanding clearing: {status}"
+    );
 }

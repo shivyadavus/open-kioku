@@ -119,7 +119,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 }
                 println!(
                     "redaction: {}",
-                    redaction_summary(snapshot.manifest.quality.redacted_files)
+                    redaction_summary(&snapshot.manifest.quality)
                 );
                 if let Some(scip) = &snapshot.scip {
                     println!(
@@ -276,7 +276,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 }
                 println!(
                     "Redaction: {}",
-                    redaction_summary(manifest.quality.redacted_files)
+                    redaction_summary(&manifest.quality)
                 );
                 let semantics = analysis_semantics_compatibility_for_manifest(Some(&manifest));
                 println!(
