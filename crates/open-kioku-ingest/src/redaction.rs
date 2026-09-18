@@ -25,8 +25,11 @@
 //!    one, so commit hashes and digests cited in Markdown stay searchable.
 //!
 //! A secret-named key whose last word names where the secret lives rather than the secret —
-//! `auth_token_env`, `password_file`, `token_path`, `secretName` — keeps its value, for the
-//! same reason a `${DB_PASSWORD}` reference does.
+//! `auth_token_env`, `POSTGRES_PASSWORD_FILE`, `token_path`, `secretName` — keeps its value
+//! only when all of three hold: the last word matches as a whole word, the value parses
+//! wholly as a locator ([`is_locator_value`]), and nothing in that value looks
+//! machine-generated. It is applied only for [`ContentKind::Config`], where the entropy rule
+//! also runs, so the exemption is never the only rule protecting a value.
 //!
 //! `null`, booleans, a bare variable reference (`${DB_PASSWORD}`, `$DB_PASSWORD`), and an
 //! unquoted number under a quantity-named key (`max_tokens: 4096`, `token_limit: 12`) are not
@@ -293,7 +296,7 @@ impl Redactor {
                     || (is_plain_number(value_core) && is_quantity_key(key.name))
                     || (self.kind == ContentKind::Config
                         && is_secret_locator_key(key.name)
-                        && is_locator_value(value_core)) =>
+                        && is_locator_value(strip_trailing_comment(value_core))) =>
                 {
                     at = bytes.len();
                 }
@@ -548,11 +551,13 @@ fn is_secret_key(name: &str) -> bool {
 }
 
 /// A secret-named key whose last word names *where* the secret lives rather than the secret:
-/// `auth_token_env` names an environment variable, `password_file` or `token_path` a file.
-/// The name alone never exempts a value — `password_file = "hunter2"` is a password, and a
-/// short or numeric secret clears neither bar of the entropy rule — so the value must look
-/// like a locator too (see [`is_locator_value`]). This repository's own `ok.toml` names the
-/// Sentry token's environment variable, which is what the pair of rules keeps readable.
+/// `auth_token_env` and `POSTGRES_PASSWORD_FILE` name an environment variable and a file.
+/// The name alone never exempts a value — `password_file = "hunter2"` is a password — so the
+/// caller must also require [`is_locator_value`], and only for [`ContentKind::Config`]. The
+/// entropy rule is no backstop here: it needs twenty characters and skips word-like runs, so
+/// a short or all-letter secret would pass it untouched. This repository's own `ok.toml`
+/// names the Sentry token's environment variable, which is what the rules together keep
+/// readable.
 fn is_secret_locator_key(name: &str) -> bool {
     let words = key_words(name);
     words.len() >= 2
@@ -568,21 +573,34 @@ fn is_secret_locator_key(name: &str) -> bool {
 /// is `secret` then `name`. Matching whole words is what keeps `profile`, `username`,
 /// `hostname`, `filename`, `logfile` and `classpath` from reading as locator keys.
 fn key_words(name: &str) -> Vec<String> {
+    let chars = name.chars().collect::<Vec<_>>();
     let mut words = Vec::new();
     let mut current = String::new();
-    for ch in name.chars() {
+    for (at, ch) in chars.iter().copied().enumerate() {
         if matches!(ch, '_' | '-' | '.') {
             if !current.is_empty() {
                 words.push(std::mem::take(&mut current));
             }
             continue;
         }
-        if ch.is_ascii_uppercase()
-            && current
-                .chars()
-                .last()
-                .is_some_and(|last| last.is_ascii_lowercase() || last.is_ascii_digit())
-        {
+        // Case is read from the input. Reading it from `current`, which is lower-cased, made
+        // every capital after a letter a word boundary: `POSTGRES_PASSWORD_FILE` became
+        // twenty one-character words, no all-caps key could be a locator key, and a
+        // `docker-compose.yml` naming a Docker secret file had its path redacted.
+        let previous = at.checked_sub(1).map(|index| chars[index]);
+        let next_is_lowercase = chars.get(at + 1).is_some_and(char::is_ascii_lowercase);
+        let boundary = ch.is_ascii_uppercase()
+            && match previous {
+                // `secretName`, `token2Env`: a hump starts here.
+                Some(previous) if previous.is_ascii_lowercase() || previous.is_ascii_digit() => {
+                    true
+                }
+                // `HTTPServer`: the last capital of a run starts the next word, but only when
+                // a lower-case letter follows it. `SENTRY_AUTH_TOKEN` splits on `_` alone.
+                Some(previous) if previous.is_ascii_uppercase() => next_is_lowercase,
+                _ => false,
+            };
+        if boundary && !current.is_empty() {
             words.push(std::mem::take(&mut current));
         }
         current.push(ch.to_ascii_lowercase());
@@ -751,7 +769,7 @@ fn is_quantity_key(name: &str) -> bool {
 /// A value that names where a secret lives rather than holding one: an environment variable
 /// (`SENTRY_AUTH_TOKEN`, upper-case with underscores) or a filesystem path (`/run/secrets/db`).
 /// Anything else under a locator-named key is redacted like any other value, so a secret
-/// written under `password_file` or `pin_file` is not kept by the name alone.
+/// written under `password_file` or `token_path` is not kept by the name alone.
 fn is_locator_value(value: &str) -> bool {
     let value = value.trim();
     if value.len() < 2 || value.len() > 256 {
@@ -766,6 +784,13 @@ fn is_locator_value(value: &str) -> bool {
         return false;
     }
     is_environment_variable_name(value) || is_explicit_path(value)
+}
+
+/// A YAML value carries its comment in the unquoted arm: `password_file: /run/secrets/db
+/// # prod`. The comment is not part of the path, so the locator test reads the value without
+/// it. Redaction still takes the whole line, comment included, when the value is not a locator.
+fn strip_trailing_comment(value: &str) -> &str {
+    value.split(" #").next().unwrap_or(value).trim_end()
 }
 
 /// `SENTRY_AUTH_TOKEN`: upper case, at least two `_`-separated segments, each letters only and
@@ -1151,6 +1176,17 @@ mod tests {
             "password_file: /run/secrets/db\n",
             "token_path: /var/run/token\n",
             "password_file: ./secrets/db.yaml\n",
+            // An all-caps key, which is how a compose file or a Dockerfile writes one. The
+            // camelCase split used to cut these into single characters, so the key stopped
+            // being a locator key and the Docker secret's path was redacted.
+            "POSTGRES_PASSWORD_FILE=/run/secrets/db_password\n",
+            "  - POSTGRES_PASSWORD_FILE=/run/secrets/db_password\n",
+            "AUTH_TOKEN_ENV = \"SENTRY_AUTH_TOKEN\"\n",
+            "ENV VAULT_TOKEN_FILE=/run/secrets/token\n",
+            // A run of capitals inside a camelCase key: `secretNAME` reads like `secretName`.
+            "secretNAME: /run/secrets/db\n",
+            // A YAML comment is not part of the value.
+            "password_file: /run/secrets/db # prod\n",
         ] {
             let result = redact_secret_values(kept, ContentKind::Config);
             assert_eq!(result.text, kept, "{kept}");

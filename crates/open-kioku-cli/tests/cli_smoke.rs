@@ -6400,3 +6400,85 @@ fn indexing_over_an_index_written_before_redaction_drops_its_unredacted_bytes() 
         "the next run retried the outstanding clearing: {status}"
     );
 }
+
+/// `ok snapshot export` is a distribution point, so it refuses what it cannot ship safely.
+/// Two different states hide behind one predicate: an index that predates redaction holds the
+/// values in live rows, which `VACUUM INTO` copies faithfully, so no mode is safe; one that has
+/// been rebuilt owes only the clearing of free pages, which `--quality best` leaves behind and
+/// `--quality fast` carries along with the file (#379).
+#[test]
+fn snapshot_export_refuses_the_states_it_cannot_ship_safely() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn load() {}\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let database = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    let rewrite_manifest = |mutate: &dyn Fn(&mut serde_json::Value)| {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let stored: String = conn
+            .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        mutate(&mut manifest);
+        conn.execute(
+            "UPDATE manifests SET json = ?1 WHERE id = 1",
+            [manifest.to_string()],
+        )
+        .unwrap();
+    };
+    let export = |quality: &str| {
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("snapshot")
+            .arg("export")
+            .arg("--quality")
+            .arg(quality);
+        command
+    };
+
+    // Written before redaction: the values are in rows, so every mode copies them.
+    rewrite_manifest(&|manifest| {
+        manifest["quality"]
+            .as_object_mut()
+            .unwrap()
+            .remove("redacted_files");
+    });
+    for quality in ["best", "fast"] {
+        let (_stdout, stderr) = run_failure(export(quality));
+        assert!(
+            stderr.contains("was written before secret-value redaction"),
+            "{quality}: {stderr}"
+        );
+    }
+
+    // Rebuilt, but the clearing of free pages is still owed: `best` rewrites the database and
+    // leaves them behind, `fast` copies the file as it is.
+    rewrite_manifest(&|manifest| {
+        let quality = manifest["quality"].as_object_mut().unwrap();
+        quality.insert("redacted_files".into(), serde_json::json!(0));
+        quality.insert(
+            "pending_pre_redaction_compaction".into(),
+            serde_json::Value::Bool(true),
+        );
+    });
+    let (_stdout, stderr) = run_failure(export("fast"));
+    assert!(stderr.contains("still owes the clearing"), "{stderr}");
+    let exported = run(export("best"));
+    let exported: serde_json::Value = serde_json::from_str(&exported).unwrap();
+    assert_eq!(exported["ok"], true, "{exported}");
+}

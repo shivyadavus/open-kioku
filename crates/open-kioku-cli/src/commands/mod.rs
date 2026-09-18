@@ -641,7 +641,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         println!("warning: {warning}");
                     }
                     for caveat in &report.caveats {
-                        println!("note: {caveat}");
+                        println!("caveat: {caveat}");
                     }
                 })?;
                 return Ok(());

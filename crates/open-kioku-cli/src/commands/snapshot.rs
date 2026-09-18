@@ -40,25 +40,38 @@ fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<Snap
     // rows faithfully, so no export mode is safe until `ok index` rewrites them. An index that
     // has been re-indexed owes only the clearing of free pages, which `best` drops on the way
     // out and `fast` carries along with the file.
-    if let Some(manifest) = open_kioku_storage::MetadataStore::manifest(&store)? {
-        if manifest.predates_secret_redaction() {
-            anyhow::bail!(
-                "index at {} was written before secret-value redaction: its rows still hold \
-                 those values as read, and every export mode copies rows. Run `ok index` to \
-                 rebuild it with redaction, then export.",
-                index_path.display()
-            );
-        }
-        if manifest.quality.pending_pre_redaction_compaction
-            && matches!(quality, SnapshotQuality::Fast)
-        {
-            anyhow::bail!(
-                "index at {} still owes the clearing of bytes an earlier index stored as read; \
-                 `--quality fast` copies the database file as it is, free pages included. Run \
-                 `ok index` to clear them, or export with `--quality best`, which rewrites the \
-                 database and leaves those pages behind.",
-                index_path.display()
-            );
+    match open_kioku_storage::MetadataStore::manifest(&store) {
+        // Withdrawn between the probe above and this read: the copy below refuses it with the
+        // unpublished-index message, so there is nothing for these checks to decide.
+        Ok(None) => {}
+        // Unreadable: whether this index can be exported safely is unknown, and `ok index`
+        // treats the same unknown as "assume the clearing is owed" rather than as "nothing
+        // owed". An export is a distribution point, so it refuses too.
+        Err(err) => anyhow::bail!(
+            "index at {} cannot be read to check whether it still holds values stored before \
+             secret-value redaction ({err}); run `ok index`, then export",
+            index_path.display()
+        ),
+        Ok(Some(manifest)) => {
+            if manifest.predates_secret_redaction() {
+                anyhow::bail!(
+                    "index at {} was written before secret-value redaction: its rows still \
+                     hold those values as read, and every export mode copies rows. Run `ok \
+                     index` to rebuild it with redaction, then export.",
+                    index_path.display()
+                );
+            }
+            if manifest.quality.pending_pre_redaction_compaction
+                && matches!(quality, SnapshotQuality::Fast)
+            {
+                anyhow::bail!(
+                    "index at {} still owes the clearing of bytes an earlier index stored as \
+                     read; `--quality fast` copies the database file as it is, free pages \
+                     included. Run `ok index` to clear them, or export with `--quality best`, \
+                     which rewrites the database and leaves those pages behind.",
+                    index_path.display()
+                );
+            }
         }
     }
     drop(store);
