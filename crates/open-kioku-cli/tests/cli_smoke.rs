@@ -4135,13 +4135,13 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
     let repo = temp.path();
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::create_dir_all(repo.join("vendor")).unwrap();
-    fs::create_dir_all(repo.join("config")).unwrap();
+    fs::create_dir_all(repo.join(".aws")).unwrap();
     fs::write(repo.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
     // Excluded by the vendor detector and the secret-path rule respectively: policy
     // exclusions, reported beside the ratio. The binary file is the omission the ratio
     // is judged on.
     fs::write(repo.join("vendor/dep.rs"), "pub fn vendored() {}\n").unwrap();
-    fs::write(repo.join("config/secrets.json"), "{}\n").unwrap();
+    fs::write(repo.join(".aws/credentials.json"), "{}\n").unwrap();
     fs::write(repo.join("src/blob.rs"), b"pub fn blob() {}\0").unwrap();
 
     run({
@@ -5897,4 +5897,663 @@ fn index_from_a_newer_open_kioku_reports_upgrade_or_reindex_on_every_surface() {
         status["schema_version"],
         open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION
     );
+}
+
+/// Credential-shaped test values are assembled at run time so that no string in the repository
+/// matches a real provider's key format or reads as a leaked secret to a scanner.
+fn striding_token(alphabet: &[u8], len: usize, stride: usize, offset: usize) -> String {
+    (0..len)
+        .map(|index| char::from(alphabet[(index * stride + offset) % alphabet.len()]))
+        .collect()
+}
+
+/// Every stored field value and every indexed term of the lexical index. Stored fields are
+/// compressed on disk, so a byte scan of the index files could not prove a value is absent.
+fn tantivy_stored_texts_and_terms(index_dir: &std::path::Path) -> Vec<String> {
+    use tantivy::schema::Value;
+    let index = tantivy::Index::open_in_dir(index_dir).unwrap();
+    let schema = index.schema();
+    let searcher = index.reader().unwrap().searcher();
+    let mut texts = Vec::new();
+    for segment in searcher.segment_readers() {
+        let store = segment.get_store_reader(1).unwrap();
+        for document in store.iter::<tantivy::TantivyDocument>(segment.alive_bitset()) {
+            for (_, value) in document.unwrap().field_values() {
+                texts.extend(value.as_str().map(str::to_string));
+            }
+        }
+        for (field, entry) in schema.fields() {
+            if !entry.is_indexed() {
+                continue;
+            }
+            let inverted = segment.inverted_index(field).unwrap();
+            let mut terms = inverted.terms().stream().unwrap();
+            while terms.advance() {
+                texts.push(String::from_utf8_lossy(terms.key()).into_owned());
+            }
+        }
+    }
+    texts
+}
+
+fn assert_secrets_absent(label: &str, haystack: &str, secrets: &[&str]) {
+    let lowered = haystack.to_ascii_lowercase();
+    for secret in secrets {
+        assert!(
+            !lowered.contains(&secret.to_ascii_lowercase()),
+            "{label} holds a secret value"
+        );
+    }
+}
+
+/// A config file's secret-like values never reach any store or output, and the file stays
+/// indexed and searchable by its keys (#379).
+#[test]
+fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    // Shaped like a cloud access key id without any provider's prefix, and a token under a
+    // key no rule names, so only the entropy rule can catch it.
+    let cloud_key = format!(
+        "{}{}",
+        ["OK", "CK"].concat(),
+        striding_token(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 16, 7, 3)
+    );
+    let token = striding_token(
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+        32,
+        17,
+        5,
+    );
+    let secrets = [cloud_key.as_str(), token.as_str()];
+    // Named for a secret but not key material, so it is indexed with its values redacted.
+    let config_path = "config/secrets.yaml";
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("config")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn load_settings() {}\n").unwrap();
+    fs::write(
+        repo.join(config_path),
+        format!(
+            "storage:\n  provider: objectstore\n  access_key_id: {cloud_key}\nwebhooks:\n  delivery_nonce: \"{token}\"\n"
+        ),
+    )
+    .unwrap();
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    let indexed = run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    assert!(
+        indexed.contains(
+            "redaction: 1 data, config, or prose file(s) indexed with secret-like values replaced by [REDACTED]"
+        ),
+        "{indexed}"
+    );
+
+    // Semantic target text and embeddings are built from the same redacted chunks, here with
+    // the local hashing provider, which downloads nothing.
+    run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("semantic").arg("index");
+        command
+    });
+    let semantic_targets = fs::read_to_string(repo.join(".ok/vectors/current/ids.json")).unwrap();
+    assert!(
+        semantic_targets.contains(config_path),
+        "the config file is in the semantic corpus"
+    );
+    let semantic_search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("search")
+            .arg("--semantic")
+            .arg("access_key_id");
+        command
+    });
+    assert_secrets_absent("ok search --semantic", &semantic_search, &secrets);
+
+    // SQLite, its WAL, and the vector store's target and embedding files hold text
+    // uncompressed, so their bytes are checked directly.
+    for entry in walkdir::WalkDir::new(repo.join(".ok")) {
+        let entry = entry.unwrap();
+        if entry.file_type().is_file() {
+            let bytes = fs::read(entry.path()).unwrap();
+            assert_secrets_absent(
+                &entry.path().display().to_string(),
+                &String::from_utf8_lossy(&bytes),
+                &secrets,
+            );
+        }
+    }
+    let lexical =
+        tantivy_stored_texts_and_terms(&open_kioku_search_tantivy::default_index_dir(repo));
+    assert!(
+        lexical.iter().any(|text| text.contains("access_key_id")),
+        "the lexical index holds the config file's keys"
+    );
+    assert_secrets_absent("tantivy", &lexical.join("\n"), &secrets);
+
+    let by_key = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("search")
+            .arg("access_key_id");
+        command
+    });
+    assert!(by_key.contains(config_path), "{by_key}");
+    assert!(by_key.contains("[REDACTED]"), "{by_key}");
+    assert_secrets_absent("ok search by key", &by_key, &secrets);
+    // One sentence from one function: the human surface reports the same redaction state as
+    // the agent surface, checked against the MCP response below.
+    let by_key_json: serde_json::Value = serde_json::from_str(&by_key).unwrap();
+    let cli_caveat = by_key_json["caveats"]
+        .as_array()
+        .expect("ok search --json carries caveats")
+        .iter()
+        .find_map(|caveat| {
+            let caveat = caveat.as_str()?;
+            caveat.contains("[REDACTED]").then(|| caveat.to_string())
+        })
+        .unwrap_or_else(|| panic!("ok search reports the redaction caveat: {by_key}"));
+    // Derived from the function every surface renders, not copied: a wording change cannot
+    // leave this green against stale text.
+    let expected_caveat = open_kioku_core::redaction_search_caveat(Some(1))
+        .expect("one redacted file produces a caveat");
+    assert_eq!(
+        cli_caveat, expected_caveat,
+        "`ok search --json` renders the shared caveat sentence"
+    );
+
+    // The default surface, in whichever form it renders: `output` prints pretty JSON when the
+    // payload is under 4 KiB and the human text only above it, so this asserts the caveat
+    // reaches the representation this run produced rather than assuming which one that is.
+    // `search_text_rendering_prints_the_redaction_caveat` covers the human path.
+    let by_key_text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("search")
+            .arg("access_key_id");
+        command
+    });
+    let caveat_reaches_default_output =
+        match serde_json::from_str::<serde_json::Value>(&by_key_text) {
+            Ok(value) => value["caveats"].as_array().is_some_and(|caveats| {
+                caveats
+                    .iter()
+                    .any(|caveat| caveat.as_str() == Some(expected_caveat.as_str()))
+            }),
+            Err(_) => by_key_text.contains(&format!("caveat: {expected_caveat}")),
+        };
+    assert!(
+        caveat_reaches_default_output,
+        "`ok search` carries the redaction caveat on its default output: {by_key_text}"
+    );
+    assert_secrets_absent("ok search default output", &by_key_text, &secrets);
+    for secret in secrets {
+        let by_value = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .arg("--json")
+                .arg("search")
+                .arg(secret);
+            command
+        });
+        assert_secrets_absent("ok search by value", &by_value, &secrets);
+    }
+
+    for quality in ["best", "fast"] {
+        let exported = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .arg("--json")
+                .arg("snapshot")
+                .arg("export")
+                .arg("--quality")
+                .arg(quality);
+            command
+        });
+        assert_secrets_absent("snapshot export report", &exported, &secrets);
+        let artifact = fs::File::open(repo.join(".ok/artifacts/index.snapshot.zst")).unwrap();
+        let database = zstd::decode_all(artifact).unwrap();
+        assert_secrets_absent(
+            &format!("snapshot artifact ({quality})"),
+            &String::from_utf8_lossy(&database),
+            &secrets,
+        );
+    }
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    assert_secrets_absent("ok status", &status, &secrets);
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["quality"]["redacted_files"], 1, "{status}");
+
+    let doctor = run({
+        let mut command = ok();
+        command.arg("--json").arg("doctor").arg(repo);
+        command
+    });
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "redaction")
+        .expect("doctor has a redaction check");
+    assert_eq!(check["status"], "pass", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("1 data, config, or prose file(s)"),
+        "{check}"
+    );
+
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"access_key_id"}}}"#.to_string(),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"search_code","arguments":{{"query":"{cloud_key}"}}}}}}"#
+        ),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"search_code","arguments":{{"query":"{token}"}}}}}}"#
+        ),
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"access_key_id","mode":"hybrid"}}}"#.to_string(),
+    ];
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        &format!("{}\n", requests.join("\n")),
+    );
+    assert_secrets_absent("mcp", &mcp, &secrets);
+    let responses = mcp
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let by_id = |id: u64| {
+        responses
+            .iter()
+            .find(|response| response["id"] == id)
+            .unwrap_or_else(|| panic!("no MCP response {id}: {mcp}"))
+    };
+    assert!(by_id(1).to_string().contains(config_path), "{mcp}");
+    assert!(by_id(5).to_string().contains(config_path), "{mcp}");
+    assert!(
+        mcp.contains(&cli_caveat),
+        "search_code reports the same redaction caveat as `ok search`: {mcp}"
+    );
+    assert_eq!(
+        by_id(4)["result"]["structuredContent"]["quality"]["redacted_files"],
+        1,
+        "{mcp}"
+    );
+}
+
+/// An index written before secret-value redaction held config values as read. Replacing its
+/// rows leaves those bytes in SQLite free pages, so the first index run over it compacts the
+/// database after publishing (#379).
+#[test]
+fn indexing_over_an_index_written_before_redaction_drops_its_unredacted_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let value = striding_token(
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+        32,
+        17,
+        5,
+    );
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("config")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn load() {}\n").unwrap();
+    fs::write(
+        repo.join("config/app.yaml"),
+        format!("service:\n  api_token: {value}\n"),
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    // Rewind the database to what an earlier release left: the value as read, in more rows
+    // than the index that replaces them, under a manifest with no redaction count.
+    let database = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let file_id: String = conn
+            .query_row(
+                "SELECT id FROM files WHERE path LIKE '%app.yaml'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stale = format!("  api_token: {value}\n").repeat(400);
+        conn.execute(
+            "INSERT INTO chunks(id, file_id, start_line, end_line, text, json) \
+             VALUES('pre-redaction', ?1, 1, 400, ?2, ?3)",
+            rusqlite::params![
+                file_id,
+                stale,
+                serde_json::json!({ "text": stale }).to_string()
+            ],
+        )
+        .unwrap();
+        let manifest: String = conn
+            .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        manifest["quality"]
+            .as_object_mut()
+            .unwrap()
+            .remove("redacted_files");
+        conn.execute(
+            "UPDATE manifests SET json = ?1 WHERE id = 1",
+            [manifest.to_string()],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+    }
+    // A vector store built before redaction holds the same values in its target text.
+    let vectors_root = open_kioku_storage::generations::resolve_index_location(repo).vectors_root();
+    fs::create_dir_all(vectors_root.join("current")).unwrap();
+    let stale_vectors = vectors_root.join("current/ids.json");
+    fs::write(&stale_vectors, format!("[{{\"text\": \"{value}\"}}]")).unwrap();
+
+    // Whatever file under `.ok` still holds the value, named. A path captured before the run
+    // is the wrong instrument here: `ok index` migrates a legacy `.ok/index.sqlite` into a
+    // generation directory the first time it runs over one, so checking the old path after the
+    // move reports "the bytes are gone" because the file moved, not because it was compacted.
+    let holder = |needle: &str| -> Option<std::path::PathBuf> {
+        walkdir::WalkDir::new(repo.join(".ok"))
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .find(|entry| {
+                fs::read(entry.path())
+                    .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+                    .unwrap_or(false)
+            })
+            .map(|entry| entry.path().to_path_buf())
+    };
+    assert!(
+        holder(&value).is_some(),
+        "the fixture holds the value as an earlier release stored it"
+    );
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert!(status["quality"]["redacted_files"].is_null(), "{status}");
+
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    if let Some(path) = holder(&value) {
+        panic!(
+            "a file under .ok still holds the value stored before redaction: {}",
+            path.display()
+        );
+    }
+    // Re-resolved, because the run may have moved the index into a generation directory. It
+    // must exist: an assertion against a database that is simply absent would pass for the
+    // wrong reason, which is the failure this test previously had.
+    let database = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    assert!(
+        database.exists(),
+        "the published index database is where this run left it"
+    );
+    assert!(
+        walkdir::WalkDir::new(repo.join(".ok"))
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .all(|entry| entry.file_name() != "ids.json"),
+        "the vector store built before redaction is discarded"
+    );
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["quality"]["redacted_files"], 1, "{status}");
+    assert_eq!(
+        status["quality"]["pending_pre_redaction_compaction"], false,
+        "a completed clearing is recorded as done: {status}"
+    );
+
+    // An index whose clearing did not finish keeps the work in its manifest, so `ok doctor`
+    // reports it and the next run retries it rather than treating it as done.
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let manifest: String = conn
+            .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        manifest["quality"]["pending_pre_redaction_compaction"] = serde_json::Value::Bool(true);
+        conn.execute(
+            "UPDATE manifests SET json = ?1 WHERE id = 1",
+            [manifest.to_string()],
+        )
+        .unwrap();
+    }
+    let doctor = run({
+        let mut command = ok();
+        command.arg("--json").arg("doctor").arg(repo);
+        command
+    });
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "redaction")
+        .expect("doctor has a redaction check");
+    assert_eq!(check["status"], "warn", "{check}");
+    assert!(
+        check["message"].as_str().unwrap().contains("outstanding"),
+        "{check}"
+    );
+
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(
+        status["quality"]["pending_pre_redaction_compaction"], false,
+        "the next run retried the outstanding clearing: {status}"
+    );
+}
+
+/// `ok snapshot export` is a distribution point, so it refuses what it cannot ship safely.
+/// Two different states hide behind one predicate: an index that predates redaction holds the
+/// values in live rows, which `VACUUM INTO` copies faithfully, so no mode is safe; one that has
+/// been rebuilt owes only the clearing of free pages, which `--quality best` leaves behind and
+/// `--quality fast` carries along with the file (#379).
+#[test]
+fn snapshot_export_refuses_the_states_it_cannot_ship_safely() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn load() {}\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let database = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    let rewrite_manifest = |mutate: &dyn Fn(&mut serde_json::Value)| {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let stored: String = conn
+            .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        mutate(&mut manifest);
+        conn.execute(
+            "UPDATE manifests SET json = ?1 WHERE id = 1",
+            [manifest.to_string()],
+        )
+        .unwrap();
+    };
+    let export = |quality: &str| {
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("snapshot")
+            .arg("export")
+            .arg("--quality")
+            .arg(quality);
+        command
+    };
+
+    // Written before redaction: the values are in rows, so every mode copies them.
+    rewrite_manifest(&|manifest| {
+        manifest["quality"]
+            .as_object_mut()
+            .unwrap()
+            .remove("redacted_files");
+    });
+    for quality in ["best", "fast"] {
+        let (_stdout, stderr) = run_failure(export(quality));
+        assert!(
+            stderr.contains("was written before secret-value redaction"),
+            "{quality}: {stderr}"
+        );
+    }
+
+    // Rebuilt, but the clearing of free pages is still owed: `best` rewrites the database and
+    // leaves them behind, `fast` copies the file as it is.
+    rewrite_manifest(&|manifest| {
+        let quality = manifest["quality"].as_object_mut().unwrap();
+        quality.insert("redacted_files".into(), serde_json::json!(0));
+        quality.insert(
+            "pending_pre_redaction_compaction".into(),
+            serde_json::Value::Bool(true),
+        );
+    });
+    let (_stdout, stderr) = run_failure(export("fast"));
+    assert!(stderr.contains("still owes the clearing"), "{stderr}");
+    let exported = run(export("best"));
+    let exported: serde_json::Value = serde_json::from_str(&exported).unwrap();
+    assert_eq!(exported["ok"], true, "{exported}");
+}
+
+/// `output` renders the human form only when the pretty JSON exceeds 4 KiB, so the caveat loop
+/// on the ranked search path is reachable only on a large result set. A small repository takes
+/// the JSON branch instead, which is why the end-to-end test could not cover this (#379).
+#[test]
+fn search_text_rendering_prints_the_redaction_caveat() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("config")).unwrap();
+    let value = striding_token(
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+        32,
+        17,
+        5,
+    );
+    for index in 0..20 {
+        fs::write(
+            repo.join(format!("config/service{index}.yaml")),
+            format!("service: svc{index}\naccess_key_id: {value}\n"),
+        )
+        .unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    // The count comes from the index rather than from this test's arithmetic, so the expected
+    // sentence is the one the code would render for this repository.
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    let redacted = status["quality"]["redacted_files"].as_u64().unwrap();
+    let expected_caveat = open_kioku_core::redaction_search_caveat(Some(redacted as usize))
+        .expect("a redacted repository produces a caveat");
+
+    let text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("search")
+            .arg("access_key_id");
+        command
+    });
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&text).is_err(),
+        "this result set is large enough to take the human rendering: {text}"
+    );
+    assert!(
+        text.contains(&format!("caveat: {expected_caveat}")),
+        "the human rendering prints the redaction caveat: {text}"
+    );
+    assert!(!text.contains(value.as_str()), "{text}");
 }

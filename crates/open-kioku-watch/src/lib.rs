@@ -108,7 +108,7 @@ pub fn reindex_repo_after_changes<'a>(
     let started = Instant::now();
     let _lock = IndexWriteLock::acquire(root, IndexWriteLock::DEFAULT_WAIT)?;
     let config = OkConfig::load_from_repo(root)?;
-    let (snapshot, history) = Indexer::default().index_repo_with_history(root, &config)?;
+    let (mut snapshot, history) = Indexer::default().index_repo_with_history(root, &config)?;
     let store = SqliteStore::open(
         open_kioku_storage::generations::resolve_index_location(root).sqlite_path(),
     )?;
@@ -139,6 +139,11 @@ pub fn reindex_repo_after_changes<'a>(
         .filter_map(|path| path.strip_prefix(root).ok().or(Some(path)))
         .map(Path::to_path_buf)
         .collect::<BTreeSet<_>>();
+    // Published with the manifest below: a pre-redaction index is rebuilt in full (a partial
+    // update is refused over one), and the work stays recorded until the clearing succeeds.
+    snapshot.manifest.quality.pending_pre_redaction_compaction = previous_manifest
+        .as_ref()
+        .is_some_and(|previous| previous.needs_pre_redaction_compaction());
     let can_partial = config.index.incremental
         && !changed_paths.is_empty()
         && partial_index_supported(previous_manifest.as_ref(), &snapshot.manifest);
@@ -325,6 +330,23 @@ pub fn reindex_repo_after_changes<'a>(
             )),
         });
     }
+    // A partial update is refused over an index written before secret-value redaction, so it
+    // was replaced in full above; its unredacted rows linger in free pages until compacted.
+    if !partial
+        && previous_manifest
+            .as_ref()
+            .is_some_and(|previous| previous.needs_pre_redaction_compaction())
+    {
+        match compact_pre_redaction_bytes(root, &store) {
+            Ok(()) => {
+                snapshot.manifest.quality.pending_pre_redaction_compaction = false;
+                store.put_manifest(&snapshot.manifest)?;
+            }
+            Err(err) => eprintln!(
+                "watch: clearing bytes stored before secret-value redaction failed ({err}); the manifest records the work as outstanding and the next index run retries it"
+            ),
+        }
+    }
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
@@ -338,15 +360,28 @@ pub fn reindex_repo_after_changes<'a>(
     })
 }
 
+/// The semantic vector store and the database's free pages and write-ahead log, which an index
+/// written before secret-value redaction filled with values the index no longer holds.
+fn compact_pre_redaction_bytes(root: &Path, store: &SqliteStore) -> Result<()> {
+    open_kioku_semantic::discard_vector_store(root)?;
+    store.vacuum()
+}
+
 fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     let root = root.as_ref();
     let started = Instant::now();
     let _lock = IndexWriteLock::acquire(root, IndexWriteLock::DEFAULT_WAIT)?;
     let config = OkConfig::load_from_repo(root)?;
-    let (snapshot, history) = Indexer::default().index_repo_with_history(root, &config)?;
+    let (mut snapshot, history) = Indexer::default().index_repo_with_history(root, &config)?;
     let store = SqliteStore::open(
         open_kioku_storage::generations::resolve_index_location(root).sqlite_path(),
     )?;
+    let compact_after_publish = store
+        .manifest()
+        .ok()
+        .flatten()
+        .is_some_and(|previous| previous.needs_pre_redaction_compaction());
+    snapshot.manifest.quality.pending_pre_redaction_compaction = compact_after_publish;
     persist_full_snapshot(&store, &snapshot)?;
     store.put_history_snapshot(&history)?;
     let graph = graph_from_snapshot(&snapshot);
@@ -361,6 +396,20 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     )?;
     // Published last: every component the manifest describes is in place by now.
     store.put_manifest(&snapshot.manifest)?;
+    // Bytes written before secret-value redaction linger until cleared. The manifest is
+    // published either way and carries the work as outstanding, so a reader holding the
+    // database delays this to the next run rather than failing one.
+    if compact_after_publish {
+        match compact_pre_redaction_bytes(root, &store) {
+            Ok(()) => {
+                snapshot.manifest.quality.pending_pre_redaction_compaction = false;
+                store.put_manifest(&snapshot.manifest)?;
+            }
+            Err(err) => eprintln!(
+                "watch: clearing bytes stored before secret-value redaction failed ({err}); the manifest records the work as outstanding and the next index run retries it"
+            ),
+        }
+    }
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {

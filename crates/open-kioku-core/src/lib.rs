@@ -3091,6 +3091,116 @@ pub struct SkippedPath {
     pub safe_to_show: bool,
 }
 
+/// Paths that hold key material or environment secrets, which are never read, whatever the
+/// file's language: `.env`, `.env.*`, `.aws`, `.ssh`, `id_rsa*`, `id_ed25519*`, `*.pem`,
+/// `*.key`, `*.p12`, `*.pfx`, `*.jks`, and `*.keystore`. Discovery skips them as
+/// `secret_policy` and the semantic corpus excludes them: one rule for both. A file merely
+/// named for a secret is not matched. A class named `CredentialsProviderTest` or a module
+/// named `secrets.go` is code (a name rule silently dropped 25 Java files from one
+/// repository), and a `secrets.yaml`, `credentials.json`, or `SECRETS.md` is indexed with its
+/// secret-like values replaced before anything is derived from its text
+/// (`open-kioku-ingest::redaction`, #379).
+pub fn is_secret_like_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        value == ".env"
+            || value.starts_with(".env.")
+            || matches!(value.as_str(), ".aws" | ".ssh")
+            || value.starts_with("id_rsa")
+            || value.starts_with("id_ed25519")
+            || value.ends_with(".pem")
+            || value.ends_with(".key")
+            || value.ends_with(".p12")
+            || value.ends_with(".pfx")
+            || value.ends_with(".jks")
+            || value.ends_with(".keystore")
+    })
+}
+
+/// The caveat every search surface attaches when the index holds redacted values. A query for
+/// a value that was replaced returns nothing, and without this an empty answer reads as "absent
+/// from the repository" rather than "absent from what the index stores". `ok search`,
+/// `ok search --regex`, MCP `search_code` and `regex_search` all render this one text, so they
+/// cannot disagree about the same index (#379).
+pub fn redaction_search_caveat(redacted_files: Option<usize>) -> Option<String> {
+    let redacted = redacted_files?;
+    (redacted > 0).then(|| {
+        format!(
+            "{redacted} data, config, or prose file(s) are indexed with secret-like values replaced by `[REDACTED]`, so a redacted value cannot be found by searching for it"
+        )
+    })
+}
+
+/// A path whose name says it holds credentials: a component containing `secret`, `credential`
+/// or `password`, or one ending in `_key` or `-key`. This no longer decides whether a file is
+/// indexed ([`is_secret_like_path`] does) — it decides how the file's content is read. A file
+/// named for secrets is where a bare token is pasted, so `docs/SECRETS.md` and `secret_key.txt`
+/// are redacted under the config rules rather than the prose ones (#379).
+pub fn is_secret_named_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        value.contains("secret")
+            || value.contains("credential")
+            || value.contains("password")
+            || value.ends_with("_key")
+            || value.ends_with("-key")
+    })
+}
+
+#[cfg(test)]
+mod secret_path_tests {
+    use super::{is_secret_like_path, is_secret_named_path};
+    use std::path::Path;
+
+    #[test]
+    fn secret_path_rule_blocks_key_material_and_environment_entries_only() {
+        // Key material and environment entries, whatever the file's language.
+        for blocked in [
+            ".env",
+            ".env.local",
+            ".aws/credentials.json",
+            ".ssh/id_rsa.pub",
+            "deploy/id_ed25519",
+            "config/server.key",
+            "certs/tls.PEM",
+            "certs/client.p12",
+            "certs/client.pfx",
+            "android/release.jks",
+            "android/release.keystore",
+        ] {
+            assert!(is_secret_like_path(Path::new(blocked)), "{blocked}");
+        }
+        // Named for a secret but not key material: indexed, source as written and data,
+        // config, and prose with secret-like values redacted.
+        // The looser name rule no longer decides indexing; it decides how content is read.
+        for named in [
+            "docs/SECRETS.md",
+            "secret_key.txt",
+            "notes/credentials.md",
+            "config/passwords.yaml",
+        ] {
+            assert!(is_secret_named_path(Path::new(named)), "{named}");
+            assert!(!is_secret_like_path(Path::new(named)), "{named}");
+        }
+        for ordinary in ["docs/architecture.md", "src/lib.rs", "config/app.yaml"] {
+            assert!(!is_secret_named_path(Path::new(ordinary)), "{ordinary}");
+        }
+
+        for indexed in [
+            "src/CredentialsProvider.java",
+            "internal/secrets.go",
+            "config/credentials.yaml",
+            "credentials.json",
+            "secret_key.txt",
+            "docs/SECRETS.md",
+            "config/server.yaml",
+            "config/.environment.yaml",
+        ] {
+            assert!(!is_secret_like_path(Path::new(indexed)), "{indexed}");
+        }
+    }
+}
+
 impl SkipReason {
     /// Human-readable label for summaries (`secret-policy`, `too-large`).
     pub fn label(self) -> &'static str {
@@ -3878,6 +3988,19 @@ impl IndexManifest {
     /// and `quality.skipped_paths` replaced by their summaries unless `Full` is asked
     /// for. Both `ok --json status` and MCP `repo_status` start from this so the two
     /// cannot drift; the manifest itself keeps the full lists.
+    /// Written before secret-value redaction existed: such an index stored data, config, and
+    /// prose files as read, so replacing it must also drop those bytes from the database.
+    pub fn predates_secret_redaction(&self) -> bool {
+        self.quality.redacted_files.is_none()
+    }
+
+    /// Whether this index still owes the one-time clearing of bytes stored before redaction:
+    /// it predates redaction, or a previous run's attempt did not finish. Publishing a
+    /// manifest that records the work as outstanding is what makes the next run retry it.
+    pub fn needs_pre_redaction_compaction(&self) -> bool {
+        self.predates_secret_redaction() || self.quality.pending_pre_redaction_compaction
+    }
+
     pub fn status_value(&self, detail: StatusDetail) -> serde_json::Result<serde_json::Value> {
         let mut value = serde_json::to_value(self)?;
         if detail == StatusDetail::Full {
@@ -3942,6 +4065,19 @@ pub struct IndexQuality {
     /// rather than treat absence as full coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<IndexCoverage>,
+    /// Data, config and prose files indexed with at least one secret-like value replaced by
+    /// `[REDACTED]` before storage (`docs/security-model.md`). `null` on manifests written
+    /// before redaction existed: those indexes stored such files' values as read. Serialized
+    /// even when absent, so a client reading `quality.redacted_files ?? 0` cannot render an
+    /// unredacted index as one with nothing to redact.
+    #[serde(default)]
+    pub redacted_files: Option<usize>,
+    /// Bytes an index written before redaction stored as read are still to be cleared from the
+    /// database's free pages, its write-ahead log, and the semantic vector store. Set when a
+    /// run detects such an index and cleared only once that work succeeds, so a blocked pass is
+    /// retried by the next run instead of being reported as done.
+    #[serde(default)]
+    pub pending_pre_redaction_compaction: bool,
     /// Every note, typed by producer. Status payloads summarize this list; see
     /// `IndexManifest::status_value`.
     #[serde(default)]

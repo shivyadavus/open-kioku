@@ -66,6 +66,9 @@ criterion = "0.5.1"
 tempfile.workspace = true
 assert_cmd = "2"
 predicates = "3"
+# Reads stored documents and term dictionaries directly: stored fields are compressed on
+# disk, so a byte scan of the index files cannot prove a value is absent.
+tantivy.workspace = true
 
 [[bench]]
 name = "index"

@@ -43,6 +43,7 @@ pub(crate) fn compact_message(mut message: String) -> String {
 }
 pub mod imports;
 pub mod project_model;
+pub mod redaction;
 pub mod relationships;
 pub mod resolver;
 pub mod runtime;
@@ -318,20 +319,35 @@ impl Indexer {
     /// quote the source text around the failing byte, and parser messages stay redacted.
     /// `AssertUnwindSafe` holds because the parser is `Sync` and borrowed immutably; the only
     /// other state the closure touches is the local content buffer, which is dropped either way.
+    ///
+    /// The flag is true when secret-like values were redacted from the file's content.
     fn parse_file(
         &self,
         root: &Path,
         file: &File,
         build_hint: Option<&str>,
-    ) -> std::result::Result<open_kioku_parse::ParsedFile, ParseFailure> {
+    ) -> std::result::Result<(open_kioku_parse::ParsedFile, bool), ParseFailure> {
         let bytes = fs::read(root.join(&file.path)).map_err(|err| ParseFailure {
             source: SkipSource::Filesystem,
             message: err.to_string(),
         })?;
         let content = String::from_utf8_lossy(&bytes).into_owned();
+        // Data, config and prose files are redacted before the parser sees them, so no chunk,
+        // symbol, fact or test derived from the text, and nothing stored or searched from
+        // those, can carry a secret-like value (#379). Programming-language source is indexed
+        // as written.
+        let (content, redacted) = match redaction::ContentKind::for_file(&file.path, &file.language)
+        {
+            None => (content, false),
+            Some(kind) => {
+                let redacted = redaction::redact_secret_values(&content, kind);
+                (redacted.text, redacted.redactions > 0)
+            }
+        };
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.parser.parse_with_hint(file, &content, build_hint)
         }))
+        .map(|parsed| (parsed, redacted))
         .map_err(|_| ParseFailure {
             source: SkipSource::Parser,
             message: "parser panicked on this file; its content was not indexed".to_string(),
@@ -450,6 +466,8 @@ impl Indexer {
                 phase_reports: &phase_reports,
                 skipped_paths: &[],
                 coverage: None,
+                // Nothing was read, so nothing was stored unredacted.
+                redacted_files: Some(0),
             });
             let manifest = IndexManifest {
                 analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
@@ -557,12 +575,14 @@ impl Indexer {
         // empty `.ok/` and the same failure on retry (#350).
         let mut skipped_paths = scan.skipped_paths;
         let mut coverage = scan.coverage;
+        let mut redacted_files = scan.redacted_files;
         let mut parse_warnings = Vec::new();
         let mut kept_files = Vec::with_capacity(files.len());
         let mut parsed = Vec::with_capacity(files.len());
         for (file, outcome) in files.into_iter().zip(outcomes) {
             match outcome {
-                Ok(parsed_file) => {
+                Ok((parsed_file, redacted)) => {
+                    redacted_files += usize::from(redacted);
                     kept_files.push(file);
                     parsed.push(parsed_file);
                 }
@@ -1174,6 +1194,7 @@ impl Indexer {
             phase_reports: &phase_reports,
             skipped_paths: &skipped_paths,
             coverage: Some(coverage),
+            redacted_files: Some(redacted_files),
         });
         let resolution_quality = if resolution_mode == open_kioku_config::ResolutionMode::Legacy {
             None
@@ -1267,6 +1288,7 @@ impl Indexer {
         let mut warnings = Vec::new();
         let mut scanned_files = 0;
         let mut source_like_files = 0;
+        let mut redacted_files = 0;
         progress.emit(ProgressEvent::new("scan"));
         for entry in builder.build() {
             let entry = match entry {
@@ -1298,7 +1320,7 @@ impl Indexer {
                 source_like_files += 1;
             }
             ledger.discovered(&language);
-            let secret_policy = is_secret_like_path(&rel, is_programming_language(&language));
+            let secret_policy = open_kioku_core::is_secret_like_path(&rel);
             if secret_policy || denied.is_match(&rel) {
                 let safe_to_show = !secret_policy || !config.security.redact_secrets;
                 let reason = if secret_policy {
@@ -1471,9 +1493,18 @@ impl Indexer {
                     }
                     document_paths.insert(rel.clone());
                     ledger.indexed(&language, false);
+                    // Documents are prose, redacted like every other non-source file before
+                    // anything is derived from them (see `Indexer::parse_file`).
+                    // Prose unless the file's name says it holds credentials: the same rule
+                    // `parse_file` applies, so a pasted token in `docs/SECRETS.md` is redacted
+                    // whichever branch reads the file.
+                    let kind = redaction::ContentKind::for_file(&rel, &language)
+                        .unwrap_or(redaction::ContentKind::Prose);
+                    let redacted = redaction::redact_secret_values(&content, kind);
+                    redacted_files += usize::from(redacted.redactions > 0);
                     document_sections.extend(build_document_sections(
                         &rel,
-                        &content,
+                        &redacted.text,
                         document_type,
                     ));
                     document_elapsed_ms = document_elapsed_ms.saturating_add(
@@ -1609,6 +1640,7 @@ impl Indexer {
             warnings,
             skipped_paths,
             coverage,
+            redacted_files,
         })
     }
 }
@@ -1623,6 +1655,8 @@ struct ScanResult {
     warnings: Vec<String>,
     skipped_paths: Vec<SkippedPath>,
     coverage: IndexCoverage,
+    /// Document-corpus files whose content had secret-like values redacted.
+    redacted_files: usize,
 }
 
 /// Discovery's running record of what was left out and why. Coverage counts only
@@ -1852,6 +1886,7 @@ struct IndexQualityInput<'a> {
     phase_reports: &'a [IndexPhaseReport],
     skipped_paths: &'a [SkippedPath],
     coverage: Option<IndexCoverage>,
+    redacted_files: Option<usize>,
 }
 
 fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
@@ -2007,6 +2042,9 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             semantic_provider_notes,
             resolution_quality: None,
             coverage: input.coverage,
+            redacted_files: input.redacted_files,
+            // Set by the run that publishes this manifest, from the index it replaces.
+            pending_pre_redaction_compaction: false,
             quality_notes,
         }
     } else {
@@ -2040,6 +2078,9 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             semantic_provider_notes,
             resolution_quality: None,
             coverage: input.coverage,
+            redacted_files: input.redacted_files,
+            // Set by the run that publishes this manifest, from the index it replaces.
+            pending_pre_redaction_compaction: false,
             quality_notes,
         }
     };
@@ -2948,44 +2989,6 @@ fn is_hidden_path(path: &Path) -> bool {
         .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
 }
 
-/// Programming-language source, as opposed to data, config, and prose formats that the parser
-/// also understands (YAML, JSON, TOML, Markdown, text). A `credentials.json` is a credential
-/// store; a `CredentialsProvider.java` is code.
-fn is_programming_language(language: &Language) -> bool {
-    language.is_programming()
-}
-
-/// Paths that hold key material or environment secrets are never read. A *programming-language*
-/// source file is only blocked by the strict list (key-material extensions and the `.env`,
-/// `.aws`, `.ssh` entries) because a class named `CredentialsProviderTest` or a
-/// module named `secrets.go` is code, not a secret; the loose rule silently dropped 25 Java
-/// files from one repository. Data, config, and prose files (`credentials.json`,
-/// `secrets.yaml`, `SECRETS.md`) keep the loose name rule, because chunk contents are not
-/// redacted today (tracked as #379); a hard-coded key inside a source file is indexed exactly
-/// as it was before this change, when only the file's name decided.
-fn is_secret_like_path(path: &Path, is_source: bool) -> bool {
-    path.components().any(|component| {
-        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        let strict = value == ".env"
-            || value.starts_with(".env.")
-            || matches!(value.as_str(), ".aws" | ".ssh")
-            || value.starts_with("id_rsa")
-            || value.starts_with("id_ed25519")
-            || value.ends_with(".pem")
-            || value.ends_with(".key")
-            || value.ends_with(".p12")
-            || value.ends_with(".pfx")
-            || value.ends_with(".jks")
-            || value.ends_with(".keystore");
-        strict
-            || (!is_source
-                && (matches!(value.as_str(), "secrets" | "secret" | "credentials")
-                    || value.contains("secret")
-                    || value.contains("credential")
-                    || value.ends_with("_key")))
-    })
-}
-
 fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
@@ -3163,10 +3166,7 @@ fn collect_architecture_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        attach_resolution_quality, derive_occurrences, is_secret_like_path, map_symbol_touches,
-        Indexer,
-    };
+    use super::{attach_resolution_quality, derive_occurrences, map_symbol_touches, Indexer};
     use chrono::{TimeZone, Utc};
     use open_kioku_config::OkConfig;
     use open_kioku_core::{
@@ -3509,26 +3509,6 @@ class Util {
             .iter()
             .any(|note| note.kind == QualityNoteKind::IndexMode
                 && note.message.contains("source parsing skipped")));
-    }
-
-    #[test]
-    fn secret_path_rule_blocks_data_files_by_name_but_not_programming_source() {
-        fn p(v: &str) -> &std::path::Path {
-            std::path::Path::new(v)
-        }
-        assert!(!is_secret_like_path(
-            p("src/CredentialsProvider.java"),
-            true
-        ));
-        assert!(!is_secret_like_path(p("internal/secrets.go"), true));
-        assert!(is_secret_like_path(p("config/server.key"), true));
-        assert!(is_secret_like_path(p(".ssh/id_rsa.pub"), true));
-        assert!(is_secret_like_path(p(".env.local"), true));
-        assert!(is_secret_like_path(p("config/credentials.yaml"), false));
-        assert!(is_secret_like_path(p("credentials.json"), false));
-        assert!(is_secret_like_path(p("secret_key.txt"), false));
-        assert!(is_secret_like_path(p("docs/SECRETS.md"), false));
-        assert!(!is_secret_like_path(p("config/server.yaml"), false));
     }
 
     #[test]
