@@ -91,4 +91,4 @@ Agents reach the same behavior through `search_code` with `mode: "semantic"` or 
 
 ## Privacy
 
-The default provider is local. Neural models are local and opt-in; their first download requires explicit consent. External providers fail unless `semantic.external_provider_allowed = true` is set in `ok.toml`. Semantic indexing respects indexed file metadata and skips vendor/generated/secret-like paths.
+The default provider is local. Neural models are local and opt-in; their first download requires explicit consent. External providers fail unless `semantic.external_provider_allowed = true` is set in `ok.toml`. Semantic indexing respects indexed file metadata, skips vendor, generated, and lock files, and applies the discovery rule for key material and environment entries (`open_kioku_core::is_secret_like_path`). It embeds stored chunks, never files read from disk, so data, config, and prose files are embedded with their secret-like values already replaced by `[REDACTED]` (`docs/security-model.md`, "Secret-value redaction").

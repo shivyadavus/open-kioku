@@ -341,6 +341,36 @@ impl SqliteStore {
     /// Every relationship read already refuses such a store; this is for the status surfaces
     /// (`ok doctor`, `ok status`, `repo_status`) and the pre-checks in front of impact and plan,
     /// which need to report the marker rather than discover it one failed read at a time.
+    /// Rewrites the database without free pages, then truncates the WAL. SQLite keeps the
+    /// bytes of deleted rows in free pages until they are reused, so after an index written
+    /// before secret-value redaction is replaced, this is what removes the values it held
+    /// (#379). The cost is one rewrite of the database, with free disk space about its size
+    /// while it runs. A checkpoint blocked by another reader completes at a later checkpoint.
+    pub fn vacuum(&self) -> Result<()> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        conn.execute_batch("VACUUM;").map_err(storage_err)?;
+        // `wal_checkpoint` does not fail when it is blocked: it returns `(busy, log,
+        // checkpointed)` with `busy = 1` and leaves the log in place. Discarding that row
+        // reported a compaction that had not happened, with the values still in the WAL.
+        let (busy, _log, _checkpointed): (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(storage_err)?;
+        if busy != 0 {
+            return Err(OkError::Storage(
+                "the write-ahead log could not be truncated because another connection is \
+                 reading the database; bytes stored before secret-value redaction may remain in \
+                 it"
+                .into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn graph_rebuild_required(&self) -> Result<bool> {
         let conn = self
             .connection
@@ -6369,6 +6399,58 @@ mod tests {
         #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         std::fs::set_permissions(&db, perms).unwrap();
+    }
+
+    /// Compacting an index written before secret-value redaction runs while a probe holds its
+    /// read connection, leaves the index served, and withdraws nothing: a pre-redaction index
+    /// is a published index, so its status carries no reason (#379).
+    #[test]
+    fn compacting_a_pre_redaction_index_keeps_it_served_under_a_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        store.put_manifest(&make_manifest()).unwrap();
+        assert!(
+            store
+                .manifest()
+                .unwrap()
+                .unwrap()
+                .predates_secret_redaction(),
+            "the fixture manifest records no redaction count"
+        );
+
+        let probed = SqliteStore::probe_repo_index(repo)
+            .expect("the index is served")
+            .expect("the manifest is published");
+        assert_eq!(probed.manifest_withdrawal().unwrap(), None);
+
+        let wal = store.path().with_file_name(format!(
+            "{}-wal",
+            store.path().file_name().unwrap().to_string_lossy()
+        ));
+        store.vacuum().unwrap();
+
+        // The point of the vacuum: a blocked checkpoint leaves the log in place and used to be
+        // reported as success, so the bytes it holds must be gone, not merely claimed gone.
+        let wal_bytes = std::fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0);
+        assert_eq!(
+            wal_bytes, 0,
+            "the write-ahead log is truncated while the probe holds its read connection"
+        );
+        assert!(
+            probed.manifest().unwrap().is_some(),
+            "the probe still reads the index it opened before the vacuum"
+        );
+        assert_eq!(
+            probed.manifest_withdrawal().unwrap(),
+            None,
+            "compacting withdraws nothing"
+        );
+        let status = SqliteStore::repo_not_indexed_status(repo).unwrap();
+        assert_eq!(status.reason, None);
+        assert!(SqliteStore::probe_repo_index(repo)
+            .expect("the index is still served")
+            .is_some());
     }
 
     #[test]
