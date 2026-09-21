@@ -6076,8 +6076,10 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
         "`ok search --json` renders the shared caveat sentence"
     );
 
-    // The surface a person actually uses. Asserting the printed `caveat: ` line, not merely
-    // that the sentence appears somewhere, so removing the print loop fails this.
+    // The default surface, in whichever form it renders: `output` prints pretty JSON when the
+    // payload is under 4 KiB and the human text only above it, so this asserts the caveat
+    // reaches the representation this run produced rather than assuming which one that is.
+    // `search_text_rendering_prints_the_redaction_caveat` covers the human path.
     let by_key_text = run({
         let mut command = ok();
         command
@@ -6087,11 +6089,20 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
             .arg("access_key_id");
         command
     });
+    let caveat_reaches_default_output =
+        match serde_json::from_str::<serde_json::Value>(&by_key_text) {
+            Ok(value) => value["caveats"].as_array().is_some_and(|caveats| {
+                caveats
+                    .iter()
+                    .any(|caveat| caveat.as_str() == Some(expected_caveat.as_str()))
+            }),
+            Err(_) => by_key_text.contains(&format!("caveat: {expected_caveat}")),
+        };
     assert!(
-        by_key_text.contains(&format!("caveat: {expected_caveat}")),
-        "`ok search` prints the redaction caveat on its default output: {by_key_text}"
+        caveat_reaches_default_output,
+        "`ok search` carries the redaction caveat on its default output: {by_key_text}"
     );
-    assert_secrets_absent("ok search text output", &by_key_text, &secrets);
+    assert_secrets_absent("ok search default output", &by_key_text, &secrets);
     for secret in secrets {
         let by_value = run({
             let mut command = ok();
@@ -6481,4 +6492,68 @@ fn snapshot_export_refuses_the_states_it_cannot_ship_safely() {
     let exported = run(export("best"));
     let exported: serde_json::Value = serde_json::from_str(&exported).unwrap();
     assert_eq!(exported["ok"], true, "{exported}");
+}
+
+/// `output` renders the human form only when the pretty JSON exceeds 4 KiB, so the caveat loop
+/// on the ranked search path is reachable only on a large result set. A small repository takes
+/// the JSON branch instead, which is why the end-to-end test could not cover this (#379).
+#[test]
+fn search_text_rendering_prints_the_redaction_caveat() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("config")).unwrap();
+    let value = striding_token(
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+        32,
+        17,
+        5,
+    );
+    for index in 0..20 {
+        fs::write(
+            repo.join(format!("config/service{index}.yaml")),
+            format!("service: svc{index}\naccess_key_id: {value}\n"),
+        )
+        .unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    // The count comes from the index rather than from this test's arithmetic, so the expected
+    // sentence is the one the code would render for this repository.
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    let redacted = status["quality"]["redacted_files"].as_u64().unwrap();
+    let expected_caveat = open_kioku_core::redaction_search_caveat(Some(redacted as usize))
+        .expect("a redacted repository produces a caveat");
+
+    let text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("search")
+            .arg("access_key_id");
+        command
+    });
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&text).is_err(),
+        "this result set is large enough to take the human rendering: {text}"
+    );
+    assert!(
+        text.contains(&format!("caveat: {expected_caveat}")),
+        "the human rendering prints the redaction caveat: {text}"
+    );
+    assert!(!text.contains(value.as_str()), "{text}");
 }

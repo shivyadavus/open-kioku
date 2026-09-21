@@ -778,7 +778,7 @@ fn is_locator_value(value: &str) -> bool {
     // The exemption subtracts from what the other rules keep; it never overrides them. A
     // locator-shaped value carrying something machine-generated is a secret in a path.
     if value
-        .split(|ch: char| matches!(ch, '/' | '\\' | '_' | '.' | '-'))
+        .split(['/', '\\', '_', '.', '-'])
         .any(is_high_entropy_token)
     {
         return false;
@@ -822,7 +822,7 @@ fn is_explicit_path(value: &str) -> bool {
         .all(|segment| {
             segment.len() <= 64
                 && segment
-                    .split(|ch: char| matches!(ch, '.' | '-' | '_'))
+                    .split(['.', '-', '_'])
                     .filter(|part| !part.is_empty())
                     .all(is_word_like_segment)
         })
