@@ -710,6 +710,22 @@ pub trait GraphStore: Send + Sync {
         ))
     }
 
+    /// Every edge of `edge_type` ending at (or, with `outgoing`, starting from) any of `node_ids`,
+    /// in one read and without paging, so the caller bounds `node_ids`. A store that returns
+    /// `Unsupported` leaves callers to page `edges_by_type_for_node` per node.
+    ///
+    /// Ordered by edge id, so a caller that truncates the result keeps the same edges across runs.
+    fn edges_by_type_for_nodes(
+        &self,
+        _edge_type: GraphEdgeType,
+        _node_ids: &[&str],
+        _outgoing: bool,
+    ) -> Result<Vec<GraphEdge>> {
+        Err(OkError::Unsupported(
+            "edges_by_type_for_nodes is not implemented by this graph store".into(),
+        ))
+    }
+
     fn graph_counts(&self) -> Result<GraphCounts> {
         Err(OkError::Unsupported(
             "graph_counts is not implemented by this graph store".into(),

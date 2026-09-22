@@ -1,6 +1,7 @@
 use chrono::Utc;
 use open_kioku_core::{
-    AnalysisSemanticsState, FileId, IndexManifest, IndexQuality, Repository, RepositoryId, SymbolId,
+    AnalysisSemanticsState, FileId, GraphEdgeType, IndexManifest, IndexQuality, Repository,
+    RepositoryId, SymbolId,
 };
 use open_kioku_storage::{GraphStore, MetadataStore};
 use open_kioku_storage_sqlite::SqliteStore;
@@ -44,6 +45,9 @@ fn incompatible_semantics_block_relationship_reads_but_preserve_diagnostics() {
         .references_for_symbol(&SymbolId::new("missing"), 10)
         .is_ok());
     assert!(store.occurrences_for_file(&FileId::new("missing")).is_ok());
+    assert!(store
+        .edges_by_type_for_nodes(GraphEdgeType::Defines, &["missing"], false)
+        .is_ok());
 
     let mut incompatible = current;
     let mut semantics = incompatible.analysis_semantics.take().unwrap();
@@ -68,6 +72,12 @@ fn incompatible_semantics_block_relationship_reads_but_preserve_diagnostics() {
             .to_string(),
         store
             .occurrences_for_file(&FileId::new("missing"))
+            .unwrap_err()
+            .to_string(),
+        // The batched read a file_path filter uses must refuse on the same terms as the per-node
+        // one; it is relationship evidence like the rest.
+        store
+            .edges_by_type_for_nodes(GraphEdgeType::Defines, &["missing"], false)
             .unwrap_err()
             .to_string(),
     ];

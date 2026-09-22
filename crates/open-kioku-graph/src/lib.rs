@@ -791,6 +791,39 @@ mod tests {
         }
     }
 
+    // WHERE lets file_path and qualified_name be filtered on SYMBOL_NODE_TYPES because they are
+    // the types this builder gives a symbol node; a type added on either side breaks this test.
+    #[test]
+    fn symbol_node_types_are_the_types_the_builder_gives_symbols() {
+        let mut kinds = std::collections::BTreeSet::new();
+        schema::enum_values(
+            &serde_json::to_value(schemars::schema_for!(SymbolKind)).unwrap(),
+            &mut kinds,
+        );
+        assert!(kinds.len() > 1, "{kinds:?}");
+        let mut produced = Vec::new();
+        for kind in kinds {
+            let mut symbol = make_symbol("s1", "a", "name");
+            symbol.kind = serde_json::from_value(json!(kind)).unwrap();
+            let node_type = symbol_node_type(&symbol);
+            if !produced.contains(&node_type) {
+                produced.push(node_type);
+            }
+        }
+        for node_type in &produced {
+            assert!(
+                schema::SYMBOL_NODE_TYPES.contains(node_type),
+                "{node_type:?} is missing from SYMBOL_NODE_TYPES"
+            );
+        }
+        for node_type in &schema::SYMBOL_NODE_TYPES {
+            assert!(
+                produced.contains(node_type),
+                "no symbol kind becomes {node_type:?}"
+            );
+        }
+    }
+
     #[test]
     fn builds_graph_from_index() {
         let file_a = make_file("a");
