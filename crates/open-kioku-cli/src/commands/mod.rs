@@ -116,6 +116,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 // versus what the index holds, with every gap attributed to a skip rule.
                 if let Some(coverage) = snapshot.manifest.quality.coverage.as_ref() {
                     println!("coverage: {}", coverage.summary_line());
+                    // The ratio is computed over considered files, so it reads near-100% on the
+                    // very repositories a gap describes. The verdict has to be printed beside it.
+                    for gap in coverage.gaps() {
+                        println!("coverage gap: {}", gap.caveat());
+                    }
                 }
                 println!(
                     "redaction: {}",
@@ -253,6 +258,15 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         "coverage".into(),
                         serde_json::to_value(manifest.quality.coverage.as_ref())?,
                     );
+                    // The coverage verdict context packs and plans price, mirrored by MCP
+                    // `repo_status`. Absent with `coverage`, so a missing record never reads
+                    // as a repository without gaps.
+                    if let Some(coverage) = manifest.quality.coverage.as_ref() {
+                        object.insert(
+                            "coverage_gaps".into(),
+                            serde_json::to_value(coverage.gaps())?,
+                        );
+                    }
                     // Also mirrored: the fingerprint above passes on a pre-4.0 index whose
                     // edges were discarded on open, so the marker is reported beside it.
                     object.insert(
@@ -271,7 +285,12 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     manifest.indexed_at
                 );
                 match manifest.quality.coverage.as_ref() {
-                    Some(coverage) => println!("Coverage: {}", coverage.summary_line()),
+                    Some(coverage) => {
+                        println!("Coverage: {}", coverage.summary_line());
+                        for gap in coverage.gaps() {
+                            println!("Coverage gap: {}", gap.caveat());
+                        }
+                    }
                     None => println!("Coverage: not recorded by this index; run `ok index .`"),
                 }
                 println!(

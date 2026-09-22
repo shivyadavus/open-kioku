@@ -843,6 +843,29 @@ impl MetadataStore for SqliteStore {
         Ok(())
     }
 
+    /// Reads `$.quality.coverage` through SQLite's JSON support instead of decoding the
+    /// whole manifest. `json_extract` yields SQL NULL both when the path is absent and when
+    /// its value is JSON null, and both mean the same thing here: no coverage record.
+    /// `index_coverage_matches_the_full_manifest_decode` holds this equal to the default.
+    fn index_coverage(&self) -> Result<Option<open_kioku_core::IndexCoverage>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let raw: Option<Option<String>> = conn
+            .query_row(
+                "SELECT json_extract(json, '$.quality.coverage') FROM manifests WHERE id = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(storage_err)?;
+        match raw.flatten() {
+            Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+            None => Ok(None),
+        }
+    }
+
     fn manifest(&self) -> Result<Option<IndexManifest>> {
         let conn = self
             .connection
@@ -4908,6 +4931,117 @@ mod tests {
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
         }
+    }
+
+    /// The `json_extract` fast path must agree with decoding the whole manifest in every
+    /// state, including the ones it cannot distinguish by construction. A fast path that
+    /// returned `None` where the full decode returns `Some` would make a fully covered
+    /// repository report unrecorded coverage, which context packs turn into a caveat and a
+    /// cap - inventing missing evidence to save a decode.
+    #[test]
+    fn index_coverage_matches_the_full_manifest_decode() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let full_decode = |store: &SqliteStore| {
+            MetadataStore::manifest(store)
+                .unwrap()
+                .and_then(|manifest| manifest.quality.coverage)
+        };
+        let raw_manifest = |store: &SqliteStore, json: &str| {
+            let conn = store.connection.lock().unwrap();
+            conn.execute(
+                "INSERT INTO manifests(id, json) VALUES(1, ?1) ON CONFLICT(id) DO UPDATE SET json = excluded.json",
+                rusqlite::params![json],
+            )
+            .unwrap();
+        };
+
+        // 1. No manifest row at all.
+        assert_eq!(store.index_coverage().unwrap(), None);
+        assert_eq!(store.index_coverage().unwrap(), full_decode(&store));
+
+        // 2. A recorded record carrying a gap.
+        let mut coverage = open_kioku_core::IndexCoverage::default();
+        for index in 0..27 {
+            coverage.record_discovered(&open_kioku_core::Language::Rust);
+            if index < 2 {
+                coverage.record_indexed(&open_kioku_core::Language::Rust, false);
+            } else {
+                coverage.record_skipped(
+                    &open_kioku_core::Language::Rust,
+                    open_kioku_core::SkipReason::Ignored,
+                );
+                coverage.record_policy_exclusion(
+                    &open_kioku_core::Language::Rust,
+                    open_kioku_core::SkipSource::GitIgnore,
+                    Some("src"),
+                );
+            }
+        }
+        let mut manifest = make_manifest();
+        manifest.quality.coverage = Some(coverage.clone());
+        MetadataStore::put_manifest(&store, &manifest).unwrap();
+        assert_eq!(store.index_coverage().unwrap(), Some(coverage));
+        assert_eq!(store.index_coverage().unwrap(), full_decode(&store));
+        assert_eq!(store.index_coverage().unwrap().unwrap().gaps().len(), 1);
+
+        // 3. A recorded record with no gaps is `Some`, not `None`: "measured, nothing missing"
+        // must never collapse into "unmeasured".
+        let mut manifest = make_manifest();
+        manifest.quality.coverage = Some(open_kioku_core::IndexCoverage::default());
+        MetadataStore::put_manifest(&store, &manifest).unwrap();
+        assert_eq!(
+            store.index_coverage().unwrap(),
+            Some(open_kioku_core::IndexCoverage::default())
+        );
+        assert_eq!(store.index_coverage().unwrap(), full_decode(&store));
+
+        // 4. `quality` present, `coverage` key absent (how the field serializes when None).
+        MetadataStore::put_manifest(&store, &make_manifest()).unwrap();
+        assert_eq!(store.index_coverage().unwrap(), None);
+        assert_eq!(store.index_coverage().unwrap(), full_decode(&store));
+
+        // 5. `coverage: null` written literally: `json_extract` yields SQL NULL here exactly as
+        // it does for an absent key, and the full decode yields `None` too.
+        raw_manifest(
+            &store,
+            &serde_json::to_string(&serde_json::json!({
+                "analysis_semantics": null,
+                "repository": {"id": "repo", "name": "repo", "root": ".", "branch": null, "commit": null, "indexed_at": null},
+                "file_count": 0, "symbol_count": 0, "chunk_count": 0,
+                "indexed_at": "2026-01-01T00:00:00Z", "schema_version": 1,
+                "index_mode": "full", "phase_reports": [],
+                "quality": {"scip_enabled": false, "scip_mode": "off", "scip_indexes_imported": 0,
+                            "scip_symbols": 0, "scip_occurrences": 0, "scip_exact_references": 0,
+                            "test_count": 0, "import_count": 0, "coverage": null}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(store.index_coverage().unwrap(), None);
+        assert_eq!(store.index_coverage().unwrap(), full_decode(&store));
+
+        // 6. A coverage record from an older schema, without the per-language source map.
+        raw_manifest(
+            &store,
+            &serde_json::to_string(&serde_json::json!({
+                "analysis_semantics": null,
+                "repository": {"id": "repo", "name": "repo", "root": ".", "branch": null, "commit": null, "indexed_at": null},
+                "file_count": 0, "symbol_count": 0, "chunk_count": 0,
+                "indexed_at": "2026-01-01T00:00:00Z", "schema_version": 1,
+                "index_mode": "full", "phase_reports": [],
+                "quality": {"scip_enabled": false, "scip_mode": "off", "scip_indexes_imported": 0,
+                            "scip_symbols": 0, "scip_occurrences": 0, "scip_exact_references": 0,
+                            "test_count": 0, "import_count": 0,
+                            "coverage": {"discovered": 10, "indexed": 2, "skipped": {"ignored": 8},
+                                         "by_language": {"rust": {"discovered": 10, "indexed": 2,
+                                                                  "skipped": {"ignored": 8}}}}}
+            }))
+            .unwrap(),
+        );
+        let legacy = store.index_coverage().unwrap().expect("legacy coverage");
+        assert_eq!(legacy.discovered, 10);
+        assert!(legacy.policy_excluded_by_language.is_empty());
+        assert_eq!(store.index_coverage().unwrap(), full_decode(&store));
+        assert!(legacy.gaps().is_empty());
     }
 
     fn history_snapshot() -> HistorySnapshot {

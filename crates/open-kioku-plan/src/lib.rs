@@ -2,9 +2,9 @@ use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
     BoundaryExpansionRequirement, BoundaryFileRule, BoundaryForbiddenRule, BoundarySignalHooks,
     ChangeBoundary, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack,
-    EvidenceQuality, EvidenceSourceType, FileId, ImpactReport, MemorySearchResult,
-    NegativeEvidence, PlanReport, PolicyCheckReport, RiskReport, RuntimeSignal, ScoreComponent,
-    SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+    CoverageGap, CoverageInput, EvidenceQuality, EvidenceSourceType, FileId, ImpactReport,
+    MemorySearchResult, NegativeEvidence, PlanReport, PolicyCheckReport, RiskReport, RuntimeSignal,
+    ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -118,11 +118,24 @@ impl PreflightReport {
     pub fn from_plan(plan: &PlanReport) -> Self {
         let confidence = plan.confidence_breakdown.overall_enum;
         let insufficient = plan.primary_context.is_empty() || confidence == Confidence::Low;
+        // A majority coverage gap in the language being edited is an evidence-completeness
+        // fact of the same class as an unresolved import or an ambiguous edge, and a stronger
+        // one: the index never read most of that language, so it cannot say what those files
+        // hold. Withholding `SafeToStart` here fixes the field an agent branches on, not only
+        // the label it displays. The general `Medium` -> `SafeToStart` rule is untouched.
+        let coverage_gap_in_selected_language =
+            plan.confidence_breakdown
+                .components
+                .iter()
+                .any(|component| {
+                    component.signal == open_kioku_core::COVERAGE_SELECTED_LANGUAGE_SIGNAL
+                });
         let caution = !insufficient
             && (plan.risk.level.eq_ignore_ascii_case("high")
                 || plan.risk.level.eq_ignore_ascii_case("critical")
                 || plan.evidence_quality.unresolved_import_count > 0
-                || plan.evidence_quality.ambiguous_edge_count > 0);
+                || plan.evidence_quality.ambiguous_edge_count > 0
+                || coverage_gap_in_selected_language);
         let verdict = if insufficient {
             PreflightVerdict::InsufficientEvidence
         } else if caution {
@@ -436,13 +449,40 @@ impl<'a> PlanEngine<'a> {
             &impact,
             &evidence,
         );
-        let mut evidence_quality =
-            evidence_quality_for_store(self.store, context.architecture_policy.as_ref())?;
+        // One manifest read serves evidence quality and the coverage verdict `repo_status`
+        // reports: an absence among files the index never read is not evidence.
+        let manifest = self.store.manifest()?;
+        // A manifest with no coverage record is reported as unavailable, never as full coverage.
+        let coverage = manifest
+            .as_ref()
+            .and_then(|manifest| manifest.quality.coverage.as_ref())
+            .map_or(CoverageInput::Unavailable, |coverage| {
+                CoverageInput::Recorded(coverage.gaps())
+            });
+        let primary_languages = open_kioku_context::primary_language_keys(
+            self.store,
+            coverage.gaps(),
+            &primary_context,
+        )?;
+        let mut evidence_quality = evidence_quality_for_store(
+            self.store,
+            manifest.as_ref(),
+            context.architecture_policy.as_ref(),
+        )?;
         // The manifest flag is SCIP-only; the plan may have found exact references through
         // an exact-authority anchor or an indexed occurrence, and must not report both
         // `exact_references 1.00` and "exact evidence is unavailable".
         evidence_quality.record_exact_references(exact_reference_count);
         apply_evidence_quality_caveats(&mut risk, &evidence_quality);
+        if let Some(reason) = coverage_gap_risk_reason(
+            coverage.gaps(),
+            &unmatched_anchors,
+            &open_kioku_core::weak_named_anchors(task),
+        ) {
+            if !risk.reasons.contains(&reason) {
+                risk.reasons.push(reason);
+            }
+        }
         let relevant_symbols = context
             .primary_symbols
             .iter()
@@ -465,15 +505,16 @@ impl<'a> PlanEngine<'a> {
         );
         // Negative evidence is built first: the confidence breakdown counts the items it
         // lists, so the blocker it reports is traceable to the list the plan publishes.
-        let negative_evidence = negative_evidence_for_plan(
+        let negative_evidence = negative_evidence_for_plan(PlanNegativeEvidenceInputs {
             task,
-            &context,
-            &primary_context,
-            &impact,
-            &validation,
+            context: &context,
+            primary_context: &primary_context,
+            impact: &impact,
+            validation: &validation,
             exact_reference_count,
-            &unmatched_anchors,
-        );
+            unmatched_anchors: &unmatched_anchors,
+            coverage: &coverage,
+        });
         let history_components =
             history_score_components_for_plan(&primary_context, &impact, &validation);
         let summary = summary(
@@ -497,6 +538,8 @@ impl<'a> PlanEngine<'a> {
             boundary: &recommended_change_boundary,
             evidence: &evidence,
             context_runtime_signal_count: context.runtime_signals.len(),
+            coverage: &coverage,
+            primary_language_keys: &primary_languages,
         });
         apply_evidence_quality_to_confidence(
             &mut confidence_breakdown,
@@ -793,12 +836,40 @@ fn anchor_miss_reason(identifiers: &[&str], words: &[&str]) -> String {
     parts.join("; ")
 }
 
-fn anchor_miss_probe(identifiers: &[&str]) -> &'static str {
+/// With a majority coverage gap the index never read most of a language, so a name it does
+/// not hold is not thereby absent from the repository. Worded as the context pack words it.
+fn anchor_miss_probe(identifiers: &[&str], excluded_source: bool) -> &'static str {
     if identifiers.is_empty() {
         "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository."
+    } else if excluded_source {
+        "Run `ok search <identifier>` for each name; the index excluded most of a language's source (see the `coverage` negative evidence), so a name it does not hold may be defined in those files."
     } else {
         "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`."
     }
+}
+
+/// A named task identifier the top context does not spell, beside a language the index
+/// mostly never read: the risk names the exclusion as a likely cause, so "did not match" is
+/// not read as absence.
+fn coverage_gap_risk_reason(
+    gaps: &[CoverageGap],
+    unmatched_anchors: &[String],
+    weak_anchors: &[String],
+) -> Option<String> {
+    let (_, identifiers) = split_unmatched_anchors(unmatched_anchors, weak_anchors);
+    let majority = gaps
+        .iter()
+        .filter(|gap| gap.is_majority())
+        .map(CoverageGap::summary)
+        .collect::<Vec<_>>();
+    if identifiers.is_empty() || majority.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "low confidence: named task anchor(s) {} may be defined in source the index excluded: {}",
+        identifiers.join(", "),
+        majority.join(", ")
+    ))
 }
 
 fn merge_risk(
@@ -903,6 +974,8 @@ struct PlanConfidenceInputs<'a> {
     boundary: &'a ChangeBoundary,
     evidence: &'a [open_kioku_core::Evidence],
     context_runtime_signal_count: usize,
+    coverage: &'a CoverageInput,
+    primary_language_keys: &'a [String],
 }
 
 fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown {
@@ -917,6 +990,8 @@ fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown 
         boundary,
         evidence,
         context_runtime_signal_count,
+        coverage,
+        primary_language_keys,
     } = inputs;
     ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
         task_relevance: open_kioku_core::task_relevance_score(task, primary_context),
@@ -941,18 +1016,36 @@ fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown 
         named_anchor_count: open_kioku_core::named_anchors(task).len(),
         unmatched_anchors: unmatched_anchors.to_vec(),
         weak_anchors: open_kioku_core::weak_named_anchors(task),
+        coverage: coverage.clone(),
+        primary_language_keys: primary_language_keys.to_vec(),
     })
 }
 
-fn negative_evidence_for_plan(
-    task: &str,
-    context: &ContextPack,
-    primary_context: &[SearchResult],
-    impact: &ImpactReport,
-    validation: &[TestTarget],
+/// Inputs to the plan's negative-evidence list, grouped rather than passed positionally:
+/// the coverage verdict took the argument list past the point where order is memorable, and
+/// these are all facets of one plan. The context pack groups its own the same way.
+struct PlanNegativeEvidenceInputs<'a> {
+    task: &'a str,
+    context: &'a ContextPack,
+    primary_context: &'a [SearchResult],
+    impact: &'a ImpactReport,
+    validation: &'a [TestTarget],
     exact_reference_count: usize,
-    unmatched_anchors: &[String],
-) -> Vec<NegativeEvidence> {
+    unmatched_anchors: &'a [String],
+    coverage: &'a CoverageInput,
+}
+
+fn negative_evidence_for_plan(inputs: PlanNegativeEvidenceInputs<'_>) -> Vec<NegativeEvidence> {
+    let PlanNegativeEvidenceInputs {
+        task,
+        context,
+        primary_context,
+        impact,
+        validation,
+        exact_reference_count,
+        unmatched_anchors,
+        coverage,
+    } = inputs;
     let mut items = context.negative_evidence.clone();
     // A context pack does not count proven cross-file dependents, so its "no exact evidence"
     // item contradicts a plan that found exact references of its own.
@@ -1089,9 +1182,19 @@ fn negative_evidence_for_plan(
                 ],
                 reason: anchor_miss_reason(&identifiers, &words),
                 confidence: 0.85,
-                suggested_next_probe: Some(anchor_miss_probe(&identifiers).into()),
+                suggested_next_probe: Some(
+                    anchor_miss_probe(
+                        &identifiers,
+                        coverage.gaps().iter().any(CoverageGap::is_majority),
+                    )
+                    .into(),
+                ),
             },
         );
+    }
+    // A context pack from the same index already lists it; one built elsewhere may not.
+    if let Some(item) = NegativeEvidence::for_coverage_input(task, coverage) {
+        push_unique_negative_evidence(&mut items, item);
     }
     items.sort_by(|a, b| {
         a.scope
@@ -1904,9 +2007,9 @@ fn summary(
 
 fn evidence_quality_for_store(
     store: &dyn OkStore,
+    manifest: Option<&open_kioku_core::IndexManifest>,
     architecture_policy: Option<&PolicyCheckReport>,
 ) -> Result<EvidenceQuality> {
-    let manifest = store.manifest()?;
     let static_facts = store.analysis_facts(Some(EvidenceSourceType::StaticAnalysis), 10_000)?;
     let unresolved_import_count = static_facts
         .iter()
@@ -1919,7 +2022,7 @@ fn evidence_quality_for_store(
         })
         .count();
     let mut quality = EvidenceQuality::from_manifest_with_counts(
-        manifest.as_ref(),
+        manifest,
         unresolved_import_count,
         ambiguous_edge_count,
     );
@@ -3090,15 +3193,16 @@ mod tests {
             score_breakdown: Vec::new(),
         };
 
-        let items = negative_evidence_for_plan(
-            "token",
-            &context,
-            &primary_context,
-            &impact,
-            &[],
-            0,
-            &["TokenIssuer".to_string()],
-        );
+        let items = negative_evidence_for_plan(PlanNegativeEvidenceInputs {
+            task: "token",
+            context: &context,
+            primary_context: &primary_context,
+            impact: &impact,
+            validation: &[],
+            exact_reference_count: 0,
+            unmatched_anchors: &["TokenIssuer".to_string()],
+            coverage: &CoverageInput::default(),
+        });
         let scopes = items
             .iter()
             .map(|item| item.scope.as_str())
@@ -3790,6 +3894,164 @@ mod tests {
     }
 
     #[test]
+    fn primary_language_keys_are_read_only_beside_a_majority_gap() {
+        let store = test_store();
+        let selected = vec![test_search_result("src/auth.rs")];
+        assert!(selected[0].symbol.is_none());
+        let gap = |indexed: usize, git_ignored: usize| {
+            let mut coverage = open_kioku_core::IndexCoverage::default();
+            for index in 0..indexed + git_ignored {
+                coverage.record_discovered(&Language::Rust);
+                if index < indexed {
+                    coverage.record_indexed(&Language::Rust, false);
+                } else {
+                    coverage.record_skipped(&Language::Rust, SkipReason::Ignored);
+                    coverage.record_policy_exclusion(
+                        &Language::Rust,
+                        SkipSource::GitIgnore,
+                        Some("src"),
+                    );
+                }
+            }
+            coverage.gaps()
+        };
+        // No gap, and a gap too small to be a majority: nothing is looked up.
+        assert!(
+            open_kioku_context::primary_language_keys(&store, &[], &selected)
+                .unwrap()
+                .is_empty()
+        );
+        let mut too_large = open_kioku_core::IndexCoverage::default();
+        for index in 0..50 {
+            too_large.record_discovered(&Language::Rust);
+            if index < 48 {
+                too_large.record_indexed(&Language::Rust, false);
+            } else {
+                too_large.record_skipped(&Language::Rust, SkipReason::TooLarge);
+            }
+        }
+        let minority = too_large.gaps();
+        assert_eq!(minority.len(), 1, "{minority:?}");
+        assert!(!minority[0].is_majority());
+        assert!(
+            open_kioku_context::primary_language_keys(&store, &minority, &selected)
+                .unwrap()
+                .is_empty()
+        );
+        // A majority gap: the indexed file record of the selection names its language.
+        let majority = gap(3, 25);
+        assert!(majority[0].is_majority());
+        assert_eq!(
+            open_kioku_context::primary_language_keys(&store, &majority, &selected).unwrap(),
+            vec!["rust".to_string()]
+        );
+        // A path the index does not hold contributes nothing.
+        let unindexed = vec![test_search_result("src/missing.rs")];
+        assert!(
+            open_kioku_context::primary_language_keys(&store, &majority, &unindexed)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_git_ignored_language_reaches_plan_confidence_and_names_the_exclusion() {
+        let rust_coverage = |indexed: usize, git_ignored: usize| {
+            let mut coverage = open_kioku_core::IndexCoverage::default();
+            for _ in 0..indexed {
+                coverage.record_discovered(&Language::Rust);
+                coverage.record_indexed(&Language::Rust, false);
+            }
+            for _ in 0..git_ignored {
+                coverage.record_discovered(&Language::Rust);
+                coverage.record_skipped(&Language::Rust, SkipReason::Ignored);
+                coverage.record_policy_exclusion(
+                    &Language::Rust,
+                    SkipSource::GitIgnore,
+                    Some("src"),
+                );
+            }
+            open_kioku_core::IndexQuality {
+                coverage: Some(coverage),
+                ..Default::default()
+            }
+        };
+        let coverage_scope = open_kioku_core::negative_evidence_scope::COVERAGE;
+        let task = "fix FrobnicateRegistry lookup in issue_token";
+
+        let store = test_store_with_analysis_facts_and_quality(Vec::new(), rust_coverage(3, 25));
+        let gapped = PlanEngine::new(&store).plan(task, 10).unwrap();
+        assert!(!gapped.primary_context.is_empty(), "{gapped:?}");
+        let item = gapped
+            .negative_evidence
+            .iter()
+            .find(|item| item.scope == coverage_scope)
+            .expect("coverage negative evidence");
+        assert!(
+            item.reason
+                .contains("25 of 28 rust source files (89.3%) are not indexed (git-ignore)"),
+            "{}",
+            item.reason
+        );
+        assert!(item
+            .inspected_sources
+            .iter()
+            .any(|source| source == "coverage:rust:git_ignore"));
+        assert!(gapped
+            .negative_evidence
+            .iter()
+            .filter_map(|item| item.suggested_next_probe.as_deref())
+            .all(|probe| !probe.contains("does not exist")));
+        assert!(gapped.evidence_by_section["negative_evidence"]
+            .iter()
+            .any(|id| id.starts_with("negative:coverage:")));
+        let confidence = &gapped.confidence_breakdown;
+        assert_eq!(confidence.overall_enum, Confidence::Low);
+        assert!(confidence.overall_score <= 0.50, "{confidence:?}");
+        assert!(confidence
+            .caveats
+            .iter()
+            .any(|caveat| caveat.starts_with("index coverage: 25 of 28 rust source files")));
+        assert!(confidence.components.iter().any(|component| {
+            component.signal == "index_coverage"
+                && component.evidence_ids == vec!["coverage:rust:git_ignore".to_string()]
+        }));
+        assert!(
+            gapped.risk.reasons.iter().any(|reason| reason
+                == "low confidence: named task anchor(s) FrobnicateRegistry may be defined in source the index excluded: rust (25 of 28 files, git-ignore)"),
+            "{:?}",
+            gapped.risk.reasons
+        );
+
+        // Complete coverage of the same files: none of it.
+        let store = test_store_with_analysis_facts_and_quality(Vec::new(), rust_coverage(3, 0));
+        let complete = PlanEngine::new(&store).plan(task, 10).unwrap();
+        assert!(complete
+            .negative_evidence
+            .iter()
+            .all(|item| item.scope != coverage_scope));
+        assert!(complete
+            .confidence_breakdown
+            .caveats
+            .iter()
+            .all(
+                |caveat| caveat != open_kioku_core::UNRECORDED_COVERAGE_CAVEAT
+                    && caveat != open_kioku_core::UNREADABLE_COVERAGE_CAVEAT
+                    && !caveat.starts_with("index coverage: ")
+            ));
+        assert!(complete
+            .confidence_breakdown
+            .components
+            .iter()
+            .all(|component| component.signal != "index_coverage"));
+        assert!(complete
+            .risk
+            .reasons
+            .iter()
+            .all(|reason| !reason.contains("index excluded")));
+    }
+
+    #[test]
     fn hyphenated_task_words_are_named_apart_from_identifiers_in_anchor_evidence_and_risk() {
         let task = "fix FrobnicateWidgetManager after a drive-by edit";
         let primary_context = vec![test_search_result("src/auth.rs")];
@@ -3799,10 +4061,19 @@ mod tests {
             test_search_result("src/session.rs"),
         );
         let anchor_item = |task: &str, unmatched: &[String]| {
-            negative_evidence_for_plan(task, &context, &primary_context, &impact, &[], 1, unmatched)
-                .into_iter()
-                .find(|item| item.scope == "anchor")
-                .expect("anchor negative evidence")
+            negative_evidence_for_plan(PlanNegativeEvidenceInputs {
+                task,
+                context: &context,
+                primary_context: &primary_context,
+                impact: &impact,
+                validation: &[],
+                exact_reference_count: 1,
+                unmatched_anchors: unmatched,
+                coverage: &CoverageInput::default(),
+            })
+            .into_iter()
+            .find(|item| item.scope == "anchor")
+            .expect("anchor negative evidence")
         };
 
         let unmatched = vec![
@@ -4098,15 +4369,16 @@ mod tests {
             suggested_next_probe: None,
         });
         let exact_items = |exact_reference_count: usize| {
-            negative_evidence_for_plan(
+            negative_evidence_for_plan(PlanNegativeEvidenceInputs {
                 task,
-                &context,
-                &primary_context,
-                &impact,
-                &[],
+                context: &context,
+                primary_context: &primary_context,
+                impact: &impact,
+                validation: &[],
                 exact_reference_count,
-                &[],
-            )
+                unmatched_anchors: &[],
+                coverage: &CoverageInput::default(),
+            })
             .into_iter()
             .filter(|item| item.scope == open_kioku_core::negative_evidence_scope::EXACT_REFERENCES)
             .count()
@@ -4130,8 +4402,16 @@ mod tests {
 
         let exact = exact_reference_count(&diagnostics, &primary_context, &impact, &[]);
         assert_eq!(exact, 0);
-        let negative =
-            negative_evidence_for_plan(task, &context, &primary_context, &impact, &[], exact, &[]);
+        let negative = negative_evidence_for_plan(PlanNegativeEvidenceInputs {
+            task,
+            context: &context,
+            primary_context: &primary_context,
+            impact: &impact,
+            validation: &[],
+            exact_reference_count: exact,
+            unmatched_anchors: &[],
+            coverage: &CoverageInput::default(),
+        });
         assert!(negative.iter().any(|item| item.scope == "exact_references"));
         let breakdown = confidence_for_plan(PlanConfidenceInputs {
             task,
@@ -4144,6 +4424,8 @@ mod tests {
             boundary: &ChangeBoundary::default(),
             evidence: &[],
             context_runtime_signal_count: 0,
+            coverage: &CoverageInput::default(),
+            primary_language_keys: &[],
         });
         assert_ne!(breakdown.overall_enum, Confidence::Exact);
         assert!(breakdown.overall_score <= 0.74, "{breakdown:?}");

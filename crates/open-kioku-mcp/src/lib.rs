@@ -682,6 +682,15 @@ async fn dispatch(
                 // coverage recording, so absence is never mistaken for 100%.
                 let coverage = manifest.quality.coverage.as_ref();
                 object.insert("coverage".into(), serde_json::to_value(coverage)?);
+                // The coverage verdict context packs and plans price, mirrored by `ok --json
+                // status`. Absent with `coverage`, so a missing record never reads as a
+                // repository without gaps.
+                if let Some(coverage) = coverage {
+                    object.insert(
+                        "coverage_gaps".into(),
+                        serde_json::to_value(coverage.gaps())?,
+                    );
+                }
                 object.insert(
                     "languages".into(),
                     json!(indexed_languages(store, coverage)?),
@@ -1746,7 +1755,7 @@ fn tool_description(name: &str, base: &str) -> String {
 /// from.
 fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
-        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files considered under the current policy versus indexed per language, each omission attributed to a skip reason, policy exclusions such as hidden or ignored files counted beside the ratio with their top directories and governing setting, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). `quality.quality_notes` and `quality.skipped_paths` are `{total, by_kind|by_reason, sample}` summaries by default. `quality.redacted_files` is the number of data, config, and prose files indexed with secret-like values replaced by `[REDACTED]`; it is null when the index predates redaction, which means those files were stored as read, so treat null as unknown rather than zero. `quality.pending_pre_redaction_compaction` is true while bytes such an index stored as read are still to be cleared from the database and the semantic vector store.", json!({"type":"object","properties":{"detail":{"type":"string","enum":["summary","full"],"description":"How much of the manifest's per-item lists to return. 'summary' (default) replaces quality.quality_notes with {total, by_kind, sample} and quality.skipped_paths with {total, by_reason, sample}, each sample at most 20 entries drawn across every kind or reason; 'full' returns every note and skipped path as the manifest stores them. An unknown value is an invalid-params error (-32602)."}}})),
+        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files considered under the current policy versus indexed per language, each omission attributed to a skip reason, policy exclusions such as hidden or ignored files counted beside the ratio with their top directories and governing setting, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), `coverage_gaps` listing each programming language whose missing source changes what an absence means (cause `git_ignore`, `excluded_by_policy` or `omitted`, with missing and judged file counts, the governing setting, and `[]` when coverage is complete), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). `quality.quality_notes` and `quality.skipped_paths` are `{total, by_kind|by_reason, sample}` summaries by default. `quality.redacted_files` is the number of data, config, and prose files indexed with secret-like values replaced by `[REDACTED]`; it is null when the index predates redaction, which means those files were stored as read, so treat null as unknown rather than zero. `quality.pending_pre_redaction_compaction` is true while bytes such an index stored as read are still to be cleared from the database and the semantic vector store.", json!({"type":"object","properties":{"detail":{"type":"string","enum":["summary","full"],"description":"How much of the manifest's per-item lists to return. 'summary' (default) replaces quality.quality_notes with {total, by_kind, sample} and quality.skipped_paths with {total, by_reason, sample}, each sample at most 20 entries drawn across every kind or reason; 'full' returns every note and skipped path as the manifest stores them. An unknown value is an invalid-params error (-32602)."}}})),
         ("list_files", "List indexed files with relative path, size in bytes, and language, or pass one `path` to get that file's indexed detail instead: its file record plus every code chunk covering it, with line ranges. A path that is not indexed returns a null file and an explicit caveat rather than an empty success.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of a single file to describe in detail (e.g. 'src/main.rs'). When set, `limit` and `offset` are ignored and the response carries the file record and its chunks."},"limit":{"type":"integer","description":"Maximum number of files to return when listing. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching files to skip when listing. Defaults to 0."}}})),
         ("search_code", "Search indexed code through one of four evidence modes: lexical BM25 over code chunks, indexed graph-node documents, the local semantic vector index, or lexical and semantic candidates ranked together. 'code', 'semantic' and 'hybrid' rank their candidates through the same function `ok search` uses, with the repository's configured `[ranking]` weights, and return one result per file, its best-ranked chunk; 'graph' returns the index's own order. Results can include a file that matched no search term, contributed by local git co-change history and named as such in its match_reason. Semantic and hybrid modes report `semantic_status` and fall back to lexical-only results when the vector index is not ready. A page ranked from a filled candidate window is reported as `truncated` with a warning. Every result carries path, line range, snippet, score, per-signal score_breakdown, and evidence_refs.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query: terms, identifiers, routes, config keys, or a natural-language description when mode is semantic or hybrid."},"mode":{"type":"string","enum":["code","graph","semantic","hybrid"],"description":"Which evidence to search. 'code' (default) is lexical BM25 over indexed chunks and file paths, ranked; 'graph' searches indexed graph-node documents in index order; 'semantic' searches the local vector index; 'hybrid' ranks lexical and semantic candidates together. An unknown mode is an invalid-params error (-32602)."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("regex_search", "Match a regular expression line by line against indexed chunk text, in path order, returning exact single-line hits with file path, line number, and the matching line. Regions the indexer did not chunk are not searched, and the response carries that caveat plus a warning when the bounded walk stopped early.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is an invalid-params error (-32602). Example: 'fn\\s+main' to find main function declarations."},"limit":{"type":"integer","description":"Maximum number of matching lines to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching lines to skip before returning results. Defaults to 0."}}})),
@@ -4677,6 +4686,42 @@ mod tests {
         .unwrap();
         manifest.analysis_semantics = Some(open_kioku_core::AnalysisSemanticsState::current());
         manifest
+    }
+
+    /// `repo_status` over an index whose coverage records a gap. The two `repo_status`
+    /// goldens carry `coverage: null`, so the serialized shape of `coverage_gaps` - the field
+    /// an agent reads to learn the index barely holds a language - was gated by nothing and
+    /// could drift silently.
+    #[tokio::test]
+    async fn golden_repo_status_reports_coverage_gaps() {
+        let fixture = McpSnapshotFixture::new();
+        let mut manifest = fixture_manifest();
+        let mut coverage = open_kioku_core::IndexCoverage::default();
+        for index in 0..27 {
+            coverage.record_discovered(&Language::Rust);
+            if index < 2 {
+                coverage.record_indexed(&Language::Rust, false);
+            } else {
+                coverage.record_skipped(&Language::Rust, open_kioku_core::SkipReason::Ignored);
+                coverage.record_policy_exclusion(
+                    &Language::Rust,
+                    open_kioku_core::SkipSource::GitIgnore,
+                    Some("src"),
+                );
+            }
+        }
+        manifest.quality.coverage = Some(coverage);
+        open_kioku_storage::MetadataStore::put_manifest(&fixture.store, &manifest).unwrap();
+
+        let response = handle_line(
+            &fixture.repo,
+            ServedIndex::Ready(&fixture.store),
+            &fixture.config,
+            r#"{"jsonrpc":"2.0","id":"repo-status-gaps","method":"repo_status","params":{}}"#,
+        )
+        .await
+        .expect("repo_status should answer");
+        assert_mcp_snapshot("repo_status_coverage_gaps.json", &response);
     }
 
     fn fixture_history_snapshot() -> HistorySnapshot {

@@ -115,3 +115,11 @@ records the same line beside every accuracy number (`docs/retrieval-benchmark.md
 lines recorded before policy exclusions left the denominator read lower on repositories
 with hidden or ignored source, and are not comparable to lines recorded after.
 
+`IndexCoverage::gaps` applies the doctor's per-language predicates as a verdict that reaches
+confidence. It lists a language git ignore rules mostly excluded, a language under the 98%
+or 20-file rule, and, when policy left no programming-language source to consider, every
+language it emptied. Context packs and plans read it from the manifest and price it as the
+`index_coverage` signal (`docs/ranking.md`, "Index coverage gaps"); `ok --json status` and
+MCP `repo_status` list it as `coverage_gaps`. The repository-wide ratio and walk errors stay
+in the doctor's check.
+
