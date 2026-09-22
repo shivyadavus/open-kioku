@@ -33,8 +33,7 @@ fn load_index_manifest(repo: &Path) -> anyhow::Result<Option<IndexManifest>> {
 /// Whether the repository's index has a graph awaiting `ok index`. `false` without an index:
 /// there is nothing to rebuild, and the missing index is reported on its own.
 fn index_graph_rebuild_required(repo: &Path) -> anyhow::Result<bool> {
-    let index_path =
-        open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    let index_path = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
     if !index_path.exists() {
         return Ok(false);
     }
@@ -49,7 +48,9 @@ const GRAPH_REBUILD_REQUIRED_MESSAGE: &str =
 /// other analysis semantics, rather than reporting an empty dependent list as if measured.
 fn require_authoritative_relationships(store: &SqliteStore) -> anyhow::Result<()> {
     if store.graph_rebuild_required()? {
-        anyhow::bail!("authoritative relationship evidence unavailable: {GRAPH_REBUILD_REQUIRED_MESSAGE}");
+        anyhow::bail!(
+            "authoritative relationship evidence unavailable: {GRAPH_REBUILD_REQUIRED_MESSAGE}"
+        );
     }
     let compatibility = analysis_semantics_compatibility_for_manifest(store.manifest()?.as_ref());
     if compatibility.status.allows_authoritative_relationships() {
@@ -68,8 +69,7 @@ fn require_authoritative_relationships(store: &SqliteStore) -> anyhow::Result<()
 }
 
 fn semantic_lifecycle_status(repo: &Path) -> Option<open_kioku_semantic::SemanticStatus> {
-    let index_path =
-        open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    let index_path = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
     if !index_path.exists() {
         return None;
     }
@@ -154,9 +154,18 @@ fn render_status_markdown(
         out.push_str("| Metric | Value |\n| --- | ---: |\n");
         out.push_str(&format!("| Mode | `{}` |\n", manifest.index_mode));
         let semantics = analysis_semantics_compatibility_for_manifest(Some(manifest));
-        out.push_str(&format!("| Analysis semantics | `{:?}` |\n", semantics.status));
-        out.push_str(&format!("| Stored semantics fingerprint | `{}` |\n", semantics.stored_fingerprint.as_deref().unwrap_or("missing")));
-        out.push_str(&format!("| Current semantics fingerprint | `{}` |\n", semantics.current_fingerprint));
+        out.push_str(&format!(
+            "| Analysis semantics | `{:?}` |\n",
+            semantics.status
+        ));
+        out.push_str(&format!(
+            "| Stored semantics fingerprint | `{}` |\n",
+            semantics.stored_fingerprint.as_deref().unwrap_or("missing")
+        ));
+        out.push_str(&format!(
+            "| Current semantics fingerprint | `{}` |\n",
+            semantics.current_fingerprint
+        ));
         // An unreadable marker is its own finding (the readiness checks below carry the
         // error), not a claim either way about the graph.
         out.push_str(&format!(
@@ -201,6 +210,24 @@ fn render_status_markdown(
                 .map(IndexCoverage::summary_line)
                 .unwrap_or_else(|| "not recorded by this index".into())
         ));
+        let coverage_gaps = manifest
+            .quality
+            .coverage
+            .as_ref()
+            .map(IndexCoverage::gaps)
+            .unwrap_or_default();
+        if !coverage_gaps.is_empty() {
+            out.push_str(&format!(
+                "| Coverage gaps | {} |\n",
+                // The same sentence the text surfaces print: one gap must not read two ways
+                // depending on which flag produced the output.
+                coverage_gaps
+                    .iter()
+                    .map(|gap| gap.caveat())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
         out.push_str(&format!("| Tests | {} |\n", manifest.quality.test_count));
         out.push_str(&format!(
             "| Imports | {} |\n",
@@ -1121,8 +1148,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
     }
 
     // 3. .ok/index.sqlite
-    let index_path =
-        open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
+    let index_path = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
     match SqliteStore::open_repo_index(&repo).and_then(|store| match store {
         Some(store) => store.manifest(),
         None => Ok(None),
@@ -1168,8 +1194,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
             // lock and the manifest is not published yet) from one that cannot be opened.
             if open_kioku_storage::generations::index_write_in_progress(&repo) {
                 next_steps.push(
-                    "Wait for the running `ok index` to finish, then run `ok doctor` again."
-                        .into(),
+                    "Wait for the running `ok index` to finish, then run `ok doctor` again.".into(),
                 );
             } else {
                 next_steps.push("Remove .ok/index.sqlite and run `ok index .` again.".into());
@@ -1211,7 +1236,11 @@ fn doctor_report(repo: &Path) -> DoctorReport {
         let compatible = compatibility.status.allows_authoritative_relationships();
         checks.push(DoctorCheck {
             name: "analysis-semantics",
-            status: if compatible { CheckStatus::Pass } else { CheckStatus::Fail },
+            status: if compatible {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
             message: if compatible {
                 format!(
                     "compatible; fingerprint {}",
@@ -1222,7 +1251,10 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                     "{:?}: {}; stored={}, current={}; affected components [{}], languages [{}]; {}",
                     compatibility.status,
                     compatibility.reasons.join("; "),
-                    compatibility.stored_fingerprint.as_deref().unwrap_or("missing"),
+                    compatibility
+                        .stored_fingerprint
+                        .as_deref()
+                        .unwrap_or("missing"),
                     compatibility.current_fingerprint,
                     compatibility.affected_components.join(", "),
                     compatibility.affected_languages.join(", "),
@@ -1251,7 +1283,6 @@ fn doctor_report(repo: &Path) -> DoctorReport {
             ),
             Some(id) => format!(
                 "active generation {id}; {corrupt} corrupt/incomplete generation dir(s) present",
-
             ),
             None => "legacy layout (adopts the generation layout on the next `ok index`)".into(),
         };
@@ -1283,8 +1314,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                     semantic.rebuild_reasons.join("; ")
                 ),
             });
-            next_steps
-                .push("Run `ok semantic index` to rebuild the local semantic index.".into());
+            next_steps.push("Run `ok semantic index` to rebuild the local semantic index.".into());
         } else {
             let backend_note = if semantic.ann_active {
                 format!(
@@ -1335,8 +1365,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                     "For better references, impact, tests, and planning: run `ok scip setup .`, then `ok index . --with-scip auto`.".into(),
                 );
                 }
-                let (check, step) =
-                    coverage_check(quality.coverage.as_ref(), manifest.index_mode);
+                let (check, step) = coverage_check(quality.coverage.as_ref(), manifest.index_mode);
                 checks.push(check);
                 next_steps.extend(step);
                 let (check, step) = redaction_check(quality);
@@ -1535,7 +1564,9 @@ fn coverage_check(
                 DoctorCheck {
                     name: "coverage",
                     status: CheckStatus::Warn,
-                    message: "not applicable in cross-project mode; see each linked project's own index".into(),
+                    message:
+                        "not applicable in cross-project mode; see each linked project's own index"
+                            .into(),
                 },
                 None,
             );
@@ -1641,10 +1672,7 @@ fn coverage_check(
                     .join(", ")
             ));
             if low.len() > 3 {
-                message.push_str(&format!(
-                    " and {} more (see the table)",
-                    low.len() - 3
-                ));
+                message.push_str(&format!(" and {} more (see the table)", low.len() - 3));
             }
         }
         return (
@@ -1890,7 +1918,11 @@ mod scip_setup_tests {
     #[test]
     fn scip_setup_reports_the_java_default_for_a_gradle_settings_root() {
         let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join("settings.gradle"), "rootProject.name = 'proof'\n").unwrap();
+        fs::write(
+            temp.path().join("settings.gradle"),
+            "rootProject.name = 'proof'\n",
+        )
+        .unwrap();
 
         let report = scip_setup_report(temp.path(), &OkConfig::default());
         let java = report
@@ -2057,7 +2089,9 @@ fn login_returns_valid_token() {
             format!("ok --repo {repo_display} symbol find issue_token"),
             format!("ok --repo {repo_display} impact --file src/auth.rs"),
             format!("ok --repo {repo_display} context token --format markdown"),
-            format!("ok --repo {repo_display} preflight \"change token expiration\" --format markdown"),
+            format!(
+                "ok --repo {repo_display} preflight \"change token expiration\" --format markdown"
+            ),
             format!("ok prove {repo_display} --task token"),
             format!("ok mcp install claude --repo {repo_display}"),
         ],

@@ -131,6 +131,9 @@ pub mod negative_evidence_scope {
     pub const BOUNDARY: &str = "boundary";
     /// A named identifier in the task that no selected context spells.
     pub const ANCHOR: &str = "anchor";
+    /// A programming language the index holds too little of for an absence to be evidence,
+    /// per [`crate::IndexCoverage::gaps`]. Priced by the `index_coverage` caps, not counted.
+    pub const COVERAGE: &str = "coverage";
 }
 
 impl NegativeEvidence {
@@ -142,7 +145,8 @@ impl NegativeEvidence {
     /// task whose only defect was a repository without SCIP. Absent history and a
     /// docs-or-tests-only selection are reported but not priced: history contributes only
     /// positive score components in plans, and the boundary item classifies what matched
-    /// rather than naming missing evidence. What counts here is evidence that retrieval
+    /// rather than naming missing evidence. A `coverage` item is priced by the `index_coverage`
+    /// caps in [`ConfidenceBreakdown::from_signals`]. What counts here is evidence that retrieval
     /// itself missed: no primary context at all, or a task identifier the selected context
     /// does not spell.
     pub fn lowers_confidence(&self) -> bool {
@@ -150,6 +154,58 @@ impl NegativeEvidence {
             self.scope.as_str(),
             negative_evidence_scope::PRIMARY_CONTEXT | negative_evidence_scope::ANCHOR
         )
+    }
+
+    /// The `coverage` item for `coverage`, whatever state it is in: the gap item when a record
+    /// was read, and otherwise the item saying what is not known and why.
+    pub fn for_coverage_input(query: &str, coverage: &CoverageInput) -> Option<Self> {
+        match coverage {
+            CoverageInput::Recorded(gaps) => Self::for_coverage_gaps(query, gaps),
+            CoverageInput::Unavailable => Some(Self {
+                query: query.into(),
+                scope: negative_evidence_scope::COVERAGE.into(),
+                inspected_sources: vec!["index_manifest.quality.coverage".into()],
+                reason: UNRECORDED_COVERAGE_CAVEAT.into(),
+                confidence: 0.80,
+                suggested_next_probe: Some(
+                    "Run `ok index .` to record which source files the index skipped and why. A cross-project index publishes no coverage record of its own; an imported snapshot carries whatever the exporting index recorded."
+                        .into(),
+                ),
+            }),
+            CoverageInput::Unreadable => Some(Self {
+                query: query.into(),
+                scope: negative_evidence_scope::COVERAGE.into(),
+                inspected_sources: vec!["index_manifest.quality.coverage".into()],
+                reason: UNREADABLE_COVERAGE_CAVEAT.into(),
+                confidence: 0.80,
+                suggested_next_probe: Some(
+                    "Run `ok doctor .` to see whether the index manifest is readable, and `ok index .` to rebuild it if it is not."
+                        .into(),
+                ),
+            }),
+        }
+    }
+
+    /// The `coverage` item a context pack or plan publishes for `gaps`, or `None` without any.
+    /// Its inspected sources are the gaps' evidence ids, so the item traces to the manifest
+    /// coverage record `repo_status` reports. Context and plan both build it here, so the two
+    /// surfaces word it identically.
+    pub fn for_coverage_gaps(query: &str, gaps: &[CoverageGap]) -> Option<Self> {
+        let first = gaps.first()?;
+        Some(Self {
+            query: query.into(),
+            scope: negative_evidence_scope::COVERAGE.into(),
+            inspected_sources: std::iter::once("index_manifest.quality.coverage".to_owned())
+                .chain(gaps.iter().map(CoverageGap::evidence_id))
+                .collect(),
+            reason: gaps
+                .iter()
+                .map(CoverageGap::caveat)
+                .collect::<Vec<_>>()
+                .join("; "),
+            confidence: 0.90,
+            suggested_next_probe: Some(first.next_probe()),
+        })
     }
 }
 
@@ -515,6 +571,15 @@ pub struct ConfidenceSignalInput {
     /// unmatched one is named in a caveat, but never counts toward the all-unmatched blocker
     /// or its 0.50 cap, because its spelling does not establish that the task named code.
     pub weak_anchors: Vec<String>,
+    /// What the manifest says about coverage: [`IndexCoverage::gaps`] when it recorded any,
+    /// or [`CoverageInput::Unavailable`] when it published no record. A gap is a file set the
+    /// index never read, so an absence among those files is not evidence; see
+    /// [`COVERAGE_GAP_MAJORITY_SHARE`] for the caps.
+    pub coverage: CoverageInput,
+    /// Language keys (`rust`, `python`) of the primary selections, sorted and deduplicated,
+    /// compared with each majority coverage gap's language. Callers fill it only when a majority
+    /// gap exists, the only case that reads it, so a pack without one looks nothing up.
+    pub primary_language_keys: Vec<String>,
     /// Fraction of the task's content terms that appear anywhere in the selected
     /// context, in 0..=1. See [`task_relevance_score`].
     ///
@@ -1001,6 +1066,54 @@ impl ConfidenceBreakdown {
                 weak_unmatched.join(", ")
             ));
         }
+        // Files the index never read: an absence among them is not evidence, so every gap is
+        // named. A gap alone lowers nothing: most repositories git-ignore a virtualenv or emitted
+        // code, and an answer found in indexed code is still found. A majority gap lowers
+        // confidence only beside a symptom it could explain.
+        let gaps = input.coverage.gaps();
+        let majority_gaps = gaps
+            .iter()
+            .filter(|gap| gap.is_majority())
+            .collect::<Vec<_>>();
+        // The absence symptom: a named identifier the selected context does not spell, or no
+        // primary context. A hyphenated word may be prose, so it is not one.
+        let coverage_explains_a_miss = !majority_gaps.is_empty()
+            && (!named_unmatched.is_empty() || input.primary_file_count == 0);
+        // The selection is in a language the index mostly never read, so the right file may be
+        // among the excluded ones. Whether the task happened to spell an identifier says
+        // nothing about that: the label must follow what the index holds, not how the task was
+        // phrased, so a matched identifier does not lift this cap.
+        let gaps_in_selected_languages = if coverage_explains_a_miss {
+            Vec::new()
+        } else {
+            majority_gaps
+                .iter()
+                .filter(|gap| input.primary_language_keys.contains(&gap.language))
+                .map(|gap| gap.summary())
+                .collect::<Vec<_>>()
+        };
+        // Reported, never capping on their own; merged into `caveats` after the 0.94 decision.
+        let coverage_caveats = gaps.iter().map(CoverageGap::caveat).collect::<Vec<_>>();
+        // An index that measured nothing is not an index that found nothing, and this caveat
+        // caps like any other: the pack cannot claim completeness it never checked.
+        if let Some(caveat) = input.coverage.caveat() {
+            caveats.push(caveat.into());
+        }
+        if coverage_explains_a_miss {
+            blockers.push(format!(
+                "the task may name code in source the index excluded: {}",
+                majority_gaps
+                    .iter()
+                    .map(|gap| gap.summary())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        } else if !gaps_in_selected_languages.is_empty() {
+            blockers.push(format!(
+                "the selected context is in a language the index mostly excluded: {}",
+                gaps_in_selected_languages.join(", ")
+            ));
+        }
         if input.exact_reference_count == 0 {
             caveats.push("exact symbol/reference evidence is absent".into());
         }
@@ -1117,6 +1230,45 @@ impl ConfidenceBreakdown {
                 "at least one selected validation target carries a runnable command",
             ),
         ];
+        // Zero weight: a gap is priced by the caps below, and a component that is always
+        // present would move every breakdown's total. It exists to carry the signal name and
+        // the evidence ids a reader traces the caps to.
+        if !gaps.is_empty() {
+            let indexed_share = gaps
+                .iter()
+                .map(|gap| 1.0 - gap.missing_share())
+                .fold(1.0_f64, f64::min) as f32;
+            components.push(ScoreComponent::new(
+                "index_coverage",
+                indexed_share,
+                indexed_share,
+                0.0,
+                0.0,
+                gaps.iter().map(CoverageGap::evidence_id).collect(),
+                "lowest indexed share among languages with a coverage gap; priced by caps, not weight",
+            ));
+        }
+        // Emitted only when the 0.74 language cap applies, so a reader - and `ok preflight` -
+        // can tell "this index barely read the language you are editing" from a gap elsewhere.
+        if !gaps_in_selected_languages.is_empty() {
+            let matched = majority_gaps
+                .iter()
+                .filter(|gap| input.primary_language_keys.contains(&gap.language))
+                .collect::<Vec<_>>();
+            let indexed_share = matched
+                .iter()
+                .map(|gap| 1.0 - gap.missing_share())
+                .fold(1.0_f64, f64::min) as f32;
+            components.push(ScoreComponent::new(
+                COVERAGE_SELECTED_LANGUAGE_SIGNAL,
+                indexed_share,
+                indexed_share,
+                0.0,
+                0.0,
+                matched.iter().map(|gap| gap.evidence_id()).collect(),
+                "a majority coverage gap in the selected context's language; the right file may be among those the index did not read",
+            ));
+        }
         components.sort_by(|a, b| a.signal.cmp(&b.signal));
         let mut overall_score = score_component_total(&components).clamp(0.0, 1.0);
         if input.primary_file_count == 0 {
@@ -1157,12 +1309,26 @@ impl ConfidenceBreakdown {
         if every_anchor_unmatched {
             overall_score = overall_score.min(0.50);
         }
+        // Beside an absence symptom a majority gap is no better than a task whose every
+        // identifier is unknown; beside a selection in the excluded language, `High` would
+        // claim knowledge of the files the index did not read.
+        if coverage_explains_a_miss {
+            overall_score = overall_score.min(0.50);
+        } else if !gaps_in_selected_languages.is_empty() {
+            overall_score = overall_score.min(0.74);
+        }
 
         blockers.sort();
         blockers.dedup();
+        // The 0.94 any-caveat cap is decided before the coverage caveats join the list, so a
+        // gap reports without capping while every other caveat still caps. Deciding it by
+        // construction rather than by matching caveat text means a future caveat cannot become
+        // exempt by how it happens to be worded.
+        let caveats_cap = !caveats.is_empty();
+        caveats.extend(coverage_caveats);
         caveats.sort();
         caveats.dedup();
-        if !caveats.is_empty() {
+        if caveats_cap {
             overall_score = overall_score.min(0.94);
         }
 
@@ -1186,21 +1352,23 @@ impl ConfidenceBreakdown {
         }
     }
 
-    /// Attach caveats a caller learned after scoring - a plan's evidence-quality caveats -
-    /// under the same rules `from_signals` applies to its own: any caveat caps the score at
-    /// 0.94 and the label is re-derived through the `Exact` gate. Appending them without
-    /// this left `Exact (1.00)` reachable above "index is stale".
+    /// Attach caveats a caller learned after scoring - a plan's evidence-quality caveats - and
+    /// re-derive the label through the `Exact` gate. Every caller passes caveats that cap, so
+    /// adding one caps the score at 0.94; adding nothing leaves the score alone. Appending them
+    /// without this left `Exact (1.00)` reachable above "index is stale".
     pub fn add_caveats(
         &mut self,
         caveats: impl IntoIterator<Item = String>,
         exact_reference_count: usize,
     ) {
+        let mut added = false;
         for caveat in caveats {
             if !self.caveats.contains(&caveat) {
                 self.caveats.push(caveat);
+                added = true;
             }
         }
-        if !self.caveats.is_empty() {
+        if added {
             self.overall_score = self.overall_score.min(0.94);
         }
         self.overall_enum = Self::label_for(self.overall_score, exact_reference_count);
@@ -3319,6 +3487,205 @@ impl LanguageCoverage {
     }
 }
 
+impl LanguageCoverage {
+    /// The skip reason behind the most files among policy (`policy`) or non-policy reasons,
+    /// ties broken by reason order.
+    fn dominant_skip_reason(&self, policy: bool) -> Option<SkipReason> {
+        self.skipped
+            .iter()
+            .filter(|(reason, count)| reason.is_policy() == policy && **count > 0)
+            .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+            .map(|(reason, _)| *reason)
+    }
+}
+
+/// A coverage gap whose missing files are at least this share of its language's judged files
+/// is a majority gap: most of that language's source is absent from the index. A majority gap
+/// lowers a pack or plan only beside a symptom it could explain: 0.50 with a named task
+/// identifier the selected context does not spell or no primary context, 0.74 when a task
+/// naming no identifier selected context in the gap's language. Any other gap is reported and
+/// changes no score: most repositories git-ignore a virtualenv or emitted code, and an answer
+/// found in indexed code is still found.
+pub const COVERAGE_GAP_MAJORITY_SHARE: f64 = 0.5;
+
+/// Every rule file git reads; ingest attributes all of them to [`SkipSource::GitIgnore`] in a
+/// git work tree, so advice cannot name `.gitignore` alone.
+const GIT_IGNORE_RULES: &str =
+    "git ignore rules (`.gitignore`, `.git/info/exclude`, or `core.excludesFile`)";
+
+/// Why a programming language's source is missing from the index.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageGapCause {
+    /// Git ignore rules set aside most of the language; they are written for git, not for
+    /// this index.
+    GitIgnore,
+    /// Policy left no programming-language source to consider at all.
+    ExcludedByPolicy,
+    /// Files the index did not intend to drop (`too-large`, `binary`, unreadable), under the
+    /// doctor's per-language threshold.
+    Omitted,
+}
+
+impl CoverageGapCause {
+    /// The serialized value, used in evidence ids (`git_ignore`).
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::GitIgnore => "git_ignore",
+            Self::ExcludedByPolicy => "excluded_by_policy",
+            Self::Omitted => "omitted",
+        }
+    }
+}
+
+/// One programming language whose missing source changes what an absence means, from
+/// [`IndexCoverage::gaps`]. Context packs and plans price it through the `index_coverage`
+/// confidence signal and report it as `coverage` negative evidence; `repo_status` and
+/// `ok --json status` list it under `coverage_gaps`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CoverageGap {
+    /// Language key, as in `IndexCoverage::by_language`.
+    pub language: String,
+    pub cause: CoverageGapCause,
+    /// Files of the language absent from the index for this cause.
+    pub missing_files: usize,
+    /// Files the cause is judged against: git-ignored plus considered files for `git_ignore`,
+    /// discovered files for `excluded_by_policy`, considered files for `omitted`.
+    pub language_files: usize,
+    /// Label of the skip source or reason behind most of the missing files (`git-ignore`,
+    /// `hidden-policy`, `too-large`): the reason category a caveat names.
+    pub reason: String,
+    /// The setting that governs `reason`, when one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governing_setting: Option<String>,
+}
+
+impl CoverageGap {
+    /// `missing_files` over `language_files`, in 0..=1.
+    pub fn missing_share(&self) -> f64 {
+        if self.language_files == 0 {
+            return 0.0;
+        }
+        (self.missing_files as f64 / self.language_files as f64).min(1.0)
+    }
+
+    /// See [`COVERAGE_GAP_MAJORITY_SHARE`].
+    pub fn is_majority(&self) -> bool {
+        self.missing_share() >= COVERAGE_GAP_MAJORITY_SHARE
+    }
+
+    /// `coverage:<language>:<cause>`: names the manifest coverage entries the gap is derived
+    /// from, `by_language.<language>` and `policy_excluded_by_language.<language>`, which
+    /// `repo_status` and `ok --json status` report.
+    pub fn evidence_id(&self) -> String {
+        format!("coverage:{}:{}", self.language, self.cause.key())
+    }
+
+    /// `rust (25 of 27 files, git-ignore)`
+    pub fn summary(&self) -> String {
+        format!(
+            "{} ({} of {} files, {})",
+            self.language,
+            group_thousands(self.missing_files),
+            group_thousands(self.language_files),
+            self.reason
+        )
+    }
+
+    /// The confidence caveat: the excluded share and the reason category.
+    pub fn caveat(&self) -> String {
+        format!(
+            "index coverage: {} of {} {} source files ({:.1}%) are not indexed ({}); an absence among them is not evidence",
+            group_thousands(self.missing_files),
+            group_thousands(self.language_files),
+            self.language,
+            self.missing_share() * 100.0,
+            self.reason
+        )
+    }
+
+    /// What to do before reading an absence as evidence, naming the governing setting.
+    pub fn next_probe(&self) -> String {
+        let files = group_thousands(self.missing_files);
+        match (self.cause, self.governing_setting.as_deref()) {
+            (CoverageGapCause::GitIgnore, _) => format!(
+                "The index follows {GIT_IGNORE_RULES}, which exclude {files} {} file(s); search them directly before concluding a name is absent. Remove the rule if they are source an agent should see, or list the paths under `[index] exclude` if the exclusion is intended, then run `ok index .`.",
+                self.language
+            ),
+            (_, Some(setting)) => format!(
+                "{setting} governs the {files} {} file(s) missing from the index ({}); search them directly before concluding a name is absent, and change the setting if they should be indexed, then run `ok index .`.",
+                self.language, self.reason
+            ),
+            (_, None) => format!(
+                "No ok.toml key governs the {files} {} file(s) missing from the index ({}); search them directly before concluding a name is absent, and review `ok --json status` `coverage.by_language` and `quality.skipped_paths`.",
+                self.language, self.reason
+            ),
+        }
+    }
+}
+
+/// What a pack or plan knows about its index's coverage. A recorded record with no gaps and
+/// no record at all are different facts: the first says nothing material is missing, the
+/// second says nobody measured. A manifest written before coverage recording, a cross-project
+/// index, an imported snapshot, and a manifest that could not be read are all `Unavailable`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoverageInput {
+    /// The index published a coverage record; these are the gaps it implies, empty when the
+    /// index holds what discovery found.
+    Recorded(Vec<CoverageGap>),
+    /// No coverage record, so what the index omitted is unknown.
+    Unavailable,
+    /// The coverage record could not be read: the manifest failed to decode, or the store
+    /// returned an error. Distinct from [`Self::Unavailable`], which says the index published
+    /// no record; this says nobody could tell.
+    Unreadable,
+}
+
+impl Default for CoverageInput {
+    /// A recorded record with no gaps: the shape a caller that says nothing should get, so a
+    /// synthetic input never claims coverage was unmeasured.
+    fn default() -> Self {
+        Self::Recorded(Vec::new())
+    }
+}
+
+impl CoverageInput {
+    /// The gaps of a recorded record; empty when coverage is unavailable, because an
+    /// unmeasured index implies no particular gap.
+    pub fn gaps(&self) -> &[CoverageGap] {
+        match self {
+            Self::Recorded(gaps) => gaps,
+            Self::Unavailable | Self::Unreadable => &[],
+        }
+    }
+
+    /// The caveat this state carries, or `None` when coverage was recorded. Both non-recorded
+    /// states cap like any other caveat: a pack cannot claim completeness it never checked.
+    pub fn caveat(&self) -> Option<&'static str> {
+        match self {
+            Self::Recorded(_) => None,
+            Self::Unavailable => Some(UNRECORDED_COVERAGE_CAVEAT),
+            Self::Unreadable => Some(UNREADABLE_COVERAGE_CAVEAT),
+        }
+    }
+}
+
+/// Score-component signal emitted when a majority coverage gap matches the selected context's
+/// language. Zero weight like `index_coverage`: it carries the fact, not a score. `ok preflight`
+/// reads it to withhold `SafeToStart`, so it is a stable name rather than prose to match on.
+pub const COVERAGE_SELECTED_LANGUAGE_SIGNAL: &str = "index_coverage_selected_language";
+
+/// The caveat for a coverage record that could not be read. Says the read failed, not that the
+/// index omitted nothing - the two are different facts and only one is about the repository.
+pub const UNREADABLE_COVERAGE_CAVEAT: &str =
+    "index coverage could not be read from the manifest, so what this index omitted is unknown";
+
+/// The caveat for an index that published no coverage record. Worded to say the opposite of a
+/// gap caveat: a gap names what is missing, this says nothing is known about what is missing.
+pub const UNRECORDED_COVERAGE_CAVEAT: &str = "index coverage is unrecorded: this index does not report which source files it omitted, so an absence in it is not evidence of absence";
+
 /// Coverage below this fraction is reported as a warning: a tenth of a corpus vanishing
 /// behind an ingest rule is exactly the failure this summary exists to expose.
 pub const INDEX_COVERAGE_WARN_PERCENT: f64 = 98.0;
@@ -3647,6 +4014,99 @@ impl IndexCoverage {
             .collect::<Vec<_>>();
         languages.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         languages
+    }
+
+    /// Programming languages whose missing source changes what an absence means, most missing
+    /// files first. This is the verdict context packs and plans price and `repo_status`
+    /// reports, built from the predicates `ok doctor`'s coverage check applies, so they cannot
+    /// disagree about which languages qualify:
+    ///
+    /// - `excluded_by_policy`: discovery found programming-language source and policy left
+    ///   none of it to consider. Every such language is a gap under its dominant source.
+    /// - `git_ignore`: [`Self::languages_mostly_excluded_by`] for [`SkipSource::GitIgnore`].
+    /// - `omitted`: [`Self::languages_below_warn_threshold`].
+    ///
+    /// The index's own settings (`hidden`, `vendor`, `fast_mode`, `denied`, `[index] exclude`,
+    /// `.okignore`) are not gaps while some source remains considered: they state an intended
+    /// exclusion, and a caveat that fires on every repository stops being read. The doctor's
+    /// repository-wide ratio and walk errors are not per-language and stay in its own check.
+    pub fn gaps(&self) -> Vec<CoverageGap> {
+        let mut gaps = Vec::new();
+        let (programming_discovered, _) = self.programming_policy_totals();
+        if programming_discovered > 0 && self.programming_percent().is_none() {
+            for (language, coverage) in &self.by_language {
+                if !language_key_is_programming(language) || coverage.discovered == 0 {
+                    continue;
+                }
+                let source = self
+                    .policy_excluded_by_language
+                    .get(language)
+                    .and_then(|sources| {
+                        sources
+                            .iter()
+                            .filter(|(_, count)| **count > 0)
+                            .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                            .map(|(source, _)| *source)
+                    });
+                let reason = match (source, coverage.dominant_skip_reason(true)) {
+                    (Some(source), _) => source.label().to_owned(),
+                    (None, Some(reason)) => reason.label().to_owned(),
+                    (None, None) => "unattributed".to_owned(),
+                };
+                let governing_setting = source.and_then(|source| match source {
+                    SkipSource::GitIgnore => Some(GIT_IGNORE_RULES),
+                    other => other.governing_setting(),
+                });
+                gaps.push(CoverageGap {
+                    language: language.clone(),
+                    cause: CoverageGapCause::ExcludedByPolicy,
+                    missing_files: coverage.excluded_by_policy(),
+                    language_files: coverage.discovered,
+                    reason,
+                    governing_setting: governing_setting.map(str::to_owned),
+                });
+            }
+        } else {
+            for (language, excluded, considered) in
+                self.languages_mostly_excluded_by(SkipSource::GitIgnore)
+            {
+                gaps.push(CoverageGap {
+                    language: language.to_owned(),
+                    cause: CoverageGapCause::GitIgnore,
+                    missing_files: excluded,
+                    language_files: excluded + considered,
+                    reason: SkipSource::GitIgnore.label().to_owned(),
+                    governing_setting: Some(GIT_IGNORE_RULES.to_owned()),
+                });
+            }
+            for (language, _, missing) in self.languages_below_warn_threshold() {
+                let Some(coverage) = self.by_language.get(language) else {
+                    continue;
+                };
+                let reason = coverage.dominant_skip_reason(false);
+                gaps.push(CoverageGap {
+                    language: language.to_owned(),
+                    cause: CoverageGapCause::Omitted,
+                    missing_files: missing,
+                    language_files: coverage.considered(),
+                    reason: reason.map_or_else(
+                        || "unattributed".to_owned(),
+                        |reason| reason.label().to_owned(),
+                    ),
+                    governing_setting: (reason == Some(SkipReason::TooLarge))
+                        .then(|| SkipSource::SizeLimit.governing_setting())
+                        .flatten()
+                        .map(str::to_owned),
+                });
+            }
+        }
+        gaps.sort_by(|a, b| {
+            b.missing_files
+                .cmp(&a.missing_files)
+                .then_with(|| a.language.cmp(&b.language))
+                .then(a.cause.cmp(&b.cause))
+        });
+        gaps
     }
 
     /// The counts, judged ratio first: `921 of 922 programming-language files indexed
@@ -5140,17 +5600,19 @@ mod tests {
     }
 
     use super::{
-        count_resolution_notes, named_anchors, negative_evidence_signal_count,
-        reconcile_score_breakdown, score_component_total, task_relevance_score,
-        unmatched_named_anchors, weak_named_anchors, Confidence, ConfidenceBreakdown,
-        ConfidenceSignalInput, EdgeId, Evidence, EvidenceQuality, EvidenceSourceType, FileRange,
-        GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge,
-        GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary,
-        IndexCoverage, IndexManifest, IndexMode, IndexQuality, Language, LineRange,
-        NegativeEvidence, NodeId, Owner, PathInterner, QualityNote, QualityNoteKind, Repository,
-        RepositoryId, ScopeId, ScoreComponent, SearchResult, SharedPath, SharedStr, SkipReason,
-        SkipSource, SkippedPath, SourceRange, StatusDetail, StringInterner, Symbol, SymbolId,
-        Visibility, HISTORY_SCHEMA_VERSION, STATUS_SAMPLE_LIMIT,
+        count_resolution_notes, named_anchors, negative_evidence_scope,
+        negative_evidence_signal_count, reconcile_score_breakdown, score_component_total,
+        task_relevance_score, unmatched_named_anchors, weak_named_anchors, Confidence,
+        ConfidenceBreakdown, ConfidenceSignalInput, CoverageInput, EdgeId, Evidence,
+        EvidenceQuality, EvidenceSourceType, FileRange, GitChangeKind, GitCommitId,
+        GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
+        GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, IndexCoverage,
+        IndexManifest, IndexMode, IndexQuality, Language, LineRange, NegativeEvidence, NodeId,
+        Owner, PathInterner, QualityNote, QualityNoteKind, Repository, RepositoryId, ScopeId,
+        ScoreComponent, SearchResult, SharedPath, SharedStr, SkipReason, SkipSource, SkippedPath,
+        SourceRange, StatusDetail, StringInterner, Symbol, SymbolId, Visibility,
+        COVERAGE_SELECTED_LANGUAGE_SIGNAL, HISTORY_SCHEMA_VERSION, STATUS_SAMPLE_LIMIT,
+        UNREADABLE_COVERAGE_CAVEAT, UNRECORDED_COVERAGE_CAVEAT,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
@@ -5495,6 +5957,405 @@ mod tests {
         );
     }
 
+    /// `considered` indexed Rust files beside `git_ignored` files git ignore rules excluded.
+    fn git_ignored_rust(considered: usize, git_ignored: usize) -> IndexCoverage {
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..considered {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_indexed(&Language::Rust, false);
+        }
+        for _ in 0..git_ignored {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_skipped(&Language::Rust, SkipReason::Ignored);
+            coverage.record_policy_exclusion(&Language::Rust, SkipSource::GitIgnore, Some("src"));
+        }
+        coverage
+    }
+
+    /// `indexed` Rust files beside `too_large` files the size limit dropped.
+    fn too_large_rust(indexed: usize, too_large: usize) -> IndexCoverage {
+        let mut coverage = git_ignored_rust(indexed, 0);
+        for _ in 0..too_large {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_skipped(&Language::Rust, SkipReason::TooLarge);
+        }
+        coverage
+    }
+
+    #[test]
+    fn coverage_gaps_apply_the_doctor_thresholds_and_never_fire_on_complete_coverage() {
+        // Complete coverage, and a repository with nothing discovered.
+        assert!(git_ignored_rust(40, 0).gaps().is_empty());
+        assert!(IndexCoverage::default().gaps().is_empty());
+
+        // Git ignore rules: at least 20 files, and more than the language has considered.
+        assert!(git_ignored_rust(2, 19).gaps().is_empty());
+        assert!(git_ignored_rust(20, 20).gaps().is_empty());
+        let gaps = git_ignored_rust(2, 25).gaps();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        let gap = &gaps[0];
+        assert_eq!(gap.cause, super::CoverageGapCause::GitIgnore);
+        assert_eq!(
+            (gap.language.as_str(), gap.missing_files, gap.language_files),
+            ("rust", 25, 27)
+        );
+        assert!(gap.is_majority());
+        assert_eq!(gap.evidence_id(), "coverage:rust:git_ignore");
+        assert_eq!(gap.summary(), "rust (25 of 27 files, git-ignore)");
+        assert_eq!(
+            gap.caveat(),
+            "index coverage: 25 of 27 rust source files (92.6%) are not indexed (git-ignore); an absence among them is not evidence"
+        );
+        let probe = gap.next_probe();
+        assert!(
+            probe.contains("`.git/info/exclude`") && probe.contains("`[index] exclude`"),
+            "{probe}"
+        );
+        assert!(!probe.contains("does not exist"), "{probe}");
+
+        // The index's own settings are intended exclusions while source remains considered.
+        let mut hidden = git_ignored_rust(2, 0);
+        for _ in 0..1_485 {
+            hidden.record_discovered(&Language::Rust);
+            hidden.record_skipped(&Language::Rust, SkipReason::Hidden);
+            hidden.record_policy_exclusion(
+                &Language::Rust,
+                SkipSource::HiddenPolicy,
+                Some(".claude"),
+            );
+        }
+        assert!(hidden.gaps().is_empty());
+
+        // ... unless policy left no programming-language source to consider at all.
+        let mut emptied = IndexCoverage::default();
+        for _ in 0..3 {
+            emptied.record_discovered(&Language::Rust);
+            emptied.record_skipped(&Language::Rust, SkipReason::Hidden);
+            emptied.record_policy_exclusion(
+                &Language::Rust,
+                SkipSource::HiddenPolicy,
+                Some(".claude"),
+            );
+        }
+        let gaps = emptied.gaps();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(gaps[0].cause, super::CoverageGapCause::ExcludedByPolicy);
+        assert_eq!((gaps[0].missing_files, gaps[0].language_files), (3, 3));
+        assert_eq!(gaps[0].reason, "hidden-policy");
+        assert_eq!(
+            gaps[0].governing_setting.as_deref(),
+            Some("`[security] allow_hidden_files`")
+        );
+
+        // Omissions the index did not intend: under 98% with at least 50 considered files, or
+        // at least 20 missing regardless of percentage.
+        assert!(too_large_rust(48, 1).gaps().is_empty());
+        let gaps = too_large_rust(48, 2).gaps();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(gaps[0].cause, super::CoverageGapCause::Omitted);
+        assert_eq!((gaps[0].missing_files, gaps[0].language_files), (2, 50));
+        assert_eq!(gaps[0].reason, "too-large");
+        assert_eq!(
+            gaps[0].governing_setting.as_deref(),
+            Some("`[index] max_file_size`")
+        );
+        assert!(!gaps[0].is_majority());
+        assert_eq!(too_large_rust(10_000, 20).gaps().len(), 1);
+        assert!(too_large_rust(10_000, 19).gaps().is_empty());
+
+        // A manifest written before per-language sources were recorded: no git ignore gap.
+        let legacy: IndexCoverage = serde_json::from_value(serde_json::json!({
+            "discovered": 27, "indexed": 2, "skipped": {"ignored": 25},
+            "by_language": {"rust": {"discovered": 27, "indexed": 2, "skipped": {"ignored": 25}}}
+        }))
+        .unwrap();
+        assert!(legacy.gaps().is_empty());
+
+        // The verdict serializes with its cause as the evidence-id key.
+        let value = serde_json::to_value(&git_ignored_rust(2, 25).gaps()[0]).unwrap();
+        assert_eq!(value["cause"], "git_ignore");
+        assert_eq!(value["missing_files"], 25);
+    }
+
+    #[test]
+    fn coverage_gaps_are_always_reported_and_lower_confidence_only_beside_a_symptom() {
+        let complete = ConfidenceSignalInput {
+            primary_file_count: 3,
+            evidence_count: 12,
+            exact_reference_count: 2,
+            validation_count: 3,
+            validation_with_command_count: 3,
+            negative_evidence_count: 0,
+            allowed_file_count: 3,
+            runtime_signal_count: 1,
+            task_relevance: 1.0,
+            ..Default::default()
+        };
+        let baseline = ConfidenceBreakdown::from_signals(complete.clone());
+        assert_eq!(baseline.overall_enum, Confidence::Exact);
+        assert!(baseline
+            .components
+            .iter()
+            .all(|component| component.signal != "index_coverage"));
+        let git_ignore_gap = git_ignored_rust(2, 25).gaps().remove(0);
+        let omitted_gap = too_large_rust(48, 2).gaps().remove(0);
+
+        // A gap alone is reported, not priced: `Exact` survives a minority and a majority gap.
+        for gap in [omitted_gap.clone(), git_ignore_gap.clone()] {
+            let reported = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+                coverage: CoverageInput::Recorded(vec![gap.clone()]),
+                ..complete.clone()
+            });
+            assert_eq!(reported.overall_enum, Confidence::Exact, "{reported:?}");
+            assert!((reported.overall_score - baseline.overall_score).abs() < f32::EPSILON);
+            assert!(reported.blockers.is_empty(), "{reported:?}");
+            assert!(reported.caveats.contains(&gap.caveat()), "{reported:?}");
+            let component = reported
+                .components
+                .iter()
+                .find(|component| component.signal == "index_coverage")
+                .expect("index_coverage component");
+            assert_eq!(component.evidence_ids, vec![gap.evidence_id()]);
+            assert!(component.weight.abs() < f32::EPSILON);
+            assert!(component.contribution.abs() < f32::EPSILON);
+            assert!((f64::from(component.raw_value) - (1.0 - gap.missing_share())).abs() < 0.001);
+        }
+
+        // A task naming no identifier whose selection is in the language the index mostly
+        // excluded: below `High`, with a blocker naming the gap.
+        let rust_selection = ConfidenceSignalInput {
+            coverage: CoverageInput::Recorded(vec![git_ignore_gap.clone()]),
+            primary_language_keys: vec!["rust".into()],
+            ..complete.clone()
+        };
+        let in_language = ConfidenceBreakdown::from_signals(rust_selection.clone());
+        assert_eq!(in_language.overall_enum, Confidence::Medium);
+        assert!(in_language.overall_score <= 0.74, "{in_language:?}");
+        assert_eq!(
+            in_language.blockers,
+            vec![
+                "the selected context is in a language the index mostly excluded: rust (25 of 27 files, git-ignore)"
+                    .to_string()
+            ]
+        );
+        // A task whose every named identifier the selection spells is capped just the same: the
+        // label follows what the index holds, not how the task was phrased. Before this, the
+        // same repository and selection returned `Exact` for "fix `refresh_session_token`
+        // expiry" and `Medium` for "fix the session expiry bug".
+        let named_and_matched = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            named_anchor_count: 1,
+            ..rust_selection.clone()
+        });
+        assert_eq!(named_and_matched.overall_enum, Confidence::Medium);
+        assert!(
+            named_and_matched.overall_score <= 0.74,
+            "{named_and_matched:?}"
+        );
+        assert_eq!(named_and_matched.blockers, in_language.blockers);
+        // The typed signal `ok preflight` branches on, emitted with the cap and not without it.
+        let has_language_signal = |breakdown: &ConfidenceBreakdown| {
+            breakdown
+                .components
+                .iter()
+                .any(|component| component.signal == COVERAGE_SELECTED_LANGUAGE_SIGNAL)
+        };
+        assert!(has_language_signal(&in_language));
+        assert!(has_language_signal(&named_and_matched));
+
+        // Positive controls: with the gap below the majority share, or in a language the
+        // selection does not use, the cap must not apply at all. If a bug stopped applying the
+        // cap these stay green while the three assertions above turn red, and if a bug applied
+        // it everywhere these turn red instead.
+        for unchanged in [
+            ConfidenceSignalInput {
+                coverage: CoverageInput::Recorded(vec![omitted_gap]),
+                ..rust_selection.clone()
+            },
+            ConfidenceSignalInput {
+                primary_language_keys: vec!["python".into()],
+                ..rust_selection.clone()
+            },
+        ] {
+            let breakdown = ConfidenceBreakdown::from_signals(unchanged);
+            assert_eq!(breakdown.overall_enum, Confidence::Exact, "{breakdown:?}");
+            assert!(breakdown.blockers.is_empty(), "{breakdown:?}");
+            assert!(
+                breakdown
+                    .components
+                    .iter()
+                    .all(|component| component.signal != COVERAGE_SELECTED_LANGUAGE_SIGNAL),
+                "{breakdown:?}"
+            );
+        }
+
+        // The absence symptom beside a majority gap: a named identifier the context does not
+        // spell moves the label from Medium to Low, and the blocker names the exclusion.
+        let partial = ConfidenceSignalInput {
+            named_anchor_count: 2,
+            unmatched_anchors: vec!["reticulate_splines".into()],
+            negative_evidence_count: 1,
+            task_relevance: 0.8,
+            ..complete.clone()
+        };
+        let without_gap = ConfidenceBreakdown::from_signals(partial.clone());
+        assert_eq!(without_gap.overall_enum, Confidence::Medium);
+        let with_gap = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            coverage: CoverageInput::Recorded(vec![git_ignore_gap.clone()]),
+            ..partial
+        });
+        assert_eq!(with_gap.overall_enum, Confidence::Low);
+        assert!(with_gap.overall_score <= 0.50, "{with_gap:?}");
+        assert!(with_gap.blockers.iter().any(|blocker| blocker
+            == "the task may name code in source the index excluded: rust (25 of 27 files, git-ignore)"));
+        // No primary context is the same symptom.
+        let empty = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            coverage: CoverageInput::Recorded(vec![git_ignore_gap.clone()]),
+            ..Default::default()
+        });
+        assert!(empty
+            .blockers
+            .iter()
+            .any(|blocker| blocker
+                .starts_with("the task may name code in source the index excluded")));
+
+        // A hyphenated word may be prose: no coverage cap or blocker, only the 0.60 count cap.
+        let weak = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            unmatched_anchors: vec!["drive-by".into()],
+            weak_anchors: vec!["drive-by".into()],
+            negative_evidence_count: 1,
+            task_relevance: 0.8,
+            coverage: CoverageInput::Recorded(vec![git_ignore_gap.clone()]),
+            ..complete.clone()
+        });
+        assert!(
+            weak.overall_score > 0.50 && weak.overall_score <= 0.60,
+            "{weak:?}"
+        );
+        assert!(weak
+            .blockers
+            .iter()
+            .all(|blocker| !blocker.contains("index")));
+
+        // Caveats attached after scoring: coverage caveats alone still do not cap; any other does.
+        let mut late = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            coverage: CoverageInput::Recorded(vec![git_ignore_gap]),
+            ..complete
+        });
+        late.add_caveats(std::iter::empty(), 2);
+        assert_eq!(late.overall_enum, Confidence::Exact);
+        late.add_caveats(["runtime evidence is unavailable".to_string()], 2);
+        assert_eq!(late.overall_enum, Confidence::High);
+        assert!(late.overall_score <= 0.94);
+    }
+
+    #[test]
+    fn unrecorded_coverage_is_reported_and_caps_like_any_other_caveat() {
+        let complete = ConfidenceSignalInput {
+            primary_file_count: 3,
+            evidence_count: 12,
+            exact_reference_count: 2,
+            validation_count: 3,
+            validation_with_command_count: 3,
+            allowed_file_count: 3,
+            runtime_signal_count: 1,
+            task_relevance: 1.0,
+            ..Default::default()
+        };
+        // A recorded record with no gaps says nothing is missing: unchanged, and `Exact` stands.
+        let recorded = ConfidenceBreakdown::from_signals(complete.clone());
+        assert_eq!(recorded.overall_enum, Confidence::Exact);
+        assert!(recorded.caveats.is_empty(), "{recorded:?}");
+
+        // No record at all is a different fact, and it caps like any other caveat.
+        let unavailable = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            coverage: CoverageInput::Unavailable,
+            ..complete
+        });
+        assert_eq!(unavailable.overall_enum, Confidence::High);
+        assert!(unavailable.overall_score <= 0.94, "{unavailable:?}");
+        assert!(unavailable
+            .caveats
+            .contains(&UNRECORDED_COVERAGE_CAVEAT.to_string()));
+        // It reads as the opposite of a gap caveat rather than as one more gap.
+        assert!(!UNRECORDED_COVERAGE_CAVEAT.starts_with("index coverage: "));
+        assert!(unavailable
+            .components
+            .iter()
+            .all(|component| component.signal != "index_coverage"));
+
+        let item = NegativeEvidence::for_coverage_input("task", &CoverageInput::Unavailable)
+            .expect("unavailable coverage is reported");
+        assert_eq!(item.scope, negative_evidence_scope::COVERAGE);
+        assert!(!item.lowers_confidence());
+        // The probe must not claim an imported snapshot carries no coverage: import republishes
+        // the exporting index's manifest, so it carries whatever that recorded.
+        let probe = item.suggested_next_probe.as_deref().expect("probe");
+        assert!(
+            probe.contains("cross-project index publishes no coverage record"),
+            "{probe}"
+        );
+        assert!(
+            probe.contains("imported snapshot carries whatever the exporting index recorded"),
+            "{probe}"
+        );
+
+        // A read failure is a different fact from an index that published nothing.
+        let unreadable = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            coverage: CoverageInput::Unreadable,
+            ..Default::default()
+        });
+        assert!(unreadable
+            .caveats
+            .contains(&UNREADABLE_COVERAGE_CAVEAT.to_string()));
+        assert_ne!(UNREADABLE_COVERAGE_CAVEAT, UNRECORDED_COVERAGE_CAVEAT);
+        let unreadable_item =
+            NegativeEvidence::for_coverage_input("task", &CoverageInput::Unreadable)
+                .expect("unreadable coverage is reported");
+        assert_eq!(unreadable_item.reason, UNREADABLE_COVERAGE_CAVEAT);
+    }
+
+    #[test]
+    fn gaps_agree_with_the_doctor_coverage_predicates() {
+        // `docs/ranking.md` says the confidence verdict and the doctor's check cannot disagree
+        // about which languages qualify. They share these predicates; this holds them to it.
+        for coverage in [
+            git_ignored_rust(2, 25),
+            git_ignored_rust(20, 20),
+            git_ignored_rust(40, 0),
+            too_large_rust(48, 2),
+            too_large_rust(10_000, 20),
+            IndexCoverage::default(),
+        ] {
+            let gaps = coverage.gaps();
+            let git_ignored = coverage
+                .languages_mostly_excluded_by(SkipSource::GitIgnore)
+                .into_iter()
+                .map(|(language, _, _)| language.to_owned())
+                .collect::<std::collections::BTreeSet<_>>();
+            let omitted = coverage
+                .languages_below_warn_threshold()
+                .into_iter()
+                .map(|(language, _, _)| language.to_owned())
+                .collect::<std::collections::BTreeSet<_>>();
+            let from_gaps = |cause: super::CoverageGapCause| {
+                gaps.iter()
+                    .filter(|gap| gap.cause == cause)
+                    .map(|gap| gap.language.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            assert_eq!(
+                from_gaps(super::CoverageGapCause::GitIgnore),
+                git_ignored,
+                "{coverage:?}"
+            );
+            assert_eq!(
+                from_gaps(super::CoverageGapCause::Omitted),
+                omitted,
+                "{coverage:?}"
+            );
+        }
+    }
+
     #[test]
     fn reconciliation_adds_delta_to_match_surfaced_score() {
         let mut components = vec![ScoreComponent::single(
@@ -5671,6 +6532,8 @@ mod tests {
                 "reticulate_splines".into(),
             ],
             weak_anchors: Vec::new(),
+            coverage: CoverageInput::default(),
+            primary_language_keys: Vec::new(),
         };
         let all_missing = ConfidenceBreakdown::from_signals(base.clone());
         assert_eq!(all_missing.overall_enum, Confidence::Low);
@@ -5763,9 +6626,11 @@ mod tests {
             "boundary",
             "anchor",
             "primary_context",
+            "coverage",
         ]
         .map(item);
-        // Absent exact/runtime/validation/history evidence is priced by its own component.
+        // Absent exact/runtime/validation/history evidence is priced by its own component, and
+        // a coverage gap by the `index_coverage` caps.
         assert_eq!(negative_evidence_signal_count(&items), 2);
     }
 
@@ -5903,6 +6768,8 @@ mod tests {
             named_anchor_count: 0,
             unmatched_anchors: vec!["re-index".into(), "drive-by".into()],
             weak_anchors: vec!["re-index".into(), "drive-by".into()],
+            coverage: CoverageInput::default(),
+            primary_language_keys: Vec::new(),
         };
         let names_identifier_blocker = |breakdown: &ConfidenceBreakdown| -> bool {
             breakdown
