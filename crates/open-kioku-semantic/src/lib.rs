@@ -23,11 +23,21 @@ const SCHEMA_VERSION: u32 = 2;
 const CHUNKER_VERSION: &str = "open-kioku-chunks-v1";
 const EXACT_INDEX_VERSION: &str = "exact-flat-json-v1";
 const HNSW_INDEX_VERSION: &str = PRODUCTION_HNSW_PROFILE;
-/// Vector population beyond which the measured 50K-1M scale evidence
-/// (benchmarks/cc5-ann-scale-evidence) shows recall degradation for the current
-/// production HNSW profile. Queries served by ANN above this population carry an
-/// explicit caveat until the scale-profile decision (issue #328) lands.
+/// Graph population at and above which the measured scale evidence
+/// (benchmarks/cc5-ann-scale-evidence) shows the production HNSW profile's recall degraded:
+/// Recall@10 0.39-0.55 at 300K and 0.24-0.39 at 1M, across all four measured series (clustered
+/// and code-shaped, 384d and 768d, at `expansion_search = 1024`). An ANN answer at or above
+/// this reports best-effort recall; the configured backend is kept, and `exact-flat` stays the
+/// default and the full-recall answer at any size (#328, docs/vector-index.md).
 const ANN_MEASURED_RECALL_CEILING_VECTORS: usize = 300_000;
+/// Graph population below which the same evidence supports this profile as adequate (Recall@10
+/// 0.82-0.92 at 50K). At 100K the four series span 0.65-0.93 — the low end is 768d code-shaped
+/// at 0.6469, which the artifact's own three-column README table omits — and the next measured
+/// point is 300K, so everything between is unmeasured rather than known good. An ANN answer at
+/// or above this population reports that gap; silence would read as adequacy where the measured
+/// low end has already fallen to 0.65, and `semantic.dimensions` is user-configurable, so the
+/// 768d series governs for anyone on a 768-dimension model.
+const ANN_MEASURED_RECALL_ADEQUATE_VECTORS: usize = 100_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticManifest {
@@ -106,6 +116,22 @@ pub struct SemanticIndexReport {
     pub reused_embeddings: usize,
     pub embedded_count: usize,
     pub removed_count: usize,
+}
+
+/// Embedding progress of a semantic index build, reported once the embedding cache has been
+/// consulted and again after every embedded batch. `embedded` of `to_embed` counts the targets
+/// the cache could not reuse; `reused` of `total_targets` came from the cache.
+///
+/// `embedded` counts targets handed to the provider, not vectors accepted: a returned vector
+/// whose length does not match the configured dimensions is dropped afterwards and counted in
+/// the report's `failed_count`. A completion line can therefore read `N/N` while the report
+/// indexes fewer than N.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticIndexProgress {
+    pub embedded: usize,
+    pub to_embed: usize,
+    pub reused: usize,
+    pub total_targets: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -325,21 +351,43 @@ impl<'a> SemanticIndexManager<'a> {
     }
 
     pub fn index(&self) -> Result<SemanticIndexReport> {
-        self.build_and_promote(false)
+        self.index_with_progress(false, &mut |_| {})
     }
 
     pub fn index_with_model_download(&self) -> Result<SemanticIndexReport> {
-        self.build_and_promote(true)
+        self.index_with_progress(true, &mut |_| {})
+    }
+
+    /// Builds or updates the semantic index, reporting embedding progress to `on_progress`.
+    /// Rendering it is the caller's concern; this crate never writes progress itself.
+    ///
+    /// `allow_model_download` is the model-acquisition policy gate, not a convenience flag: the
+    /// CLI sets it only for an explicit `--allow-model-download` and refuses it outright when
+    /// `security.deny_network` is set, so a neural model is never fetched implicitly.
+    pub fn index_with_progress(
+        &self,
+        allow_model_download: bool,
+        on_progress: &mut dyn FnMut(SemanticIndexProgress),
+    ) -> Result<SemanticIndexReport> {
+        self.build_and_promote(allow_model_download, on_progress)
     }
 
     pub fn rebuild(&self) -> Result<SemanticIndexReport> {
-        let _ = fs::remove_dir_all(self.builds_dir());
-        self.build_and_promote(false)
+        self.rebuild_with_progress(false, &mut |_| {})
     }
 
     pub fn rebuild_with_model_download(&self) -> Result<SemanticIndexReport> {
+        self.rebuild_with_progress(true, &mut |_| {})
+    }
+
+    /// Rebuilds the semantic index, reporting embedding progress to `on_progress`.
+    pub fn rebuild_with_progress(
+        &self,
+        allow_model_download: bool,
+        on_progress: &mut dyn FnMut(SemanticIndexProgress),
+    ) -> Result<SemanticIndexReport> {
         let _ = fs::remove_dir_all(self.builds_dir());
-        self.build_and_promote(true)
+        self.build_and_promote(allow_model_download, on_progress)
     }
 
     pub fn clean(&self, include_cache: bool) -> Result<()> {
@@ -534,17 +582,15 @@ impl<'a> SemanticIndexManager<'a> {
                 options,
             )?
         };
-        // Keep our own backend honest: the measured 50K-1M scale evidence
-        // (benchmarks/cc5-ann-scale-evidence) shows recall degradation for the current
-        // production HNSW profile beyond this population. Until the scale-profile
-        // decision lands, an ANN answer at that scale carries the caveat instead of
-        // presenting itself as full-recall retrieval.
-        if backend_is_ann(&selected_backend)
-            && eligible_candidate_count > ANN_MEASURED_RECALL_CEILING_VECTORS
-        {
-            caveats.push(format!(
-                "persistent ANN is serving {eligible_candidate_count} candidates, above the ~{ANN_MEASURED_RECALL_CEILING_VECTORS}-vector range where measured scale evidence shows recall degradation for the current profile; treat results as best-effort recall (see benchmarks/cc5-ann-scale-evidence)"
-            ));
+        // Keyed on the graph, not the allowlist: a filtered ANN search walks the whole graph with
+        // a predicate, so a path scope leaves the traversal — and the recall the evidence
+        // measured — exactly as it was. Scoping must not be able to delete a degradation warning.
+        if let Some(caveat) = ann_scale_caveat(
+            &selected_backend,
+            total_vector_count,
+            eligible_candidate_count,
+        ) {
+            caveats.push(caveat);
         }
         let results = hydrate_hits(self.store, &targets, hits)?;
         Ok(SemanticSearchReport {
@@ -564,7 +610,11 @@ impl<'a> SemanticIndexManager<'a> {
         })
     }
 
-    fn build_and_promote(&self, allow_model_download: bool) -> Result<SemanticIndexReport> {
+    fn build_and_promote(
+        &self,
+        allow_model_download: bool,
+        on_progress: &mut dyn FnMut(SemanticIndexProgress),
+    ) -> Result<SemanticIndexReport> {
         let _ = self.recover_interrupted_promotion();
         let provider = provider_for_config(&self.config, allow_model_download, &self.models_dir())?;
         let descriptor = provider.descriptor();
@@ -633,12 +683,26 @@ impl<'a> SemanticIndexManager<'a> {
             missing_indexes.push(index);
         }
 
+        let to_embed = missing_indexes.len();
+        let total_targets = targets.len();
+        let reused = cache_hits;
+        let progress_at = move |embedded: usize| SemanticIndexProgress {
+            embedded: embedded.min(to_embed),
+            to_embed,
+            reused,
+            total_targets,
+        };
+        on_progress(progress_at(0));
         if !missing_indexes.is_empty() {
             let missing_texts = missing_indexes
                 .iter()
                 .map(|index| targets[*index].text.clone())
                 .collect::<Vec<_>>();
-            let embedded = provider.embed_document_batch(&missing_texts, self.config.batch_size)?;
+            let embedded = provider.embed_document_batch_with_progress(
+                &missing_texts,
+                self.config.batch_size,
+                &mut |count| on_progress(progress_at(count)),
+            )?;
             if embedded.len() != missing_indexes.len() {
                 return Err(OkError::Storage(format!(
                     "embedding provider returned {} vectors for {} inputs",
@@ -912,6 +976,36 @@ fn resolved_backend_name(backend: ResolvedSemanticBackend) -> &'static str {
         ResolvedSemanticBackend::HnswF32 => "usearch-hnsw-f32",
         ResolvedSemanticBackend::HnswBf16 => "usearch-hnsw-bf16",
     }
+}
+
+/// The scale caveat an ANN answer owes at this candidate population, if any.
+///
+/// Two bands, because the evidence has two boundaries: above the ceiling recall is measured as
+/// degraded, and between the adequate population and that ceiling it is not measured at all.
+/// Reporting only the first would let silence in the second read as adequacy; collapsing them
+/// into one would report the unmeasured band as known-bad, which is the same overclaim
+/// reversed. The configured backend is kept either way — full recall at any scale is the
+/// `exact-flat` default. Split out of the search path so both boundaries are testable without
+/// building a 300K-vector index.
+fn ann_scale_caveat(
+    selected_backend: &str,
+    total_vector_count: usize,
+    eligible_candidate_count: usize,
+) -> Option<String> {
+    if !backend_is_ann(selected_backend) {
+        return None;
+    }
+    if total_vector_count >= ANN_MEASURED_RECALL_CEILING_VECTORS {
+        return Some(format!(
+            "persistent ANN is traversing a {total_vector_count}-vector graph ({eligible_candidate_count} eligible after filters), at or above the ~{ANN_MEASURED_RECALL_CEILING_VECTORS}-vector population where measured scale evidence shows recall degradation for the current profile; treat results as best-effort recall (see benchmarks/cc5-ann-scale-evidence)"
+        ));
+    }
+    if total_vector_count >= ANN_MEASURED_RECALL_ADEQUATE_VECTORS {
+        return Some(format!(
+            "persistent ANN is traversing a {total_vector_count}-vector graph ({eligible_candidate_count} eligible after filters), at or above the ~{ANN_MEASURED_RECALL_ADEQUATE_VECTORS}-vector population the measured scale evidence supports and below the ~{ANN_MEASURED_RECALL_CEILING_VECTORS}-vector population it measures as degraded; recall for this profile is unmeasured in that range (see benchmarks/cc5-ann-scale-evidence)"
+        ));
+    }
+    None
 }
 
 fn backend_is_ann(backend: &str) -> bool {
@@ -1638,6 +1732,53 @@ mod tests {
     };
     use open_kioku_storage::{IndexData, MetadataStore};
     use open_kioku_storage_sqlite::SqliteStore;
+
+    #[test]
+    fn ann_scale_caveat_separates_measured_degradation_from_the_unmeasured_band() {
+        // exact-flat scores every vector, so no population makes it best-effort.
+        assert!(ann_scale_caveat("exact-flat", 5_000_000, 5_000_000).is_none());
+        // Below the population the evidence supports, an ANN answer owes nothing.
+        assert!(ann_scale_caveat(
+            "usearch-hnsw-f32",
+            ANN_MEASURED_RECALL_ADEQUATE_VECTORS - 1,
+            ANN_MEASURED_RECALL_ADEQUATE_VECTORS - 1
+        )
+        .is_none());
+
+        // 100K is itself measured (0.65-0.93 across the four series), so it is where silence
+        // would start implying an adequacy the evidence does not establish.
+        let at_adequate = ann_scale_caveat(
+            "usearch-hnsw-f32",
+            ANN_MEASURED_RECALL_ADEQUATE_VECTORS,
+            ANN_MEASURED_RECALL_ADEQUATE_VECTORS,
+        )
+        .expect("the adequate boundary owes a caveat");
+        assert!(at_adequate.contains("unmeasured"), "{at_adequate}");
+
+        let unmeasured = ann_scale_caveat("usearch-hnsw-f32", 150_000, 150_000)
+            .expect("the unmeasured band must report itself");
+        assert!(unmeasured.contains("unmeasured"), "{unmeasured}");
+        assert!(!unmeasured.contains("best-effort"), "{unmeasured}");
+
+        // 300K is a measured point (0.39-0.55), so it is degraded, not unmeasured.
+        let at_ceiling = ann_scale_caveat(
+            "usearch-hnsw-f32",
+            ANN_MEASURED_RECALL_CEILING_VECTORS,
+            ANN_MEASURED_RECALL_CEILING_VECTORS,
+        )
+        .expect("the ceiling owes a caveat");
+        assert!(at_ceiling.contains("best-effort recall"), "{at_ceiling}");
+        assert!(!at_ceiling.contains("unmeasured"), "{at_ceiling}");
+
+        // A filtered query walks the same graph, so a path scope must not be able to downgrade a
+        // measured degradation into a claim that recall here is unknown.
+        let scoped = ann_scale_caveat("usearch-hnsw-f32", 1_000_000, 150_000)
+            .expect("a scoped query over a large graph still owes the degradation caveat");
+        assert!(scoped.contains("best-effort recall"), "{scoped}");
+        assert!(!scoped.contains("unmeasured"), "{scoped}");
+        assert!(scoped.contains("1000000"), "{scoped}");
+        assert!(scoped.contains("150000"), "{scoped}");
+    }
 
     #[test]
     fn disabled_config_returns_no_provider() {
