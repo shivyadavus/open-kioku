@@ -1,3 +1,4 @@
+use crate::imports::RustImportEdgeTargets;
 use open_kioku_core::{
     identity, AnalysisFact, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType,
     GraphNodeType, Import, ImportResolution, Language, QualityNote, QualityNoteKind,
@@ -59,6 +60,7 @@ pub fn resolve_imports(
     files: &[File],
     symbols: &[Symbol],
     imports: &[Import],
+    rust_targets: &RustImportEdgeTargets,
 ) -> Result<ResolverReport> {
     let file_index = FileIndex::new(files, symbols)?;
     let manifests = ManifestIndex::discover(root)?;
@@ -75,7 +77,7 @@ pub fn resolve_imports(
         let Some(source_file) = files_by_id.get(&import.file_id) else {
             continue;
         };
-        let resolution = resolve_one(source_file, import, &file_index, &manifests);
+        let resolution = resolve_one(source_file, import, &file_index, &manifests, rust_targets);
         if !resolution.caveats.is_empty() {
             report.quality_notes.push(QualityNote::new(
                 QualityNoteKind::ImportResolverCaveat,
@@ -105,6 +107,7 @@ fn resolve_one(
     import: &Import,
     files: &FileIndex,
     manifests: &ManifestIndex,
+    rust_targets: &RustImportEdgeTargets,
 ) -> ImportResolution {
     let imported = import.imported.trim();
     if is_builtin(&source_file.language, imported) {
@@ -117,6 +120,37 @@ fn resolve_one(
             "builtin",
             vec![],
         );
+    }
+
+    // A path of the importing file's own crate is answered by that crate's declared module tree
+    // or not at all. Matching its text against repository paths, or falling back to the crate
+    // root, proved edges into a file declaring nothing the path names. Only a file belonging to a
+    // discovered package is covered: a tree with no manifest has no crate root to resolve
+    // `crate::` against, and failing closed there would erase every in-crate edge it has.
+    if source_file.language == Language::Rust && rust_targets.is_in_crate(&import.file_id, imported)
+    {
+        return match rust_targets.target(&import.file_id, imported) {
+            Some(edge) => resolution(
+                import,
+                ResolutionStatus::Resolved,
+                Some(edge.file.clone()),
+                // The edge is this file's dependency on that module. Naming a symbol would make it
+                // a `REFERENCES` edge, which resolution proves from the use site instead.
+                None,
+                Confidence::High,
+                edge.strategy,
+                vec![],
+            ),
+            None => resolution(
+                import,
+                ResolutionStatus::Unresolved,
+                None,
+                None,
+                Confidence::Low,
+                "rust-module-path-unresolved",
+                vec!["no module declared by the importing file's own crate holds this path".into()],
+            ),
+        };
     }
 
     let mut candidates = Vec::new();
@@ -137,12 +171,7 @@ fn resolve_one(
     if matches!(source_file.language, Language::Go) {
         candidates.extend(resolve_go_module(imported, files, manifests));
     }
-    candidates.extend(resolve_language_module(
-        source_file,
-        imported,
-        files,
-        manifests,
-    ));
+    candidates.extend(resolve_language_module(source_file, imported, files));
 
     candidates.sort_by(|a, b| {
         a.strategy
@@ -232,6 +261,12 @@ fn analysis_fact_for_resolution(
     let (edge_type, target_kind, target, message) = match &resolution.status {
         ResolutionStatus::Resolved => {
             let target_file = files.by_id(resolution.target_file.as_ref()?)?;
+            // A file importing itself is no dependency: `mod tests { use super::*; }` names the
+            // module the file already is. The path is resolved, so it is not an unresolved import
+            // either, and there is nothing to record.
+            if target_file.id == source_file.id {
+                return None;
+            }
             (
                 if resolution.target_symbol.is_some() {
                     GraphEdgeType::References
@@ -658,36 +693,30 @@ fn resolve_language_module(
     source_file: &File,
     imported: &str,
     files: &FileIndex,
-    manifests: &ManifestIndex,
 ) -> Vec<Candidate> {
     match source_file.language {
         Language::Rust => {
+            // A path of a file that belongs to a package is answered by the module tree before
+            // it reaches here. What is left is a path in a tree with no manifest, where the
+            // repository-root `src/` is the only crate root there is, or a path naming another
+            // crate. A Rust module is `x.rs` or `x/mod.rs` — never a file inside `x/`, which made
+            // `use crate::auth;` ambiguous wherever `auth.rs` and `auth/keys.rs` both existed.
+            if !imported.contains("::") {
+                return Vec::new();
+            }
             let module = imported
                 .strip_prefix("crate::")
                 .or_else(|| imported.strip_prefix("self::"))
-                .unwrap_or(imported)
-                .replace("::", "/");
-            let mut candidates = if module == imported && !imported.contains("::") {
-                Vec::new()
-            } else {
-                files
-                    .matching_files(&Path::new("src").join(module))
-                    .into_iter()
-                    .map(|mut candidate| {
-                        candidate.strategy = "rust-module".into();
-                        candidate
-                    })
-                    .collect()
-            };
-            if candidates.is_empty() && is_rust_current_crate_import(imported, manifests) {
-                candidates.extend(files.matching_files(Path::new("src/lib")).into_iter().map(
-                    |mut candidate| {
-                        candidate.strategy = "rust-crate-root".into();
-                        candidate
-                    },
-                ));
-            }
-            candidates
+                .unwrap_or(imported);
+            files
+                .matching_files(&Path::new("src").join(module.replace("::", "/")))
+                .into_iter()
+                .filter(|candidate| candidate.strategy != "repo-path-directory")
+                .map(|mut candidate| {
+                    candidate.strategy = "rust-module".into();
+                    candidate
+                })
+                .collect()
         }
         Language::Python => files
             .matching_files(Path::new(&imported.replace('.', "/")))
@@ -713,22 +742,6 @@ fn resolve_language_module(
         }
         _ => Vec::new(),
     }
-}
-
-fn is_rust_current_crate_import(imported: &str, manifests: &ManifestIndex) -> bool {
-    if imported.starts_with("crate::")
-        || imported.starts_with("self::")
-        || imported.starts_with("super::")
-    {
-        return true;
-    }
-    let Some(prefix) = imported.split("::").next() else {
-        return false;
-    };
-    manifests
-        .packages
-        .iter()
-        .any(|package| package.replace('-', "_") == prefix)
 }
 
 fn candidate_paths(path: &Path) -> Vec<PathBuf> {
@@ -876,8 +889,27 @@ fn confidence_label(confidence: Confidence) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imports::{RustImportEdge, RUST_MODULE_PATH_STRATEGY};
     use open_kioku_core::{LineRange, RepositoryId, SymbolKind};
     use tempfile::TempDir;
+
+    /// `super::resolve_imports` with no Rust module-tree targets, which is what a resolver holding
+    /// no indexed module tree sees: every path of the importing file's own crate is unresolved. A
+    /// test that needs a target records one and calls `super::resolve_imports` directly.
+    fn resolve_imports(
+        root: &Path,
+        files: &[File],
+        symbols: &[Symbol],
+        imports: &[Import],
+    ) -> Result<ResolverReport> {
+        super::resolve_imports(
+            root,
+            files,
+            symbols,
+            imports,
+            &RustImportEdgeTargets::default(),
+        )
+    }
 
     fn file(id: &str, path: &str, language: Language) -> File {
         File {
@@ -1037,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_rust_workspace_module_import() {
+    fn rust_module_imports_resolve_to_the_module_tree_target() {
         let tmp = TempDir::new().unwrap();
         fs::write(
             tmp.path().join("Cargo.toml"),
@@ -1048,18 +1080,37 @@ mod tests {
             file("lib", "src/lib.rs", Language::Rust),
             file("utils", "src/utils.rs", Language::Rust),
         ];
-        let report =
-            resolve_imports(tmp.path(), &files, &[], &[import("lib", "crate::utils")]).unwrap();
+        let mut targets = RustImportEdgeTargets::default();
+        targets.record(
+            FileId::new("lib"),
+            "crate::utils",
+            Some(RustImportEdge {
+                file: FileId::new("utils"),
+                strategy: RUST_MODULE_PATH_STRATEGY,
+            }),
+        );
+        let report = super::resolve_imports(
+            tmp.path(),
+            &files,
+            &[],
+            &[import("lib", "crate::utils")],
+            &targets,
+        )
+        .unwrap();
 
         assert_eq!(report.resolutions[0].status, ResolutionStatus::Resolved);
         assert_eq!(
             report.resolutions[0].target_file,
             Some(FileId::new("utils"))
         );
+        assert_eq!(report.resolutions[0].strategy, RUST_MODULE_PATH_STRATEGY);
+        assert_eq!(report.resolutions[0].confidence, Confidence::High);
     }
 
     #[test]
-    fn resolves_rust_current_crate_symbol_imports_at_the_crate_root() {
+    fn rust_paths_of_the_importers_own_crate_stay_unresolved_without_a_module_tree_target() {
+        // The crate root used to absorb every unmatched path of its own crate at High confidence
+        // with a binding proof, whether or not it declared anything the path named.
         let tmp = TempDir::new().unwrap();
         fs::write(
             tmp.path().join("Cargo.toml"),
@@ -1071,26 +1122,85 @@ mod tests {
             file("auth", "src/auth.rs", Language::Rust),
             file("flow", "tests/auth_flow.rs", Language::Rust),
         ];
+        let imports = vec![
+            import("auth", "crate::RequestContext"),
+            import("auth", "super::*"),
+            import("flow", "demo_crate::auth"),
+        ];
+        // The module tree examined each path and could answer none of them.
+        let mut targets = RustImportEdgeTargets::default();
+        for row in &imports {
+            targets.record(row.file_id.clone(), &row.imported, None);
+        }
+        let report = super::resolve_imports(tmp.path(), &files, &[], &imports, &targets).unwrap();
+
+        for resolution in &report.resolutions {
+            assert_eq!(
+                resolution.status,
+                ResolutionStatus::Unresolved,
+                "`{}`",
+                resolution.import.imported
+            );
+            assert_eq!(
+                resolution.target_file, None,
+                "`{}`",
+                resolution.import.imported
+            );
+            assert_eq!(resolution.confidence, Confidence::Low);
+        }
+        assert!(report
+            .quality_notes
+            .iter()
+            .any(|note| note.message.contains("crate::RequestContext")));
+    }
+
+    #[test]
+    fn rust_imports_in_a_tree_with_no_manifest_keep_repository_path_matching() {
+        // A file in no discovered package has no crate root to resolve `crate::` against. Failing
+        // closed there erased every in-crate import edge of a tree without a `Cargo.toml`, and
+        // took the architecture policy checks' dependency edges with it.
+        let tmp = TempDir::new().unwrap();
+        let files = vec![
+            file("domain", "src/domain/mod.rs", Language::Rust),
+            file("internal", "src/api/internal/mod.rs", Language::Rust),
+        ];
         let report = resolve_imports(
             tmp.path(),
             &files,
             &[],
-            &[
-                import("auth", "crate::RequestContext"),
-                import("auth", "super::*"),
-                import("flow", "demo_crate::{auth, handle_login}"),
-            ],
+            &[import("domain", "crate::api::internal")],
         )
         .unwrap();
 
-        assert!(report
-            .resolutions
-            .iter()
-            .all(|resolution| resolution.status == ResolutionStatus::Resolved));
-        assert!(report
-            .resolutions
-            .iter()
-            .all(|resolution| resolution.target_file == Some(FileId::new("lib"))));
+        assert_eq!(report.resolutions[0].status, ResolutionStatus::Resolved);
+        assert_eq!(
+            report.resolutions[0].target_file,
+            Some(FileId::new("internal"))
+        );
+        assert_eq!(report.resolutions[0].strategy, "rust-module");
+    }
+
+    #[test]
+    fn rust_module_imports_never_match_a_file_inside_the_directory() {
+        // `use auth::keys;` names a module, which is `keys.rs` or `keys/mod.rs`. Matching every
+        // file inside `auth/` made an import of the directory itself ambiguous instead.
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers=[\".\"]",
+        )
+        .unwrap();
+        let files = vec![
+            file("auth", "src/auth.rs", Language::Rust),
+            file("keys", "src/auth/keys.rs", Language::Rust),
+            file("entry", "src/entry.rs", Language::Rust),
+        ];
+        let report =
+            resolve_imports(tmp.path(), &files, &[], &[import("entry", "auth::keys")]).unwrap();
+
+        assert_eq!(report.resolutions[0].status, ResolutionStatus::Resolved);
+        assert_eq!(report.resolutions[0].target_file, Some(FileId::new("keys")));
+        assert_eq!(report.resolutions[0].strategy, "rust-module");
     }
 
     #[test]

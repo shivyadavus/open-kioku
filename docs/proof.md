@@ -44,8 +44,8 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | --- | ---: |
 | Mode | `full` |
 | Analysis semantics | `Compatible` |
-| Stored semantics fingerprint | `199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d` |
-| Current semantics fingerprint | `199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d` |
+| Stored semantics fingerprint | `f009a1581917f9a6eba790501d8394d0aa941f61cd99022f40cf0112bc1f520b` |
+| Current semantics fingerprint | `f009a1581917f9a6eba790501d8394d0aa941f61cd99022f40cf0112bc1f520b` |
 | Graph rebuild required | `false` |
 | Files | 5 |
 | Symbols | 8 |
@@ -57,16 +57,16 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | Imports | 5 |
 | SCIP indexes imported | 0 |
 | SCIP exact references | 0 |
-| Static analysis facts | 35 |
+| Static analysis facts | 34 |
 
-Indexed at `2026-09-21 22:20:49.005117 UTC`.
+Indexed at `2026-09-22 00:22:18.061434 UTC`.
 
 Build systems: `cargo`.
 
 Local signal notes:
 - build systems detected: cargo
-- language static analysis facts detected: 35
-- import resolver facts detected: 4
+- language static analysis facts detected: 34
+- import resolver facts detected: 3
 - symbol registry facts detected: 24
 - complexity/similarity relationship facts detected: 7
 
@@ -180,9 +180,9 @@ Quality notes (204): scip: 1, symbol_registry_caveat: 138, symbol_registry_unres
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
-| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-21 22:20:49.005117 UTC |
+| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-22 00:22:18.061434 UTC |
 | `pass` | `graph` | relationship graph present |
-| `pass` | `analysis-semantics` | compatible; fingerprint 199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d |
+| `pass` | `analysis-semantics` | compatible; fingerprint f009a1581917f9a6eba790501d8394d0aa941f61cd99022f40cf0112bc1f520b |
 | `pass` | `generations` | legacy layout (adopts the generation layout on the next `ok index`) |
 | `pass` | `semantic-lifecycle` | semantic search is disabled in ok.toml (explicit local opt-in) |
 | `warn` | `quality` | SCIP exact references unavailable; 2 tests, 5 imports indexed |
@@ -246,7 +246,7 @@ target/debug/ok setup audit /tmp/open-kioku-proof --markdown
 | `pass` | `build` | detected cargo | None |
 | `pass` | `tests` | 2 indexed test target(s) | None |
 | `pass` | `imports` | 5 indexed import edge(s) | None |
-| `pass` | `static` | 35 language-specific static analysis fact(s) | None |
+| `pass` | `static` | 34 language-specific static analysis fact(s) | None |
 | `warn` | `git-history` | 0 git co-change fact(s) from local history | Keep repository history available and enable `[history].enabled = true`, then rerun `ok index .`. |
 | `pass` | `validation` | indexed validation candidates available | None |
 
