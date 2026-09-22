@@ -37,6 +37,7 @@ open-kioku-graph = { version = "4.0.0", path = "../open-kioku-graph" }
 open-kioku-git = { version = "4.0.0", path = "../open-kioku-git" }
 open-kioku-impact = { version = "4.0.0", path = "../open-kioku-impact" }
 open-kioku-ingest = { version = "4.0.0", path = "../open-kioku-ingest" }
+open-kioku-languages = { version = "4.0.0", path = "../open-kioku-languages" }
 open-kioku-mcp = { version = "4.0.0", path = "../open-kioku-mcp" }
 open-kioku-memory = { version = "4.0.0", path = "../open-kioku-memory" }
 open-kioku-patch = { version = "4.0.0", path = "../open-kioku-patch" }
@@ -55,7 +56,7 @@ serde_json.workspace = true
 # `backup`: `ok snapshot export --quality fast` copies the index with the online backup API.
 rusqlite = { workspace = true, features = ["backup"] }
 sha2.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 toml = "0.8"
 tracing-subscriber.workspace = true
 walkdir.workspace = true

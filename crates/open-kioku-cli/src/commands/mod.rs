@@ -1185,24 +1185,38 @@ pub async fn run_cli() -> anyhow::Result<()> {
         Command::Contract { command } => {
             handle_contract_command(cli.json, &repo, command)?;
         }
-        Command::Bench(args) => {
-            let min_precision = args.quality_min_precision_at_1;
-            let report = run_bench(args)?;
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_bench_report(&report);
-            }
-            if let Some(quality) = &report.quality {
-                if quality.precision_at_1 < min_precision {
-                    anyhow::bail!(
-                        "quality precision@1 {:.3} is below required {:.3}",
-                        quality.precision_at_1,
-                        min_precision
-                    );
+        Command::Bench(mut args) => match args.command.take() {
+            Some(BenchCommand::SelfHistory(self_args)) => {
+                let self_repo = resolve_repo(&repo, self_args.path.clone());
+                let report = run_bench_self_until_interrupted(self_repo, self_args).await?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_bench_self_report(&report);
+                }
+                if let Some(reason) = report.gate.metrics_suppressed.as_deref() {
+                    anyhow::bail!("bench self published no metrics: {reason}");
                 }
             }
-        }
+            None => {
+                let min_precision = args.quality_min_precision_at_1;
+                let report = run_bench(args)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_bench_report(&report);
+                }
+                if let Some(quality) = &report.quality {
+                    if quality.precision_at_1 < min_precision {
+                        anyhow::bail!(
+                            "quality precision@1 {:.3} is below required {:.3}",
+                            quality.precision_at_1,
+                            min_precision
+                        );
+                    }
+                }
+            }
+        },
         Command::WorkflowBench(args) => {
             let min_context_recall = args.min_context_recall;
             let min_verification_accuracy = args.min_verification_accuracy;

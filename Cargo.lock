@@ -2568,6 +2568,7 @@ dependencies = [
  "open-kioku-graph",
  "open-kioku-impact",
  "open-kioku-ingest",
+ "open-kioku-languages",
  "open-kioku-mcp",
  "open-kioku-memory",
  "open-kioku-patch",

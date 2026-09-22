@@ -55,9 +55,22 @@ fn build_context_pack(
     task: &str,
     limit: usize,
 ) -> anyhow::Result<open_kioku_core::ContextPack> {
-    let search_dir = default_index_dir(repo);
     let config = OkConfig::load_from_repo(repo)?;
-    let mut ranking_options = ranking_options_for_repo(repo)?;
+    build_context_pack_with_config(repo, store, task, limit, &config)
+}
+
+/// `build_context_pack` with the configuration supplied by the caller. `ok bench self` passes
+/// the benchmarked repository's configuration for a base checkout, whose own `ok.toml` is
+/// whatever that commit tracked, if anything.
+fn build_context_pack_with_config(
+    repo: &Path,
+    store: &SqliteStore,
+    task: &str,
+    limit: usize,
+    config: &OkConfig,
+) -> anyhow::Result<open_kioku_core::ContextPack> {
+    let search_dir = default_index_dir(repo);
+    let mut ranking_options = open_kioku_context::search::ranking_options(&config.ranking);
     ranking_options.query = Some(task.into());
     let builder = ContextPackBuilder::new(store as &dyn OkStore)
         .with_history_store(Some(store))
