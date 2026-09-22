@@ -288,6 +288,173 @@ fn report_index_stage(
     }
 }
 
+const SEMANTIC_PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Renders semantic embedding progress on stderr so stdout stays the report. An interactive
+/// stderr gets one line redrawn in place; anything else gets whole lines, where carriage
+/// returns would only garble the capture. "Interactive" is `is_terminal()` minus the two
+/// conventional opt-outs, because a CI job that allocates a PTY is a terminal by that test and
+/// is exactly where a redrawn line reads worst.
+struct SemanticProgressReporter {
+    phase: &'static str,
+    started_at: Instant,
+    last_emitted_at: Option<Instant>,
+    terminal: bool,
+    line_open: bool,
+    finished: bool,
+}
+
+impl SemanticProgressReporter {
+    fn new(phase: &'static str) -> Self {
+        // NO_COLOR is honoured only when non-empty, which is what the convention requires: an
+        // empty value is not an opt-out.
+        let opted_out = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+            || std::env::var("TERM").is_ok_and(|term| term == "dumb");
+        Self {
+            phase,
+            started_at: Instant::now(),
+            last_emitted_at: None,
+            terminal: std::io::stderr().is_terminal() && !opted_out,
+            line_open: false,
+            finished: false,
+        }
+    }
+
+    fn observe(&mut self, progress: SemanticIndexProgress) {
+        if self.finished {
+            return;
+        }
+        let now = Instant::now();
+        let finished = progress.embedded >= progress.to_embed;
+        if !semantic_progress_is_due(self.last_emitted_at, now, finished) {
+            return;
+        }
+        self.last_emitted_at = Some(now);
+        self.finished = finished;
+        let line = semantic_progress_line(self.phase, progress, self.started_at.elapsed());
+        if self.terminal {
+            eprint!("\r\x1b[2K{line}");
+            if finished {
+                eprintln!();
+            }
+            self.line_open = !finished;
+        } else {
+            eprintln!("{line}");
+        }
+    }
+}
+
+impl Drop for SemanticProgressReporter {
+    // A build that fails mid-embedding must not glue its error onto a half-drawn line.
+    fn drop(&mut self) {
+        if self.line_open {
+            eprintln!();
+        }
+    }
+}
+
+/// Whether a progress update earns a line: the first one and the last one always do, and the
+/// rest are rate-limited to one per [`SEMANTIC_PROGRESS_INTERVAL`]. Split from `observe` so the
+/// cadence is testable without a clock or a terminal.
+fn semantic_progress_is_due(
+    last_emitted_at: Option<Instant>,
+    now: Instant,
+    finished: bool,
+) -> bool {
+    finished
+        || last_emitted_at.is_none_or(|last| now.duration_since(last) >= SEMANTIC_PROGRESS_INTERVAL)
+}
+
+fn semantic_progress_line(
+    phase: &str,
+    progress: SemanticIndexProgress,
+    elapsed: Duration,
+) -> String {
+    let SemanticIndexProgress {
+        embedded,
+        to_embed,
+        reused,
+        total_targets,
+    } = progress;
+    let elapsed = elapsed.as_secs_f64();
+    if to_embed == 0 {
+        return format!(
+            "semantic[{phase}] nothing to embed, reused={reused}/{total_targets}, elapsed={elapsed:.1}s"
+        );
+    }
+    let percent = (embedded as f64 / to_embed as f64) * 100.0;
+    format!(
+        "semantic[{phase}] {embedded}/{to_embed} targets embedded ({percent:.1}%), reused={reused}/{total_targets}, elapsed={elapsed:.1}s"
+    )
+}
+
+#[cfg(test)]
+mod semantic_progress_tests {
+    use super::*;
+
+    #[test]
+    fn semantic_progress_emits_first_and_last_and_rate_limits_between() {
+        let start = Instant::now();
+        // The first update always prints, which is what makes a long run say something early.
+        assert!(semantic_progress_is_due(None, start, false));
+        // Inside the interval, an unfinished update is suppressed.
+        assert!(!semantic_progress_is_due(
+            Some(start),
+            start + Duration::from_millis(1_999),
+            false
+        ));
+        // At the interval it prints again.
+        assert!(semantic_progress_is_due(
+            Some(start),
+            start + SEMANTIC_PROGRESS_INTERVAL,
+            false
+        ));
+        // Completion is never rate-limited, so the final line cannot be swallowed by a build
+        // that finishes inside the interval — which is every small repository.
+        assert!(semantic_progress_is_due(
+            Some(start),
+            start + Duration::from_millis(1),
+            true
+        ));
+    }
+
+    #[test]
+    fn semantic_progress_line_states_embedded_of_total_reused_and_elapsed() {
+        let line = semantic_progress_line(
+            "index",
+            SemanticIndexProgress {
+                embedded: 512,
+                to_embed: 4_096,
+                reused: 380,
+                total_targets: 4_476,
+            },
+            Duration::from_millis(41_300),
+        );
+        assert_eq!(
+            line,
+            "semantic[index] 512/4096 targets embedded (12.5%), reused=380/4476, elapsed=41.3s"
+        );
+    }
+
+    #[test]
+    fn semantic_progress_line_says_when_every_target_was_reused() {
+        let line = semantic_progress_line(
+            "rebuild",
+            SemanticIndexProgress {
+                embedded: 0,
+                to_embed: 0,
+                reused: 12,
+                total_targets: 12,
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(
+            line,
+            "semantic[rebuild] nothing to embed, reused=12/12, elapsed=0.0s"
+        );
+    }
+}
+
 fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
     let args = vec![
         "mcp".to_string(),

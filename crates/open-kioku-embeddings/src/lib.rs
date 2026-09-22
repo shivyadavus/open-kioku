@@ -44,6 +44,28 @@ pub trait EmbeddingProvider: Send + Sync {
             .collect()
     }
 
+    /// Embeds like [`Self::embed_document_batch`], calling `on_embedded` with the cumulative
+    /// number of embedded inputs after each batch.
+    ///
+    /// The default embeds `batch_size` windows in input order, which is a behaviour change for
+    /// an implementation whose `embed_document_batch` would otherwise consume the whole input
+    /// in one call: it will see one call per window instead. Override this method to report
+    /// progress without changing batching. The in-tree neural provider does, so its
+    /// length-sorted batching is unaffected by asking for progress.
+    fn embed_document_batch_with_progress(
+        &self,
+        inputs: &[String],
+        batch_size: usize,
+        on_embedded: &mut dyn FnMut(usize),
+    ) -> Result<Vec<Vec<f32>>> {
+        let mut vectors = Vec::with_capacity(inputs.len());
+        for window in inputs.chunks(batch_size.max(1)) {
+            vectors.extend(self.embed_document_batch(window, batch_size)?);
+            on_embedded(vectors.len());
+        }
+        Ok(vectors)
+    }
+
     fn descriptor(&self) -> EmbeddingProviderDescriptor;
 }
 
@@ -289,10 +311,16 @@ impl FastEmbedEmbeddingProvider {
         })
     }
 
-    fn embed_inputs(&self, inputs: &[String], batch_size: usize) -> Result<Vec<Vec<f32>>> {
+    fn embed_inputs(
+        &self,
+        inputs: &[String],
+        batch_size: usize,
+        on_embedded: &mut dyn FnMut(usize),
+    ) -> Result<Vec<Vec<f32>>> {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
+        let mut embedded_count = 0usize;
         let vectors = match &self.backend {
             NeuralBackend::Qwen3(inner) => {
                 let model = inner.lock().map_err(|_| {
@@ -311,6 +339,8 @@ impl FastEmbedEmbeddingProvider {
                     for (&index, vector) in batch.iter().zip(embedded) {
                         vectors[index] = Some(vector);
                     }
+                    embedded_count += batch.len();
+                    on_embedded(embedded_count);
                 }
                 vectors
                     .into_iter()
@@ -347,6 +377,8 @@ impl FastEmbedEmbeddingProvider {
                     for (&index, vector) in group.iter().zip(embedded) {
                         vectors[index] = Some(vector);
                     }
+                    embedded_count += group.len();
+                    on_embedded(embedded_count);
                 }
                 vectors
                     .into_iter()
@@ -374,21 +406,30 @@ impl EmbeddingProvider for FastEmbedEmbeddingProvider {
         } else {
             input.to_string()
         };
-        let mut vectors = self.embed_inputs(&[prepared], 1)?;
+        let mut vectors = self.embed_inputs(&[prepared], 1, &mut |_| {})?;
         vectors.pop().ok_or_else(|| {
             OkError::Unsupported("local neural embedding returned no query vector".into())
         })
     }
 
     fn embed_document(&self, input: &str) -> Result<Vec<f32>> {
-        let mut vectors = self.embed_inputs(&[input.to_string()], 1)?;
+        let mut vectors = self.embed_inputs(&[input.to_string()], 1, &mut |_| {})?;
         vectors.pop().ok_or_else(|| {
             OkError::Unsupported("local neural embedding returned no document vector".into())
         })
     }
 
     fn embed_document_batch(&self, inputs: &[String], batch_size: usize) -> Result<Vec<Vec<f32>>> {
-        self.embed_inputs(inputs, batch_size.min(self.batch_size).max(1))
+        self.embed_inputs(inputs, batch_size.min(self.batch_size).max(1), &mut |_| {})
+    }
+
+    fn embed_document_batch_with_progress(
+        &self,
+        inputs: &[String],
+        batch_size: usize,
+        on_embedded: &mut dyn FnMut(usize),
+    ) -> Result<Vec<Vec<f32>>> {
+        self.embed_inputs(inputs, batch_size.min(self.batch_size).max(1), on_embedded)
     }
 
     fn descriptor(&self) -> EmbeddingProviderDescriptor {
@@ -602,6 +643,20 @@ mod tests {
         assert_eq!(first, second);
         let magnitude = first.iter().map(|value| value * value).sum::<f32>().sqrt();
         assert!((magnitude - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn default_batch_progress_reports_cumulative_counts_without_changing_vectors() {
+        let provider = LocalHashEmbeddingProvider::new(32).unwrap();
+        let inputs = ["alpha", "beta", "gamma", "delta", "epsilon"]
+            .map(String::from)
+            .to_vec();
+        let mut reported = Vec::new();
+        let vectors = provider
+            .embed_document_batch_with_progress(&inputs, 2, &mut |count| reported.push(count))
+            .unwrap();
+        assert_eq!(reported, vec![2, 4, 5]);
+        assert_eq!(vectors, provider.embed_document_batch(&inputs, 2).unwrap());
     }
 
     #[test]

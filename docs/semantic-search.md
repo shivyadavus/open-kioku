@@ -16,6 +16,8 @@ ok search --hybrid --explain-ranking "session token flow"
 
 `ok semantic status --json` reports the provider, selected model, dimensions, vector count, stale count, failed count, disk usage, resolved backend, `ann_active`, and `ann_profile`. When `semantic.backend = "auto"`, a ready status reports `exact-flat` or `usearch-hnsw-f32` rather than merely echoing `auto`, so CLI and MCP callers can see whether ANN is active and which measured HNSW profile produced the index.
 
+`ok semantic index` and `ok semantic rebuild` report embedding progress on stderr: once the embedding cache has been checked, then at most every two seconds, then when embedding finishes. Each line gives the targets (chunks and symbols) embedded so far out of those the cache could not reuse, the reused count out of all targets, and the elapsed time, for example `semantic[index] 512/4096 targets embedded (12.5%), reused=380/4476, elapsed=41.3s`. An interactive terminal gets one line redrawn in place; redirected stderr, and a terminal where `NO_COLOR` is set to a non-empty value or `TERM=dumb`, get whole lines with no carriage returns. Standard output is unchanged, so `--json` output still parses. Embeddings are reused by content hash: a run with no source change embeds nothing, and after an edit only targets whose text changed are embedded.
+
 ## Vector backend selection
 
 `exact-flat` is the correctness oracle and remains the default backend. It is recommended for small corpora and regression testing because it evaluates every stored vector.
