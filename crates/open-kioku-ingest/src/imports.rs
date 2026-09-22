@@ -1,13 +1,14 @@
-use crate::rust_use_path::{map_rust_use_path, RustUsePath};
+use crate::rust_use_path::{map_rust_crate_name_path, map_rust_use_path, RustUsePath};
 use open_kioku_core::{
     File, FileId, ImportSite, Language, ModuleDeclarationSite, ScopeId, ScopeKind, SymbolId,
     SymbolKind,
 };
-use open_kioku_semantic_model::ProjectModel;
 pub use open_kioku_semantic_model::{
     ExportBinding, ExportIndex, ImportBinding, ImportBindingRule, ImportIndex, ImportOrigin,
     GLOB_IMPORT_LOCAL_NAME,
 };
+use open_kioku_semantic_model::{ProjectModel, ProjectRoot};
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -163,6 +164,23 @@ impl<'a> RustModuleTree<'a> {
             .collect::<Vec<_>>();
         match found.len() {
             1 => found.pop(),
+            _ => None,
+        }
+    }
+
+    /// `module_file`, extended to the crate root itself: `use crate::*;`, and `use super::*;` from a
+    /// top-level module, open the root module, whose file is `lib.rs` or `main.rs`.
+    fn module_or_root_file(&self, path: &RustUsePath, module: &[String]) -> Option<FileId> {
+        if !module.is_empty() {
+            return self.module_file(path, module);
+        }
+        let mut roots = self
+            .crate_roots(path)
+            .into_iter()
+            .filter_map(|stem| self.files_by_stem.get(&stem).cloned())
+            .collect::<Vec<_>>();
+        match roots.len() {
+            1 => roots.pop(),
             _ => None,
         }
     }
@@ -426,7 +444,230 @@ fn rust_module_item(
     }
 }
 
+/// Where each Rust `use` path in a file points, for that file's `IMPORTS` edge.
+///
+/// A path inside the importing file's own crate is the module tree's to answer or nobody's: the
+/// resolver must not match its text against repository paths or fall back to the crate root, which
+/// pointed three of one file's imports at `src/lib.rs` with a binding proof.
+#[derive(Debug, Default)]
+pub struct RustImportEdgeTargets {
+    /// Keyed by importing file and `use` path. A `None` value keeps a path of the importer's own
+    /// crate that the module tree cannot answer, or that two sites disagree about, unresolved.
+    in_crate: HashMap<(FileId, String), Option<RustImportEdge>>,
+}
+
+/// The file a Rust `use` path names, and the rule that reached it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustImportEdge {
+    pub file: FileId,
+    pub strategy: &'static str,
+}
+
+/// A path naming a module, or the module a glob opens, reaches that module's own file.
+pub const RUST_MODULE_PATH_STRATEGY: &str = "rust-module-path";
+/// A path naming an item reaches the file of the module that declares it.
+pub const RUST_ITEM_MODULE_STRATEGY: &str = "rust-item-module";
+/// A relative path written inside an inline `mod` block that cannot leave the file it is written
+/// in. The file imports its own module, which is no dependency, so no edge is emitted.
+pub const RUST_SELF_MODULE_STRATEGY: &str = "rust-self-module";
+
+impl RustImportEdgeTargets {
+    /// The file `path` names in `file`, when the module tree proves one.
+    pub fn target(&self, file: &FileId, path: &str) -> Option<&RustImportEdge> {
+        self.in_crate
+            .get(&(file.clone(), path.to_string()))?
+            .as_ref()
+    }
+
+    /// Whether `path` is a path of `file`'s own crate, proven or not. An unproven one stays
+    /// unresolved instead of falling back to a repository-path match.
+    pub fn is_in_crate(&self, file: &FileId, path: &str) -> bool {
+        self.in_crate
+            .contains_key(&(file.clone(), path.to_string()))
+    }
+
+    /// Records what `path` names in `file`. Two sites spelling one path in one file must agree:
+    /// `use super::*;` at file level and inside `mod tests` name different modules, and the stored
+    /// import row cannot tell them apart, so a disagreement leaves the path unresolved.
+    ///
+    /// Public because `resolver::resolve_imports` requires these targets: a caller outside this
+    /// crate that passes `Default::default()` gets "no path of any importer's own crate resolves",
+    /// which is a degraded answer rather than an error, so the constructor must be reachable.
+    pub fn record(&mut self, file: FileId, path: &str, edge: Option<RustImportEdge>) {
+        match self.in_crate.entry((file, path.to_string())) {
+            Entry::Occupied(mut recorded) => {
+                if *recorded.get() != edge {
+                    recorded.insert(None);
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(edge);
+            }
+        }
+    }
+}
+
+/// Follows every Rust `use` path through the declared module tree of the importing file's own
+/// crate, for the file-level `IMPORTS` edge.
+///
+/// - a path naming a declared module file reaches that file;
+/// - a glob reaches the file of the module it opens;
+/// - an item reaches the file of the module declaring it, which is the crate root only when the
+///   item is declared there; an item reachable only through a re-export stays unresolved;
+/// - a path the tree cannot answer is left unresolved, including a relative path written inside an
+///   inline `mod` block, whose module the importing file's path cannot tell.
+///
+/// Import sites are read rather than the stored import rows because only a site carries the scope
+/// its path is written in.
+pub(crate) fn rust_import_edge_targets(
+    sites: &[ImportSite],
+    symbols: &open_kioku_resolution::SymbolIndex,
+    scopes: &open_kioku_resolution::ScopeIndex,
+    modules: &RustModuleTree<'_>,
+) -> RustImportEdgeTargets {
+    let mut targets = RustImportEdgeTargets::default();
+    for site in sites {
+        let Some(importer) = modules.files.get(&site.file_id) else {
+            continue;
+        };
+        let Some(root) = modules.project.nearest_root_for(importer, Language::Rust) else {
+            continue;
+        };
+        if !is_rust_in_crate_path(&site.source, root.package_name.as_deref()) {
+            continue;
+        }
+        let edge = if rust_self_module_site(site, scopes) {
+            Some(RustImportEdge {
+                file: site.file_id.clone(),
+                strategy: RUST_SELF_MODULE_STRATEGY,
+            })
+        } else {
+            rust_use_path_for_site(site, importer, root, scopes, modules)
+                .and_then(|path| rust_import_edge(&path, symbols, modules))
+        };
+        targets.record(site.file_id.clone(), &site.source, edge);
+    }
+    targets
+}
+
+/// Whether `source` names something in the crate of the file that writes it: `crate::`, `self::`,
+/// `super::`, or the package's own crate name.
+pub(crate) fn is_rust_in_crate_path(source: &str, package_name: Option<&str>) -> bool {
+    let Some(first) = source.split("::").next() else {
+        return false;
+    };
+    matches!(first, "crate" | "self" | "super")
+        || package_name.is_some_and(|package| package.replace('-', "_") == first)
+}
+
+/// Whether `site` writes a relative path that cannot leave the file it is written in: `self::`,
+/// or `super` repeated no more times than the inline `mod` blocks enclosing it.
+///
+/// In `mod tests { use super::*; }` the parent of `tests` is the module the file already is, so
+/// the file imports itself. One more `super` than there are enclosing blocks climbs above the
+/// file's own module and names another file, which the importing file's path cannot identify.
+fn rust_self_module_site(site: &ImportSite, scopes: &open_kioku_resolution::ScopeIndex) -> bool {
+    let Some(scope) = site.scope_id.as_ref() else {
+        return false;
+    };
+    let depth = inline_module_depth(scope, scopes);
+    if depth == 0 {
+        return false;
+    }
+    let mut segments = site.source.split("::").peekable();
+    let hops = match segments.peek() {
+        Some(&"self") => {
+            segments.next();
+            0
+        }
+        Some(&"super") => {
+            let mut hops = 0;
+            while segments.peek() == Some(&"super") {
+                segments.next();
+                hops += 1;
+            }
+            hops
+        }
+        _ => return false,
+    };
+    // One hop per enclosing block lands on the file's own module; one more climbs past it.
+    if hops > depth {
+        return false;
+    }
+    // Only a path that stops at that module, or globs it, stays inside the file.
+    // `super::helpers::Thing` names a module below it — a different file, and the module tree's
+    // to answer. Treating it as self-referential dropped the edge and the absence with it.
+    match segments.next() {
+        None => true,
+        Some("*") => segments.next().is_none(),
+        Some(_) => false,
+    }
+}
+
+fn rust_use_path_for_site(
+    site: &ImportSite,
+    importer: &Path,
+    root: &ProjectRoot,
+    scopes: &open_kioku_resolution::ScopeIndex,
+    modules: &RustModuleTree<'_>,
+) -> Option<RustUsePath> {
+    if let Some(package) = root.package_name.as_deref() {
+        if let Some(path) = map_rust_crate_name_path(&root.path, package, &site.source) {
+            return Some(path);
+        }
+    }
+    // `self` and `super` are read off the importer's file path, which cannot see an inline `mod`
+    // block: in `mod tests { use super::*; }` `super` is the file's own module.
+    if !site.source.starts_with("crate::")
+        && site
+            .scope_id
+            .as_ref()
+            .is_some_and(|scope| is_inside_inline_module(scope, scopes))
+    {
+        return None;
+    }
+    let path = map_rust_use_path(&root.path, importer, &site.source)?;
+    if path.relative && !modules.declares_file_modules(&path, &path.importer_module) {
+        return None;
+    }
+    Some(path)
+}
+
+fn rust_import_edge(
+    path: &RustUsePath,
+    symbols: &open_kioku_resolution::SymbolIndex,
+    modules: &RustModuleTree<'_>,
+) -> Option<RustImportEdge> {
+    let module_edge = |file| RustImportEdge {
+        file,
+        strategy: RUST_MODULE_PATH_STRATEGY,
+    };
+    let (last, parent) = path.segments.split_last()?;
+    if last == "*" {
+        return modules.module_or_root_file(path, parent).map(module_edge);
+    }
+    // A path naming both a module file and an item names the module: the item is reached through
+    // that module, not by this path.
+    if let Some(file) = modules.module_file(path, &path.segments) {
+        return Some(module_edge(file));
+    }
+    if !modules.declares_file_modules(path, parent) {
+        return None;
+    }
+    let item = rust_module_item(&modules.module_stems(path, parent), last, symbols)?;
+    Some(RustImportEdge {
+        file: symbols.get(&item)?.file_id.clone(),
+        strategy: RUST_ITEM_MODULE_STRATEGY,
+    })
+}
+
 fn is_inside_inline_module(scope_id: &ScopeId, scopes: &open_kioku_resolution::ScopeIndex) -> bool {
+    inline_module_depth(scope_id, scopes) > 0
+}
+
+/// How many inline `mod` blocks of the writing file enclose `scope_id`. `super` climbs one module
+/// per hop, so a relative path with no more hops than this stays inside that file.
+fn inline_module_depth(scope_id: &ScopeId, scopes: &open_kioku_resolution::ScopeIndex) -> usize {
     std::iter::successors(scopes.get(scope_id), |scope| {
         scope
             .parent_id
@@ -434,7 +675,8 @@ fn is_inside_inline_module(scope_id: &ScopeId, scopes: &open_kioku_resolution::S
             .and_then(|parent| scopes.get(parent))
     })
     .take(scopes.scopes.len())
-    .any(|scope| matches!(scope.kind, ScopeKind::Module))
+    .filter(|scope| matches!(scope.kind, ScopeKind::Module))
+    .count()
 }
 
 #[cfg(test)]
@@ -1418,6 +1660,400 @@ mod tests {
         assert_eq!(
             bound_target(&registry, "src/auth.rs", "issue_token").as_deref(),
             Some("symbol:src/lib.rs:issue_token")
+        );
+    }
+
+    /// Runs the import-edge pass the way indexing does, over `files` in the packages rooted at
+    /// `manifests` (`(directory, package name)`).
+    fn rust_import_edges(
+        files: &[&str],
+        manifests: &[(&str, Option<&str>)],
+        declarations: Vec<ModuleDeclarationSite>,
+        sites: &[ImportSite],
+        symbols: Vec<Symbol>,
+        scopes: Vec<Scope>,
+    ) -> RustImportEdgeTargets {
+        let files = files.iter().copied().map(source_file).collect::<Vec<_>>();
+        let mut project = ProjectModel::new();
+        project
+            .roots
+            .extend(manifests.iter().map(|(dir, package)| ProjectRoot {
+                path: PathBuf::from(*dir),
+                language: Language::Rust,
+                package_name: package.map(str::to_string),
+                source_roots: Vec::new(),
+            }));
+        let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
+        let scopes = open_kioku_resolution::ScopeIndex::build(scopes);
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        rust_import_edge_targets(sites, &symbols, &scopes, &modules)
+    }
+
+    /// `strategy:file` for the file a path names, or `None` where it stays unresolved.
+    fn edge_target(targets: &RustImportEdgeTargets, importer: &str, path: &str) -> Option<String> {
+        targets
+            .target(&FileId::new(format!("file:{importer}")), path)
+            .map(|edge| format!("{}:{}", edge.strategy, edge.file.0))
+    }
+
+    /// The site the parser emits for `use <source>;` where the path ends in `*`.
+    fn rust_glob_site(importer: &str, source: &str, scope: Option<&str>) -> ImportSite {
+        ImportSite {
+            is_glob: true,
+            bindings: Vec::new(),
+            ..rust_use_site(importer, source, GLOB_IMPORT_LOCAL_NAME, scope)
+        }
+    }
+
+    #[test]
+    fn rust_import_edges_name_the_file_declaring_the_module_or_the_item() {
+        // The reported package: the crate root declares the modules and re-exports one item.
+        let targets = rust_import_edges(
+            &[
+                "src/lib.rs",
+                "src/api.rs",
+                "src/auth.rs",
+                "src/auth/keys.rs",
+                "src/session.rs",
+            ],
+            &[("", Some("demo-crate"))],
+            vec![
+                mod_decl("src/lib.rs", "api"),
+                mod_decl("src/lib.rs", "auth"),
+                mod_decl("src/lib.rs", "session"),
+                mod_decl("src/auth.rs", "keys"),
+            ],
+            &[
+                rust_use_site(
+                    "src/session.rs",
+                    "crate::auth::issue_token",
+                    "issue_token",
+                    None,
+                ),
+                rust_use_site("src/session.rs", "crate::auth::Token", "Token", None),
+                rust_use_site("src/session.rs", "crate::auth::keys", "keys", None),
+                rust_glob_site("src/session.rs", "crate::auth::*", None),
+                rust_use_site("src/api.rs", "crate::issue_token", "issue_token", None),
+            ],
+            vec![
+                rust_symbol("src/auth.rs", "issue_token"),
+                rust_symbol("src/auth.rs", "Token"),
+            ],
+            Vec::new(),
+        );
+
+        for path in ["crate::auth::issue_token", "crate::auth::Token"] {
+            assert_eq!(
+                edge_target(&targets, "src/session.rs", path).as_deref(),
+                Some("rust-item-module:file:src/auth.rs"),
+                "`{path}`"
+            );
+        }
+        assert_eq!(
+            edge_target(&targets, "src/session.rs", "crate::auth::keys").as_deref(),
+            Some("rust-module-path:file:src/auth/keys.rs")
+        );
+        assert_eq!(
+            edge_target(&targets, "src/session.rs", "crate::auth::*").as_deref(),
+            Some("rust-module-path:file:src/auth.rs")
+        );
+        // The crate root only re-exports `issue_token`, and a re-export is not a declaration.
+        assert!(targets.is_in_crate(&FileId::new("file:src/api.rs"), "crate::issue_token"));
+        assert_eq!(
+            edge_target(&targets, "src/api.rs", "crate::issue_token"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_crate_root_item_import_reaches_the_root_that_declares_it() {
+        let targets = rust_import_edges(
+            &["src/lib.rs", "src/auth.rs"],
+            &[("", None)],
+            vec![mod_decl("src/lib.rs", "auth")],
+            &[rust_use_site(
+                "src/auth.rs",
+                "crate::RequestContext",
+                "RequestContext",
+                None,
+            )],
+            vec![rust_symbol("src/lib.rs", "RequestContext")],
+            Vec::new(),
+        );
+        assert_eq!(
+            edge_target(&targets, "src/auth.rs", "crate::RequestContext").as_deref(),
+            Some("rust-item-module:file:src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn crate_name_paths_reach_the_library_crate_from_outside_its_module_tree() {
+        let targets = rust_import_edges(
+            &["src/lib.rs", "src/auth.rs", "tests/auth_flow.rs"],
+            &[("", Some("open-kioku-demo"))],
+            vec![mod_decl("src/lib.rs", "auth")],
+            &[
+                rust_use_site("tests/auth_flow.rs", "open_kioku_demo::auth", "auth", None),
+                rust_use_site(
+                    "tests/auth_flow.rs",
+                    "open_kioku_demo::handle_login",
+                    "handle_login",
+                    None,
+                ),
+                // An integration test is its own crate, so its `crate::` is not the library's.
+                rust_use_site("tests/auth_flow.rs", "crate::helper", "helper", None),
+            ],
+            vec![rust_symbol("src/lib.rs", "handle_login")],
+            Vec::new(),
+        );
+        assert_eq!(
+            edge_target(&targets, "tests/auth_flow.rs", "open_kioku_demo::auth").as_deref(),
+            Some("rust-module-path:file:src/auth.rs")
+        );
+        assert_eq!(
+            edge_target(
+                &targets,
+                "tests/auth_flow.rs",
+                "open_kioku_demo::handle_login"
+            )
+            .as_deref(),
+            Some("rust-item-module:file:src/lib.rs")
+        );
+        assert_eq!(
+            edge_target(&targets, "tests/auth_flow.rs", "crate::helper"),
+            None
+        );
+    }
+
+    #[test]
+    fn relative_paths_follow_the_scope_that_writes_them() {
+        let file_level = rust_import_edges(
+            &["src/lib.rs", "src/auth.rs"],
+            &[("", None)],
+            vec![mod_decl("src/lib.rs", "auth")],
+            &[rust_glob_site("src/auth.rs", "super::*", None)],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            edge_target(&file_level, "src/auth.rs", "super::*").as_deref(),
+            Some("rust-module-path:file:src/lib.rs")
+        );
+
+        // One file writing the path at both levels names two different modules: at the top the
+        // parent file, inside a `mod` block this file. The stored import row carries the path and
+        // not the scope it was written in, so the two cannot be told apart and neither wins.
+        let both = rust_import_edges(
+            &["src/lib.rs", "src/auth.rs"],
+            &[("", None)],
+            vec![mod_decl("src/lib.rs", "auth")],
+            &[
+                rust_glob_site("src/auth.rs", "super::*", None),
+                rust_glob_site("src/auth.rs", "super::*", Some("scope:auth:tests")),
+            ],
+            Vec::new(),
+            vec![inline_module_scope("scope:auth:tests", "src/auth.rs")],
+        );
+        assert_eq!(edge_target(&both, "src/auth.rs", "super::*"), None);
+    }
+
+    fn nested_module_scope(id: &str, file: &str, parent: &str) -> Scope {
+        Scope {
+            parent_id: Some(ScopeId::new(parent)),
+            ..inline_module_scope(id, file)
+        }
+    }
+
+    #[test]
+    fn super_from_an_inline_module_names_the_file_it_is_written_in() {
+        // `mod tests { use super::*; }`: the parent of `tests` is the module `src/auth.rs` already
+        // is. The import is known and self-referential, not unknown.
+        let targets = rust_import_edges(
+            &["src/lib.rs", "src/auth.rs"],
+            &[("", None)],
+            vec![mod_decl("src/lib.rs", "auth")],
+            &[rust_glob_site(
+                "src/auth.rs",
+                "super::*",
+                Some("scope:auth:tests"),
+            )],
+            Vec::new(),
+            vec![inline_module_scope("scope:auth:tests", "src/auth.rs")],
+        );
+        assert_eq!(
+            edge_target(&targets, "src/auth.rs", "super::*").as_deref(),
+            Some("rust-self-module:file:src/auth.rs")
+        );
+
+        // Nesting stays inside the file: `mod a { mod b { use super::*; } }` names `a`.
+        let nested = rust_import_edges(
+            &["src/lib.rs", "src/auth.rs"],
+            &[("", None)],
+            vec![mod_decl("src/lib.rs", "auth")],
+            &[rust_glob_site(
+                "src/auth.rs",
+                "super::*",
+                Some("scope:auth:a:b"),
+            )],
+            Vec::new(),
+            vec![
+                inline_module_scope("scope:auth:a", "src/auth.rs"),
+                nested_module_scope("scope:auth:a:b", "src/auth.rs", "scope:auth:a"),
+            ],
+        );
+        assert_eq!(
+            edge_target(&nested, "src/auth.rs", "super::*").as_deref(),
+            Some("rust-self-module:file:src/auth.rs")
+        );
+    }
+
+    #[test]
+    fn a_relative_path_naming_something_below_the_module_is_not_self_referential() {
+        // `mod tests { use super::helpers::Thing; }` in `src/auth.rs`: `super` is the file's own
+        // module, but `helpers` below it is `src/auth/helpers.rs`, a different file. Calling this
+        // self-referential emitted no edge and no unresolved fact, so the dependency vanished
+        // without the absence being reported.
+        let files = &["src/lib.rs", "src/auth.rs", "src/auth/helpers.rs"];
+        let decls = || {
+            vec![
+                mod_decl("src/lib.rs", "auth"),
+                mod_decl("src/auth.rs", "helpers"),
+            ]
+        };
+        let scopes = || vec![inline_module_scope("scope:auth:tests", "src/auth.rs")];
+
+        for path in [
+            "super::helpers::Thing",
+            "super::helpers",
+            "self::helpers::Thing",
+        ] {
+            let targets = rust_import_edges(
+                files,
+                &[("", None)],
+                decls(),
+                &[rust_use_site(
+                    "src/auth.rs",
+                    path,
+                    path.rsplit("::").next().unwrap(),
+                    Some("scope:auth:tests"),
+                )],
+                Vec::new(),
+                scopes(),
+            );
+            assert!(
+                targets.is_in_crate(&FileId::new("file:src/auth.rs"), path),
+                "`{path}` is a path of the importer's own crate"
+            );
+            assert_ne!(
+                edge_target(&targets, "src/auth.rs", path).as_deref(),
+                Some("rust-self-module:file:src/auth.rs"),
+                "`{path}` names something below the module, not the module itself"
+            );
+        }
+
+        // Globbing the module the hops land on does stay inside the file.
+        let glob = rust_import_edges(
+            files,
+            &[("", None)],
+            decls(),
+            &[rust_glob_site(
+                "src/auth.rs",
+                "self::*",
+                Some("scope:auth:tests"),
+            )],
+            Vec::new(),
+            scopes(),
+        );
+        assert_eq!(
+            edge_target(&glob, "src/auth.rs", "self::*").as_deref(),
+            Some("rust-self-module:file:src/auth.rs")
+        );
+    }
+
+    #[test]
+    fn one_super_too_many_climbs_out_of_the_file_and_stays_unresolved() {
+        // `mod tests { use super::super::*; }` names the parent of `crate::auth`, a different
+        // file, which the importing file's path cannot identify.
+        let targets = rust_import_edges(
+            &["src/lib.rs", "src/auth.rs"],
+            &[("", None)],
+            vec![mod_decl("src/lib.rs", "auth")],
+            &[rust_glob_site(
+                "src/auth.rs",
+                "super::super::*",
+                Some("scope:auth:tests"),
+            )],
+            Vec::new(),
+            vec![inline_module_scope("scope:auth:tests", "src/auth.rs")],
+        );
+        assert!(targets.is_in_crate(&FileId::new("file:src/auth.rs"), "super::super::*"));
+        assert_eq!(
+            edge_target(&targets, "src/auth.rs", "super::super::*"),
+            None
+        );
+    }
+
+    #[test]
+    fn paths_the_module_tree_cannot_answer_stay_unresolved() {
+        // A stale `auth.rs` beside `#[path = "auth_v2.rs"] mod auth;` is not `crate::auth`.
+        let redirected = rust_import_edges(
+            &[
+                "src/lib.rs",
+                "src/auth.rs",
+                "src/auth_v2.rs",
+                "src/session.rs",
+            ],
+            &[("", None)],
+            vec![
+                ModuleDeclarationSite {
+                    has_path_attribute: true,
+                    ..mod_decl("src/lib.rs", "auth")
+                },
+                mod_decl("src/lib.rs", "session"),
+            ],
+            &[rust_use_site(
+                "src/session.rs",
+                "crate::auth::issue_token",
+                "issue_token",
+                None,
+            )],
+            vec![rust_symbol("src/auth.rs", "issue_token")],
+            Vec::new(),
+        );
+        assert_eq!(
+            edge_target(&redirected, "src/session.rs", "crate::auth::issue_token"),
+            None
+        );
+
+        // Each workspace member has its own `src/auth.rs`; `crate::` never leaves the importer's.
+        let workspace = rust_import_edges(
+            &[
+                "crates/a/src/lib.rs",
+                "crates/a/src/auth.rs",
+                "crates/b/src/lib.rs",
+                "crates/b/src/session.rs",
+            ],
+            &[("crates/a", Some("a")), ("crates/b", Some("b"))],
+            vec![
+                mod_decl("crates/a/src/lib.rs", "auth"),
+                mod_decl("crates/b/src/lib.rs", "session"),
+            ],
+            &[rust_use_site(
+                "crates/b/src/session.rs",
+                "crate::auth::issue_token",
+                "issue_token",
+                None,
+            )],
+            vec![rust_symbol("crates/a/src/auth.rs", "issue_token")],
+            Vec::new(),
+        );
+        assert_eq!(
+            edge_target(
+                &workspace,
+                "crates/b/src/session.rs",
+                "crate::auth::issue_token"
+            ),
+            None
         );
     }
 }

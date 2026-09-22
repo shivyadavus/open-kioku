@@ -48,11 +48,7 @@ pub(crate) fn map_rust_use_path(
     importer: &Path,
     use_path: &str,
 ) -> Option<RustUsePath> {
-    let crate_dir = crate_dir.to_string_lossy().replace('\\', "/");
-    let src_root = match crate_dir.trim_end_matches('/') {
-        "" => "src".to_string(),
-        dir => format!("{dir}/src"),
-    };
+    let src_root = src_root_of(crate_dir);
     let importer = importer.to_string_lossy().replace('\\', "/");
     let module_file = importer
         .strip_prefix(src_root.as_str())?
@@ -114,6 +110,47 @@ pub(crate) fn map_rust_use_path(
         relative: first != "crate",
         importer_root,
     })
+}
+
+/// Maps `use_path` naming the importing file's own package by its crate name
+/// (`demo_crate::auth::issue_token`), which is absolute in that package's library crate.
+///
+/// Unlike `crate::`, a crate-name path is legal from a file outside the module tree — an
+/// integration test under `tests/`, an example, a binary — so the importer's own path says nothing
+/// and the path is followed from `lib.rs` alone.
+pub(crate) fn map_rust_crate_name_path(
+    crate_dir: &Path,
+    package_name: &str,
+    use_path: &str,
+) -> Option<RustUsePath> {
+    let mut parts = use_path.split("::");
+    if parts.next()? != package_name.replace('-', "_") {
+        return None;
+    }
+    let rest = parts.collect::<Vec<_>>();
+    let last = rest.len().checked_sub(1)?;
+    for (position, part) in rest.iter().enumerate() {
+        if !(is_path_identifier(part) || (*part == "*" && position == last)) {
+            return None;
+        }
+    }
+    Some(RustUsePath {
+        src_root: src_root_of(crate_dir),
+        segments: rest.into_iter().map(str::to_string).collect(),
+        importer_module: Vec::new(),
+        relative: false,
+        // A crate name names the library crate, whichever file writes the path.
+        importer_root: Some("lib"),
+    })
+}
+
+/// The directory holding the module tree of the package at `crate_dir`.
+fn src_root_of(crate_dir: &Path) -> String {
+    let crate_dir = crate_dir.to_string_lossy().replace('\\', "/");
+    match crate_dir.trim_end_matches('/') {
+        "" => "src".to_string(),
+        dir => format!("{dir}/src"),
+    }
 }
 
 fn is_path_identifier(part: &str) -> bool {
@@ -224,5 +261,33 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn crate_name_paths_map_from_the_packages_library_root() {
+        let path =
+            map_rust_crate_name_path(Path::new(""), "demo-crate", "demo_crate::auth::issue_token")
+                .expect("a package's own crate name maps");
+        assert_eq!(path.src_root, "src");
+        assert_eq!(path.segments, vec!["auth", "issue_token"]);
+        assert_eq!(path.importer_root, Some("lib"));
+        assert!(!path.relative);
+        assert!(path.importer_module.is_empty());
+
+        let member = map_rust_crate_name_path(Path::new("crates/app"), "app", "app::auth::*")
+            .expect("a workspace member's crate name maps");
+        assert_eq!(member.src_root, "crates/app/src");
+        assert_eq!(member.segments, vec!["auth", "*"]);
+    }
+
+    #[test]
+    fn crate_name_paths_of_another_package_or_without_a_tail_are_not_mapped() {
+        for path in ["other_crate::auth", "demo_crate", "demo_crate::*::x"] {
+            assert_eq!(
+                map_rust_crate_name_path(Path::new(""), "demo-crate", path),
+                None,
+                "`{path}`"
+            );
+        }
     }
 }

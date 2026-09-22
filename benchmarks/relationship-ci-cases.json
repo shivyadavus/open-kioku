@@ -435,6 +435,70 @@
       "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
     },
     {
+      "id": "ci-rust-imports-02-cross_module_item_import",
+      "fixture_id": "ci/ri3/rust/imports/cross_module_item_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/session.rs",
+        "identity": "file:rust:imports:cross_module_item_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "cross_module_item_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/auth.rs",
+        "identity": "file:rust:imports:cross_module_item_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case: `use crate::auth::issue_token;` imports an item the crate root only declares a module for, so the edge names `src/auth.rs` rather than `src/lib.rs`."
+    },
+    {
+      "id": "ci-rust-imports-03-glob_module_import",
+      "fixture_id": "ci/ri3/rust/imports/glob_module_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/session.rs",
+        "identity": "file:rust:imports:glob_module_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "glob_module_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/auth.rs",
+        "identity": "file:rust:imports:glob_module_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case: `use crate::auth::*;` opens a module, so the edge names that module's file."
+    },
+    {
+      "id": "ci-rust-imports-04-crate_root_reexport_fallback",
+      "fixture_id": "ci/ri3/rust/imports/crate_root_reexport_fallback",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/api.rs",
+        "identity": "file:rust:imports:crate_root_reexport_fallback:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "crate_root_reexport_fallback",
+      "notes": "Regression case: `use crate::issue_token;` reaches the item only through the crate root's `pub use`, which no module declaration proves; the crate root must not absorb the edge."
+    },
+    {
       "id": "ci-rust-depends_on-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/depends_on/metamorphic_a",
       "split": "development",
