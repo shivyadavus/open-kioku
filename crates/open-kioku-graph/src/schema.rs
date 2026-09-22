@@ -1,6 +1,6 @@
 use crate::query::{DEFAULT_MAX_DEPTH, HARD_MAX_DEPTH, HARD_ROW_LIMIT};
 use open_kioku_core::{
-    EdgeTypeSpec, EvidenceGraphSchema, GraphEdgeType, GraphNodeType, GraphQueryExample,
+    Confidence, EdgeTypeSpec, EvidenceGraphSchema, GraphEdgeType, GraphNodeType, GraphQueryExample,
     IndexManifest, NodeTypeSpec, OptionalEvidenceSpec, PropertySpec, UnsupportedGraphQueryForm,
 };
 
@@ -175,6 +175,65 @@ fn underscored(name: &str) -> String {
     spelling
 }
 
+/// The node types the graph builder gives a symbol (`symbol_node_type` in lib.rs). A node of one
+/// of these types built from an indexed symbol carries a `symbol_id`; one built from an import or
+/// an analysis fact does not. `symbol_node_types_are_the_types_the_builder_gives_symbols` ties
+/// this list to the builder.
+pub(crate) const SYMBOL_NODE_TYPES: [GraphNodeType; 10] = [
+    GraphNodeType::Module,
+    GraphNodeType::Class,
+    GraphNodeType::Trait,
+    GraphNodeType::Interface,
+    GraphNodeType::Function,
+    GraphNodeType::Method,
+    GraphNodeType::Field,
+    GraphNodeType::Endpoint,
+    GraphNodeType::DatabaseTable,
+    GraphNodeType::Test,
+];
+
+// WHERE fields per binding. The parser validates filters against these and the schema's syntax
+// sentence is built from them, so an agent is never told a field exists that the parser rejects.
+const FILE_FILTER_FIELDS: &[&str] = &["label", "id", "file_path"];
+const SYMBOL_FILTER_FIELDS: &[&str] = &["label", "id", "file_path", "qualified_name"];
+const OTHER_NODE_FILTER_FIELDS: &[&str] = &["label", "id"];
+/// Graph nodes carry no evidence; these are read from a bound edge's `Evidence`.
+pub(crate) const EDGE_FILTER_FIELDS: &[&str] = &["source", "source_type", "confidence"];
+
+/// The WHERE fields a node variable takes. An untyped node may bind a File or a symbol node, so it
+/// takes every node field and each row resolves the field for the node it holds.
+pub(crate) fn node_filter_fields(node_type: Option<&GraphNodeType>) -> &'static [&'static str] {
+    match node_type {
+        Some(GraphNodeType::File) => FILE_FILTER_FIELDS,
+        Some(node_type) if SYMBOL_NODE_TYPES.contains(node_type) => SYMBOL_FILTER_FIELDS,
+        Some(_) => OTHER_NODE_FILTER_FIELDS,
+        None => SYMBOL_FILTER_FIELDS,
+    }
+}
+
+pub(crate) const CONFIDENCE_BANDS: [Confidence; 4] = [
+    Confidence::Low,
+    Confidence::Medium,
+    Confidence::High,
+    Confidence::Exact,
+];
+
+/// The serialized band name, which is how evidence JSON spells it.
+pub(crate) fn confidence_band_name(band: Confidence) -> &'static str {
+    match band {
+        Confidence::Low => "low",
+        Confidence::Medium => "medium",
+        Confidence::High => "high",
+        Confidence::Exact => "exact",
+    }
+}
+
+pub(crate) fn confidence_band_for_query_name(name: &str) -> Option<Confidence> {
+    CONFIDENCE_BANDS
+        .into_iter()
+        .find(|band| name.eq_ignore_ascii_case(confidence_band_name(*band)))
+}
+
 pub fn current_schema(store: Option<&dyn open_kioku_storage::GraphStore>) -> EvidenceGraphSchema {
     current_schema_with_manifest(store, None)
 }
@@ -302,7 +361,7 @@ pub fn current_schema_with_manifest(
     }
 }
 
-fn evidence_source_types() -> Vec<String> {
+pub(crate) fn evidence_source_types() -> Vec<String> {
     [
         "tree_sitter",
         "scip",
@@ -330,6 +389,8 @@ fn query_features() -> Vec<String> {
         "property_equality_filters",
         "property_prefix_filters",
         "regex_filters_on_label_qualified_name_file_path",
+        "edge_evidence_filters",
+        "numeric_confidence_comparison",
         "return_variables",
         "limit",
         "offset",
@@ -351,16 +412,57 @@ fn query_syntax() -> Vec<String> {
         "A query is MATCH <path> [WHERE <filter> [AND <filter>]...] RETURN <variable>[, <variable>]..., optionally followed by LIMIT <n> and OFFSET <n> in either order; keywords are case-insensitive.".into(),
         "A path is exactly one edge pattern between two nodes, such as (f:File)-[:DEFINES]->(s:Function) or (s:Function)<-[:DEFINES]-(f:File); a MATCH without an edge pattern is rejected.".into(),
         "A node is (variable:Type); the variable and the :Type are each optional, so (f), (:File) and () are nodes.".into(),
-        "A one-hop edge is -[:TYPE]-> or <-[:TYPE]-, and it must name its type to run.".into(),
-        format!("A multi-hop edge is -[:TYPE *min..max]-> with 1 <= min <= max, where max may not exceed the depth cap ({DEFAULT_MAX_DEPTH} unless raised, never above {HARD_MAX_DEPTH}); the :TYPE is optional, the source node must name its type, and only forward edges are followed."),
+        "A one-hop edge is -[:TYPE]-> or <-[:TYPE]-, and it must name its type to run; -[e:TYPE]-> binds the edge to a variable that WHERE can filter on its evidence.".into(),
+        format!("A multi-hop edge is -[:TYPE *min..max]-> with 1 <= min <= max, where max may not exceed the depth cap ({DEFAULT_MAX_DEPTH} unless raised, never above {HARD_MAX_DEPTH}); the :TYPE is optional, it binds no variable, the source node must name its type, and only forward edges are followed."),
         "Type names are case-insensitive and may be written as node_types and edge_types name them or in their underscored form: (t:DatabaseTable) or (t:database_table), [:DependsOn] or [:DEPENDS_ON].".into(),
-        "A filter is variable.field = 'text', variable.field STARTS_WITH 'text', or variable.field =~ 'regex' on a node variable bound in MATCH, with a single- or double-quoted value.".into(),
-        "A File node's label is its repository-relative path (src/config.rs). A symbol node's label is that path without its extension, with / replaced by ::, followed by ::name (src::config::parse_config); this holds for every language, Java and Go included, with no package prefix and no segment dropped (src/main/java/com/acme/OrderService.java gives src::main::java::com::acme::OrderService::handle), except in a file where tree-sitter finds no symbols and a regex fallback names them. label, file_path and qualified_name filters compare against that whole label, except that a one-hop label = filter also matches a bare symbol name (parse_config) through the index.".into(),
-        "Filter fields are label, id, file_path, qualified_name, source, source_type and confidence; file_path and qualified_name compare against the node label, and graph nodes carry no source, source_type or confidence field, so filters on those match no rows.".into(),
+        "A filter is variable.field = 'text', variable.field STARTS_WITH 'text', or variable.field =~ 'regex' on a variable bound in MATCH, with a single- or double-quoted value; confidence also takes <, <=, > and >=, and takes = or any of those with an unquoted number such as 0.85.".into(),
+        "A File node's label is its repository-relative path (src/config.rs). A symbol node's label is that path without its extension, with / replaced by ::, followed by ::name (src::config::parse_config); this holds for every language, Java and Go included, with no package prefix and no segment dropped (src/main/java/com/acme/OrderService.java gives src::main::java::com::acme::OrderService::handle), except in a file where tree-sitter finds no symbols and a regex fallback names them. A label filter compares against that whole label, except that a one-hop label = filter also matches a bare symbol name (parse_config) through the index.".into(),
+        filter_field_sentence(),
+        confidence_sentence(),
         "=~ applies to label, file_path and qualified_name only, with a valid regex of at most 100 bytes.".into(),
-        "RETURN lists node variables bound in MATCH, each at most once; read labels and properties from the returned node objects.".into(),
+        "RETURN lists node variables bound in MATCH, each at most once; an edge variable is for WHERE only, so read labels and properties from the returned node objects.".into(),
         format!("LIMIT is clamped to {HARD_ROW_LIMIT} rows, and a write-like or composition keyword (CREATE, MERGE, DELETE, DETACH, SET, REMOVE, DROP, CALL, LOAD, UNION, WITH, FOREACH) rejects the whole query."),
     ]
+}
+
+/// Built from the field tables the parser validates against.
+fn filter_field_sentence() -> String {
+    let symbol_types = SYMBOL_NODE_TYPES
+        .iter()
+        .map(node_type_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let other_types = NODE_TYPES
+        .iter()
+        .filter(|node_type| {
+            **node_type != GraphNodeType::File && !SYMBOL_NODE_TYPES.contains(*node_type)
+        })
+        .map(node_type_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Filter fields depend on what the variable binds. File nodes take {file}; file_path is the File node's label. {symbol_types} nodes take {symbol}; on a node built from an indexed symbol, qualified_name is its label and file_path is the label of the File node that DEFINES it, while a node of these types built from an import or an analysis fact carries neither. {other_types} nodes take {other}. An untyped node takes {symbol}. An edge variable takes {edge}, read from the edge's evidence. A filter on a field the variable does not take is a parse error listing the fields it takes; a filter on a field a matched node does not carry excludes that row, and a caveat counts the rows excluded that way.",
+        file = FILE_FILTER_FIELDS.join(", "),
+        symbol = SYMBOL_FILTER_FIELDS.join(", "),
+        other = OTHER_NODE_FILTER_FIELDS.join(", "),
+        edge = EDGE_FILTER_FIELDS.join(", "),
+    )
+}
+
+fn confidence_sentence() -> String {
+    let names = CONFIDENCE_BANDS
+        .iter()
+        .map(|band| confidence_band_name(*band))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let scores = CONFIDENCE_BANDS
+        .iter()
+        .map(|band| format!("{} {}", confidence_band_name(*band), band.score()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "confidence = 'high' compares the edge evidence's band ({names}); a number compares the band's score ({scores}), so e.confidence >= 0.85 keeps high and exact edges. source_type = takes a name from evidence_source_types, and source names the pass that recorded the evidence, such as open-kioku-graph or open-kioku-resolution."
+    )
 }
 
 fn query_examples() -> Vec<GraphQueryExample> {
@@ -388,6 +490,14 @@ fn query_examples() -> Vec<GraphQueryExample> {
         (
             "MATCH (f:File)-[:IMPORTS]->(g:File) WHERE g.file_path = 'src/config.rs' RETURN f",
             "Files whose imports resolve to src/config.rs.",
+        ),
+        (
+            "MATCH (a:Function)-[:CALLS]->(b:Function) WHERE b.file_path = 'src/config.rs' RETURN a, b",
+            "Calls into functions defined in src/config.rs. On a symbol node file_path is the path of the File node that defines it, not the node's label.",
+        ),
+        (
+            "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 AND c.source_type = 'tree_sitter' RETURN a, b",
+            "Calls recorded from tree-sitter evidence at high or exact confidence. The edge variable c exists for WHERE only; source, source_type and confidence are read from the edge's evidence.",
         ),
     ]
     .into_iter()
@@ -426,9 +536,14 @@ fn unsupported_query_forms() -> Vec<UnsupportedGraphQueryForm> {
             "Run one query per edge, or use a multi-hop range when every hop has the same edge type.",
         ),
         unsupported(
-            "edge_variable",
-            "MATCH (a:Function)-[c:CALLS]->(b:Function) RETURN a, b",
-            "Omit the edge variable and write -[:CALLS]->; edges cannot be bound, filtered or returned.",
+            "edge_variable_in_return",
+            "MATCH (a:Function)-[c:CALLS]->(b:Function) RETURN a, c",
+            "RETURN node variables; an edge variable is bound only to filter the edge's evidence in WHERE, such as WHERE c.confidence >= 0.85.",
+        ),
+        unsupported(
+            "edge_variable_on_hop_range",
+            "MATCH (a:Function)-[c:CALLS *1..2]->(b:Function) RETURN b",
+            "A hop range binds no single edge; bind and filter one hop at a time, such as (a:Function)-[c:CALLS]->(b:Function).",
         ),
         unsupported(
             "undirected_edge",
@@ -468,12 +583,22 @@ fn unsupported_query_forms() -> Vec<UnsupportedGraphQueryForm> {
         unsupported(
             "other_filter_operators",
             "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE s.label CONTAINS 'parse' RETURN s",
-            "Use =, STARTS_WITH or =~; =~ 'parse' matches a substring of label, file_path or qualified_name.",
+            "Use =, STARTS_WITH or =~, and <, <=, > or >= on confidence; =~ 'parse' matches a substring of label, file_path or qualified_name.",
         ),
         unsupported(
             "unsupported_filter_field",
             "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE f.protocol = 'http' RETURN f",
-            "Filter on label, id, file_path or qualified_name, and read other properties from the returned nodes.",
+            format!("Filter on a field the variable takes (File nodes take {}; the syntax lists the fields for every node type), and read other properties from the returned nodes.", FILE_FILTER_FIELDS.join(", ")),
+        ),
+        unsupported(
+            "field_the_node_type_does_not_carry",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE f.qualified_name = 'src::config::parse_config' RETURN s",
+            "A File node has no qualified_name; filter the symbol instead: WHERE s.qualified_name = 'src::config::parse_config'.",
+        ),
+        unsupported(
+            "evidence_field_on_a_node",
+            "MATCH (a:Function)-[:CALLS]->(b:Function) WHERE b.confidence >= 0.85 RETURN a",
+            "Nodes carry no source, source_type or confidence; bind the edge and filter its evidence: MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 RETURN a.",
         ),
         unsupported(
             "inline_property_map",
@@ -594,6 +719,35 @@ fn schema_caveats(manifest: Option<&IndexManifest>) -> Vec<String> {
     }
 }
 
+/// Every string listed in an `enum` array of a JSON schema. A documented variant appears under
+/// `oneOf`, so the walk collects every `enum` array rather than only the top-level one.
+#[cfg(test)]
+pub(crate) fn enum_values(
+    schema: &serde_json::Value,
+    values: &mut std::collections::BTreeSet<String>,
+) {
+    match schema {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                match (key.as_str(), child) {
+                    ("enum", serde_json::Value::Array(items)) => values.extend(
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_string)),
+                    ),
+                    _ => enum_values(child, values),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                enum_values(item, values);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,29 +821,6 @@ mod tests {
                 schema.unsupported.iter().any(|entry| entry.form == form),
                 "unsupported forms must list {form}"
             );
-        }
-    }
-
-    fn enum_values(schema: &serde_json::Value, values: &mut std::collections::BTreeSet<String>) {
-        match schema {
-            serde_json::Value::Object(map) => {
-                for (key, child) in map {
-                    match (key.as_str(), child) {
-                        ("enum", serde_json::Value::Array(items)) => values.extend(
-                            items
-                                .iter()
-                                .filter_map(|item| item.as_str().map(str::to_string)),
-                        ),
-                        _ => enum_values(child, values),
-                    }
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    enum_values(item, values);
-                }
-            }
-            _ => {}
         }
     }
 
@@ -823,5 +954,68 @@ mod tests {
         assert!(!junit.available);
         assert_eq!(junit.status, "not_observed");
         assert!(!junit.caveats.is_empty());
+    }
+
+    #[test]
+    fn the_filter_field_sentence_names_every_node_type_and_every_field_list() {
+        let sentence = filter_field_sentence();
+        assert!(current_schema(None).syntax.contains(&sentence));
+        for node_type in &NODE_TYPES {
+            assert!(
+                sentence.contains(node_type_name(node_type)),
+                "{} is missing from: {sentence}",
+                node_type_name(node_type)
+            );
+        }
+        for fields in [
+            FILE_FILTER_FIELDS,
+            SYMBOL_FILTER_FIELDS,
+            OTHER_NODE_FILTER_FIELDS,
+            EDGE_FILTER_FIELDS,
+        ] {
+            assert!(sentence.contains(&fields.join(", ")), "{fields:?}");
+        }
+    }
+
+    #[test]
+    fn confidence_bands_are_every_serialized_band() {
+        let mut variants = std::collections::BTreeSet::new();
+        enum_values(
+            &serde_json::to_value(schemars::schema_for!(Confidence)).unwrap(),
+            &mut variants,
+        );
+        let listed = CONFIDENCE_BANDS
+            .iter()
+            .map(|band| confidence_band_name(*band).to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(listed, variants);
+        for band in CONFIDENCE_BANDS {
+            assert_eq!(
+                serde_json::to_value(band).unwrap(),
+                confidence_band_name(band)
+            );
+            assert_eq!(
+                confidence_band_for_query_name(&confidence_band_name(band).to_ascii_uppercase()),
+                Some(band)
+            );
+        }
+    }
+
+    // The parser validates `source_type =` by deserializing the value and lists these names when
+    // it fails, so the list must be exactly the serialized variants.
+    #[test]
+    fn evidence_source_types_are_every_serialized_source_type() {
+        let mut variants = std::collections::BTreeSet::new();
+        enum_values(
+            &serde_json::to_value(schemars::schema_for!(open_kioku_core::EvidenceSourceType))
+                .unwrap(),
+            &mut variants,
+        );
+        assert_eq!(
+            evidence_source_types()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            variants
+        );
     }
 }

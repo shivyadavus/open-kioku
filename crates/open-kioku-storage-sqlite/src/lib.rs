@@ -3823,6 +3823,54 @@ impl GraphStore for SqliteStore {
         collect_edges(&mut rows)
     }
 
+    fn edges_by_type_for_nodes(
+        &self,
+        edge_type: GraphEdgeType,
+        node_ids: &[&str],
+        outgoing: bool,
+    ) -> Result<Vec<GraphEdge>> {
+        require_authoritative_relationship_semantics(self)?;
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let edge_type = format!("{edge_type:?}");
+        let mut node_sids = Vec::with_capacity(node_ids.len());
+        for node_id in node_ids {
+            // A node id that was never stored has no edges.
+            if let Some(sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, node_id)? {
+                node_sids.push(sid);
+            }
+        }
+        node_sids.sort_unstable();
+        node_sids.dedup();
+        let endpoint_column = if outgoing { "from_sid" } else { "to_sid" };
+        let mut edges = Vec::new();
+        // Chunks stay under SQLite's historical limit of 999 bound parameters per statement.
+        for chunk in node_sids.chunks(900) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "{} WHERE e.edge_type = ? AND e.{endpoint_column} IN ({placeholders}) ORDER BY e.id",
+                compact::EDGE_SELECT
+            );
+            let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
+            let params = std::iter::once(rusqlite::types::Value::Text(edge_type.clone())).chain(
+                chunk
+                    .iter()
+                    .map(|sid| rusqlite::types::Value::Integer(*sid)),
+            );
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(params))
+                .map_err(storage_err)?;
+            edges.extend(collect_edges(&mut rows)?);
+        }
+        // Each chunk is ordered by edge id, so the accumulation is ordered by (chunk, id) until it
+        // is sorted here. Chunk membership follows string-interning order, which is not meaningful
+        // to a caller, and a caller that truncates this list would otherwise get that order.
+        edges.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+        Ok(edges)
+    }
+
     fn graph_counts(&self) -> Result<GraphCounts> {
         let conn = self
             .connection
@@ -7609,6 +7657,24 @@ mod tests {
         assert_eq!(outgoing[0].id, edge.id);
         assert_eq!(incoming.len(), 1);
         assert_eq!(incoming[0].id, edge.id);
+
+        let batched = store
+            .edges_by_type_for_nodes(
+                GraphEdgeType::Defines,
+                &["symbol:s1", "symbol:never-stored", "symbol:s1"],
+                false,
+            )
+            .unwrap();
+        assert_eq!(batched.len(), 1);
+        assert_eq!(batched[0].id, edge.id);
+        assert!(store
+            .edges_by_type_for_nodes(GraphEdgeType::Calls, &["symbol:s1"], false)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .edges_by_type_for_nodes(GraphEdgeType::Defines, &[], false)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

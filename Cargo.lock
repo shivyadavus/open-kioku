@@ -2740,6 +2740,7 @@ dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-storage",
+ "open-kioku-storage-sqlite",
  "regex",
  "schemars",
  "serde",
