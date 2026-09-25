@@ -78,8 +78,8 @@ jobs:
           import json
           report = json.load(open('artifacts/relationships/compact-report.json'))
           diagnostics = report.get('diagnostics', [])
-          if report.get('overall', {}).get('cases') != 82:
-              raise SystemExit(f"expected 82 compact cases, got {report.get('overall', {}).get('cases')}")
+          if report.get('overall', {}).get('cases') != 84:
+              raise SystemExit(f"expected 84 compact cases, got {report.get('overall', {}).get('cases')}")
           if diagnostics:
               for item in diagnostics[:50]:
                   print(item)

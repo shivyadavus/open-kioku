@@ -901,6 +901,32 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // The shape of `mod_block_parent_item` with `forbid_heuristic_edges`: the symbol-registry
+        // pass must not offer the file's `target_fn` either, not even as a heuristic edge (#526).
+        "mod_block_parent_item_heuristic" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use mock_clock::target_fn;\n\n    #[test]\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // An item of a sibling `mod` block is not in scope by its bare name, so neither the
+        // resolver nor the symbol-registry pass may link the call to it (#526).
+        "sibling_mod_item_heuristic" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "mod clock {\n    pub fn target_fn() {}\n}\n\nmod tests {\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
         // `Client` in `caller_fn` is the imported `reqwest::Client`, not `fakes::Client`.
         "sibling_mod_same_file_type" => (
             vec![
@@ -1463,6 +1489,7 @@ mod relationship_live_tests {
                 forbidden_proof_kinds: BTreeSet::new(),
                 candidate_count_expected: None,
                 metamorphic_group: None,
+                forbid_heuristic_edges: false,
                 scenario: "same_simple_name".into(),
                 notes: None,
             }],
