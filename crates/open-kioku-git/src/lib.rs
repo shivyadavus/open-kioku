@@ -1,5 +1,6 @@
 mod ownership;
 mod reviewers;
+pub mod unified_diff;
 
 use chrono::{DateTime, Utc};
 use open_kioku_core::{
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use unified_diff::{DiffLine, HunkScanner, MalformedDiff};
 
 const COMMIT_RECORD_SEPARATOR: u8 = 0x1e;
 const GIT_COMMIT_FORMAT: &str =
@@ -224,6 +226,10 @@ pub fn commit_patches(root: impl AsRef<Path>, max_commits: usize) -> Result<Vec<
             "--unified=0",
             "--no-ext-diff",
             "--no-textconv",
+            // Pinned so `diff.noprefix`, `diff.mnemonicPrefix` or `diff.srcPrefix` cannot change
+            // the recorded paths.
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
         ])
         .output()
         .map_err(|err| OkError::Repository(format!("git patch scan failed: {err}")))?;
@@ -520,25 +526,50 @@ fn parse_file_patches(patch: &str) -> Result<Vec<FilePatch>> {
 
     let mut patches = Vec::new();
     let mut pending = PendingPatch::default();
+    let mut scanner = HunkScanner::new();
     for line in patch.lines() {
-        if line.starts_with("diff --git ") {
-            finish(&mut patches, &mut pending);
-        } else if let Some(value) = line.strip_prefix("rename from ") {
-            pending.previous_path = Some(parse_patch_path(value, None)?);
-        } else if let Some(value) = line.strip_prefix("rename to ") {
-            pending.path = Some(parse_patch_path(value, None)?);
-        } else if let Some(value) = line.strip_prefix("+++ ") {
-            if value != "/dev/null" {
-                pending.path = Some(parse_patch_path(value, Some("b/"))?);
+        let kind = scanner.scan(line);
+        if let Some(malformed) = scanner.malformation() {
+            return Err(malformed_patch(pending.path.as_deref(), malformed));
+        }
+        match kind {
+            DiffLine::Content => {}
+            DiffLine::HunkHeader(_) => {
+                if let Some(range) = parse_new_hunk_range(line)? {
+                    pending.line_ranges.push(range);
+                }
             }
-        } else if line.starts_with("@@ ") {
-            if let Some(range) = parse_new_hunk_range(line)? {
-                pending.line_ranges.push(range);
+            DiffLine::Header => {
+                if line.starts_with("diff --git ") {
+                    finish(&mut patches, &mut pending);
+                } else if let Some(value) = line.strip_prefix("rename from ") {
+                    pending.previous_path = Some(parse_patch_path(value, None)?);
+                } else if let Some(value) = line.strip_prefix("rename to ") {
+                    pending.path = Some(parse_patch_path(value, None)?);
+                } else if let Some(value) = line.strip_prefix("+++ ") {
+                    if value != "/dev/null" {
+                        pending.path = Some(parse_patch_path(value, Some("b/"))?);
+                    }
+                }
             }
         }
     }
+    scanner
+        .finish()
+        .map_err(|malformed| malformed_patch(pending.path.as_deref(), &malformed))?;
     finish(&mut patches, &mut pending);
     Ok(patches)
+}
+
+/// A git diff whose hunk bodies disagree with their headers. Git does not write one, so the
+/// output is not what the parser takes it for and no path read from it can be trusted.
+fn malformed_patch(path: Option<&Path>, malformed: &MalformedDiff) -> OkError {
+    let entry = path
+        .map(|path| format!(" in the entry for `{}`", path.display()))
+        .unwrap_or_default();
+    OkError::Repository(format!(
+        "git diff output is malformed{entry} at {malformed}"
+    ))
 }
 
 fn parse_diff_name_status(raw: &str) -> Result<Vec<DiffFile>> {
@@ -633,95 +664,58 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
 
     let mut files = Vec::new();
     let mut pending = PendingDiff::default();
-    let mut hunk = HunkBody::default();
+    let mut scanner = HunkScanner::new();
     for line in patch.lines() {
-        if hunk.take(line) {
+        let kind = scanner.scan(line);
+        if let Some(malformed) = scanner.malformation() {
+            let path = pending.new_path.as_deref().or(pending.old_path.as_deref());
+            return Err(malformed_patch(path, malformed));
+        }
+        match kind {
             // A hunk's content lines are never headers: a removed `-- x` or an added `++ y`
             // reads as `--- x` or `+++ y` and names no path.
-        } else if line.starts_with("diff --git ") {
-            finish(&mut files, &mut pending);
-        } else if let Some(header) = line.strip_prefix("@@ ") {
-            pending.hunks.push(parse_diff_hunk(line)?);
-            hunk = HunkBody::start(header);
-        } else if line.starts_with("new file mode ") {
-            pending.status = Some(GitChangeKind::Added);
-        } else if line.starts_with("deleted file mode ") {
-            pending.status = Some(GitChangeKind::Deleted);
-        } else if let Some(score) = line.strip_prefix("similarity index ") {
-            pending.rename_score = score.trim_end_matches('%').parse::<u8>().ok();
-        } else if let Some(value) = line.strip_prefix("rename from ") {
-            pending.old_path = Some(parse_patch_path(value, None)?);
-            pending.status = Some(GitChangeKind::Renamed);
-        } else if let Some(value) = line.strip_prefix("rename to ") {
-            pending.new_path = Some(parse_patch_path(value, None)?);
-            pending.status = Some(GitChangeKind::Renamed);
-        } else if let Some(value) = line.strip_prefix("copy from ") {
-            pending.old_path = Some(parse_patch_path(value, None)?);
-            pending.status = Some(GitChangeKind::Copied);
-        } else if let Some(value) = line.strip_prefix("copy to ") {
-            pending.new_path = Some(parse_patch_path(value, None)?);
-            pending.status = Some(GitChangeKind::Copied);
-        } else if let Some(value) = line.strip_prefix("--- ") {
-            // `rename from`/`copy from` already name the pre-edit path exactly.
-            if value != "/dev/null" && pending.old_path.is_none() {
-                pending.old_path = Some(parse_patch_path(value, Some("a/"))?);
-            }
-        } else if let Some(value) = line.strip_prefix("+++ ") {
-            if value != "/dev/null" && pending.new_path.is_none() {
-                pending.new_path = Some(parse_patch_path(value, Some("b/"))?);
+            DiffLine::Content => {}
+            DiffLine::HunkHeader(_) => pending.hunks.push(parse_diff_hunk(line)?),
+            DiffLine::Header => {
+                if line.starts_with("diff --git ") {
+                    finish(&mut files, &mut pending);
+                } else if line.starts_with("new file mode ") {
+                    pending.status = Some(GitChangeKind::Added);
+                } else if line.starts_with("deleted file mode ") {
+                    pending.status = Some(GitChangeKind::Deleted);
+                } else if let Some(score) = line.strip_prefix("similarity index ") {
+                    pending.rename_score = score.trim_end_matches('%').parse::<u8>().ok();
+                } else if let Some(value) = line.strip_prefix("rename from ") {
+                    pending.old_path = Some(parse_patch_path(value, None)?);
+                    pending.status = Some(GitChangeKind::Renamed);
+                } else if let Some(value) = line.strip_prefix("rename to ") {
+                    pending.new_path = Some(parse_patch_path(value, None)?);
+                    pending.status = Some(GitChangeKind::Renamed);
+                } else if let Some(value) = line.strip_prefix("copy from ") {
+                    pending.old_path = Some(parse_patch_path(value, None)?);
+                    pending.status = Some(GitChangeKind::Copied);
+                } else if let Some(value) = line.strip_prefix("copy to ") {
+                    pending.new_path = Some(parse_patch_path(value, None)?);
+                    pending.status = Some(GitChangeKind::Copied);
+                } else if let Some(value) = line.strip_prefix("--- ") {
+                    // `rename from`/`copy from` already name the pre-edit path exactly.
+                    if value != "/dev/null" && pending.old_path.is_none() {
+                        pending.old_path = Some(parse_patch_path(value, Some("a/"))?);
+                    }
+                } else if let Some(value) = line.strip_prefix("+++ ") {
+                    if value != "/dev/null" && pending.new_path.is_none() {
+                        pending.new_path = Some(parse_patch_path(value, Some("b/"))?);
+                    }
+                }
             }
         }
+    }
+    if let Err(malformed) = scanner.finish() {
+        let path = pending.new_path.as_deref().or(pending.old_path.as_deref());
+        return Err(malformed_patch(path, &malformed));
     }
     finish(&mut files, &mut pending);
     Ok(files)
-}
-
-/// The lines a hunk still holds, from the counts in its `@@ -a,b +c,d @@` header (an omitted
-/// count is 1). While any remain, a line is content whatever it starts with; once both reach
-/// zero, the next line is a header again.
-#[derive(Default)]
-struct HunkBody {
-    old: u32,
-    new: u32,
-}
-
-impl HunkBody {
-    fn start(header: &str) -> Self {
-        let mut parts = header.split_whitespace();
-        let count = |side: Option<&str>, marker: char| -> u32 {
-            side.and_then(|side| side.strip_prefix(marker))
-                .and_then(|side| match side.split_once(',') {
-                    Some((_, count)) => count.parse::<u32>().ok(),
-                    None => Some(1),
-                })
-                .unwrap_or(0)
-        };
-        let old = count(parts.next(), '-');
-        let new = count(parts.next(), '+');
-        Self { old, new }
-    }
-
-    /// Whether `line` is content of this hunk, counting it off if so. A line the remaining
-    /// counts cannot place, such as `diff --git`, ends the hunk.
-    fn take(&mut self, line: &str) -> bool {
-        if self.old == 0 && self.new == 0 {
-            return false;
-        }
-        match line.as_bytes().first() {
-            Some(b'-') if self.old > 0 => self.old -= 1,
-            Some(b'+') if self.new > 0 => self.new -= 1,
-            Some(b' ') | None if self.old > 0 && self.new > 0 => {
-                self.old -= 1;
-                self.new -= 1;
-            }
-            Some(b'\\') => {}
-            _ => {
-                *self = Self::default();
-                return false;
-            }
-        }
-        true
-    }
 }
 
 fn parse_diff_hunk(header: &str) -> Result<DiffHunk> {
@@ -1126,6 +1120,108 @@ mod tests {
     }
 
     #[test]
+    fn commit_patches_never_read_hunk_content_as_a_path() {
+        let dir = initialized_repo();
+        write(dir.path(), "src/lib.rs", "fn one() {}\n");
+        commit_all(dir.path(), "one");
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn one() {}\n++ b/not/a/path.rs\n-- a/nor/this.rs\n",
+        );
+        commit_all(dir.path(), "header-like content");
+
+        let patches = commit_patches(dir.path(), 1).unwrap();
+
+        assert_eq!(patches.len(), 1);
+        let files = patches[0]
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), file.line_ranges.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            files,
+            vec![(
+                Path::new("src/lib.rs").to_path_buf(),
+                vec![open_kioku_core::LineRange { start: 2, end: 3 }]
+            )]
+        );
+    }
+
+    #[test]
+    fn commit_patch_paths_ignore_local_prefix_config() {
+        let dir = initialized_repo();
+        write(dir.path(), "b/lib.rs", "fn one() {}\n");
+        commit_all(dir.path(), "one");
+        run(dir.path(), &["config", "diff.noprefix", "true"]);
+        run(dir.path(), &["config", "diff.mnemonicPrefix", "true"]);
+        run(dir.path(), &["config", "diff.srcPrefix", "x/"]);
+        run(dir.path(), &["config", "diff.dstPrefix", "y/"]);
+        write(dir.path(), "b/lib.rs", "fn one() {}\nfn two() {}\n");
+        commit_all(dir.path(), "two");
+
+        let patches = commit_patches(dir.path(), 1).unwrap();
+
+        let paths = patches[0]
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec![Path::new("b/lib.rs").to_path_buf()]);
+    }
+
+    #[test]
+    fn patch_parser_reads_header_like_hunk_content_as_content() {
+        let patches = parse_file_patches(
+            "diff --git a/src/a.rs b/src/a.rs\n\
+             --- a/src/a.rs\n\
+             +++ b/src/a.rs\n\
+             @@ -1 +1,2 @@\n\
+             --- a/src/other.rs\n\
+             +++ b/src/other.rs\n\
+             +++ b/src/also_not_a_path.rs\n",
+        )
+        .unwrap();
+
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].path, Path::new("src/a.rs"));
+    }
+
+    #[test]
+    fn patch_parser_reports_hunks_that_disagree_with_their_headers() {
+        let over = "diff --git a/src/a.rs b/src/a.rs\n\
+                    --- a/src/a.rs\n\
+                    +++ b/src/a.rs\n\
+                    @@ -1 +1,3 @@\n\
+                    -a\n\
+                    +b\n\
+                    diff --git a/src/b.rs b/src/b.rs\n";
+        let under = "diff --git a/src/a.rs b/src/a.rs\n\
+                     --- a/src/a.rs\n\
+                     +++ b/src/a.rs\n\
+                     @@ -1 +1 @@\n\
+                     -a\n\
+                     +b\n\
+                     +++ b/src/b.rs\n";
+        let unparsed = "diff --git a/src/a.rs b/src/a.rs\n\
+                        --- a/src/a.rs\n\
+                        +++ b/src/a.rs\n\
+                        @@ -1 +1,x @@\n";
+        for patch in [over, under, unparsed] {
+            let err = parse_file_patches(patch).unwrap_err().to_string();
+            assert!(
+                err.contains("malformed in the entry for `src/a.rs`"),
+                "{err}"
+            );
+            let err = parse_unified_zero_diff(patch).unwrap_err().to_string();
+            assert!(
+                err.contains("malformed in the entry for `src/a.rs`"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
     fn diff_name_status_parser_captures_added_modified_deleted_and_renamed() {
         let files = parse_diff_name_status(
             "A\tsrc/new.rs\n\
@@ -1326,7 +1422,10 @@ mod tests {
              deleted file mode 100644\n\
              --- a/src/deleted.rs\n\
              +++ /dev/null\n\
-             @@ -1,3 +0,0 @@\n",
+             @@ -1,3 +0,0 @@\n\
+             -one();\n\
+             -two();\n\
+             -three();\n",
         )
         .unwrap();
 
@@ -1370,7 +1469,12 @@ mod tests {
              --- \"a/src/space\\040name.rs\"\n\
              +++ \"b/src/space\\040name.rs\"\n\
              @@ -3,2 +3,0 @@\n\
-             @@ -8 +6,2 @@\n",
+             -gone();\n\
+             -gone_too();\n\
+             @@ -8 +6,2 @@\n\
+             -old();\n\
+             +new();\n\
+             +added();\n",
         )
         .unwrap();
 
@@ -1385,6 +1489,7 @@ mod tests {
     #[test]
     fn patch_parser_ignores_record_separator_bytes_inside_diff_content() {
         let mut raw = b"\x1e0123456789abcdef0123456789abcdef01234567\x00diff --git a/a.rs b/a.rs\n\
+              --- /dev/null\n\
               +++ b/a.rs\n\
               @@ -0,0 +1 @@\n\
               +embedded "
