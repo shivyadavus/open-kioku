@@ -29,6 +29,8 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - name: no ignored tests without allowlist
         run: scripts/check-no-ignored-tests.py
+      - name: public surface
+        run: scripts/check-public-surface.py
       - run: cargo test --all
       - run: cargo test -p open-kioku-tests
       - name: MCP golden snapshot contract
