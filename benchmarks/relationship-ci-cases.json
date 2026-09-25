@@ -323,6 +323,165 @@
       "notes": "Regression case: `mod tests { use super::*; use crate::fakes::*; }` could take `target_fn` from either glob, so the call must not bind to the parent's import. rustc rejects the call as ambiguous; the index must still fail closed."
     },
     {
+      "id": "ci-rust-calls-18-mod_block_parent_item",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_parent_item",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_parent_item:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "mod_block_parent_item",
+      "notes": "Regression case: the file's own `target_fn` is not in scope inside `mod tests { use mock_clock::target_fn; }`, so the call there must not bind to it; the import is unresolved and the call gets no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-19-sibling_mod_same_file_type",
+      "fixture_id": "ci/ri3/rust/calls/sibling_mod_same_file_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:sibling_mod_same_file_type:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "sibling_mod_same_file_type",
+      "notes": "Regression case: `Client` in `caller_fn` names the unresolved `use reqwest::Client;`, so neither `Client::new()` nor `client.target_fn()` may bind to `fakes::Client` declared in a sibling `mod` block of the same file."
+    },
+    {
+      "id": "ci-rust-calls-20-mod_block_super_glob_item",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_super_glob_item",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_super_glob_item:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "mod_block_super_glob_item",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:mod_block_super_glob_item:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "same_scope_definition"
+      ],
+      "notes": "Regression case: `mod tests { use super::*; }` brings the file's own `target_fn` into scope, so the call inside it binds to that item."
+    },
+    {
+      "id": "ci-rust-calls-21-mod_block_own_item",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_own_item",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_own_item:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "mod_block_own_item",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:mod_block_own_item:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "same_scope_definition"
+      ],
+      "notes": "Regression case: a call inside a `mod` block binds to an item the block itself declares, with no import."
+    },
+    {
+      "id": "ci-rust-calls-22-mod_block_import_over_parent_item",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_import_over_parent_item",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_import_over_parent_item:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "mod_block_import_over_parent_item",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::clock::target_fn",
+        "identity": "symbol:rust:calls:mod_block_import_over_parent_item:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case: `mod tests { use crate::clock::target_fn; }` names the call's target; the file's own `target_fn` is not in scope inside the block."
+    },
+    {
+      "id": "ci-rust-calls-23-mod_block_super_glob_type",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_super_glob_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_super_glob_type:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "mod_block_super_glob_type",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:mod_block_super_glob_type:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case: `mod tests { use super::*; }` brings the file's own `Token` into scope, so a method call on a `Token` parameter there binds to `Token::target_fn`."
+    },
+    {
+      "id": "ci-rust-calls-24-mod_block_super_item_import",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_super_item_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_super_item_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "mod_block_super_item_import",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:mod_block_super_item_import:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "same_scope_definition"
+      ],
+      "notes": "Regression case: `mod tests { use super::target_fn; }` names the file's own `target_fn`, so the call inside the block binds to it."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
