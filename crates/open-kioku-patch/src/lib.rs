@@ -16,7 +16,7 @@ use open_kioku_core::{
     Symbol, SymbolKind, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
-use open_kioku_git::unified_diff::{DiffLine, HunkScanner, MalformedDiff};
+use open_kioku_git::unified_diff::{file_header_name, DiffLine, HunkScanner, MalformedDiff};
 use open_kioku_impact::ImpactEngine;
 use open_kioku_plan::ContractBuilder;
 use open_kioku_storage::{MetadataStore, OkStore, SearchIndex};
@@ -2916,16 +2916,10 @@ fn changed_regions_from_input(
 }
 
 fn diff_path(raw: &str) -> Option<String> {
+    let raw = file_header_name(raw);
     let path = match unquote_diff_path(raw) {
         Some((path, _)) => path,
-        // A tab ends the name before a timestamp, and git appends one to a name that holds a
-        // space; without a tab the name ends at the first whitespace.
-        None if raw.contains('\t') => raw.split('\t').next().unwrap_or_default().to_string(),
-        None => raw
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_string(),
+        None => raw.to_string(),
     };
     if path == "/dev/null" {
         return None;
