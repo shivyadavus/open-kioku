@@ -189,6 +189,40 @@ copy of the artifact:
   and a `scip` quality note and lowers `quality.scip_symbols`, `scip_occurrences` and
   `scip_exact_references` to match; `ok index` imports SCIP for generated or ignored code
   again. The search index is rebuilt from what remains.
+- **What the remaining rows said about removed ones.** A removed file's symbols are named
+  elsewhere by their qualified names, which no path rule matches: the symbol registry's
+  resolution of a bare `KeyAnchored` in an admitted file is a fact targeting
+  `internal::vault::keys::KeyAnchored`, drawn as a graph node with that label and an edge
+  whose message quotes it. The names are taken from the removed symbols themselves, as the
+  language's parser spelled them (for Rust, the module path), not derived from the file's
+  path; every fact whose target is one of them, and every graph node no file owns labelled
+  with one, is removed with its edges, unless an indexed file still defines a symbol of that
+  name. A graph node no file owns that the removal leaves with no edge (a removed symbol's
+  `complexity:` resource) is removed too: such nodes exist only as the target of an edge.
+  Call-site dictionary entries no remaining call site uses are removed, since a call site's
+  id spells its file's path. Every history hotspot is recomputed from the file and symbol
+  touches that remain, so a directory hotspot for a directory only removed files were in is
+  gone and a parent directory's counts no longer include the removed touches. The artifact's
+  quality notes about removed content are dropped from the imported manifest: an
+  import-resolver caveat in a removed file, an unresolved name in a removed chunk, and a
+  symbol-registry caveat for a name no remaining chunk uses (the registry records each name
+  once, without its chunk, so a name a remaining chunk also uses keeps its caveat). `ok index`
+  writes none of these for a file discovery skipped; the imported graph, facts and hotspots
+  match what it writes for the same files and touches. The manifest's skipped paths still
+  name a denied file, as `ok index` records it; a secret-like one is withheld under
+  `redact_secrets`.
+- **Free pages.** When the policy step removed anything, the staged database is compacted
+  with `VACUUM` once the artifact's manifest has been withheld, before it is moved into place.
+  SQLite keeps the bytes of deleted rows in free pages until they are reused, so without it
+  the imported file would still hold the removed names, and the artifact's manifest with its
+  notes about them, although no query serves either. The compaction runs in rollback-journal
+  mode, so no write-ahead log holds the old pages afterwards; the manifest published after the
+  search index is rebuilt is written into new pages. The cost is one rewrite of the staged
+  database, with free disk space about its size while it runs: on this repository's index
+  (about 260 MB), `VACUUM` alone took about 2.8 s, and an import that removed one crate took
+  about 8.8 s against 5.6 s before this change. An import that removes nothing skips it. As
+  with the pre-redaction compaction, `VACUUM` cannot scrub blocks the filesystem has already
+  freed, such as the deleted rollback journal's.
 
 The published manifest carries the result as `snapshot`: `imported_from_commit`,
 `local_commit`, `relation` (`same_commit`, `related` or `foreign`), `commits_behind`,
