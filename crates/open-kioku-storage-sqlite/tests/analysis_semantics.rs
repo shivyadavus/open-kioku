@@ -25,6 +25,7 @@ fn manifest(root: &std::path::Path) -> IndexManifest {
         index_mode: Default::default(),
         phase_reports: Vec::new(),
         quality: IndexQuality::default(),
+        snapshot: None,
     }
 }
 

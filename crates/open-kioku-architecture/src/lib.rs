@@ -843,6 +843,7 @@ mod tests {
             index_mode: IndexMode::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
         store
             .replace_index(IndexData {

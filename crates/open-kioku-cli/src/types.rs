@@ -393,7 +393,15 @@ enum SnapshotCommand {
         quality: SnapshotQuality,
     },
     /// Import the snapshot under .ok, replacing the current index and rebuilding search.
-    Import,
+    /// The artifact's commit must share history with HEAD; files the local index policy
+    /// excludes are removed from the imported index.
+    Import {
+        /// Import an artifact whose commit this repository cannot relate to HEAD (absent,
+        /// unrelated history, unrecorded, or no local HEAD). The index is marked foreign and
+        /// every answer carries a caveat until `ok index` rebuilds it.
+        #[arg(long)]
+        allow_foreign: bool,
+    },
     /// Validate the snapshot artifact and metadata under .ok without importing them.
     Doctor,
 }
@@ -444,6 +452,9 @@ struct SnapshotMetadata {
     original_size_bytes: u64,
     compressed_size_bytes: u64,
     compression_level: i32,
+    /// Hashes the exporter's absolute path with its commit, so it cannot match on another
+    /// machine and nothing compares it; the revision check uses `repo_commit`. Still written
+    /// because earlier binaries require the field when they read the metadata.
     source_root_hash: String,
     artifact_kind: String,
 }
@@ -466,6 +477,13 @@ struct SnapshotImportReport {
     metadata_path: PathBuf,
     index_path: PathBuf,
     metadata: SnapshotMetadata,
+    /// Which revision the imported index describes and what the local policy removed; the
+    /// same record `ok status` and MCP `repo_status` report under `snapshot`.
+    snapshot: open_kioku_core::SnapshotProvenance,
+    /// Files removed by the local policy, counted per rule. Paths are not listed: a
+    /// secret-like path is itself withheld.
+    policy_filtered_by_source: BTreeMap<String, usize>,
+    caveats: Vec<String>,
     warnings: Vec<String>,
 }
 

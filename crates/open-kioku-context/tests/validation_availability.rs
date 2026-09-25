@@ -203,6 +203,7 @@ fn store(targets: Targets) -> SqliteStore {
         index_mode: quality.index_mode,
         phase_reports: Vec::new(),
         quality,
+        snapshot: None,
     };
     store
         .replace_index(IndexData {

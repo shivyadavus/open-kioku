@@ -20,22 +20,51 @@ use std::thread;
 /// `--no-index`, so tracked files are never reported as ignored merely because
 /// an exclude pattern also matches them.
 pub(crate) fn ignored_paths(root: &Path) -> Result<Option<HashSet<PathBuf>>> {
-    if !has_git_marker(root) {
+    if !inside_work_tree(root)? {
         return Ok(None);
     }
+    let candidates = filesystem_candidates(root);
+    check_ignored_candidates(root, &candidates).map(Some)
+}
 
+/// Git's verdict on `candidates` (paths relative to `root`) rather than on the files present
+/// on disk: an imported index names paths the local checkout may not hold, and whether the
+/// local configuration ignores them does not depend on that. Same `None` contract as
+/// [`ignored_paths`].
+pub(crate) fn ignored_among(
+    root: &Path,
+    candidates: &[PathBuf],
+) -> Result<Option<HashSet<PathBuf>>> {
+    if !inside_work_tree(root)? {
+        return Ok(None);
+    }
+    // `git check-ignore` rejects a path outside the work tree (`../x`, `/x`) with a fatal
+    // error that answers nothing for the whole batch, so only plain relative paths are sent;
+    // no rule of Git's can ignore a path it cannot name anyway.
+    let candidates = candidates
+        .iter()
+        .filter(|path| {
+            !path.as_os_str().is_empty()
+                && path
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    check_ignored_candidates(root, &candidates).map(Some)
+}
+
+fn inside_work_tree(root: &Path) -> Result<bool> {
+    if !has_git_marker(root) {
+        return Ok(false);
+    }
     let probe = Command::new("git")
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .map_err(|err| OkError::Repository(format!("git ignore probe failed: {err}")))?;
-    if !probe.status.success() || String::from_utf8_lossy(&probe.stdout).trim() != "true" {
-        return Ok(None);
-    }
-
-    let candidates = filesystem_candidates(root);
-    check_ignored_candidates(root, &candidates).map(Some)
+    Ok(probe.status.success() && String::from_utf8_lossy(&probe.stdout).trim() == "true")
 }
 
 fn check_ignored_candidates(root: &Path, candidates: &[PathBuf]) -> Result<HashSet<PathBuf>> {

@@ -1714,6 +1714,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
 
         let f1 = File {
@@ -2164,6 +2165,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
         store
             .replace_index(IndexData {
@@ -2351,6 +2353,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
 
         store
@@ -2440,6 +2443,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
         let history_fact = AnalysisFact {
             id: "history:source-neighbor".into(),
@@ -2561,6 +2565,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
 
         store
@@ -2650,6 +2655,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
 
         store
@@ -2716,6 +2722,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
         store
             .replace_index(IndexData {
@@ -2873,6 +2880,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
         store
             .replace_index(IndexData {
@@ -3016,6 +3024,7 @@ mod tests {
             // Graph reads fail closed unless the index declares current analysis semantics.
             analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
         store
             .replace_index(IndexData {
@@ -3159,6 +3168,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
         let file = File {
             id: FileId::new("f1"),
@@ -3261,6 +3271,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
         store
             .replace_index(IndexData {
@@ -3349,6 +3360,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         };
         store
             .replace_index(IndexData {

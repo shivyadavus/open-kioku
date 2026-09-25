@@ -134,14 +134,199 @@ pub fn branch(root: impl AsRef<Path>) -> Option<String> {
 }
 
 pub fn commit(root: impl AsRef<Path>) -> Option<String> {
-    let head = fs::read_to_string(root.as_ref().join(".git/HEAD")).ok()?;
+    let root = root.as_ref();
+    loose_head_commit(root).or_else(|| {
+        // A branch whose ref was packed (`git gc`, a fresh clone) and a linked worktree, whose
+        // `.git` is a file, have no loose ref to read; Git itself resolves both.
+        root.join(".git")
+            .exists()
+            .then(|| rev_parse_commit(root, "HEAD"))
+            .flatten()
+    })
+}
+
+fn loose_head_commit(root: &Path) -> Option<String> {
+    let head = fs::read_to_string(root.join(".git/HEAD")).ok()?;
     if !head.starts_with("ref: ") {
         return Some(head.trim().to_string());
     }
     let reference = head.trim().strip_prefix("ref: ")?;
-    fs::read_to_string(root.as_ref().join(".git").join(reference))
+    fs::read_to_string(root.join(".git").join(reference))
         .ok()
         .map(|value| value.trim().to_string())
+}
+
+/// The full id of the commit `revision` names in the repository at `root`, if it is one.
+fn rev_parse_commit(root: &Path, revision: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
+        .arg(format!("{revision}^{{commit}}"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// How a commit recorded elsewhere (an index snapshot's) relates to the local `HEAD`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionRelation {
+    /// It is `HEAD`.
+    Same,
+    /// It shares history with `HEAD`. `ahead` counts the commits it has that `HEAD` does not,
+    /// `behind` the commits `HEAD` has that it does not; an ancestor of `HEAD` has `ahead: 0`.
+    Related { ahead: usize, behind: usize },
+    /// Both are commits of this repository and share no history.
+    Unrelated,
+    /// It is not a commit this repository holds, so nothing about it can be verified here.
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionComparison {
+    /// The local `HEAD`, fully resolved.
+    pub head: String,
+    /// The compared commit, fully resolved when the repository holds it.
+    pub commit: String,
+    pub relation: RevisionRelation,
+}
+
+/// Compare `commit` with the `HEAD` of the repository at `root`. `None` when `root` has no
+/// resolvable `HEAD` (not a Git work tree, or no commit yet), so no comparison is possible.
+pub fn compare_with_head(
+    root: impl AsRef<Path>,
+    commit: &str,
+) -> Result<Option<RevisionComparison>> {
+    let root = root.as_ref();
+    let Some(head) = rev_parse_commit(root, "HEAD") else {
+        return Ok(None);
+    };
+    let unknown = |commit: &str| RevisionComparison {
+        head: head.clone(),
+        commit: commit.to_string(),
+        relation: RevisionRelation::Unknown,
+    };
+    // Only an object id is looked up: a recorded value such as `unknown`, or a ref name that
+    // happens to exist locally, must not resolve to some local commit.
+    let is_object_id =
+        (7..=64).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !is_object_id {
+        return Ok(Some(unknown(commit)));
+    }
+    let Some(resolved) = rev_parse_commit(root, commit) else {
+        return Ok(Some(unknown(commit)));
+    };
+    if resolved == head {
+        return Ok(Some(RevisionComparison {
+            head,
+            commit: resolved,
+            relation: RevisionRelation::Same,
+        }));
+    }
+    let merge_base = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["merge-base", "--end-of-options", &resolved, &head])
+        .output()
+        .map_err(|err| OkError::Repository(format!("git merge-base failed: {err}")))?;
+    // Exit status 1 with no output is Git's answer "no common ancestor"; anything else that
+    // is not success is a failure to answer, not an answer.
+    match merge_base.status.code() {
+        Some(0) => {}
+        Some(1) if merge_base.stdout.is_empty() => {
+            return Ok(Some(RevisionComparison {
+                head,
+                commit: resolved,
+                relation: RevisionRelation::Unrelated,
+            }));
+        }
+        _ => {
+            return Err(OkError::Repository(format!(
+                "git merge-base failed: {}",
+                String::from_utf8_lossy(&merge_base.stderr).trim()
+            )))
+        }
+    }
+    let counts = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-list", "--left-right", "--count", "--end-of-options"])
+        .arg(format!("{resolved}...{head}"))
+        .output()
+        .map_err(|err| OkError::Repository(format!("git rev-list failed: {err}")))?;
+    if !counts.status.success() {
+        return Err(OkError::Repository(format!(
+            "git rev-list failed: {}",
+            String::from_utf8_lossy(&counts.stderr).trim()
+        )));
+    }
+    let text = git_text(&counts.stdout, "rev-list count")?;
+    let mut fields = text.split_whitespace().map(str::parse::<usize>);
+    let (Some(Ok(ahead)), Some(Ok(behind))) = (fields.next(), fields.next()) else {
+        return Err(OkError::Repository(format!(
+            "git rev-list returned an unexpected count: {}",
+            text.trim()
+        )));
+    };
+    Ok(Some(RevisionComparison {
+        head,
+        commit: resolved,
+        relation: RevisionRelation::Related { ahead, behind },
+    }))
+}
+
+/// Paths whose working-tree content differs from `commit`: tracked files changed since it,
+/// committed or not, and untracked files Git does not ignore. Together they are every file
+/// an index built here now would read differently from one built at `commit`, ignored files
+/// aside, which indexing skips anyway.
+pub fn changed_paths_since_commit(root: impl AsRef<Path>, commit: &str) -> Result<Vec<PathBuf>> {
+    let root = root.as_ref();
+    let run = |args: &[&str], what: &str| -> Result<Vec<PathBuf>> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "core.quotePath=false"])
+            .args(args)
+            .output()
+            .map_err(|err| OkError::Repository(format!("git {what} failed: {err}")))?;
+        if !output.status.success() {
+            return Err(OkError::Repository(format!(
+                "git {what} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| PathBuf::from(String::from_utf8_lossy(raw).into_owned()))
+            .collect())
+    };
+    let mut paths = run(
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--end-of-options",
+            commit,
+            "--",
+        ],
+        "diff --name-only",
+    )?;
+    paths.extend(run(
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        "ls-files --others",
+    )?);
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 pub fn require_repo(root: impl AsRef<Path>) -> Result<PathBuf> {
@@ -982,9 +1167,9 @@ fn is_test_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cochange_records, commit_history, commit_patches, diff_name_status_since,
-        diff_unified_zero_since, parse_commit_patches, parse_diff_name_status, parse_file_patches,
-        parse_unified_zero_diff,
+        changed_paths_since_commit, cochange_records, commit, commit_history, commit_patches,
+        compare_with_head, diff_name_status_since, diff_unified_zero_since, parse_commit_patches,
+        parse_diff_name_status, parse_file_patches, parse_unified_zero_diff, RevisionRelation,
     };
     use open_kioku_core::GitChangeKind;
     use std::fs;
@@ -1679,5 +1864,92 @@ mod tests {
             diff_name_status_since(dir.path(), "HEAD~1").unwrap().len(),
             1
         );
+    }
+
+    fn head(root: &Path) -> String {
+        commit(root).expect("a committed repository has a HEAD")
+    }
+
+    #[test]
+    fn a_commit_is_related_to_head_by_its_shared_history() {
+        let dir = initialized_repo();
+        write(dir.path(), "src/one.rs", "fn one() {}\n");
+        commit_all(dir.path(), "one");
+        let first = head(dir.path());
+        write(dir.path(), "src/one.rs", "fn one() {}\nfn two() {}\n");
+        commit_all(dir.path(), "two");
+        write(dir.path(), "src/three.rs", "fn three() {}\n");
+        commit_all(dir.path(), "three");
+
+        let same = compare_with_head(dir.path(), &head(dir.path()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(same.relation, RevisionRelation::Same);
+        let behind = compare_with_head(dir.path(), &first).unwrap().unwrap();
+        assert_eq!(
+            behind.relation,
+            RevisionRelation::Related {
+                ahead: 0,
+                behind: 2
+            }
+        );
+        // Abbreviated ids resolve to the full one.
+        let short = compare_with_head(dir.path(), &first[..10])
+            .unwrap()
+            .unwrap();
+        assert_eq!(short.commit, first);
+        assert_eq!(
+            changed_paths_since_commit(dir.path(), &first)
+                .unwrap()
+                .len(),
+            2
+        );
+        write(dir.path(), "src/three.rs", "fn three() { }\n");
+        write(dir.path(), "src/four.rs", "fn four() {}\n");
+        write(dir.path(), ".gitignore", "*.log\n");
+        write(dir.path(), "debug.log", "ignored\n");
+        let changed = changed_paths_since_commit(dir.path(), &head(dir.path())).unwrap();
+        assert_eq!(
+            changed,
+            [".gitignore", "src/four.rs", "src/three.rs"]
+                .map(std::path::PathBuf::from)
+                .to_vec(),
+            "uncommitted and untracked changes count; ignored files do not"
+        );
+    }
+
+    #[test]
+    fn an_absent_unrecorded_or_unrelated_commit_is_never_related_to_head() {
+        let dir = initialized_repo();
+        write(dir.path(), "a.rs", "fn a() {}\n");
+        commit_all(dir.path(), "a");
+        let other = initialized_repo();
+        write(other.path(), "b.rs", "fn b() {}\n");
+        commit_all(other.path(), "b");
+        let foreign = head(other.path());
+
+        for value in [foreign.as_str(), "unknown", "HEAD", "--all", "deadbeef"] {
+            let comparison = compare_with_head(dir.path(), value).unwrap().unwrap();
+            assert_eq!(comparison.relation, RevisionRelation::Unknown, "{value}");
+        }
+        run(
+            dir.path(),
+            &["fetch", "--quiet", &other.path().to_string_lossy(), "HEAD"],
+        );
+        let unrelated = compare_with_head(dir.path(), &foreign).unwrap().unwrap();
+        assert_eq!(unrelated.relation, RevisionRelation::Unrelated);
+
+        let bare = tempfile::tempdir().unwrap();
+        assert!(compare_with_head(bare.path(), &foreign).unwrap().is_none());
+    }
+
+    #[test]
+    fn head_resolves_through_packed_refs() {
+        let dir = initialized_repo();
+        write(dir.path(), "a.rs", "fn a() {}\n");
+        commit_all(dir.path(), "a");
+        let loose = head(dir.path());
+        run(dir.path(), &["pack-refs", "--all"]);
+        assert_eq!(commit(dir.path()), Some(loose));
     }
 }

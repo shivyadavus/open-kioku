@@ -442,6 +442,198 @@ impl SqliteStore {
         Ok(report)
     }
 
+    /// Every repository-relative path the store's rows name, split by what governs them:
+    /// indexed content (files and document sections), which the scan policy decides, and Git
+    /// history, which is recorded for every path a commit touched whatever that policy says.
+    pub fn stored_paths(&self) -> Result<StoredPaths> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let read = |queries: &[&str]| -> Result<BTreeSet<PathBuf>> {
+            let mut paths = BTreeSet::new();
+            for sql in queries {
+                let mut stmt = conn.prepare(sql).map_err(storage_err)?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, Option<String>>(0))
+                    .map_err(storage_err)?;
+                for row in rows {
+                    if let Some(path) = row.map_err(storage_err)? {
+                        paths.insert(PathBuf::from(path));
+                    }
+                }
+            }
+            Ok(paths)
+        };
+        let mut unanchored_nodes = Vec::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, label FROM graph_nodes WHERE file_id IS NULL OR file_id = '' \
+                 ORDER BY id",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_err)?;
+        for row in rows {
+            unanchored_nodes.push(row.map_err(storage_err)?);
+        }
+        drop(stmt);
+        Ok(StoredPaths {
+            indexed: read(INDEXED_PATH_QUERIES)?,
+            history: read(HISTORY_PATH_QUERIES)?,
+            unanchored_nodes,
+        })
+    }
+
+    /// Every way the store's rows disagree with each other where readers rely on them to
+    /// agree, one line per check that failed; empty for a store `ok index` wrote.
+    ///
+    /// The path policy an import applies is decided on the path columns, and readers serve
+    /// the path inside each row's JSON, resolve content through `file_id`, and find graph
+    /// strings by their hash. A row whose column says `src/ok.rs` and whose JSON says `.env`
+    /// would pass the policy and be served as `.env`; an orphaned chunk or a dictionary entry
+    /// under the wrong hash would escape the purge. None of these states can be produced by
+    /// the writers, so any of them means the database was not written by Open Kioku as it
+    /// stands, and it is refused rather than repaired.
+    pub fn consistency_violations(&self) -> Result<Vec<String>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let mut violations = Vec::new();
+        for (check, sql) in CONSISTENCY_CHECKS {
+            let count: i64 = conn
+                .query_row(sql, [], |row| row.get(0))
+                .map_err(storage_err)?;
+            if count > 0 {
+                violations.push(format!("{count} row(s): {check}"));
+            }
+        }
+        let mut stmt = conn
+            .prepare("SELECT vhash, value FROM graph_strings")
+            .map_err(storage_err)?;
+        let mut rows = stmt.query([]).map_err(storage_err)?;
+        let mut mismatched = 0usize;
+        while let Some(row) = rows.next().map_err(storage_err)? {
+            let vhash: i64 = row.get(0).map_err(storage_err)?;
+            let value: String = row.get(1).map_err(storage_err)?;
+            if compact::fnv1a64(&value) != vhash {
+                mismatched += 1;
+            }
+        }
+        if mismatched > 0 {
+            violations.push(format!(
+                "{mismatched} row(s): graph dictionary entries whose hash does not match their value"
+            ));
+        }
+        Ok(violations)
+    }
+
+    /// Remove, in one transaction, every row derived from indexing one of `indexed`: each
+    /// file's rows and graph nodes, the edges anchored at them or evidenced in the file, its
+    /// vector targets and document sections, the facts other files hold about it, and the
+    /// symbol-level history derived from its symbols. Its file-level Git history is kept, as
+    /// `ok index` keeps it for a path the scan policy excludes. Every history row naming one
+    /// of `history` is removed as well. The manifest is not written; `manifest` only
+    /// satisfies the shared row writer, as in
+    /// [`stage_files_index_with_graph`](Self::stage_files_index_with_graph).
+    pub fn purge_paths(
+        &self,
+        indexed: &BTreeSet<PathBuf>,
+        history: &BTreeSet<PathBuf>,
+        graph_nodes: &BTreeSet<String>,
+        manifest: &IndexManifest,
+    ) -> Result<PathPurge> {
+        let mut report = PathPurge::default();
+        if indexed.is_empty() && history.is_empty() && graph_nodes.is_empty() {
+            return Ok(report);
+        }
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        let mut file_ids = Vec::new();
+        for path in indexed {
+            let path = path.to_string_lossy();
+            let id: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM files WHERE path = ?1",
+                    params![path],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_err)?;
+            if let Some(id) = id {
+                file_ids.push(FileId::new(id));
+            }
+        }
+        let count_for = |sql: &str, id: &FileId| -> Result<usize> {
+            tx.query_row(sql, params![&id.0], |row| row.get::<_, i64>(0))
+                .map(|count| count as usize)
+                .map_err(storage_err)
+        };
+        for id in &file_ids {
+            report.symbols_removed +=
+                count_for("SELECT COUNT(*) FROM symbols WHERE file_id = ?1", id)?;
+            report.chunks_removed +=
+                count_for("SELECT COUNT(*) FROM chunks WHERE file_id = ?1", id)?;
+            tx.execute(
+                "DELETE FROM vector_targets WHERE file_id = ?1",
+                params![&id.0],
+            )
+            .map_err(storage_err)?;
+        }
+        report.files_removed = file_ids.len();
+        let update = PartialIndexUpdate {
+            manifest,
+            changed_files: &[],
+            deleted_file_ids: &file_ids,
+            symbols: &[],
+            chunks: &[],
+            tests: &[],
+            imports: &[],
+            occurrences: &[],
+            analysis_facts: &[],
+            graph_nodes: &[],
+            graph_edges: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
+        };
+        replace_files_rows(&tx, &update, ManifestWrite::Withhold, None)?;
+        // Nodes no file owns (a test named by history, a resource) go with every edge at them.
+        let mut orphan_candidates = HashSet::new();
+        for node_id in graph_nodes {
+            if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, node_id)? {
+                delete_edges_at_node(&tx, sid, &mut orphan_candidates)?;
+                orphan_candidates.insert(sid);
+            }
+            report.graph_nodes_removed += tx
+                .execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])
+                .map_err(storage_err)?;
+        }
+        remove_orphan_graph_strings(&tx, orphan_candidates)?;
+        for (paths, statements) in [
+            (indexed, INDEXED_PATH_PURGE_STATEMENTS),
+            (history, HISTORY_PATH_PURGE_STATEMENTS),
+        ] {
+            for path in paths {
+                let path = path.to_string_lossy();
+                for sql in statements {
+                    report.other_rows_removed +=
+                        tx.execute(sql, params![path]).map_err(storage_err)?;
+                }
+            }
+        }
+        tx.commit().map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
+        Ok(report)
+    }
+
     fn replace_index_with_documents_and_manifest(
         &self,
         data: IndexData<'_>,
@@ -855,6 +1047,25 @@ impl MetadataStore for SqliteStore {
         let raw: Option<Option<String>> = conn
             .query_row(
                 "SELECT json_extract(json, '$.quality.coverage') FROM manifests WHERE id = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(storage_err)?;
+        match raw.flatten() {
+            Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn snapshot_provenance(&self) -> Result<Option<open_kioku_core::SnapshotProvenance>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let raw: Option<Option<String>> = conn
+            .query_row(
+                "SELECT json_extract(json, '$.snapshot') FROM manifests WHERE id = 1",
                 [],
                 |row| row.get::<_, Option<String>>(0),
             )
@@ -2634,6 +2845,174 @@ enum ManifestWrite {
     Withhold,
 }
 
+/// The indexed-content path columns [`SqliteStore::stored_paths`] reads.
+const INDEXED_PATH_QUERIES: &[&str] = &[
+    "SELECT path FROM files",
+    "SELECT DISTINCT path FROM document_sections",
+];
+
+/// The Git history path columns [`SqliteStore::stored_paths`] reads.
+const HISTORY_PATH_QUERIES: &[&str] = &[
+    "SELECT DISTINCT path FROM git_file_touches",
+    "SELECT DISTINCT previous_path FROM git_file_touches",
+    "SELECT DISTINCT file_path FROM git_symbol_touches",
+    "SELECT DISTINCT path FROM git_cochange_edges",
+    "SELECT DISTINCT cochanged_path FROM git_cochange_edges",
+    "SELECT DISTINCT path FROM git_review_events",
+    "SELECT DISTINCT path FROM history_hotspots",
+];
+
+/// Rows outside the file tables that exist only because a file was indexed: its document
+/// sections, the facts other indexed files hold about it (co-change is recorded between
+/// indexed files only), and its symbols' history. See [`SqliteStore::purge_paths`].
+const INDEXED_PATH_PURGE_STATEMENTS: &[&str] = &[
+    "DELETE FROM document_sections WHERE path = ?1",
+    FACTS_ABOUT_FILE_DELETE,
+    "DELETE FROM git_symbol_touches WHERE file_path = ?1",
+    "DELETE FROM history_hotspots WHERE path = ?1 AND entity_kind = 'symbol'",
+];
+
+/// The facts other files hold about the file at `?1`: those whose target is that file (a
+/// co-change with it, or with it as a test), not every fact whose target string matches.
+const FACTS_ABOUT_FILE_DELETE: &str = "DELETE FROM analysis_facts WHERE target = ?1 \
+     AND json_extract(json, '$.target_kind') IN ('file', 'test')";
+
+/// Every history row that names a path, and every fact naming it, whatever its kind: a
+/// secret-like or denied path must not be named anywhere. See [`SqliteStore::purge_paths`].
+const HISTORY_PATH_PURGE_STATEMENTS: &[&str] = &[
+    "DELETE FROM git_file_touches WHERE path = ?1 OR previous_path = ?1",
+    "DELETE FROM git_symbol_touches WHERE file_path = ?1",
+    "DELETE FROM git_cochange_edges WHERE path = ?1 OR cochanged_path = ?1",
+    "DELETE FROM git_review_events WHERE path = ?1",
+    "DELETE FROM history_hotspots WHERE path = ?1",
+    "DELETE FROM analysis_facts WHERE target = ?1",
+];
+
+/// What [`SqliteStore::stored_paths`] found.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StoredPaths {
+    pub indexed: BTreeSet<PathBuf>,
+    pub history: BTreeSet<PathBuf>,
+    /// `(id, label)` of every graph node no file owns. Such a node's label can be a path (a
+    /// test named by history), and no file purge reaches it.
+    pub unanchored_nodes: Vec<(String, String)>,
+}
+
+/// [`SqliteStore::consistency_violations`]: each query counts the rows that break one
+/// invariant every Open Kioku writer keeps. JSON and column values are compared with `IS NOT`
+/// so a NULL on one side and a value on the other counts.
+const CONSISTENCY_CHECKS: &[(&str, &str)] = &[
+    (
+        "files whose path or id column disagrees with their JSON",
+        "SELECT COUNT(*) FROM files WHERE json_extract(json, '$.path') IS NOT path \
+         OR json_extract(json, '$.id') IS NOT id",
+    ),
+    (
+        "document sections whose path column disagrees with their JSON",
+        // The column is written with `/` separators and the JSON as the platform spells it.
+        "SELECT COUNT(*) FROM document_sections \
+         WHERE replace(json_extract(json, '$.path'), '\\', '/') IS NOT path",
+    ),
+    (
+        "file history rows whose path columns disagree with their JSON",
+        "SELECT COUNT(*) FROM git_file_touches WHERE json_extract(json, '$.path') IS NOT path \
+         OR json_extract(json, '$.previous_path') IS NOT previous_path",
+    ),
+    (
+        "symbol history rows whose file path column disagrees with their JSON",
+        "SELECT COUNT(*) FROM git_symbol_touches \
+         WHERE json_extract(json, '$.file_path') IS NOT file_path",
+    ),
+    (
+        "co-change rows whose path columns disagree with their JSON",
+        "SELECT COUNT(*) FROM git_cochange_edges WHERE json_extract(json, '$.path') IS NOT path \
+         OR json_extract(json, '$.cochanged_path') IS NOT cochanged_path",
+    ),
+    (
+        "review events whose path column disagrees with their JSON",
+        "SELECT COUNT(*) FROM git_review_events WHERE json_extract(json, '$.path') IS NOT path",
+    ),
+    (
+        "hotspots whose path column disagrees with their JSON",
+        "SELECT COUNT(*) FROM history_hotspots WHERE json_extract(json, '$.path') IS NOT path",
+    ),
+    (
+        "analysis facts whose file or target column disagrees with their JSON",
+        "SELECT COUNT(*) FROM analysis_facts WHERE json_extract(json, '$.file_id') IS NOT file_id \
+         OR json_extract(json, '$.target') IS NOT target",
+    ),
+    (
+        "rows that belong to no indexed file",
+        // Symbols and occurrences imported from a SCIP index are stored for every document
+        // the index covers, including files discovery skipped, so theirs may name no indexed
+        // file. They carry only a `file_id`, and every reader resolves a path through the
+        // files table, so such a row serves no file path or content.
+        "SELECT (SELECT COUNT(*) FROM symbols WHERE (file_id NOT IN (SELECT id FROM files) \
+                 AND json_extract(json, '$.provenance') IS NOT 'scip') \
+                 OR json_extract(json, '$.file_id') IS NOT file_id) \
+              + (SELECT COUNT(*) FROM chunks WHERE file_id NOT IN (SELECT id FROM files) \
+                 OR json_extract(json, '$.file_id') IS NOT file_id) \
+              + (SELECT COUNT(*) FROM occurrences WHERE (file_id NOT IN (SELECT id FROM files) \
+                 AND json_extract(json, '$.provenance') IS NOT 'scip') \
+                 OR json_extract(json, '$.file_id') IS NOT file_id) \
+              + (SELECT COUNT(*) FROM tests WHERE file_id NOT IN (SELECT id FROM files) \
+                 OR json_extract(json, '$.file_id') IS NOT file_id) \
+              + (SELECT COUNT(*) FROM imports WHERE file_id NOT IN (SELECT id FROM files) \
+                 OR json_extract(json, '$.file_id') IS NOT file_id) \
+              + (SELECT COUNT(*) FROM analysis_facts WHERE file_id NOT IN (SELECT id FROM files)) \
+              + (SELECT COUNT(*) FROM scopes WHERE file_id NOT IN (SELECT id FROM files)) \
+              + (SELECT COUNT(*) FROM bindings WHERE file_id NOT IN (SELECT id FROM files)) \
+              + (SELECT COUNT(*) FROM vector_targets WHERE file_id NOT IN (SELECT id FROM files)) \
+              + (SELECT COUNT(*) FROM call_sites c JOIN call_site_strings s ON s.sid = c.file_sid \
+                 WHERE s.value NOT IN (SELECT id FROM files))",
+    ),
+    (
+        "history facts about a path that is not an indexed file",
+        "SELECT COUNT(*) FROM analysis_facts WHERE source_type = 'git_history' \
+         AND target NOT IN (SELECT path FROM files)",
+    ),
+    (
+        "graph nodes whose columns disagree with their JSON",
+        "SELECT COUNT(*) FROM graph_nodes WHERE json_extract(json, '$.id') IS NOT id \
+         OR json_extract(json, '$.label') IS NOT label \
+         OR COALESCE(json_extract(json, '$.file_id'), '') IS NOT COALESCE(file_id, '') \
+         OR COALESCE(json_extract(json, '$.symbol_id'), '') IS NOT COALESCE(symbol_id, '')",
+    ),
+    (
+        "graph nodes owned by no indexed file",
+        "SELECT COUNT(*) FROM graph_nodes WHERE COALESCE(file_id, '') <> '' \
+         AND file_id NOT IN (SELECT id FROM files)",
+    ),
+    (
+        "file nodes not named for the file that owns them",
+        "SELECT COUNT(*) FROM graph_nodes n LEFT JOIN files f ON f.id = n.file_id \
+         WHERE n.node_type = 'File' AND (f.id IS NULL OR n.id IS NOT 'file:' || f.path \
+         OR n.label IS NOT f.path)",
+    ),
+    (
+        "graph dictionary file references that name no indexed file",
+        "SELECT COUNT(*) FROM graph_strings WHERE substr(value, 1, 5) = 'file:' \
+         AND substr(value, 6) NOT IN (SELECT path FROM files)",
+    ),
+    (
+        "graph edges whose evidence names a path that is not an indexed file",
+        "SELECT COUNT(*) FROM graph_edges e JOIN graph_strings s ON s.sid = e.ev_path_sid \
+         WHERE s.value NOT IN (SELECT path FROM files)",
+    ),
+];
+
+/// What [`SqliteStore::purge_paths`] removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PathPurge {
+    pub files_removed: usize,
+    /// Graph nodes no file owned, removed with their edges.
+    pub graph_nodes_removed: usize,
+    pub symbols_removed: usize,
+    pub chunks_removed: usize,
+    /// Document sections, facts about removed files, and history rows.
+    pub other_rows_removed: usize,
+}
+
 /// What reconciling the stored graph with a snapshot's graph changed; see
 /// [`SqliteStore::stage_files_index_with_graph`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -2780,6 +3159,12 @@ fn replace_files_rows(
         .iter()
         .map(|file| file.path.to_string_lossy().to_string())
         .collect::<BTreeSet<_>>();
+    let changed_ids = update
+        .changed_files
+        .iter()
+        .map(|file| &file.id)
+        .collect::<HashSet<_>>();
+    let mut deleted_file_paths = Vec::new();
     for file_id in &affected_file_ids {
         let path: Option<String> = tx
             .query_row(
@@ -2790,6 +3175,9 @@ fn replace_files_rows(
             .optional()
             .map_err(storage_err)?;
         if let Some(path) = path {
+            if !changed_ids.contains(file_id) {
+                deleted_file_paths.push(path.clone());
+            }
             affected_file_paths.insert(path);
         }
     }
@@ -3006,6 +3394,15 @@ fn replace_files_rows(
             tx.execute("DELETE FROM call_sites WHERE file_sid = ?1", params![sid])
                 .map_err(storage_err)?;
         }
+    }
+    // Facts other files hold about a deleted file (a co-change with it) describe a file the
+    // index no longer has. A full index records facts between indexed files only, so they go
+    // with it; otherwise the partial writer would keep serving evidence about a deleted path.
+    // Only facts whose target is a file: an unresolved import whose specifier happens to
+    // spell the same string (`#include "src/foo.h"`) is about the importing file, not this one.
+    for path in &deleted_file_paths {
+        tx.execute(FACTS_ABOUT_FILE_DELETE, params![path])
+            .map_err(storage_err)?;
     }
 
     let mut call_site_strings = compact::StringWriter::incremental(tx, compact::CALL_SITE_STRINGS)?;
@@ -4978,6 +5375,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         }
     }
 

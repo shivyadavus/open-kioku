@@ -921,6 +921,12 @@ impl<'a> ContextPackBuilder<'a> {
             &confidence_breakdown,
         );
         append_supporting_units(&supporting_files, &mut retrieval_diagnostics);
+        // An index imported from a snapshot of another revision answers from that revision's
+        // code. The pack still builds from it, but says so, as `repo_status` does.
+        if let Some(caveat) = snapshot_provenance_caveat(self.store) {
+            retrieval_diagnostics.caveats.push(caveat.clone());
+            confidence_breakdown.caveats.push(caveat);
+        }
         let confidence_summary = confidence_summary(&confidence_breakdown);
         let mut pack = ContextPack {
             task: task.into(),
@@ -1033,6 +1039,18 @@ pub fn apply_calibrated_abstention(
     pack.recommended_change_boundary.allowed_files.clear();
     pack.recommended_change_boundary.caution_files.clear();
     pack.recommended_change_boundary.forbidden_files.clear();
+}
+
+/// The caveat an index published by `ok snapshot import` carries, if it does not describe
+/// the checkout it was imported into. A provenance record that cannot be read is reported
+/// rather than read as "not imported".
+fn snapshot_provenance_caveat(store: &dyn open_kioku_storage::MetadataStore) -> Option<String> {
+    match store.snapshot_provenance() {
+        Ok(provenance) => provenance.and_then(|provenance| provenance.caveat()),
+        Err(err) => Some(format!(
+            "whether this index was imported from a snapshot of another revision could not be read ({err})"
+        )),
+    }
 }
 
 fn bounded_primary_results(primary: Vec<SearchResult>, limit: usize) -> Vec<SearchResult> {

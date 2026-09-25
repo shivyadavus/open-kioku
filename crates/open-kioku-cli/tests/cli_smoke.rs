@@ -1827,13 +1827,575 @@ fn init_index_search_and_doctor_work_together() {
     assert!(!setup_markdown.contains("0 BSP descriptor"));
 }
 
+/// Commit everything in `repo` except Open Kioku's local state, creating the repository on
+/// first use. A snapshot import relates the artifact's commit to `HEAD`, so a repository whose
+/// snapshot is imported has to be one.
+fn commit_all(repo: &std::path::Path, message: &str) {
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "-c",
+                "user.email=cli@example.com",
+                "-c",
+                "user.name=CLI Test",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    if !repo.join(".git").exists() {
+        git(&["init", "--quiet"]);
+        fs::write(repo.join(".gitignore"), ".ok/\n").unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", message]);
+}
+
 fn snapshot_fixture_repo() -> tempfile::TempDir {
+    snapshot_fixture_repo_with(&[(
+        "src/lib.rs",
+        "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n",
+    )])
+}
+
+fn snapshot_fixture_repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    for (path, content) in files {
+        let path = repo.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    commit_all(repo, "initial");
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    temp
+}
+
+fn export_snapshot(repo: &std::path::Path) {
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["snapshot", "export", "--quality", "fast"]);
+        command
+    });
+}
+
+fn import_snapshot_json(repo: &std::path::Path, extra: &[&str]) -> serde_json::Value {
+    let output = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "snapshot", "import"])
+            .args(extra);
+        command
+    });
+    serde_json::from_str(&output).unwrap()
+}
+
+fn status_json(repo: &std::path::Path) -> serde_json::Value {
+    let output = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args(["--json", "status"]);
+        command
+    });
+    serde_json::from_str(&output).unwrap()
+}
+
+#[test]
+fn snapshot_import_of_the_checked_out_commit_is_fresh() {
+    let temp = snapshot_fixture_repo();
+    let repo = temp.path();
+    export_snapshot(repo);
+    // Untracked and not ignored, but under a directory discovery prunes: not a difference
+    // between the index and the checkout.
+    fs::create_dir_all(repo.join("node_modules/dep")).unwrap();
+    fs::write(
+        repo.join("node_modules/dep/index.js"),
+        "module.exports = 1;\n",
+    )
+    .unwrap();
+
+    let imported = import_snapshot_json(repo, &[]);
+    let snapshot = &imported["snapshot"];
+    assert_eq!(snapshot["relation"], "same_commit", "{imported}");
+    assert_eq!(snapshot["commits_behind"], 0);
+    assert_eq!(snapshot["changed_files"], 0, "{imported}");
+    assert_eq!(snapshot["policy_filtered"], 0, "{imported}");
+    assert_eq!(imported["caveats"], serde_json::json!([]), "{imported}");
+
+    let status = status_json(repo);
+    assert_eq!(status["snapshot"]["relation"], "same_commit", "{status}");
+
+    // `ok index` rebuilds from source and publishes a manifest with no snapshot record.
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    assert!(status_json(repo).get("snapshot").is_none());
+}
+
+#[test]
+fn snapshot_import_of_an_ancestor_commit_is_stale_and_every_surface_says_so() {
+    let temp = snapshot_fixture_repo();
+    let repo = temp.path();
+    export_snapshot(repo);
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub struct Worker;\nimpl Worker { pub fn run(&self) {} pub fn stop(&self) {} }\n",
+    )
+    .unwrap();
+    commit_all(repo, "add stop");
+
+    let imported = import_snapshot_json(repo, &[]);
+    let snapshot = &imported["snapshot"];
+    assert_eq!(snapshot["relation"], "related", "{imported}");
+    assert_eq!(snapshot["commits_behind"], 1);
+    assert_eq!(snapshot["commits_ahead"], 0);
+    assert_eq!(snapshot["changed_files"], 1);
+    let caveat = imported["caveats"][0].as_str().unwrap().to_string();
+    assert!(caveat.contains("1 commit(s) behind"), "{caveat}");
+
+    let status = status_json(repo);
+    assert_eq!(status["snapshot"]["commits_behind"], 1, "{status}");
+    let repo_status = mcp_repo_status(repo);
+    assert_eq!(
+        repo_status["result"]["structuredContent"]["snapshot"]["commits_behind"], 1,
+        "{repo_status}"
+    );
+
+    let doctor: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command.arg("--json").arg("doctor").arg(repo);
+        command
+    }))
+    .unwrap();
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "snapshot")
+        .unwrap_or_else(|| panic!("no snapshot check: {doctor}"));
+    assert_eq!(check["status"], "warn", "{check}");
+
+    let pack: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "context", "Worker run"]);
+        command
+    }))
+    .unwrap();
+    assert!(
+        pack["retrieval_diagnostics"]["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some(caveat.as_str())),
+        "{pack}"
+    );
+}
+
+#[test]
+fn snapshot_import_refuses_an_artifact_this_repository_cannot_relate_to_head() {
+    let exporter = snapshot_fixture_repo();
+    export_snapshot(exporter.path());
+    let importer = snapshot_fixture_repo_with(&[("src/lib.rs", "pub struct Other;\n")]);
+    let repo = importer.path();
+    fs::create_dir_all(repo.join(".ok/artifacts")).unwrap();
+    for name in ["index.snapshot.zst", "index.snapshot.json"] {
+        fs::copy(
+            exporter.path().join(".ok/artifacts").join(name),
+            repo.join(".ok/artifacts").join(name),
+        )
+        .unwrap();
+    }
+    let original_index = fs::read(repo.join(".ok/index.sqlite")).unwrap();
+    let import_failure = || {
+        run_failure({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).args(["snapshot", "import"]);
+            command
+        })
+        .1
+    };
+
+    // The artifact's commit is not an object here.
+    let stderr = import_failure();
+    assert!(stderr.contains("is not in this repository"), "{stderr}");
+    assert!(stderr.contains("--allow-foreign"), "{stderr}");
+    assert_eq!(
+        fs::read(repo.join(".ok/index.sqlite")).unwrap(),
+        original_index
+    );
+
+    // Fetched, it is an object here with no history in common with HEAD.
+    let fetched = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["fetch", "--quiet"])
+        .arg(exporter.path())
+        .arg("HEAD")
+        .status()
+        .unwrap();
+    assert!(fetched.success());
+    let stderr = import_failure();
+    assert!(stderr.contains("shares no history with HEAD"), "{stderr}");
+    assert_eq!(
+        fs::read(repo.join(".ok/index.sqlite")).unwrap(),
+        original_index
+    );
+
+    // `--from-snapshot auto` applies the same refusal and indexes from source instead.
+    let (stdout, stderr) = run_ok_with_stderr({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "index", "--from-snapshot", "auto"]);
+        command
+    });
+    assert!(stderr.contains("falling back to full index"), "{stderr}");
+    let manifest: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(manifest.get("imported").is_none(), "{manifest}");
+    assert!(manifest.get("snapshot").is_none(), "{manifest}");
+
+    let imported = import_snapshot_json(repo, &["--allow-foreign"]);
+    assert_eq!(imported["snapshot"]["relation"], "foreign", "{imported}");
+    assert!(imported["caveats"][0]
+        .as_str()
+        .unwrap()
+        .contains("--allow-foreign"));
+    assert_eq!(status_json(repo)["snapshot"]["relation"], "foreign");
+}
+
+/// FNV-1a over `value`, as the graph dictionaries key their entries.
+fn graph_string_hash(value: &str) -> i64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash as i64
+}
+
+/// Replace `from` with `to` in every text column of every table, keeping column and JSON in
+/// step and re-keying the graph dictionaries, so the result is what a consistent writer that
+/// had indexed the file under `to` would have stored.
+fn rename_everywhere(db: &std::path::Path, from: &str, to: &str) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let tables = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    for table in tables {
+        let columns = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(_, kind)| kind.eq_ignore_ascii_case("TEXT"))
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        for column in columns {
+            conn.execute(
+                &format!(
+                    "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
+                     WHERE {column} LIKE '%' || ?1 || '%'"
+                ),
+                [from, to],
+            )
+            .unwrap();
+        }
+    }
+    for table in ["graph_strings", "call_site_strings"] {
+        let rows = conn
+            .prepare(&format!("SELECT sid, value FROM {table}"))
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        for (sid, value) in rows {
+            conn.execute(
+                &format!("UPDATE {table} SET vhash = ?1 WHERE sid = ?2"),
+                rusqlite::params![graph_string_hash(&value), sid],
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn snapshot_import_serves_no_path_the_local_policy_excludes() {
+    let temp = snapshot_fixture_repo_with(&[
+        ("src/lib.rs", "pub struct Worker;\n"),
+        ("src/vault.rs", "pub struct VaultWidget;\n"),
+        ("legacy/old.rs", "pub struct LegacyWidget;\n"),
+    ]);
+    let repo = temp.path();
+    // An exporter that indexed a secret-like path: an older release, another policy, or a
+    // crafted artifact. Every stored mention of `src/vault.rs` becomes `deploy/vault.key`, in
+    // every table, graph included; the graph dictionary is re-keyed so it stays consistent.
+    rename_everywhere(
+        &repo.join(".ok/index.sqlite"),
+        "src/vault.rs",
+        "deploy/vault.key",
+    );
+    export_snapshot(repo);
+    // The importing checkout excludes `legacy/`; the exporter did not.
+    let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    assert!(config.contains("exclude = [\n"));
+    fs::write(
+        repo.join("ok.toml"),
+        config.replacen("exclude = [\n", "exclude = [\n    \"legacy/**\",\n", 1),
+    )
+    .unwrap();
+
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(imported["snapshot"]["policy_filtered"], 2, "{imported}");
+    assert_eq!(
+        imported["policy_filtered_by_source"],
+        serde_json::json!({"security_policy": 1, "config_exclude": 1}),
+        "{imported}"
+    );
+    assert_eq!(status_json(repo)["snapshot"]["policy_filtered"], 2);
+
+    for (query, path) in [
+        ("VaultWidget", "vault.key"),
+        ("LegacyWidget", "legacy/old.rs"),
+    ] {
+        let search = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", query]);
+            command
+        });
+        assert!(!search.contains(path), "{query}: {search}");
+    }
+    // No row of the published database names either path.
+    let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+    for table in [
+        "files",
+        "chunks",
+        "symbols",
+        "graph_nodes",
+        "document_sections",
+    ] {
+        let json_column = if table == "document_sections" {
+            "path"
+        } else {
+            "json"
+        };
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE {json_column} LIKE '%vault.key%' \
+                     OR {json_column} LIKE '%legacy/old.rs%'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} still names an excluded path");
+    }
+    for (table, column) in [
+        ("graph_strings", "value"),
+        ("graph_nodes", "id"),
+        ("analysis_facts", "target"),
+        ("git_symbol_touches", "file_path"),
+    ] {
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE {column} LIKE '%vault%' \
+                     OR {column} LIKE '%legacy/old.rs%'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} still names an excluded path");
+    }
+    // Git history names a secret-like path nowhere. File-level history of a merely excluded
+    // path is kept, as `ok index` records history for every path a commit touched.
+    let history_rows = |pattern: &str| -> i64 {
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM git_file_touches WHERE path LIKE ?1) \
+                  + (SELECT COUNT(*) FROM git_cochange_edges \
+                     WHERE path LIKE ?1 OR cochanged_path LIKE ?1)",
+            [pattern],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(history_rows("%vault%"), 0);
+    assert!(history_rows("legacy/old.rs") > 0);
+    drop(conn);
+
+    // The coverage the index reports agrees with what it serves: both files are counted as
+    // excluded by the rule that excluded them, and the secret-like one is not named.
+    let status = status_json(repo);
+    let excluded = &status["coverage"]["policy_excluded_by_source"];
+    assert_eq!(excluded["security_policy"], 1, "{status}");
+    assert_eq!(excluded["config_exclude"], 1, "{status}");
+    assert!(!status.to_string().contains("vault.key"), "{status}");
+}
+
+/// `ok watch` replaces the rows of the files that changed. A deleted file's co-change facts
+/// held by an unchanged file used to survive it, so the next export carried a fact about a
+/// file the index no longer had, and the import refused it as inconsistent.
+#[test]
+fn snapshot_of_a_watched_index_after_a_co_changed_file_is_deleted_imports() {
+    let temp = snapshot_fixture_repo_with(&[
+        ("src/lib.rs", "pub mod a;\n"),
+        ("src/a.rs", "pub fn ledger_alpha() {}\n"),
+        ("src/d.rs", "pub fn ledger_delta() {}\n"),
+    ]);
+    let repo = temp.path();
+    let facts_about_deleted = || -> i64 {
+        rusqlite::Connection::open(repo.join(".ok/index.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM analysis_facts WHERE target = 'src/d.rs' \
+                 AND json_extract(json, '$.target_kind') IN ('file', 'test')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(
+        facts_about_deleted() > 0,
+        "the fixture must record a co-change fact about src/d.rs"
+    );
+    // A fact that is not about the file but spells the same target, as an unresolved
+    // `#include "src/d.rs"` would: it belongs to src/a.rs and must outlive src/d.rs.
+    {
+        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+        let inserted = conn
+            .execute(
+                "INSERT INTO analysis_facts(id, file_id, source_type, target, json) \
+                 SELECT 'unresolved-include', a.file_id, 'static_analysis', a.target, \
+                        json_set(a.json, '$.id', 'unresolved-include', \
+                                 '$.target_kind', 'module', \
+                                 '$.source_type', 'static_analysis') \
+                 FROM analysis_facts a JOIN files f ON f.id = a.file_id \
+                 WHERE f.path = 'src/a.rs' AND a.target = 'src/d.rs' LIMIT 1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1);
+    }
+    let unresolved_include = || -> i64 {
+        rusqlite::Connection::open(repo.join(".ok/index.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM analysis_facts WHERE id = 'unresolved-include'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    fs::remove_file(repo.join("src/d.rs")).unwrap();
+    let status =
+        open_kioku_watch::reindex_repo_after_changes(repo, [std::path::Path::new("src/d.rs")])
+            .unwrap();
+    assert!(
+        status.partial && status.deleted_files == 1 && status.changed_files == 0,
+        "the watch update must be the partial one: {status:?}"
+    );
+    assert_eq!(
+        facts_about_deleted(),
+        0,
+        "facts about a deleted file must go with it"
+    );
+
+    assert_eq!(
+        unresolved_include(),
+        1,
+        "a fact that only spells the deleted path is not about it"
+    );
+
+    export_snapshot(repo);
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(imported["imported"], true, "{imported}");
+}
+
+/// A protobuf length-delimited field.
+fn protobuf_field(number: u32, bytes: &[u8]) -> Vec<u8> {
+    fn varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+    let mut out = Vec::new();
+    varint(u64::from(number << 3 | 2), &mut out);
+    varint(bytes.len() as u64, &mut out);
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// A SCIP index with one document, for a file discovery skips, holding one symbol and its
+/// definition. Written by hand so the test needs no SCIP generator.
+fn scip_index_for(relative_path: &str, symbol: &str) -> Vec<u8> {
+    let mut information = protobuf_field(1, symbol.as_bytes());
+    information.extend(protobuf_field(6, b"GeneratedApi"));
+    let mut occurrence = protobuf_field(1, &[0, 11, 23]);
+    occurrence.extend(protobuf_field(2, symbol.as_bytes()));
+    occurrence.extend([3 << 3, 1]); // symbol_roles: Definition
+    let mut document = protobuf_field(1, relative_path.as_bytes());
+    document.extend(protobuf_field(2, &occurrence));
+    document.extend(protobuf_field(3, &information));
+    document.extend(protobuf_field(4, b"rust"));
+    protobuf_field(2, &document)
+}
+
+/// SCIP covers every document it was generated for, including files discovery skipped, and
+/// `ok index` stores those symbols with a `file_id` no file row has. That is a state the
+/// writer produces, so the import's consistency check accepts it, and the rows serve no path.
+#[test]
+fn snapshot_import_accepts_scip_symbols_for_a_file_discovery_skipped() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
     fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub struct Worker;\n").unwrap();
     fs::write(
-        repo.join("src/lib.rs"),
-        "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n",
+        repo.join("index.scip"),
+        scip_index_for(
+            "generated/api.rs",
+            "rust-analyzer cargo fixture 0.1.0 generated/api/GeneratedApi#",
+        ),
     )
     .unwrap();
     run({
@@ -1841,12 +2403,122 @@ fn snapshot_fixture_repo() -> tempfile::TempDir {
         command.arg("init").arg(repo);
         command
     });
+    commit_all(repo, "initial");
+    // Generated after the first commit and ignored, so discovery skips it and it is untracked.
+    fs::write(repo.join(".gitignore"), ".ok/\ngenerated/\n").unwrap();
+    commit_all(repo, "ignore generated sources");
+    fs::create_dir_all(repo.join("generated")).unwrap();
+    fs::write(repo.join("generated/api.rs"), "pub struct GeneratedApi;\n").unwrap();
     run({
         let mut command = ok();
         command.arg("index").arg(repo);
         command
     });
-    temp
+    {
+        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+        let orphaned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols WHERE file_id NOT IN (SELECT id FROM files) \
+                 AND json_extract(json, '$.provenance') = 'scip'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            orphaned > 0,
+            "the fixture must store a SCIP symbol for an unindexed file"
+        );
+    }
+    export_snapshot(repo);
+
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(
+        imported["snapshot"]["relation"], "same_commit",
+        "{imported}"
+    );
+    let search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "GeneratedApi"]);
+        command
+    });
+    assert!(!search.contains("generated/api.rs"), "{search}");
+}
+
+/// The policy is decided on each row's path column, and readers serve the path in its JSON.
+/// An artifact whose two disagree, or whose graph dictionary is keyed wrongly, is refused
+/// before anything is replaced: judged by one path and served under another, a secret-like
+/// path would pass the policy.
+#[test]
+fn snapshot_import_refuses_rows_whose_served_path_differs_from_their_column() {
+    let cases: [(&str, &str); 3] = [
+        (
+            "files",
+            "UPDATE files SET json = json_set(json, '$.path', '.env') WHERE path = 'src/lib.rs'",
+        ),
+        (
+            "file history",
+            "UPDATE git_file_touches SET json = json_set(json, '$.path', 'deploy/id_rsa') \
+             WHERE path = 'src/lib.rs'",
+        ),
+        (
+            "graph dictionary",
+            "UPDATE graph_strings SET value = 'deploy/id_rsa' WHERE value = 'src/lib.rs'",
+        ),
+    ];
+    for (name, tamper) in cases {
+        let temp = snapshot_fixture_repo();
+        let repo = temp.path();
+        export_snapshot(repo);
+        // Tamper with the artifact itself: expand it, change one row, compress it again and
+        // restate its sizes, so every structural check still passes.
+        let artifacts = repo.join(".ok/artifacts");
+        let db = artifacts.join("tampered.sqlite");
+        let compressed = fs::read(artifacts.join("index.snapshot.zst")).unwrap();
+        fs::write(&db, zstd::decode_all(compressed.as_slice()).unwrap()).unwrap();
+        let changed = rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(tamper, [])
+            .unwrap();
+        assert!(changed > 0, "{name}: the tamper must change a row");
+        let raw = fs::read(&db).unwrap();
+        let recompressed = zstd::encode_all(raw.as_slice(), 1).unwrap();
+        fs::write(artifacts.join("index.snapshot.zst"), &recompressed).unwrap();
+        let metadata_path = artifacts.join("index.snapshot.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
+        metadata["original_size_bytes"] = raw.len().into();
+        metadata["compressed_size_bytes"] = recompressed.len().into();
+        fs::write(&metadata_path, metadata.to_string()).unwrap();
+        fs::remove_file(&db).unwrap();
+
+        let original_index = fs::read(repo.join(".ok/index.sqlite")).unwrap();
+        let (_, stderr) = run_failure({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["snapshot", "import", "--allow-foreign"]);
+            command
+        });
+        assert!(stderr.contains("rows are inconsistent"), "{name}: {stderr}");
+        assert_eq!(
+            fs::read(repo.join(".ok/index.sqlite")).unwrap(),
+            original_index,
+            "{name}: the current index must be left in place"
+        );
+        let leftovers = fs::read_dir(&artifacts)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers.is_empty(),
+            "{name}: staged files left: {leftovers:?}"
+        );
+    }
 }
 
 #[test]
@@ -2063,8 +2735,45 @@ fn snapshot_export_import_round_trip_rebuilds_search_and_bootstraps_index() {
 }
 
 fn assert_snapshot_round_trip(quality: &str, compression_level: i64) {
-    let temp = snapshot_fixture_repo();
+    // A relative TypeScript import and an HTTP route give the graph nodes no file owns whose
+    // labels are not repository paths (`../utils/foo`, `/api/users`); Git rejects both, so
+    // the import must judge them without asking it.
+    let temp = snapshot_fixture_repo_with(&[
+        (
+            "src/lib.rs",
+            "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n",
+        ),
+        (
+            "web/src/app/main.ts",
+            "import express from \"express\";\nimport { foo } from \"../utils/foo\";\n\
+             const app = express();\napp.get(\"/api/users\", (req, res) => res.json(foo()));\n",
+        ),
+        (
+            "web/src/utils/foo.ts",
+            "export function foo() { return []; }\n",
+        ),
+    ]);
     let repo = temp.path();
+    {
+        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+        let unowned_labels = conn
+            .prepare("SELECT label FROM graph_nodes WHERE file_id IS NULL OR file_id = ''")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        assert!(
+            unowned_labels.iter().any(|label| label.starts_with("../")),
+            "the fixture must produce a relative import node: {unowned_labels:?}"
+        );
+        assert!(
+            unowned_labels
+                .iter()
+                .any(|label| label.contains("/api/users")),
+            "the fixture must produce a route node: {unowned_labels:?}"
+        );
+    }
     let artifact_path = repo.join(".ok/artifacts/index.snapshot.zst");
     let metadata_path = repo.join(".ok/artifacts/index.snapshot.json");
     let gitattributes_path = repo.join(".ok/artifacts/.gitattributes");
@@ -6242,6 +6951,8 @@ fn index_run_that_fails_after_the_rows_publishes_no_manifest() {
 #[test]
 fn snapshot_import_waits_for_a_live_index_writer_and_leaves_the_index_untouched() {
     let (_temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     run({
         let mut command = ok();
         command
@@ -6313,6 +7024,8 @@ fn snapshot_import_waits_for_a_live_index_writer_and_leaves_the_index_untouched(
 #[test]
 fn snapshot_import_that_fails_at_the_search_stage_publishes_no_manifest() {
     let (_temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     let import = |repo: &std::path::Path| {
         let mut command = ok();
         command
@@ -6421,6 +7134,8 @@ fn snapshot_import_that_fails_at_the_search_stage_publishes_no_manifest() {
 #[test]
 fn snapshot_import_aborts_when_the_replaced_index_cannot_be_read() {
     let (_temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     run({
         let mut command = ok();
         command
@@ -6536,6 +7251,8 @@ fn snapshot_export_refuses_an_unpublished_index() {
 #[test]
 fn snapshot_import_moves_a_running_mcp_session_to_the_imported_index() {
     let (_temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     run({
         let mut command = ok();
         command
@@ -6709,6 +7426,8 @@ fn snapshot_export_fast_copies_one_committed_state_while_a_writer_commits() {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     let (temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
     let stop = Arc::new(AtomicBool::new(false));
     let committed = Arc::new(AtomicU64::new(0));

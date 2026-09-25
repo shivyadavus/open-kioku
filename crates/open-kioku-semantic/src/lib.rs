@@ -1885,6 +1885,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: Default::default(),
+            snapshot: None,
         };
         let files = vec![file("file_auth", "src/auth.rs")];
         let symbols = vec![symbol("symbol_issue_token", "issue_token", "file_auth")];
@@ -1951,6 +1952,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: Default::default(),
+            snapshot: None,
         };
         let files = vec![
             file("file_auth", "src/auth.rs"),
@@ -2040,6 +2042,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: Default::default(),
+            snapshot: None,
         };
         let files = vec![
             file("file_auth", "src/auth.rs"),

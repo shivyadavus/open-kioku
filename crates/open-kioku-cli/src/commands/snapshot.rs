@@ -140,7 +140,7 @@ fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<Snap
     })
 }
 
-fn snapshot_import(repo: &Path) -> anyhow::Result<SnapshotImportReport> {
+fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotImportReport> {
     let repo = absolutize(repo)?;
     // An import replaces every index component, so it takes the writer lock `ok index` and
     // `ok watch` take, for the whole run: it never interleaves with either, and readers report
@@ -207,6 +207,34 @@ fn snapshot_import(repo: &Path) -> anyhow::Result<SnapshotImportReport> {
         );
     }
 
+    // Both checks run on the staged copy, before the current index is touched: a refusal
+    // leaves it published, and the rows the local policy excludes are gone before any reader
+    // can see the imported database.
+    let artifact_commit = match snapshot_artifact_commit(&metadata, &temp_manifest) {
+        Ok(commit) => commit,
+        Err(err) => {
+            let _ = fs::remove_file(&temp_db);
+            return Err(err);
+        }
+    };
+    let revision = match assess_snapshot_revision(&repo, &artifact_commit, allow_foreign) {
+        Ok(revision) => revision,
+        Err(err) => {
+            let _ = fs::remove_file(&temp_db);
+            return Err(err);
+        }
+    };
+    let mut temp_manifest = temp_manifest;
+    let filtered = match apply_local_policy_to_snapshot(&repo, &temp_db, &mut temp_manifest) {
+        Ok(filtered) => filtered,
+        Err(err) => {
+            remove_staged_db(&temp_db);
+            return Err(err);
+        }
+    };
+    let provenance = revision.into_provenance(filtered.paths_removed);
+    temp_manifest.snapshot = Some(provenance.clone());
+
     // The manifest is the publication marker and the artifact carries one. The database is
     // moved into place without it, and it is put back once the search index has been rebuilt
     // from the imported rows, as `ok index` publishes its own.
@@ -235,6 +263,15 @@ fn snapshot_import(repo: &Path) -> anyhow::Result<SnapshotImportReport> {
         )
     })?;
 
+    let mut caveats = Vec::new();
+    caveats.extend(provenance.caveat());
+    if filtered.paths_removed > 0 {
+        caveats.push(format!(
+            "{} path(s) in the snapshot are excluded by this repository's index policy and \
+             were removed from the imported index",
+            filtered.paths_removed
+        ));
+    }
     Ok(SnapshotImportReport {
         ok: true,
         imported: true,
@@ -243,8 +280,321 @@ fn snapshot_import(repo: &Path) -> anyhow::Result<SnapshotImportReport> {
         metadata_path,
         index_path,
         metadata,
+        snapshot: provenance,
+        policy_filtered_by_source: filtered.by_source,
+        caveats,
         warnings,
     })
+}
+
+fn print_snapshot_import_outcome(report: &SnapshotImportReport) {
+    let snapshot = &report.snapshot;
+    let revision = match snapshot.relation {
+        open_kioku_core::SnapshotRevisionRelation::SameCommit => "the checked-out commit".into(),
+        open_kioku_core::SnapshotRevisionRelation::Related => format!(
+            "{} commit(s) behind and {} ahead of HEAD",
+            snapshot.commits_behind.unwrap_or_default(),
+            snapshot.commits_ahead.unwrap_or_default()
+        ),
+        open_kioku_core::SnapshotRevisionRelation::Foreign => {
+            "an unverified revision (--allow-foreign)".into()
+        }
+    };
+    println!(
+        "Snapshot revision: {} ({revision})",
+        snapshot.imported_from_commit
+    );
+    println!(
+        "Removed by local index policy: {} path(s)",
+        snapshot.policy_filtered
+    );
+    for (source, count) in &report.policy_filtered_by_source {
+        println!("  {source}: {count}");
+    }
+    for caveat in &report.caveats {
+        println!("caveat: {caveat}");
+    }
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
+}
+
+/// The commit the artifact's rows were built from. The embedded manifest records it at index
+/// time; the metadata records it at export, falling back to `HEAD` then. Two different values
+/// mean the metadata does not describe this database.
+fn snapshot_artifact_commit(
+    metadata: &SnapshotMetadata,
+    manifest: &IndexManifest,
+) -> anyhow::Result<Option<String>> {
+    let recorded = (metadata.repo_commit != "unknown").then(|| metadata.repo_commit.clone());
+    match (&manifest.repository.commit, recorded) {
+        (Some(embedded), Some(recorded)) if *embedded != recorded => anyhow::bail!(
+            "snapshot metadata names commit {recorded}, but the embedded index manifest was \
+             built from {embedded}"
+        ),
+        (Some(embedded), _) => Ok(Some(embedded.clone())),
+        (None, recorded) => Ok(recorded),
+    }
+}
+
+/// The revision half of [`open_kioku_core::SnapshotProvenance`].
+#[derive(Debug)]
+struct SnapshotRevision {
+    imported_from_commit: String,
+    local_commit: Option<String>,
+    relation: open_kioku_core::SnapshotRevisionRelation,
+    commits_behind: Option<usize>,
+    commits_ahead: Option<usize>,
+    changed_files: Option<usize>,
+}
+
+impl SnapshotRevision {
+    fn into_provenance(self, policy_filtered: usize) -> open_kioku_core::SnapshotProvenance {
+        open_kioku_core::SnapshotProvenance {
+            imported_from_commit: self.imported_from_commit,
+            local_commit: self.local_commit,
+            relation: self.relation,
+            commits_behind: self.commits_behind,
+            commits_ahead: self.commits_ahead,
+            changed_files: self.changed_files,
+            policy_filtered,
+        }
+    }
+}
+
+/// Relate the artifact's commit to this checkout. An artifact that shares history with
+/// `HEAD` is imported, stale or not, because the provenance it gets says exactly how far it
+/// is from the checkout. One whose relation cannot be established — its commit is absent
+/// here, unrelated, or unrecorded, or there is no `HEAD` — is refused unless the caller
+/// passes `--allow-foreign`: importing it silently would serve another tree's code as this
+/// one's, and nothing downstream could tell.
+fn assess_snapshot_revision(
+    repo: &Path,
+    artifact_commit: &Option<String>,
+    allow_foreign: bool,
+) -> anyhow::Result<SnapshotRevision> {
+    use open_kioku_core::SnapshotRevisionRelation as Relation;
+    use open_kioku_git::RevisionRelation;
+
+    let comparison = match artifact_commit {
+        Some(commit) => open_kioku_git::compare_with_head(repo, commit)?,
+        None => None,
+    };
+    let local_commit = comparison
+        .as_ref()
+        .map(|comparison| comparison.head.clone())
+        .or_else(|| open_kioku_git::commit(repo));
+    let imported_from_commit = comparison
+        .as_ref()
+        .map(|comparison| comparison.commit.clone())
+        .or_else(|| artifact_commit.clone())
+        .unwrap_or_else(|| "unknown".into());
+    // Paths discovery never reaches (`.ok` itself, `.git`, build and dependency directories)
+    // do not make the index differ from the checkout.
+    let changed_files = |commit: &str| {
+        open_kioku_git::changed_paths_since_commit(repo, commit)
+            .ok()
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter(|path| {
+                        !open_kioku_ingest::path_policy::is_pruned_by_discovery(path)
+                    })
+                    .count()
+            })
+    };
+    let refusal = match (artifact_commit, &comparison) {
+        (None, _) => "the snapshot does not record the commit it was built from".to_string(),
+        (Some(_), None) => format!(
+            "{} has no Git HEAD, so the snapshot's commit {imported_from_commit} cannot be \
+             related to this checkout",
+            repo.display()
+        ),
+        (Some(_), Some(comparison)) => match comparison.relation {
+            RevisionRelation::Same => {
+                return Ok(SnapshotRevision {
+                    changed_files: changed_files(&comparison.commit),
+                    imported_from_commit,
+                    local_commit,
+                    relation: Relation::SameCommit,
+                    commits_behind: Some(0),
+                    commits_ahead: Some(0),
+                })
+            }
+            RevisionRelation::Related { ahead, behind } => {
+                return Ok(SnapshotRevision {
+                    changed_files: changed_files(&comparison.commit),
+                    imported_from_commit,
+                    local_commit,
+                    relation: Relation::Related,
+                    commits_behind: Some(behind),
+                    commits_ahead: Some(ahead),
+                })
+            }
+            RevisionRelation::Unrelated => format!(
+                "the snapshot's commit {imported_from_commit} shares no history with HEAD {}",
+                comparison.head
+            ),
+            RevisionRelation::Unknown => format!(
+                "the snapshot's commit {imported_from_commit} is not in this repository; \
+                 fetch it if the snapshot comes from this repository's remote"
+            ),
+        },
+    };
+    if !allow_foreign {
+        anyhow::bail!(
+            "snapshot import refused: {refusal}. The imported index would describe a tree this \
+             checkout cannot be compared with. Run `ok index` to build the index from source, \
+             or pass `--allow-foreign` to import it marked as foreign."
+        );
+    }
+    Ok(SnapshotRevision {
+        imported_from_commit,
+        local_commit,
+        relation: Relation::Foreign,
+        commits_behind: None,
+        commits_ahead: None,
+        changed_files: None,
+    })
+}
+
+#[derive(Debug, Default)]
+struct SnapshotPolicyFilter {
+    paths_removed: usize,
+    by_source: BTreeMap<String, usize>,
+}
+
+/// Check the staged database and apply this repository's index policy to it, with the
+/// ingest crate's own rules, so an imported index holds what `ok index` here would admit.
+///
+/// First, the rows must agree with each other where readers rely on it: the path a row's
+/// column holds is the one its JSON serves, every row belongs to an indexed file, and the
+/// graph dictionary is keyed by its values. The policy below is decided on columns, so a
+/// row that disagrees could carry a path past it; such an artifact is refused outright,
+/// whatever `--allow-foreign` says, because no writer produces one.
+///
+/// Then:
+/// - every indexed file and document the policy excludes (secret-like or denied, hidden,
+///   `[index] exclude`, `.gitignore`, `.okignore`) is removed with every row derived from it,
+///   and recorded in the manifest's coverage and skipped paths as discovery records a skip;
+/// - every Git history row, and every graph node no file owns, naming a secret-like or
+///   denied path is removed too, as `ok index` withholds such history when it reads it: an
+///   artifact from an older release or another policy must not serve a path the security
+///   policy here denies;
+/// - secret-like paths the exporter recorded as skipped are withheld under this repository's
+///   `redact_secrets`.
+///
+/// Rules that do not depend on local configuration — vendor detection, pruning of build and
+/// dependency directories, the size limit, symlinks — are not applied again. The search index
+/// is rebuilt from the database afterwards, so it never sees what was removed.
+fn apply_local_policy_to_snapshot(
+    repo: &Path,
+    temp_db: &Path,
+    manifest: &mut IndexManifest,
+) -> anyhow::Result<SnapshotPolicyFilter> {
+    let config = OkConfig::load_from_repo(repo)
+        .with_context(|| format!("loading the index policy of {}", repo.display()))?;
+    let store = SqliteStore::open(temp_db)
+        .with_context(|| format!("opening staged snapshot {}", temp_db.display()))?;
+    let violations = store.consistency_violations()?;
+    if !violations.is_empty() {
+        anyhow::bail!(
+            "snapshot import refused: the artifact's rows are inconsistent in ways no Open \
+             Kioku writer produces, so the paths it would serve cannot be checked against \
+             this repository's index policy ({}). Re-export it with `ok snapshot export`, or \
+             run `ok index`.",
+            violations.join("; ")
+        );
+    }
+    let stored = store.stored_paths()?;
+    // Indexed and history paths are repository paths, and Git is asked about them. Graph node
+    // labels are not all paths (import specifiers, routes), so they get the security rules
+    // alone, below, and never reach Git.
+    let candidates = stored
+        .indexed
+        .union(&stored.history)
+        .cloned()
+        .collect::<Vec<_>>();
+    let policy = open_kioku_ingest::path_policy::IndexPathPolicy::for_paths(
+        repo,
+        &config,
+        &candidates,
+    )?;
+    let mut filter = SnapshotPolicyFilter::default();
+    let mut indexed = BTreeSet::new();
+    let mut history = BTreeSet::new();
+    let mut excluded_files = Vec::new();
+    for path in &candidates {
+        let Some(exclusion) = policy.exclusion(path) else {
+            continue;
+        };
+        let security = exclusion.source == open_kioku_core::SkipSource::SecurityPolicy;
+        let in_index = stored.indexed.contains(path);
+        if !in_index && !security {
+            continue;
+        }
+        *filter
+            .by_source
+            .entry(skip_source_key(exclusion.source))
+            .or_default() += 1;
+        if in_index {
+            if let Some(file) = store.get_file_by_path(path)? {
+                excluded_files.push((file, exclusion));
+            }
+            indexed.insert(path.clone());
+        }
+        if security {
+            history.insert(path.clone());
+        }
+    }
+    let mut nodes = BTreeSet::new();
+    let mut node_labels = BTreeSet::new();
+    for (id, label) in &stored.unanchored_nodes {
+        let Some(exclusion) = policy.security_exclusion(Path::new(label)) else {
+            continue;
+        };
+        nodes.insert(id.clone());
+        // A label that is also an indexed or history path was counted above.
+        if !history.contains(Path::new(label)) && node_labels.insert(label.clone()) {
+            *filter
+                .by_source
+                .entry(skip_source_key(exclusion.source))
+                .or_default() += 1;
+        }
+    }
+    filter.paths_removed = filter.by_source.values().sum();
+    let purge = store.purge_paths(&indexed, &history, &nodes, manifest)?;
+    drop(store);
+
+    manifest.file_count = manifest.file_count.saturating_sub(purge.files_removed);
+    manifest.symbol_count = manifest.symbol_count.saturating_sub(purge.symbols_removed);
+    manifest.chunk_count = manifest.chunk_count.saturating_sub(purge.chunks_removed);
+    for (file, exclusion) in &excluded_files {
+        open_kioku_ingest::path_policy::record_excluded_indexed_file(
+            &mut manifest.quality,
+            file,
+            *exclusion,
+        );
+    }
+    open_kioku_ingest::path_policy::redact_recorded_skips(&mut manifest.quality, &config);
+    Ok(filter)
+}
+
+/// Remove a staged database and the sidecar files an open connection left beside it.
+fn remove_staged_db(temp_db: &Path) {
+    let _ = fs::remove_file(temp_db);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = temp_db.as_os_str().to_owned();
+        sidecar.push(suffix);
+        let _ = fs::remove_file(PathBuf::from(sidecar));
+    }
+}
+
+fn skip_source_key(source: open_kioku_core::SkipSource) -> String {
+    serde_json::to_value(source)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{source:?}"))
 }
 
 fn snapshot_doctor(repo: &Path) -> SnapshotDoctorReport {
@@ -329,6 +679,32 @@ fn snapshot_doctor(repo: &Path) -> SnapshotDoctorReport {
                                     compatibility.recommended_action
                                 ));
                             }
+                            // The import's own revision check, so `importable` means what
+                            // a plain `ok snapshot import` would do with this artifact here.
+                            if let Some(metadata) = &metadata {
+                                match snapshot_artifact_commit(metadata, &manifest).and_then(
+                                    |commit| assess_snapshot_revision(&repo, &commit, false),
+                                ) {
+                                    Ok(revision) => {
+                                        warnings.extend(revision.into_provenance(0).caveat())
+                                    }
+                                    Err(err) => errors.push(err.to_string()),
+                                }
+                            }
+                            // The import's consistency check, on this throwaway copy.
+                            match SqliteStore::open(&temp_db)
+                                .and_then(|store| store.consistency_violations())
+                            {
+                                Ok(violations) => errors.extend(violations.into_iter().map(
+                                    |violation| {
+                                        format!(
+                                            "snapshot rows are inconsistent and would be \
+                                             refused on import: {violation}"
+                                        )
+                                    },
+                                )),
+                                Err(err) => errors.push(err.to_string()),
+                            }
                         }
                         Ok(None) => errors.push("snapshot database has no index manifest".into()),
                         Err(err) => errors.push(err.to_string()),
@@ -336,7 +712,7 @@ fn snapshot_doctor(repo: &Path) -> SnapshotDoctorReport {
                 }
                 Err(err) => errors.push(err.to_string()),
             }
-            let _ = fs::remove_file(&temp_db);
+            remove_staged_db(&temp_db);
         }
     }
 

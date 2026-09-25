@@ -78,6 +78,7 @@ fn persist_snapshot(repo: &Path, store: &SqliteStore, commit: &str, fixtures: &[
         index_mode: Default::default(),
         phase_reports: Vec::new(),
         quality: Default::default(),
+        snapshot: None,
     };
 
     store

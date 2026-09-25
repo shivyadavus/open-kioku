@@ -192,6 +192,12 @@ fn render_status_markdown(
         if manifest.quality.pending_pre_redaction_compaction {
             out.push_str("| Pre-redaction bytes | clearing outstanding; run `ok index` |\n");
         }
+        if let Some(snapshot) = &manifest.snapshot {
+            out.push_str(&format!(
+                "| Imported snapshot | {} |\n",
+                markdown_cell(&snapshot_provenance_summary(snapshot))
+            ));
+        }
         if let Some(excluded) = manifest
             .quality
             .coverage
@@ -1476,6 +1482,11 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                 let (check, step) = redaction_check(quality);
                 checks.push(check);
                 next_steps.extend(step);
+                if let Some(snapshot) = &manifest.snapshot {
+                    let (check, step) = snapshot_check(snapshot);
+                    checks.push(check);
+                    next_steps.extend(step);
+                }
                 coverage = quality.coverage.clone();
             }
         }
@@ -1635,6 +1646,49 @@ fn redaction_summary(quality: &open_kioku_core::IndexQuality) -> String {
 /// Redaction sits beside coverage. An index written before redaction existed, or one whose
 /// clearing of pre-redaction bytes has not finished, warns rather than fails: it holds values
 /// as read, and running the index again is the fix.
+/// One line for an index `ok snapshot import` published: the revision it describes and what
+/// the local policy removed from it.
+fn snapshot_provenance_summary(snapshot: &open_kioku_core::SnapshotProvenance) -> String {
+    use open_kioku_core::SnapshotRevisionRelation as Relation;
+    let count = |value: Option<usize>| value.map_or_else(|| "unknown".into(), |n| n.to_string());
+    let revision = match snapshot.relation {
+        Relation::SameCommit => "the checked-out commit".to_string(),
+        Relation::Related => format!(
+            "{} commit(s) behind and {} ahead of the local HEAD",
+            count(snapshot.commits_behind),
+            count(snapshot.commits_ahead)
+        ),
+        Relation::Foreign => "a revision not verified against this checkout".to_string(),
+    };
+    format!(
+        "imported from {} ({revision}); {} changed file(s) at import; {} path(s) removed by local index policy",
+        snapshot.imported_from_commit,
+        count(snapshot.changed_files),
+        snapshot.policy_filtered
+    )
+}
+
+/// An imported index that does not describe the checkout is a warning: every answer is still
+/// served, with the caveat, until `ok index` rebuilds it from source.
+fn snapshot_check(snapshot: &open_kioku_core::SnapshotProvenance) -> (DoctorCheck, Option<String>) {
+    let caveat = snapshot.caveat();
+    let step = caveat.is_some().then(|| {
+        "Snapshot: run `ok index .` so the index describes this checkout rather than the revision the snapshot was exported from.".to_string()
+    });
+    (
+        DoctorCheck {
+            name: "snapshot",
+            status: if caveat.is_some() {
+                CheckStatus::Warn
+            } else {
+                CheckStatus::Pass
+            },
+            message: snapshot_provenance_summary(snapshot),
+        },
+        step,
+    )
+}
+
 fn redaction_check(quality: &open_kioku_core::IndexQuality) -> (DoctorCheck, Option<String>) {
     let outstanding =
         quality.redacted_files.is_none() || quality.pending_pre_redaction_compaction;

@@ -923,6 +923,7 @@ mod tests {
                 coverage_reports: 1,
                 ..Default::default()
             },
+            snapshot: None,
         };
 
         let schema = current_schema_with_manifest(None, Some(&manifest));

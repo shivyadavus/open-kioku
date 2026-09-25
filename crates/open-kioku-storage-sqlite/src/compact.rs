@@ -39,7 +39,7 @@ pub(crate) const CALL_SITE_STRINGS: &str = "call_site_strings";
 /// FNV-1a. Chosen over `DefaultHasher` because the value is persisted: `DefaultHasher`'s
 /// output is explicitly not stable across Rust releases, and a hash that silently changed
 /// would make the incremental writer stop finding existing entries.
-fn fnv1a64(value: &str) -> i64 {
+pub(crate) fn fnv1a64(value: &str) -> i64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in value.as_bytes() {
         hash ^= u64::from(*byte);
