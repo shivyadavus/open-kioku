@@ -580,8 +580,34 @@ fn apply_local_policy_to_snapshot(
         }
     }
     filter.paths_removed = filter.by_source.values().sum();
+    // The exporter's quality notes name the removed files' paths and chunks, and the names in
+    // them; which notes those are is decided against the chunks removed and the ones left.
+    let mut removed_chunk_ids = std::collections::HashSet::new();
+    for (file, _) in &excluded_files {
+        for chunk in store.chunks_for_file(&file.id)? {
+            removed_chunk_ids.insert(chunk.id);
+        }
+    }
     let purge = store.purge_paths(&indexed, &history, &nodes, manifest)?;
     let scip = store.purge_unanchored_scip_rows()?;
+    if !indexed.is_empty() {
+        let mut remaining_words = std::collections::HashSet::new();
+        for chunk in store.all_chunks()? {
+            for word in open_kioku_ingest::path_policy::registry_words(&chunk.text) {
+                if !remaining_words.contains(word) {
+                    remaining_words.insert(word.to_string());
+                }
+            }
+        }
+        open_kioku_ingest::path_policy::withhold_notes_about_removed_content(
+            &mut manifest.quality,
+            &open_kioku_ingest::path_policy::RemovedContent {
+                paths: &indexed,
+                chunk_ids: &removed_chunk_ids,
+                remaining_words: &remaining_words,
+            },
+        );
+    }
     filter.rows_removed = purge != open_kioku_storage_sqlite::PathPurge::default()
         || scip != open_kioku_storage_sqlite::ScipPurge::default();
     drop(store);

@@ -9,10 +9,10 @@ use crate::{
 };
 use globset::GlobSet;
 use open_kioku_config::OkConfig;
-use open_kioku_core::{File, IndexQuality, SkipReason, SkipSource, SkippedPath};
+use open_kioku_core::{File, IndexQuality, QualityNoteKind, SkipReason, SkipSource, SkippedPath};
 use open_kioku_errors::Result;
 use open_kioku_languages::is_supported_code;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Why the local policy keeps a path out of the index.
@@ -218,10 +218,120 @@ pub fn redact_recorded_skips(quality: &mut IndexQuality, config: &OkConfig) -> u
     withheld
 }
 
+/// What an index's quality notes may still say about files removed from it after it was built.
+pub struct RemovedContent<'a> {
+    /// The removed files' repository paths.
+    pub paths: &'a BTreeSet<PathBuf>,
+    /// The ids of the removed files' chunks.
+    pub chunk_ids: &'a HashSet<String>,
+    /// Every word (a run of letters, digits, `_` and `$`, as the symbol registry reads chunk
+    /// text) of the chunks that remain.
+    pub remaining_words: &'a HashSet<String>,
+}
+
+/// The words of `text` as the symbol registry splits it into tokens.
+pub fn registry_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+        .filter(|word| !word.is_empty())
+}
+
+/// Remove from `quality` the notes that describe only `removed` content: an import-resolver
+/// caveat in a removed file, an unresolved name in a removed chunk, and a symbol-registry
+/// caveat for a name no remaining chunk uses (the registry notes each name once, without its
+/// chunk). `ok index` records none of them for a file discovery skips, and they spell the
+/// file's path or the names in it. Returns how many were removed.
+pub fn withhold_notes_about_removed_content(
+    quality: &mut IndexQuality,
+    removed: &RemovedContent<'_>,
+) -> usize {
+    let resolver_prefixes = removed
+        .paths
+        .iter()
+        .map(|path| format!("import resolver caveat in {} for `", path.display()))
+        .collect::<Vec<_>>();
+    let before = quality.quality_notes.len();
+    quality.quality_notes.retain(|note| {
+        let message = note.message.as_str();
+        match note.kind {
+            QualityNoteKind::ImportResolverCaveat => !resolver_prefixes
+                .iter()
+                .any(|prefix| message.starts_with(prefix.as_str())),
+            QualityNoteKind::SymbolRegistryUnresolved => message
+                .rsplit_once(" in chunk ")
+                .is_none_or(|(_, chunk)| !removed.chunk_ids.contains(chunk)),
+            QualityNoteKind::SymbolRegistryCaveat => message
+                .strip_prefix("symbol registry caveat for `")
+                .and_then(|rest| rest.split_once("` via "))
+                .is_none_or(|(token, _)| removed.remaining_words.contains(token)),
+            _ => true,
+        }
+    });
+    before - quality.quality_notes.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn notes_only_removed_content_accounts_for_are_withheld() {
+        let note = |kind, message: &str| open_kioku_core::QualityNote::new(kind, message);
+        let mut quality = IndexQuality {
+            quality_notes: vec![
+                note(
+                    QualityNoteKind::ImportResolverCaveat,
+                    "import resolver caveat in internal/vault/keys.rs for `chrono::Utc`: none",
+                ),
+                note(
+                    QualityNoteKind::ImportResolverCaveat,
+                    "import resolver caveat in internal/vault/keys.rs.bak for `x`: none",
+                ),
+                note(
+                    QualityNoteKind::SymbolRegistryUnresolved,
+                    "symbol registry unresolved `seal_inner` in chunk c-removed",
+                ),
+                note(
+                    QualityNoteKind::SymbolRegistryUnresolved,
+                    "symbol registry unresolved `main_loop` in chunk c-kept",
+                ),
+                note(
+                    QualityNoteKind::SymbolRegistryCaveat,
+                    "symbol registry caveat for `seal_inner` via unresolved: no candidate",
+                ),
+                note(
+                    QualityNoteKind::SymbolRegistryCaveat,
+                    "symbol registry caveat for `check` via unique-project-name: 2 candidates",
+                ),
+                note(QualityNoteKind::Discovery, "discovery skipped 1 path(s)"),
+            ],
+            ..Default::default()
+        };
+        let paths = BTreeSet::from([PathBuf::from("internal/vault/keys.rs")]);
+        let chunk_ids = HashSet::from(["c-removed".to_string()]);
+        let remaining_words = registry_words("fn main() { anchor.check(); main_loop() }")
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        let withheld = withhold_notes_about_removed_content(
+            &mut quality,
+            &RemovedContent {
+                paths: &paths,
+                chunk_ids: &chunk_ids,
+                remaining_words: &remaining_words,
+            },
+        );
+        assert_eq!(withheld, 3);
+        let kept = quality
+            .quality_notes
+            .iter()
+            .map(|note| note.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(kept.iter().all(|message| !message.contains("seal_inner")));
+        assert!(kept.iter().any(|message| message.contains("keys.rs.bak")));
+        assert!(kept.iter().any(|message| message.contains("main_loop")));
+        assert!(kept.iter().any(|message| message.contains("`check`")));
+        assert!(kept.iter().any(|message| message.starts_with("discovery")));
+    }
 
     fn policy_for(root: &Path, config: &OkConfig, paths: &[&str]) -> IndexPathPolicy {
         let paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
