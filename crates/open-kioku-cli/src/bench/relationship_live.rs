@@ -1015,6 +1015,80 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // `super::target_fn()` in `mod tests` names the file's own `target_fn`, not the crate root's.
+        "mod_block_super_path_file_item" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n\npub fn target_fn() {}\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    fn caller_fn() {\n        super::target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // The file's `target_fn` is an import from a crate the index does not hold, so
+        // `super::target_fn()` in `mod tests` names that, never the crate root's `target_fn`.
+        "mod_block_super_path_parent_import" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n\npub fn target_fn() {}\n"),
+                (
+                    "src/worker.rs",
+                    "use mock_clock::target_fn;\n\n#[cfg(test)]\nmod tests {\n    fn caller_fn() {\n        super::target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `self::target_fn()` in `mod tests` names the block's own item.
+        "mod_block_self_path_block_item" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn production() {}\n\n#[cfg(test)]\nmod tests {\n    fn target_fn() {}\n\n    fn caller_fn() {\n        self::target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `self::target_fn()` in `mod tests` names the block's import, not the file's `target_fn`.
+        "mod_block_self_path_file_item" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use mock_clock::target_fn;\n\n    fn caller_fn() {\n        self::target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `super::target_fn()` in `mod inner` names `outer`'s item.
+        "nested_mod_block_super_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn production() {}\n\nmod outer {\n    pub fn target_fn() {}\n\n    mod inner {\n        fn caller_fn() {\n            super::target_fn();\n        }\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `super::super::target_fn()` in `mod tests` leaves the block and then the file, landing
+        // on the crate root.
+        "mod_block_super_super_path_crate_item" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n\npub fn target_fn() {}\n"),
+                (
+                    "src/worker.rs",
+                    "#[cfg(test)]\nmod tests {\n    fn caller_fn() {\n        super::super::target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
         // `callee.rs` beside `callee/mod.rs` leaves the module file ambiguous. The module is not
         // named `target`: discovery skips any `target/` directory as build output, which would
         // index only one of the two files.

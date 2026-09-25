@@ -549,6 +549,142 @@
       "notes": "Regression case: a bare `target_fn()` inside a method binds through `use crate::clock::target_fn;`, not to the associated `Session::target_fn` of the enclosing `impl`."
     },
     {
+      "id": "ci-rust-calls-28-mod_block_super_path_file_item",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_super_path_file_item",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_super_path_file_item:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "mod_block_super_path_file_item",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::worker::target_fn",
+        "identity": "symbol:rust:calls:mod_block_super_path_file_item:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case: `super::target_fn()` inside `mod tests` of `src/worker.rs` names the file's own `target_fn`. The path used to climb from the file path to the crate root, losing this edge and proving one to the crate root's `target_fn` instead."
+    },
+    {
+      "id": "ci-rust-calls-29-mod_block_super_path_parent_import",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_super_path_parent_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_super_path_parent_import:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "mod_block_super_path_parent_import",
+      "notes": "Regression case: `super::target_fn()` inside `mod tests` names the file's `use mock_clock::target_fn;`, which the index does not hold, so the call gets no authoritative edge; the crate root's `target_fn` must not take it."
+    },
+    {
+      "id": "ci-rust-calls-30-mod_block_self_path_block_item",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_self_path_block_item",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_self_path_block_item:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "mod_block_self_path_block_item",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:mod_block_self_path_block_item:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case: `self::target_fn()` inside `mod tests` names the item the block declares."
+    },
+    {
+      "id": "ci-rust-calls-31-mod_block_self_path_file_item",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_self_path_file_item",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_self_path_file_item:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "mod_block_self_path_file_item",
+      "notes": "Regression case: `self::target_fn()` inside `mod tests` names the block's unresolved `use mock_clock::target_fn;`, so the call must not bind to the file's own `target_fn`."
+    },
+    {
+      "id": "ci-rust-calls-32-nested_mod_block_super_path",
+      "fixture_id": "ci/ri3/rust/calls/nested_mod_block_super_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:nested_mod_block_super_path:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "nested_mod_block_super_path",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:nested_mod_block_super_path:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case: `super::target_fn()` inside `mod inner` names the item of the enclosing `mod outer`, not anything the file path climbs to."
+    },
+    {
+      "id": "ci-rust-calls-33-mod_block_super_super_path_crate_item",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_super_super_path_crate_item",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_super_super_path_crate_item:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "mod_block_super_super_path_crate_item",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:mod_block_super_super_path_crate_item:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case: `super::super::target_fn()` inside `mod tests` of `src/worker.rs` leaves the block, then the file, and names the crate root's `target_fn`."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
