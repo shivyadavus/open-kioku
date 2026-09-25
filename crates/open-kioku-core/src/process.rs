@@ -129,10 +129,12 @@ mod tests {
             "instrument was {}",
             reading.instrument
         );
-        // Peak RSS only rises, so a second reading may exceed the first; what must hold is that
-        // the instrument stays available and never reports less than it already did.
-        let later = process_peak_rss_bytes().expect("the instrument stays available");
-        assert!(later >= bytes);
+        // A second reading must still come from an instrument. It is not compared with the
+        // first: Linux derives `VmHWM` from per-thread RSS counters it syncs lazily, so under a
+        // multi-threaded test harness a later read can report less than an earlier one, and a
+        // `/proc` read that falls back to `getrusage` switches to separate kernel accounting.
+        let later = process_peak_rss();
+        assert!(later.bytes.is_some_and(|later| later > 0));
     }
 
     /// The unit conversion is the only arithmetic this module owns, so it is pinned with
