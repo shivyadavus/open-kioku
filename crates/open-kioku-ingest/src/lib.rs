@@ -1099,13 +1099,7 @@ impl Indexer {
         let validation_analysis_facts = validation_facts.len();
         analysis_facts.extend(validation_facts);
         let git_history = if config.history.enabled {
-            collect_git_history(
-                &root,
-                &files,
-                &symbols,
-                config.history.max_commits,
-                config.history.max_files_per_commit,
-            )?
+            collect_git_history(&root, &files, &symbols, config)?
         } else {
             GitHistoryIngest::empty()
         };
@@ -2170,31 +2164,124 @@ fn collect_git_history(
     root: &Path,
     files: &[File],
     symbols: &[Symbol],
-    max_commits: usize,
-    max_files_per_commit: usize,
+    config: &OkConfig,
 ) -> Result<GitHistoryIngest> {
-    let history = open_kioku_git::commit_history(root, max_commits)?;
-    let patch_scan = open_kioku_git::commit_patches(root, max_commits)?;
+    let history = open_kioku_git::commit_history(root, config.history.max_commits)?;
+    let patch_scan = open_kioku_git::commit_patches(root, config.history.max_commits)?;
+    let denied = compile_globs(&config.paths.deny)?;
     Ok(git_history_ingest(
         files,
         symbols,
         history,
         patch_scan,
-        max_files_per_commit,
+        config.history.max_files_per_commit,
+        &|path| security_policy_excludes(&denied, path),
     ))
+}
+
+/// The security rules discovery applies before it reads a file: secret-like paths and
+/// `[paths] deny`. History names every path a commit touched, including files discovery never
+/// reads, so it applies the same rules (#525).
+fn security_policy_excludes(denied: &GlobSet, path: &Path) -> bool {
+    open_kioku_core::is_secret_like_path(path) || denied.is_match(path)
+}
+
+/// What history ingestion left out because the security policy excludes the path it names.
+#[derive(Debug, Default)]
+struct WithheldHistory {
+    paths: BTreeSet<PathBuf>,
+    file_touches: usize,
+    cochange_records: usize,
+}
+
+impl WithheldHistory {
+    /// Counts only: naming a withheld path here would defeat withholding it.
+    fn quality_note(&self) -> Option<QualityNote> {
+        (!self.paths.is_empty()).then(|| {
+            QualityNote::new(
+                QualityNoteKind::GitHistory,
+                format!(
+                    "git history: {} file touch(es) and {} co-change pair(s) on {} path(s) the \
+                     security policy excludes (secret-like or `[paths] deny`) were not stored",
+                    self.file_touches,
+                    self.cochange_records,
+                    self.paths.len()
+                ),
+            )
+        })
+    }
+}
+
+/// Drop every history row that names a path `excluded` rejects: a file touch on such a path
+/// (or renamed from one), its patch, and every co-change pair naming it. `records` are computed
+/// before the drop, so a commit too large to count toward co-change stays too large, and the
+/// pairs between the other files it touched are unchanged. A skipped patch's reason can quote
+/// its entry's path, so an excluded path is masked there too.
+fn withhold_excluded_history(
+    history: &mut open_kioku_git::CommitHistory,
+    patch_scan: &mut open_kioku_git::CommitPatchScan,
+    records: &mut Vec<open_kioku_git::CochangeRecord>,
+    excluded: &dyn Fn(&Path) -> bool,
+) -> WithheldHistory {
+    let mut paths = BTreeSet::new();
+    let mut names_excluded = |path: &Path| {
+        let hit = excluded(path);
+        if hit {
+            paths.insert(path.to_path_buf());
+        }
+        hit
+    };
+    // Both sides of a rename are judged: a touch renamed from `.env` must not keep its old name.
+    let mut touch_excluded = |path: &Path, previous_path: Option<&Path>| {
+        let path_excluded = names_excluded(path);
+        let previous_excluded = previous_path.is_some_and(&mut names_excluded);
+        path_excluded || previous_excluded
+    };
+    let touches_before = history.file_touches.len();
+    history
+        .file_touches
+        .retain(|touch| !touch_excluded(&touch.path, touch.previous_path.as_deref()));
+    for commit in &mut patch_scan.commits {
+        commit
+            .files
+            .retain(|file| !touch_excluded(&file.path, file.previous_path.as_deref()));
+    }
+    let records_before = records.len();
+    records.retain(|record| !excluded(&record.path) && !excluded(&record.cochanged_path));
+    for skipped in &mut patch_scan.skipped {
+        for path in &paths {
+            let name = path.to_string_lossy();
+            if skipped.reason.contains(name.as_ref()) {
+                skipped.reason = skipped.reason.replace(name.as_ref(), "[redacted]");
+            }
+        }
+    }
+    WithheldHistory {
+        file_touches: touches_before - history.file_touches.len(),
+        cochange_records: records_before - records.len(),
+        paths,
+    }
 }
 
 fn git_history_ingest(
     files: &[File],
     symbols: &[Symbol],
-    history: open_kioku_git::CommitHistory,
-    patch_scan: open_kioku_git::CommitPatchScan,
+    mut history: open_kioku_git::CommitHistory,
+    mut patch_scan: open_kioku_git::CommitPatchScan,
     max_files_per_commit: usize,
+    excluded: &dyn Fn(&Path) -> bool,
 ) -> GitHistoryIngest {
-    let quality_notes = skipped_patch_notes(&patch_scan.skipped);
-    let symbol_touches = map_symbol_touches(files, symbols, &history, &patch_scan.commits);
-    let cochange_records =
+    let mut cochange_records =
         open_kioku_git::cochange_records_from_history(&history, max_files_per_commit);
+    let withheld = withhold_excluded_history(
+        &mut history,
+        &mut patch_scan,
+        &mut cochange_records,
+        excluded,
+    );
+    let mut quality_notes = skipped_patch_notes(&patch_scan.skipped);
+    quality_notes.extend(withheld.quality_note());
+    let symbol_touches = map_symbol_touches(files, symbols, &history, &patch_scan.commits);
     let cochange_edges = cochange_records
         .iter()
         .take(MAX_HISTORY_COCHANGE_EDGES)
@@ -3748,6 +3835,128 @@ class Util {
         assert!(history.file_touches.is_empty());
     }
 
+    /// Discovery never reads a secret-like or denied path, so history must not record one
+    /// either (#525): no touch, rename, co-change pair or fact may name it, and the history of
+    /// the files committed beside it is what it would have been without it.
+    #[test]
+    fn history_withholds_paths_the_security_policy_excludes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test User"]);
+        for dir in ["src", "tests", "config", "blocked"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("src/auth.rs"), "pub fn login() {}\n").unwrap();
+        std::fs::write(
+            root.join("tests/auth_test.rs"),
+            "#[test] fn login_test() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".env"), "TOKEN=abc\n").unwrap();
+        std::fs::write(root.join(".env.sample"), "TOKEN=\n").unwrap();
+        std::fs::write(root.join("config/server.key"), "key\n").unwrap();
+        std::fs::write(root.join("blocked/notes.rs"), "pub fn hidden() {}\n").unwrap();
+        // Named for credentials but not secret-like: discovery indexes it (redacted), so its
+        // history is kept.
+        std::fs::write(root.join("config/credentials.json"), "{}\n").unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-m", "auth with config"]);
+        // A rename away from a secret-like name must not keep the old name either.
+        git(root, &["mv", ".env.sample", "config/env.sample"]);
+        std::fs::write(root.join("src/auth.rs"), "pub fn login() { let _ = 1; }\n").unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-m", "move sample env"]);
+
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.paths.deny = vec!["blocked/**".into()];
+        let (snapshot, history) = Indexer::default()
+            .index_repo_with_history(root, &config)
+            .unwrap();
+
+        let recorded = serde_json::to_string(&history).unwrap();
+        let facts = serde_json::to_string(&snapshot.analysis_facts).unwrap();
+        let notes = serde_json::to_string(&snapshot.manifest.quality.quality_notes).unwrap();
+        for withheld in [".env", "server.key", "blocked/notes.rs"] {
+            assert!(!recorded.contains(withheld), "{withheld} in {recorded}");
+            assert!(!facts.contains(withheld), "{withheld} in {facts}");
+            assert!(!notes.contains(withheld), "{withheld} in {notes}");
+        }
+
+        // The files committed beside them keep their history.
+        let touched = |path: &str| {
+            history
+                .file_touches
+                .iter()
+                .filter(|touch| touch.path == std::path::Path::new(path))
+                .count()
+        };
+        assert_eq!(touched("src/auth.rs"), 2);
+        assert_eq!(touched("tests/auth_test.rs"), 1);
+        assert_eq!(touched("config/credentials.json"), 1);
+        assert!(history.cochange_edges.iter().any(|edge| {
+            edge.path == std::path::Path::new("src/auth.rs")
+                && edge.cochanged_path == std::path::Path::new("tests/auth_test.rs")
+                && edge.commit_count == 1
+        }));
+        assert!(history.cochange_edges.iter().any(|edge| {
+            edge.path == std::path::Path::new("src/auth.rs")
+                && edge.cochanged_path == std::path::Path::new("config/credentials.json")
+        }));
+        assert!(history
+            .symbol_touches
+            .iter()
+            .any(|touch| touch.file_path == std::path::Path::new("src/auth.rs")));
+
+        // What was withheld is counted, never named.
+        let note = snapshot
+            .manifest
+            .quality
+            .quality_notes
+            .iter()
+            .find(|note| note.message.contains("security policy excludes"))
+            .expect("withheld history is reported");
+        assert_eq!(note.kind, QualityNoteKind::GitHistory);
+        assert!(note.message.contains("on 4 path(s)"), "{}", note.message);
+    }
+
+    #[test]
+    fn a_skipped_patch_reason_does_not_name_a_withheld_path() {
+        let history = open_kioku_git::CommitHistory {
+            commits: Vec::new(),
+            file_touches: vec![GitFileTouch {
+                id: HistoryRecordId::new("touch"),
+                commit_id: GitCommitId::new("aaaa"),
+                path: ".env".into(),
+                previous_path: None,
+                change_kind: GitChangeKind::Modified,
+                additions: None,
+                deletions: None,
+                touched_at: Utc::now(),
+            }],
+        };
+        let ingest = git_history_ingest(
+            &[],
+            &[],
+            history,
+            open_kioku_git::CommitPatchScan {
+                commits: Vec::new(),
+                skipped: vec![open_kioku_git::SkippedCommitPatch {
+                    commit_id: GitCommitId::new("aaaa"),
+                    reason: "git diff output is malformed in the entry for `.env` at line 3".into(),
+                }],
+            },
+            10,
+            &|path| open_kioku_core::is_secret_like_path(path),
+        );
+        assert!(ingest.snapshot.file_touches.is_empty());
+        let notes = serde_json::to_string(&ingest.quality_notes).unwrap();
+        assert!(!notes.contains(".env"), "{notes}");
+        assert!(notes.contains("entry for `[redacted]`"), "{notes}");
+    }
+
     #[test]
     fn a_skipped_commit_patch_is_reported_as_a_history_quality_note() {
         let skipped = |id: &str| open_kioku_git::SkippedCommitPatch {
@@ -3760,6 +3969,7 @@ class Util {
             open_kioku_git::CommitHistory::empty(),
             open_kioku_git::CommitPatchScan::default(),
             10,
+            &|_| false,
         );
         assert!(clean.quality_notes.is_empty());
 
@@ -3772,6 +3982,7 @@ class Util {
                 skipped: vec![skipped("aaaa"), skipped("bbbb")],
             },
             10,
+            &|_| false,
         );
 
         assert_eq!(ingest.quality_notes.len(), 1);
