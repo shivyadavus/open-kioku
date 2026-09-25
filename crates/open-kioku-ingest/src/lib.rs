@@ -1150,8 +1150,15 @@ impl Indexer {
 
         let mut scip_report = None;
         if config.scip.enabled {
+            // SCIP covers every document it was generated for, discovery's skips included. A
+            // document the security policy excludes contributes nothing: its symbol strings spell
+            // its path and its names are its content. Other unindexed documents (gitignored or
+            // generated code) are kept, so references into them still resolve to a symbol.
+            let security = path_policy::SecurityPathPolicy::new(config)?;
             let (imported, report) =
-                open_kioku_scip::prepare_and_import_scip(&root, &config.scip, &repo_id)?;
+                open_kioku_scip::prepare_and_import_scip(&root, &config.scip, &repo_id, &|path| {
+                    security.exclusion(path).is_some()
+                })?;
             let imported_symbol_count = imported.symbols.len();
             let imported_occurrence_count = imported.occurrences.len();
             symbols.extend(imported.symbols);
@@ -1965,6 +1972,17 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             quality_notes.push(QualityNote::new(
                 QualityNoteKind::Scip,
                 "SCIP was enabled but no SCIP index was imported",
+            ));
+        }
+        if report.withheld_documents > 0 {
+            quality_notes.push(QualityNote::new(
+                QualityNoteKind::Scip,
+                format!(
+                    "{} SCIP document(s) for paths the security policy excludes (secret-like or \
+                     `[paths] deny`) were not imported; their symbols and references are not \
+                     in the index",
+                    report.withheld_documents
+                ),
             ));
         }
         if report.exact_references == 0 {
