@@ -131,6 +131,7 @@ impl<'a> ImpactEngine<'a> {
         let mut exact_reference_count = 0;
         let mut exact_reference_files = 0;
         let mut exact_reference_sources = Vec::new();
+        let mut omitted_direct = 0;
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
             exact_reference_count = direct.len();
@@ -166,7 +167,7 @@ impl<'a> ImpactEngine<'a> {
             }
             direct = group_direct_impacts(dedupe_results(direct));
             direct.sort_by(compare_impact_results);
-            direct.truncate(25);
+            omitted_direct = cap_impacts(&mut direct, MAX_DIRECT_IMPACTS);
             direct
         } else {
             Vec::new()
@@ -194,8 +195,11 @@ impl<'a> ImpactEngine<'a> {
             }
         }
         indirect.sort_by(compare_impact_results);
-        indirect.dedup_by(|a, b| a.path == b.path);
-        indirect.truncate(15);
+        // One entry per path, the best-ranked. `dedup_by` only folds adjacent entries, and a
+        // path found at two different scores is not adjacent after the sort.
+        let mut indirect_paths = std::collections::HashSet::new();
+        indirect.retain(|result| indirect_paths.insert(result.path.clone()));
+        let omitted_indirect = cap_impacts(&mut indirect, MAX_INDIRECT_IMPACTS);
         let mut reasons = Vec::new();
         if exact_reference_count > 0 {
             reasons.push(format!(
@@ -204,6 +208,18 @@ impl<'a> ImpactEngine<'a> {
         }
         if direct.len() > 10 {
             reasons.push("many lexical dependents reference this file or its symbols".into());
+        }
+        // The lists are capped; a dependent past the cap is still a dependent. Say how many
+        // were cut so a short list is not read as the whole blast radius.
+        if omitted_direct > 0 {
+            reasons.push(format!(
+                "{omitted_direct} further direct impact(s) omitted beyond the {MAX_DIRECT_IMPACTS}-entry cap; lower scores, then weaker evidence at an equal score, are cut first"
+            ));
+        }
+        if omitted_indirect > 0 {
+            reasons.push(format!(
+                "{omitted_indirect} further indirect impact(s) omitted beyond the {MAX_INDIRECT_IMPACTS}-entry cap"
+            ));
         }
         if !runtime_facts.is_empty() {
             reasons.push(format!(
@@ -347,6 +363,8 @@ impl<'a> ImpactEngine<'a> {
             target: path.display().to_string(),
             direct_impacts: direct,
             indirect_impacts: indirect,
+            direct_impacts_omitted: omitted_direct,
+            indirect_impacts_omitted: omitted_indirect,
             proven_impact,
             possible_impact,
             risk_report: RiskReport {
@@ -1169,6 +1187,12 @@ fn exact_reference_impacts(
 /// readers only: exactness is read from `SearchResult::exact_reference_provenance`.
 const EXACT_REFERENCE_MATCH_REASON_PREFIX: &str = "exact symbol reference via ";
 
+/// Direct impacts one report lists. The rest are counted in `ImpactReport::direct_impacts_omitted`.
+const MAX_DIRECT_IMPACTS: usize = 25;
+
+/// Indirect impacts one report lists. The rest are counted in `ImpactReport::indirect_impacts_omitted`.
+const MAX_INDIRECT_IMPACTS: usize = 15;
+
 /// Further chunks of one path whose evidence lines a grouped direct impact lists. The rest are
 /// named by line range on one summary line: a symbol referenced a hundred times in one file
 /// would otherwise put a hundred lines in one entry.
@@ -1235,10 +1259,14 @@ fn merge_direct_group(mut chunks: Vec<SearchResult>) -> Option<SearchResult> {
     if others.is_empty() {
         return Some(representative);
     }
+    // Only the first few are listed, so this order decides which chunks are named. It falls
+    // back to the full ranking order rather than to the order `chunks` happened to be in: that
+    // is sorted above today, but the listed subset must not depend on a sort elsewhere.
     others.sort_by(|left, right| {
         line_start(left)
             .cmp(&line_start(right))
             .then_with(|| left.evidence_refs.cmp(&right.evidence_refs))
+            .then_with(|| compare_impact_results(left, right))
     });
     let mut evidence_refs = aligned_evidence_refs(&representative);
     let mut evidence = std::mem::take(&mut representative.evidence);
@@ -1454,9 +1482,19 @@ fn best_occurrence_snippet(
         .collect()
 }
 
-/// Descending score, then repository position: path, line range, and the evidence ids the
-/// result was published with. Impacts are truncated after this sort, so equal scores ordered by
-/// whatever their stream produced decided which files the report kept.
+/// Keeps the first `cap` of an already ranked list and returns how many it cut, so the report
+/// can count what it does not list.
+fn cap_impacts(results: &mut Vec<SearchResult>, cap: usize) -> usize {
+    let omitted = results.len().saturating_sub(cap);
+    results.truncate(cap);
+    omitted
+}
+
+/// Descending score, then the authority of the edge the impact was reached through, then
+/// repository position: path, line range, and the evidence ids the result was published with.
+/// Impacts are truncated after this sort, so at an equal score the stronger evidence must be
+/// what survives the cap: ordering ties by path alone kept an alphabetically early lexical hit
+/// over an exact reference. Position stays last so the order is total and reproducible.
 fn compare_impact_results(left: &SearchResult, right: &SearchResult) -> std::cmp::Ordering {
     let bounds = |result: &SearchResult| {
         result
@@ -1468,6 +1506,7 @@ fn compare_impact_results(left: &SearchResult, right: &SearchResult) -> std::cmp
         .score
         .partial_cmp(&left.score)
         .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| direct_impact_kind(left).cmp(&direct_impact_kind(right)))
         .then_with(|| left.path.cmp(&right.path))
         .then_with(|| bounds(left).cmp(&bounds(right)))
         .then_with(|| left.evidence_refs.cmp(&right.evidence_refs))
@@ -3142,6 +3181,235 @@ mod tests {
             .unwrap();
         assert!(report.proven_impact.is_empty());
         assert!(report.possible_impact.is_empty());
+    }
+
+    /// Answers every query with the same fixed results, in the order given.
+    struct FixedSearchIndex(Vec<SearchResult>);
+
+    impl SearchIndex for FixedSearchIndex {
+        fn rebuild(&mut self, _: &[CodeChunk], _: &[File], _: &[Symbol]) -> Result<()> {
+            Ok(())
+        }
+
+        fn search(&self, _: &str, _: usize) -> Result<Vec<SearchResult>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn store_with_target(path: &str) -> SqliteStore {
+        let store = make_store();
+        let target = File {
+            id: FileId::new("target"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "target".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: RepositoryId::new("repo"),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 1,
+            symbol_count: 0,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[target],
+                symbols: &[],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn capped_direct_impacts_keep_stronger_evidence_at_a_tied_score_and_count_the_rest() {
+        let store = store_with_target("src/rates.rs");
+        // Twenty lexical hits whose paths all sort before twelve exact references, every one at
+        // the same score. Ordering the tie by path kept all twenty lexical hits and cut seven
+        // exact references without saying so.
+        let mut hits = (0..20)
+            .map(|index| chunk_hit(&format!("a/lexical_{index:02}.rs"), 1, 1.0, "lexical"))
+            .collect::<Vec<_>>();
+        hits.extend((0..12).map(|index| {
+            let mut hit = exact_hit(
+                &format!("z/exact_{index:02}.rs"),
+                1,
+                EvidenceSourceType::Scip,
+            );
+            hit.score = 1.0;
+            hit
+        }));
+        let mut reversed = hits.clone();
+        reversed.reverse();
+        let mut kept_orders = Vec::new();
+        for arrival in [hits, reversed] {
+            let index = FixedSearchIndex(arrival);
+            let report = ImpactEngine::new(&store)
+                .with_search_index(Some(&index))
+                .for_file(Path::new("src/rates.rs"))
+                .unwrap();
+
+            assert_eq!(report.direct_impacts.len(), MAX_DIRECT_IMPACTS);
+            assert_eq!(
+                report
+                    .direct_impacts
+                    .iter()
+                    .filter(|result| result.is_exact_reference())
+                    .count(),
+                12,
+                "every exact reference outlives a lexical hit at the same score"
+            );
+            assert_eq!(report.direct_impacts_omitted, 32 - MAX_DIRECT_IMPACTS);
+            assert!(
+                report.risk_report.reasons.iter().any(|reason| reason
+                    .starts_with("7 further direct impact(s) omitted beyond the 25-entry cap")),
+                "{:?}",
+                report.risk_report.reasons
+            );
+            kept_orders.push(
+                report
+                    .direct_impacts
+                    .iter()
+                    .map(|result| result.path.clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(kept_orders[0], kept_orders[1]);
+    }
+
+    #[test]
+    fn an_uncapped_report_counts_nothing_omitted_and_serializes_no_count() {
+        let store = store_with_target("src/rates.rs");
+        let index = FixedSearchIndex(vec![chunk_hit("src/publisher.rs", 1, 1.0, "lexical")]);
+        let report = ImpactEngine::new(&store)
+            .with_search_index(Some(&index))
+            .for_file(Path::new("src/rates.rs"))
+            .unwrap();
+        assert_eq!(report.direct_impacts_omitted, 0);
+        assert_eq!(report.indirect_impacts_omitted, 0);
+        assert!(!report
+            .risk_report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("omitted beyond")));
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("direct_impacts_omitted").is_none());
+        assert!(json.get("indirect_impacts_omitted").is_none());
+    }
+
+    /// Answers a query for `stem` with `dependents` and every other query with `direct`.
+    struct StemSearchIndex {
+        stem: &'static str,
+        direct: Vec<SearchResult>,
+        dependents: Vec<SearchResult>,
+    }
+
+    impl SearchIndex for StemSearchIndex {
+        fn rebuild(&mut self, _: &[CodeChunk], _: &[File], _: &[Symbol]) -> Result<()> {
+            Ok(())
+        }
+
+        fn search(&self, query: &str, _: usize) -> Result<Vec<SearchResult>> {
+            Ok(if query == self.stem {
+                self.dependents.clone()
+            } else {
+                self.direct.clone()
+            })
+        }
+    }
+
+    #[test]
+    fn an_indirect_path_found_at_two_scores_is_listed_once() {
+        let store = store_with_target("src/rates.rs");
+        let index = StemSearchIndex {
+            stem: "publisher",
+            direct: vec![chunk_hit("src/publisher.rs", 1, 1.0, "direct")],
+            dependents: vec![
+                chunk_hit("src/ledger.rs", 1, 0.9, "ledger strong"),
+                chunk_hit("src/billing.rs", 1, 0.5, "billing"),
+                chunk_hit("src/ledger.rs", 40, 0.3, "ledger weak"),
+            ],
+        };
+        let report = ImpactEngine::new(&store)
+            .with_search_index(Some(&index))
+            .for_file(Path::new("src/rates.rs"))
+            .unwrap();
+        assert_eq!(
+            report
+                .indirect_impacts
+                .iter()
+                .map(|result| (
+                    result.path.to_string_lossy().into_owned(),
+                    result.line_range.as_ref().map(|range| range.start)
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("src/ledger.rs".to_string(), Some(1)),
+                ("src/billing.rs".to_string(), Some(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn grouped_chunks_listed_under_the_cap_do_not_depend_on_arrival_order() {
+        // Chunks of one path that cite one shared runtime fact and start on one line tie on
+        // start line and on refs, and the cap sits between them. Which one is listed, and which
+        // is folded into the summary line, must come from the chunks, not their arrival order.
+        let shared = |start: u32, end: u32, message: &str| {
+            let mut hit = chunk_hit("src/publisher.rs", start, 0.4, message);
+            hit.line_range = Some(LineRange { start, end });
+            hit.evidence_refs = vec!["runtime:fact-1".into()];
+            hit
+        };
+        let chunks = vec![
+            chunk_hit("src/publisher.rs", 1, 0.9, "representative"),
+            chunk_hit("src/publisher.rs", 10, 0.4, "at 10"),
+            chunk_hit("src/publisher.rs", 20, 0.4, "at 20"),
+            chunk_hit("src/publisher.rs", 30, 0.4, "at 30"),
+            shared(40, 45, "wide at 40"),
+            shared(40, 42, "narrow at 40"),
+            chunk_hit("src/publisher.rs", 50, 0.4, "at 50"),
+        ];
+        let mut reversed = chunks.clone();
+        reversed.reverse();
+        let merged = [chunks, reversed]
+            .into_iter()
+            .map(|group| merge_direct_group(group).expect("group merges into one impact"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(merged[0].evidence, merged[1].evidence);
+        assert_eq!(merged[0].evidence_refs, merged[1].evidence_refs);
+        assert!(
+            merged[0]
+                .evidence
+                .contains(&"lines 40-42: narrow at 40".to_string()),
+            "{:#?}",
+            merged[0].evidence
+        );
     }
 
     #[test]

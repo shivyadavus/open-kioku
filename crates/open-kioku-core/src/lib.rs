@@ -5368,8 +5368,17 @@ pub struct RelationshipImpact {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ImpactReport {
     pub target: String,
+    /// Capped; see `direct_impacts_omitted` for how many the cap left out.
     pub direct_impacts: Vec<SearchResult>,
+    /// Capped; see `indirect_impacts_omitted` for how many the cap left out.
     pub indirect_impacts: Vec<SearchResult>,
+    /// Direct impacts found but cut by the cap on `direct_impacts`. Counted, not listed, so a
+    /// short list is not read as the whole blast radius.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub direct_impacts_omitted: usize,
+    /// Indirect impacts found but cut by the cap on `indirect_impacts`.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub indirect_impacts_omitted: usize,
     pub risk_report: RiskReport,
     pub evidence: Vec<Evidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
