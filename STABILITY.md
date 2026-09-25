@@ -33,6 +33,10 @@ version bump.
 caveats}`, the shape `ok search --regex --json` already returned, not a bare array of results.
 Read `.results`. See the Unreleased entry in `CHANGELOG.md`.
 
+`ok tests` changed shape: with `--json`, and in its default output while that is short enough
+to print as JSON, it returns `{tests, excluded, excluded_sample, caveats}`, not a bare array of
+test targets. Read `.tests`. See the Unreleased entry in `CHANGELOG.md`.
+
 ## Stable MCP Tools
 
 The following MCP tools have stable JSON-RPC interfaces. Their input schemas,
@@ -59,7 +63,7 @@ against this list by `scripts/validate-docs.sh`.
 | `retrieve_context` | Retrieve a previously persisted context pack |
 | `plan_change` | Generate a change plan (`detail` for preflight or patch, `persist` for a contract) |
 | `verify_change` | Verify changed files against a plan or contract |
-| `find_tests_for_change` | Identify tests affected by a change, or the repository's test evidence |
+| `find_tests_for_change` | Identify tests affected by a changed file |
 | `query_evidence_graph` | Query the evidence graph; with no `query`, return its schema |
 
 Five further tools are advertised **in addition** to the sixteen, but only when the
@@ -70,6 +74,10 @@ provider. They carry no stability guarantee here — the runtime three are `expe
 
 `get_references` changed shape in 4.0.0: it returns an object whose sections each name their own
 `evidence_source`, not a bare occurrence array. See the 4.0.0 entry in `CHANGELOG.md`.
+
+`find_tests_for_change` changed shape: it returns `{tests, excluded, excluded_sample, caveats}`,
+and `structuredContent` is that object rather than `{value: [...]}`. Read `.tests`. See the
+Unreleased entry in `CHANGELOG.md`.
 
 Capabilities that reached 3.x through MCP and now ship only on the CLI — `ok architecture …`,
 `ok history …`, and `ok contract show` — are covered by the CLI section above only where the
