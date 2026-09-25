@@ -13,7 +13,13 @@ Default posture:
   `secrets.yaml`, `credentials.json`, or `SECRETS.md` with its secret-like values replaced
   (see "Secret-value redaction" below), and `secrets.go` as written; parser messages that
   would quote file content are redacted. `[paths] deny` excludes any other path, and the
-  default configuration denies `**/secrets/**`
+  default configuration denies `**/secrets/**`. Git history ingestion applies the same two
+  rules to every path a commit names: a file touch on such a path (or renamed from one), its
+  patch, and every co-change pair naming it are not stored, so `git_file_touches`,
+  `git_cochange_edges`, churn hotspots and the history-backed ranking signals never name it.
+  The index records only how many touches and pairs were withheld, as a `git_history` quality
+  note that `ok --json status` and MCP `repo_status` return in `quality.quality_notes`. An
+  index built before this rule keeps such rows until the next `ok index`
 - redact-capable output boundary
 - source edits occur in the user's normal editor
 

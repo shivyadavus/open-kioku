@@ -1346,6 +1346,131 @@ reason = "domain cannot import api"
     assert!(mcp_verify.contains("domain-must-not-import-api"));
 }
 
+/// `ok index` stores no git history naming a path discovery never reads (#525): not in the
+/// touch, co-change, symbol-touch or hotspot tables, and not in any fact or graph row derived
+/// from them. The file committed beside them keeps its history.
+#[test]
+fn index_stores_no_history_naming_a_secret_like_or_denied_path() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    for dir in ["src/secrets", "tests", "certs"] {
+        fs::create_dir_all(repo.join(dir)).unwrap();
+    }
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn load_config() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("tests/lib_test.rs"),
+        "#[test]\nfn loads() {\n    assert_eq!(1, 1);\n}\n",
+    )
+    .unwrap();
+    fs::write(repo.join(".env"), "TOKEN=fixture\n").unwrap();
+    fs::write(repo.join("certs/tls.pem"), "fixture\n").unwrap();
+    // Denied by the default `[paths] deny` (`**/secrets/**`), not by the secret-like rule.
+    fs::write(repo.join("src/secrets/token.rs"), "pub fn token() {}\n").unwrap();
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["config", "user.email", "cli@example.com"]);
+    git(&repo, &["config", "user.name", "CLI Test"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "-m", "initial"]);
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn load_config() -> u32 {\n    2\n}\n",
+    )
+    .unwrap();
+    fs::write(repo.join(".env"), "TOKEN=fixture2\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "-m", "bump"]);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+
+    let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+    let text_of = |table: &str| -> Vec<String> {
+        let mut statement = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+        let columns = statement.column_count();
+        let mut rows = statement.query([]).unwrap();
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().unwrap() {
+            for column in 0..columns {
+                match row.get_ref(column).unwrap() {
+                    rusqlite::types::ValueRef::Text(text)
+                    | rusqlite::types::ValueRef::Blob(text) => {
+                        values.push(String::from_utf8_lossy(text).into_owned())
+                    }
+                    _ => {}
+                }
+            }
+        }
+        values
+    };
+    for table in [
+        "git_commits",
+        "git_file_touches",
+        "git_symbol_touches",
+        "git_cochange_edges",
+        "history_hotspots",
+        "analysis_facts",
+        "graph_nodes",
+        "graph_edges",
+        "graph_strings",
+    ] {
+        for value in text_of(table) {
+            for withheld in [".env", "tls.pem", "secrets/token.rs"] {
+                assert!(
+                    !value.contains(withheld),
+                    "{table} names {withheld}: {value}"
+                );
+            }
+        }
+    }
+    let touches = text_of("git_file_touches");
+    assert!(
+        touches
+            .iter()
+            .filter(|value| value.contains("src/lib.rs"))
+            .count()
+            >= 2,
+        "{touches:?}"
+    );
+    let edges = text_of("git_cochange_edges");
+    assert!(
+        edges
+            .iter()
+            .any(|value| value.contains("tests/lib_test.rs")),
+        "{edges:?}"
+    );
+
+    let status = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("status")
+            .arg("--full");
+        command
+    });
+    // Withheld history is counted in a quality note, never named there. (Discovery's own
+    // skipped-path list still names the denied file, as it did before.)
+    assert!(status.contains("security policy excludes"), "{status}");
+}
+
 #[test]
 fn verify_git_checks_both_sides_of_a_rename() {
     fn git(repo: &std::path::Path, args: &[&str]) {
