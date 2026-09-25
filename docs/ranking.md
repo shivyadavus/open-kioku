@@ -54,8 +54,8 @@ Set `enabled = false` to skip history indexing entirely. Large commits above
 `max_files_per_commit` are ignored so mass-formatting or generated-file commits
 do not dominate co-change ranking. Their commit and file-touch records still
 remain available inside the configured `max_commits` window.
-History names only paths discovery could index: a touch, rename or co-change pair
-naming a secret-like or `[paths] deny` path is not stored, so no history signal
+History names no path the security rules exclude: a touch, rename or co-change
+pair naming a secret-like or `[paths] deny` path is not stored, so no history signal
 can surface one (see `docs/security-model.md`). A large commit is judged by every
 path it touched, so withholding one does not bring it under `max_files_per_commit`.
 History components are advisory and bounded: exact references, exact symbol

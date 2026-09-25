@@ -18,7 +18,8 @@ Default posture:
   patch, and every co-change pair naming it are not stored, so `git_file_touches`,
   `git_cochange_edges`, churn hotspots and the history-backed ranking signals never name it.
   The index records only how many touches and pairs were withheld, as a `git_history` quality
-  note
+  note that `ok --json status` and MCP `repo_status` return in `quality.quality_notes`. An
+  index built before this rule keeps such rows until the next `ok index`
 - redact-capable output boundary
 - source edits occur in the user's normal editor
 

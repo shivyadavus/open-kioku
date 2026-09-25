@@ -2191,7 +2191,8 @@ fn security_policy_excludes(denied: &GlobSet, path: &Path) -> bool {
 struct WithheldHistory {
     paths: BTreeSet<PathBuf>,
     file_touches: usize,
-    cochange_records: usize,
+    /// Unordered pairs, counted before `MAX_HISTORY_COCHANGE_EDGES` caps the stored edges.
+    cochange_pairs: usize,
 }
 
 impl WithheldHistory {
@@ -2201,10 +2202,11 @@ impl WithheldHistory {
             QualityNote::new(
                 QualityNoteKind::GitHistory,
                 format!(
-                    "git history: {} file touch(es) and {} co-change pair(s) on {} path(s) the \
-                     security policy excludes (secret-like or `[paths] deny`) were not stored",
+                    "git history: {} file touch(es) and {} co-change pair(s) (counted before \
+                     the co-change edge cap) on {} path(s) the security policy excludes \
+                     (secret-like or `[paths] deny`) were not stored",
                     self.file_touches,
-                    self.cochange_records,
+                    self.cochange_pairs,
                     self.paths.len()
                 ),
             )
@@ -2246,19 +2248,32 @@ fn withhold_excluded_history(
             .files
             .retain(|file| !touch_excluded(&file.path, file.previous_path.as_deref()));
     }
-    let records_before = records.len();
-    records.retain(|record| !excluded(&record.path) && !excluded(&record.cochanged_path));
+    // Records hold each pair in both directions; count it once.
+    let mut cochange_pairs = 0;
+    records.retain(|record| {
+        let keep = !excluded(&record.path) && !excluded(&record.cochanged_path);
+        if !keep && record.path < record.cochanged_path {
+            cochange_pairs += 1;
+        }
+        keep
+    });
+    // Longest name first: masking `.env` inside `config/.env.local` first would leave
+    // `config/[redacted].local`, which still names the file.
+    let mut names = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
     for skipped in &mut patch_scan.skipped {
-        for path in &paths {
-            let name = path.to_string_lossy();
-            if skipped.reason.contains(name.as_ref()) {
-                skipped.reason = skipped.reason.replace(name.as_ref(), "[redacted]");
+        for name in &names {
+            if skipped.reason.contains(name.as_str()) {
+                skipped.reason = skipped.reason.replace(name.as_str(), "[redacted]");
             }
         }
     }
     WithheldHistory {
         file_touches: touches_before - history.file_touches.len(),
-        cochange_records: records_before - records.len(),
+        cochange_pairs,
         paths,
     }
 }
@@ -3920,6 +3935,13 @@ class Util {
             .expect("withheld history is reported");
         assert_eq!(note.kind, QualityNoteKind::GitHistory);
         assert!(note.message.contains("on 4 path(s)"), "{}", note.message);
+        // Seven files in the first commit, three of them kept: 21 - 3 unordered pairs name a
+        // withheld path. The rename commit pairs only kept names.
+        assert!(
+            note.message.contains("and 18 co-change pair(s)"),
+            "{}",
+            note.message
+        );
     }
 
     #[test]
@@ -3955,6 +3977,49 @@ class Util {
         let notes = serde_json::to_string(&ingest.quality_notes).unwrap();
         assert!(!notes.contains(".env"), "{notes}");
         assert!(notes.contains("entry for `[redacted]`"), "{notes}");
+    }
+
+    /// A withheld name inside a longer withheld name must not be masked first: `.env` inside
+    /// `config/.env.local` would leave `config/[redacted].local`.
+    #[test]
+    fn a_skipped_patch_reason_masks_the_longest_withheld_name_first() {
+        let touch = |id: &str, path: &str| GitFileTouch {
+            id: HistoryRecordId::new(id),
+            commit_id: GitCommitId::new("aaaa"),
+            path: path.into(),
+            previous_path: None,
+            change_kind: GitChangeKind::Modified,
+            additions: None,
+            deletions: None,
+            touched_at: Utc::now(),
+        };
+        let history = open_kioku_git::CommitHistory {
+            commits: Vec::new(),
+            file_touches: vec![touch("a", ".env"), touch("b", "config/.env.local")],
+        };
+        let ingest = git_history_ingest(
+            &[],
+            &[],
+            history,
+            open_kioku_git::CommitPatchScan {
+                commits: Vec::new(),
+                skipped: vec![open_kioku_git::SkippedCommitPatch {
+                    commit_id: GitCommitId::new("aaaa"),
+                    reason: "git diff output is malformed in the entry for `config/.env.local` \
+                             after `.env`"
+                        .into(),
+                }],
+            },
+            10,
+            &|path| open_kioku_core::is_secret_like_path(path),
+        );
+        let notes = serde_json::to_string(&ingest.quality_notes).unwrap();
+        assert!(!notes.contains("config/"), "{notes}");
+        assert!(!notes.contains(".local"), "{notes}");
+        assert!(
+            notes.contains("entry for `[redacted]` after `[redacted]`"),
+            "{notes}"
+        );
     }
 
     #[test]
