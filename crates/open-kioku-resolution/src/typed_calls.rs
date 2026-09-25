@@ -1,4 +1,4 @@
-use crate::context::{ResolutionContext, ScopedImport};
+use crate::context::{ResolutionContext, RustRelativeModule, ScopedImport};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
 use open_kioku_core::{
@@ -161,25 +161,59 @@ pub(crate) fn resolve_module_member_outcome(
     }
 }
 
+/// A Rust call through a `crate::`, `self::` or `super::` path. `self` and `super` start from the
+/// innermost module around the call, an inline `mod` block included: `super::f()` in
+/// `mod tests` of `src/worker.rs` names the `f` that file declares, not one in the crate root. A
+/// path ending in a module of this file names an item that module declares itself; one ending
+/// outside the file's scopes names items by the qualified names its module path spells.
 fn resolve_rust_qualified_module_outcome(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
     receiver: &str,
 ) -> Option<ResolutionOutcome> {
-    let qualified_names =
-        rust_qualified_module_symbol_names(ctx.file_path, receiver, &call.callee_name)?;
-
-    let mut targets = Vec::new();
-    for qualified_name in qualified_names {
-        if let Some(ids) = ctx.symbols.by_qualified.get(&qualified_name) {
-            targets.extend(ids.iter().cloned());
+    let receiver = receiver.trim();
+    let (mut targets, strategy) = if receiver == "crate" || receiver.starts_with("crate::") {
+        let names = rust_crate_path_member_names(ctx.file_path, receiver, &call.callee_name)?;
+        (
+            rust_qualified_targets(ctx, &names),
+            RustModulePathStrategy::CrateQualified,
+        )
+    } else {
+        let (depth, segments) = rust_relative_path(receiver)?;
+        match crate::context::rust_relative_module(ctx, &call.scope_id, depth, &segments)? {
+            RustRelativeModule::InFile(module) => (
+                crate::context::rust_module_items(ctx, module, &call.callee_name, |symbol| {
+                    !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
+                }),
+                RustModulePathStrategy::ModuleScope,
+            ),
+            RustRelativeModule::Outside { climbs, path } => {
+                let names =
+                    rust_outside_member_names(ctx.file_path, climbs, &path, &call.callee_name)?;
+                (
+                    rust_qualified_targets(ctx, &names),
+                    RustModulePathStrategy::CrateQualified,
+                )
+            }
         }
-    }
+    };
     normalize_symbol_ids(&mut targets);
     if targets.is_empty() {
         return None;
     }
 
+    let (message, module_strategy, member_strategy) = match strategy {
+        RustModulePathStrategy::CrateQualified => (
+            "candidate from exact Rust crate-qualified module path",
+            "rust_crate_qualified_module",
+            "rust_crate_qualified_member",
+        ),
+        RustModulePathStrategy::ModuleScope => (
+            "candidate declared by the module of this file that the Rust path names",
+            "rust_module_scope_path",
+            "rust_module_scope_member",
+        ),
+    };
     let candidate_count = targets.len();
     let ambiguity = ambiguity_strings(&targets);
     let candidates = targets
@@ -191,12 +225,12 @@ fn resolve_rust_qualified_module_outcome(
                 source_type: EvidenceSourceType::TreeSitter,
                 file_range: call_file_range(call, ctx),
                 symbol_id: Some(target.clone()),
-                message: "candidate from exact Rust crate-qualified module path".into(),
+                message: message.into(),
             });
             candidate.proofs.push(call_site_proof(call, ctx, &target));
             candidate.proofs.push(proof(
                 RelationshipProofKind::ModuleOrPackageBinding,
-                "rust_crate_qualified_module",
+                module_strategy,
                 call,
                 ctx,
                 &target,
@@ -205,7 +239,7 @@ fn resolve_rust_qualified_module_outcome(
             ));
             candidate.proofs.push(proof(
                 RelationshipProofKind::QualifiedName,
-                "rust_crate_qualified_member",
+                member_strategy,
                 call,
                 ctx,
                 &target,
@@ -218,40 +252,94 @@ fn resolve_rust_qualified_module_outcome(
     Some(evaluate_candidates(&GraphEdgeType::Calls, candidates))
 }
 
-fn rust_qualified_module_symbol_names(
+/// How a Rust module path reached its candidates.
+enum RustModulePathStrategy {
+    /// Qualified names the path spells from the file path.
+    CrateQualified,
+    /// Items a module scope of this file declares.
+    ModuleScope,
+}
+
+fn rust_qualified_targets(ctx: &ResolutionContext<'_>, names: &[String]) -> Vec<SymbolId> {
+    names
+        .iter()
+        .filter_map(|name| ctx.symbols.by_qualified.get(name))
+        .flat_map(|ids| ids.iter().cloned())
+        .collect()
+}
+
+/// `self::a::b` is `(0, ["a", "b"])` and `super::super::a` is `(2, ["a"])`; a path that does not
+/// start with `self` or `super`, or names either again later, is `None`.
+fn rust_relative_path(receiver: &str) -> Option<(usize, Vec<&str>)> {
+    let mut segments = receiver.split("::").map(str::trim);
+    let depth = match segments.next()? {
+        "self" => 0,
+        "super" => 1,
+        _ => return None,
+    };
+    let mut depth = depth;
+    let mut rest = Vec::new();
+    for segment in segments {
+        match segment {
+            "super" if depth > 0 && rest.is_empty() => depth += 1,
+            "" | "self" | "super" | "crate" => return None,
+            segment => rest.push(segment),
+        }
+    }
+    Some((depth, rest))
+}
+
+fn rust_crate_path_member_names(
     file_path: &std::path::Path,
     receiver: &str,
     callee: &str,
 ) -> Option<Vec<String>> {
-    let receiver = receiver.trim();
-    let stem = file_path
-        .with_extension("")
-        .to_string_lossy()
-        .replace(['/', '\\'], "::");
-    let logical_module = rust_logical_module_prefix(&stem);
-
-    let mut names = match receiver {
-        "crate" => rust_crate_root_member_names(&stem, callee),
-        "self" => vec![format!("{stem}::{callee}")],
-        "super" => rust_super_member_names(&logical_module, callee),
-        _ if receiver.starts_with("crate::") => {
-            let module = receiver.trim_start_matches("crate::");
-            rust_module_member_names(&format!("src::{module}"), callee)
-        }
-        _ if receiver.starts_with("self::") => {
-            let module = receiver.trim_start_matches("self::");
-            rust_module_member_names(&format!("{logical_module}::{module}"), callee)
-        }
-        _ if receiver.starts_with("super::") => {
-            let module = receiver.trim_start_matches("super::");
-            let parent = rust_parent_module_prefix(&logical_module)?;
-            rust_module_member_names(&format!("{parent}::{module}"), callee)
-        }
-        _ => return None,
+    let stem = rust_file_stem(file_path);
+    let mut names = if receiver == "crate" {
+        rust_crate_root_member_names(&stem, callee)
+    } else {
+        let module = receiver.strip_prefix("crate::")?;
+        rust_module_member_names(&format!("src::{module}"), callee)
     };
     names.sort();
     names.dedup();
     Some(names)
+}
+
+/// Qualified names of `callee` in the module `climbs` modules above this file's own module and
+/// then down `path`, as tree-sitter spells them from module file paths.
+fn rust_outside_member_names(
+    file_path: &std::path::Path,
+    climbs: usize,
+    path: &[String],
+    callee: &str,
+) -> Option<Vec<String>> {
+    let mut module = rust_logical_module_prefix(&rust_file_stem(file_path));
+    for _ in 0..climbs {
+        module = rust_parent_module_prefix(&module)?;
+    }
+    let mut names = if path.is_empty() {
+        if module.contains("::") {
+            rust_module_member_names(&module, callee)
+        } else {
+            vec![
+                format!("{module}::lib::{callee}"),
+                format!("{module}::main::{callee}"),
+            ]
+        }
+    } else {
+        rust_module_member_names(&format!("{module}::{}", path.join("::")), callee)
+    };
+    names.sort();
+    names.dedup();
+    Some(names)
+}
+
+fn rust_file_stem(file_path: &std::path::Path) -> String {
+    file_path
+        .with_extension("")
+        .to_string_lossy()
+        .replace(['/', '\\'], "::")
 }
 
 fn rust_logical_module_prefix(stem: &str) -> String {
@@ -281,20 +369,6 @@ fn rust_crate_root_member_names(stem: &str, callee: &str) -> Vec<String> {
             format!("{root}::lib::{callee}"),
             format!("{root}::main::{callee}"),
         ]
-    }
-}
-
-fn rust_super_member_names(logical_module: &str, callee: &str) -> Vec<String> {
-    let Some(parent) = rust_parent_module_prefix(logical_module) else {
-        return Vec::new();
-    };
-    if !parent.contains("::") {
-        vec![
-            format!("{parent}::lib::{callee}"),
-            format!("{parent}::main::{callee}"),
-        ]
-    } else {
-        rust_module_member_names(&parent, callee)
     }
 }
 
@@ -766,7 +840,7 @@ mod tests {
     #[test]
     fn rust_module_symbol_names_match_tree_sitter_qualified_names() {
         assert_eq!(
-            rust_qualified_module_symbol_names(
+            rust_crate_path_member_names(
                 std::path::Path::new("src/lib.rs"),
                 "crate::storage",
                 "persist"
@@ -778,18 +852,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            rust_qualified_module_symbol_names(
+            rust_outside_member_names(
                 std::path::Path::new("src/storage/service.rs"),
-                "self",
-                "persist"
-            )
-            .unwrap(),
-            vec!["src::storage::service::persist".to_string()]
-        );
-        assert_eq!(
-            rust_qualified_module_symbol_names(
-                std::path::Path::new("src/storage/service.rs"),
-                "super",
+                1,
+                &[],
                 "persist"
             )
             .unwrap(),
@@ -798,6 +864,42 @@ mod tests {
                 "src::storage::persist".to_string(),
             ]
         );
+        assert_eq!(
+            rust_outside_member_names(std::path::Path::new("src/worker.rs"), 1, &[], "persist")
+                .unwrap(),
+            vec![
+                "src::lib::persist".to_string(),
+                "src::main::persist".to_string(),
+            ]
+        );
+        assert_eq!(
+            rust_outside_member_names(
+                std::path::Path::new("src/worker.rs"),
+                0,
+                &["tests".to_string(), "helpers".to_string()],
+                "persist"
+            )
+            .unwrap(),
+            vec![
+                "src::worker::tests::helpers::mod::persist".to_string(),
+                "src::worker::tests::helpers::persist".to_string(),
+            ]
+        );
+        assert_eq!(
+            rust_outside_member_names(std::path::Path::new("src/lib.rs"), 1, &[], "persist"),
+            None
+        );
+    }
+
+    #[test]
+    fn rust_relative_paths_count_leading_super_segments() {
+        assert_eq!(rust_relative_path("self"), Some((0, vec![])));
+        assert_eq!(rust_relative_path("self::a::b"), Some((0, vec!["a", "b"])));
+        assert_eq!(rust_relative_path("super"), Some((1, vec![])));
+        assert_eq!(rust_relative_path("super::super::a"), Some((2, vec!["a"])));
+        assert_eq!(rust_relative_path("self::super"), None);
+        assert_eq!(rust_relative_path("super::a::super"), None);
+        assert_eq!(rust_relative_path("crate::a"), None);
     }
 
     fn type_symbol(id: &str, name: &str) -> Symbol {
@@ -1113,5 +1215,240 @@ mod tests {
                 other => panic!("expected an unproven candidate, got {other:?}"),
             },
         );
+    }
+
+    /// `src/worker.rs` declaring `fn f` and `mod outer { fn f; mod inner { fn g; fn t() { .. } } }`
+    /// beside a crate root `src/lib.rs` that declares its own `fn f`. Qualified names are the
+    /// file's, as tree-sitter spells them, so every `f` of the worker shares one.
+    fn with_inline_mod_context<T>(
+        extra: Vec<Symbol>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
+        let worker = FileId::new("file:src/worker.rs");
+        let scope = |id: &str, parent: Option<&str>, owner: Option<&str>, kind: ScopeKind| Scope {
+            id: ScopeId::new(id),
+            file_id: worker.clone(),
+            parent_id: parent.map(ScopeId::new),
+            owner_symbol_id: owner.map(SymbolId::new),
+            kind,
+            range: SourceRange {
+                start_line: 1,
+                start_column: 1,
+                end_line: 50,
+                end_column: 1,
+            },
+        };
+        let scopes = ScopeIndex::build(vec![
+            scope("scope:worker", None, None, ScopeKind::File),
+            scope(
+                "scope:outer",
+                Some("scope:worker"),
+                Some("sym:mod:outer"),
+                ScopeKind::Module,
+            ),
+            scope(
+                "scope:inner",
+                Some("scope:outer"),
+                Some("sym:mod:inner"),
+                ScopeKind::Module,
+            ),
+            scope(
+                "scope:t",
+                Some("scope:inner"),
+                Some("sym:inner:t"),
+                ScopeKind::Function,
+            ),
+            scope(
+                "scope:t:body",
+                Some("scope:t"),
+                Some("sym:inner:t"),
+                ScopeKind::Block,
+            ),
+        ]);
+        let item = |id: &str, name: &str, kind: SymbolKind, file: &str, scope: &str| Symbol {
+            id: SymbolId::new(id),
+            name: name.into(),
+            qualified_name: format!("src::{file}::{name}"),
+            kind,
+            file_id: FileId::new(format!("file:src/{file}.rs")),
+            range: None,
+            language: Language::Rust,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: Some(ScopeId::new(scope)),
+            signature: None,
+            visibility: Visibility::Public,
+        };
+        let mut symbols = vec![
+            item("sym:lib:f", "f", SymbolKind::Function, "lib", "scope:lib"),
+            item(
+                "sym:worker:f",
+                "f",
+                SymbolKind::Function,
+                "worker",
+                "scope:worker",
+            ),
+            item(
+                "sym:mod:outer",
+                "outer",
+                SymbolKind::Module,
+                "worker",
+                "scope:worker",
+            ),
+            item(
+                "sym:outer:f",
+                "f",
+                SymbolKind::Function,
+                "worker",
+                "scope:outer",
+            ),
+            item(
+                "sym:mod:inner",
+                "inner",
+                SymbolKind::Module,
+                "worker",
+                "scope:outer",
+            ),
+            item(
+                "sym:inner:g",
+                "g",
+                SymbolKind::Function,
+                "worker",
+                "scope:inner",
+            ),
+            item(
+                "sym:inner:t",
+                "t",
+                SymbolKind::Function,
+                "worker",
+                "scope:inner",
+            ),
+        ];
+        symbols.extend(extra);
+        let symbol_index = SymbolIndex::build(symbols);
+        let bindings = BindingIndex::build(Vec::new());
+        let inheritance = InheritanceIndex::build(Vec::new());
+        let repository = open_kioku_semantic_model::SemanticRepository::new();
+        let semantics = open_kioku_languages::semantics_for(&Language::Rust).unwrap();
+        let context = ResolutionContext::new(
+            &worker,
+            std::path::Path::new("src/worker.rs"),
+            None,
+            Language::Rust,
+            &repository,
+            &symbol_index,
+            &scopes,
+            &bindings,
+            &inheritance,
+            semantics,
+        );
+        test(&context)
+    }
+
+    fn module_path_call(scope: &str, receiver: &str, callee: &str) -> CallSite {
+        CallSite {
+            id: CallSiteId::new(format!("call:{receiver}::{callee}")),
+            file_id: FileId::new("file:src/worker.rs"),
+            scope_id: ScopeId::new(scope),
+            caller_symbol_id: Some(SymbolId::new("sym:inner:t")),
+            callee_name: callee.into(),
+            receiver: Some(receiver.into()),
+            receiver_kind: ReceiverKind::Module,
+            range: SourceRange {
+                start_line: 20,
+                start_column: 5,
+                end_line: 20,
+                end_column: 14,
+            },
+        }
+    }
+
+    fn proven_target(ctx: &ResolutionContext<'_>, call: &CallSite) -> Option<String> {
+        match resolve_module_member_outcome(call, ctx) {
+            ResolutionOutcome::Proven { candidate } => Some(candidate.target_symbol_id.0),
+            ResolutionOutcome::Unresolved { candidates, .. } if candidates.is_empty() => None,
+            other => panic!("expected a proven edge or none, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rust_relative_paths_start_from_the_innermost_inline_mod() {
+        with_inline_mod_context(Vec::new(), |ctx| {
+            let at = |scope: &str, receiver: &str, callee: &str| {
+                proven_target(ctx, &module_path_call(scope, receiver, callee))
+            };
+            // `super` in `inner` is `outer`, not the crate root the file path climbs to.
+            assert_eq!(
+                at("scope:t:body", "super", "f").as_deref(),
+                Some("sym:outer:f")
+            );
+            // Two hops leave both blocks and land on the file's own module.
+            assert_eq!(
+                at("scope:t:body", "super::super", "f").as_deref(),
+                Some("sym:worker:f")
+            );
+            // Three climb past the file, into its parent module: the crate root.
+            assert_eq!(
+                at("scope:t:body", "super::super::super", "f").as_deref(),
+                Some("sym:lib:f")
+            );
+            assert_eq!(
+                at("scope:t:body", "self", "g").as_deref(),
+                Some("sym:inner:g")
+            );
+            // `self` in `inner` declares no `f`; the file's and `outer`'s are not in it.
+            assert_eq!(at("scope:t:body", "self", "f"), None);
+            // A path descends into the inline blocks it names.
+            assert_eq!(
+                at("scope:worker", "self::outer::inner", "g").as_deref(),
+                Some("sym:inner:g")
+            );
+            assert_eq!(
+                at("scope:t:body", "super::super::outer", "f").as_deref(),
+                Some("sym:outer:f")
+            );
+            // The file's own `self::f` is its item, not the same-named items of its blocks.
+            assert_eq!(
+                at("scope:worker", "self", "f").as_deref(),
+                Some("sym:worker:f")
+            );
+            assert_eq!(
+                at("scope:worker", "super", "f").as_deref(),
+                Some("sym:lib:f")
+            );
+        });
+    }
+
+    #[test]
+    fn rust_relative_path_into_an_unindexed_module_proves_nothing_in_this_file() {
+        // `super::f` in `inner` names what `outer` declares; `outer` declares no `f` here, so no
+        // item of the file or the crate root may stand in for it.
+        with_inline_mod_context(Vec::new(), |ctx| {
+            let call = module_path_call("scope:t:body", "super", "h");
+            assert_eq!(proven_target(ctx, &call), None);
+        });
+        // `super::helpers` in `inner` is a module file below `outer`'s path, spelled by name.
+        let helper = Symbol {
+            id: SymbolId::new("sym:helpers:h"),
+            name: "h".into(),
+            qualified_name: "src::worker::outer::helpers::h".into(),
+            kind: SymbolKind::Function,
+            file_id: FileId::new("file:src/worker/outer/helpers.rs"),
+            range: None,
+            language: Language::Rust,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: Some(ScopeId::new("scope:helpers")),
+            signature: None,
+            visibility: Visibility::Public,
+        };
+        with_inline_mod_context(vec![helper], |ctx| {
+            let call = module_path_call("scope:t:body", "super::helpers", "h");
+            assert_eq!(proven_target(ctx, &call).as_deref(), Some("sym:helpers:h"));
+        });
     }
 }

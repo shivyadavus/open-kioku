@@ -2,7 +2,7 @@ use crate::evidence::ResolutionEvidence;
 use crate::index::{BindingIndex, ScopeIndex, SymbolIndex};
 use crate::inheritance::InheritanceIndex;
 use open_kioku_core::{
-    Confidence, FileId, Language, ModuleId, Scope, ScopeId, ScopeKind, Symbol, SymbolId,
+    Confidence, FileId, Language, ModuleId, Scope, ScopeId, ScopeKind, Symbol, SymbolId, SymbolKind,
 };
 use open_kioku_languages::semantics::LanguageSemantics;
 use open_kioku_semantic_model::{ImportBinding, SemanticRepository, GLOB_IMPORT_LOCAL_NAME};
@@ -442,6 +442,89 @@ fn rust_relative_item_path(source: &str) -> Option<(usize, &str)> {
         depth += 1;
     }
     Some((depth, item))
+}
+
+/// Where a Rust `self::` or `super::` path lands, as [`rust_relative_module`] places it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RustRelativeModule<'s> {
+    /// A module of this file: the file's own module or an inline `mod` block.
+    InFile(&'s ScopeId),
+    /// A module the scopes of this file do not hold: `climbs` modules above the file's own
+    /// module, then down the module `path`.
+    Outside { climbs: usize, path: Vec<String> },
+}
+
+/// Where the Rust path of `depth` leading `super` segments (`self` for 0) followed by `segments`
+/// lands when written at `scope_id`: `super::super::helpers` is depth 2 with `["helpers"]`.
+///
+/// Each `super` leaves the innermost module, and an inline `mod` block is a module, so a path
+/// leaves the file only after climbing out of every block around it. A segment naming an inline
+/// `mod` block of the module reached so far descends into it; any other segment continues in the
+/// module files below, where the file path decides. `None` when the scopes cannot place the path:
+/// an unknown use-site scope, a block whose name the index lost, or a segment naming two modules.
+pub(crate) fn rust_relative_module<'s>(
+    ctx: &ResolutionContext<'s>,
+    scope_id: &ScopeId,
+    depth: usize,
+    segments: &[&str],
+) -> Option<RustRelativeModule<'s>> {
+    let mut module = enclosing_module_scope(ctx.scopes, scope_id)?;
+    let mut climbs = depth;
+    while climbs > 0 && module.kind == ScopeKind::Module {
+        module = enclosing_module_scope(ctx.scopes, module.parent_id.as_ref()?)?;
+        climbs -= 1;
+    }
+    if climbs > 0 {
+        return Some(RustRelativeModule::Outside {
+            climbs,
+            path: segments.iter().map(ToString::to_string).collect(),
+        });
+    }
+    for (index, segment) in segments.iter().enumerate() {
+        let modules = declared_items(ctx, &module.id, segment, &|symbol: &Symbol| {
+            symbol.kind == SymbolKind::Module
+        });
+        let body = match modules.as_slice() {
+            [] => None,
+            [only] => ctx.scopes.module_body(only),
+            _ => return None,
+        };
+        if let Some(body) = body {
+            module = body;
+            continue;
+        }
+        let mut path = rust_inline_module_path(ctx, module)?;
+        path.extend(segments[index..].iter().map(ToString::to_string));
+        return Some(RustRelativeModule::Outside { climbs: 0, path });
+    }
+    Some(RustRelativeModule::InFile(&module.id))
+}
+
+/// The names of the inline `mod` blocks from the file's own module down to `module`.
+fn rust_inline_module_path(ctx: &ResolutionContext<'_>, module: &Scope) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    let mut current = module;
+    for _ in 0..=ctx.scopes.scopes.len() {
+        if current.kind != ScopeKind::Module {
+            names.reverse();
+            return Some(names);
+        }
+        let owner = ctx.symbols.get(current.owner_symbol_id.as_ref()?)?;
+        names.push(owner.name.clone());
+        current = enclosing_module_scope(ctx.scopes, current.parent_id.as_ref()?)?;
+    }
+    None
+}
+
+/// Items of this file that the module scope `module` declares itself under `name` and `accept`
+/// admits: what a path ending in that module names.
+pub(crate) fn rust_module_items(
+    ctx: &ResolutionContext<'_>,
+    module: &ScopeId,
+    name: &str,
+    accept: impl Fn(&Symbol) -> bool,
+) -> Vec<SymbolId> {
+    declared_items(ctx, module, name, &accept)
 }
 
 /// Whether an import recorded at `binding_scope` binds its names at `level`. In Python the import

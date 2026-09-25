@@ -1,4 +1,6 @@
-use open_kioku_core::{Binding, FileId, ModuleId, Scope, ScopeId, SourceRange, Symbol, SymbolId};
+use open_kioku_core::{
+    Binding, FileId, ModuleId, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId,
+};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
@@ -123,12 +125,21 @@ impl SymbolIndex {
 #[derive(Debug, Clone, Default)]
 pub struct ScopeIndex {
     pub scopes: HashMap<ScopeId, Scope>,
+    /// The scope of each inline `mod` block, by the module symbol that owns it.
+    modules_by_owner: HashMap<SymbolId, ScopeId>,
 }
 
 impl ScopeIndex {
     pub fn build(scopes: Vec<Scope>) -> Self {
         let mut index = Self::default();
         for scope in scopes {
+            if scope.kind == ScopeKind::Module {
+                if let Some(owner) = &scope.owner_symbol_id {
+                    index
+                        .modules_by_owner
+                        .insert(owner.clone(), scope.id.clone());
+                }
+            }
             index.scopes.insert(scope.id.clone(), scope);
         }
         index
@@ -136,6 +147,11 @@ impl ScopeIndex {
 
     pub fn get(&self, id: &ScopeId) -> Option<&Scope> {
         self.scopes.get(id)
+    }
+
+    /// The body scope of the inline `mod` block that `module` declares, if it has one.
+    pub(crate) fn module_body(&self, module: &SymbolId) -> Option<&Scope> {
+        self.get(self.modules_by_owner.get(module)?)
     }
 }
 
