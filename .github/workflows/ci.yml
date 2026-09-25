@@ -29,8 +29,6 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - name: no ignored tests without allowlist
         run: scripts/check-no-ignored-tests.py
-      - name: public surface
-        run: scripts/check-public-surface.py
       - run: cargo test --all
       - run: cargo test -p open-kioku-tests
       - name: MCP golden snapshot contract
@@ -205,6 +203,13 @@ jobs:
         run: cargo audit
       - name: cargo deny check
         run: cargo deny check
+
+  public-surface:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: public surface
+        run: scripts/check-public-surface.py
 
   manifest-versions:
     runs-on: ubuntu-latest
