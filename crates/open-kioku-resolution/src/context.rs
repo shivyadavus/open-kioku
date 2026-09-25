@@ -203,7 +203,7 @@ pub(crate) fn nearest_lexical_items(
 /// path of this crate the index could not place. Without one, the item is ruled out when its
 /// module is neither the use site's nor one the use site reaches through `use super::*` globs.
 /// Unknown scopes rule nothing out.
-pub(crate) fn rust_rules_out_same_file_item(
+pub fn rust_rules_out_same_file_item(
     ctx: &ResolutionContext<'_>,
     scope_id: &ScopeId,
     name: &str,

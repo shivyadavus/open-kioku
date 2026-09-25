@@ -1,11 +1,18 @@
 use open_kioku_core::{
-    identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, FileId, GraphEdgeType,
-    GraphNodeType, ImportResolution, QualityNote, QualityNoteKind, ResolutionStatus,
-    StringInterner, Symbol, SymbolId, SymbolKind,
+    identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType,
+    GraphNodeType, ImportResolution, Language, QualityNote, QualityNoteKind, ResolutionStatus,
+    Scope, ScopeId, StringInterner, Symbol, SymbolId, SymbolKind,
 };
+use open_kioku_resolution::{
+    context::rust_rules_out_same_file_item, BindingIndex, InheritanceIndex, ResolutionContext,
+    ScopeIndex, SymbolIndex,
+};
+use open_kioku_semantic_model::SemanticRepository;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 const COMMON_NAME_CAP: usize = 32;
 const MAX_TOKENS_PER_CHUNK: usize = 80;
@@ -54,7 +61,155 @@ struct Resolution {
 struct TokenUse {
     token: String,
     line: u32,
+    /// 1-based byte column of the token's first character, as scope ranges count columns.
+    column: u32,
     is_call: bool,
+    /// Not the tail of a `path::` or the member of a `receiver.`: only a bare name is looked up
+    /// in the scopes around its use.
+    bare: bool,
+}
+
+/// The resolver's scope and import model, which lets a Rust bare name match a same-file item
+/// only where the resolver's module scoping lets the use site see it (#526).
+pub struct RegistryScopeModel<'a> {
+    repository: &'a SemanticRepository,
+    symbols: &'a SymbolIndex,
+    scopes: &'a ScopeIndex,
+    bindings: &'a BindingIndex,
+    inheritance: &'a InheritanceIndex,
+    rust_files: HashMap<&'a FileId, RustFileScopes<'a>>,
+}
+
+struct RustFileScopes<'a> {
+    path: &'a Path,
+    scopes: Vec<&'a Scope>,
+}
+
+impl<'a> RegistryScopeModel<'a> {
+    pub fn new(
+        files: &'a [File],
+        repository: &'a SemanticRepository,
+        symbols: &'a SymbolIndex,
+        scopes: &'a ScopeIndex,
+        bindings: &'a BindingIndex,
+        inheritance: &'a InheritanceIndex,
+    ) -> Self {
+        let mut rust_files = files
+            .iter()
+            .filter(|file| file.language == Language::Rust)
+            .map(|file| {
+                (
+                    &file.id,
+                    RustFileScopes {
+                        path: file.path.as_path(),
+                        scopes: Vec::new(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for scope in scopes.scopes.values() {
+            if let Some(file) = rust_files.get_mut(&scope.file_id) {
+                file.scopes.push(scope);
+            }
+        }
+        Self {
+            repository,
+            symbols,
+            scopes,
+            bindings,
+            inheritance,
+            rust_files,
+        }
+    }
+
+    /// The innermost scope of a Rust file around a bare token, or `None` when the token is not a
+    /// bare Rust name or its file has no scopes, in which case scoping rules nothing out.
+    fn rust_use_scope(&self, chunk: &CodeChunk, token_use: &TokenUse) -> Option<&'a ScopeId> {
+        if chunk.language != Language::Rust || !token_use.bare {
+            return None;
+        }
+        let file = self.rust_files.get(&chunk.file_id)?;
+        let position = (
+            chunk
+                .range
+                .start
+                .saturating_add(token_use.line)
+                .saturating_sub(1),
+            token_use.column,
+        );
+        file.scopes
+            .iter()
+            .filter(|scope| {
+                (scope.range.start_line, scope.range.start_column) <= position
+                    && position <= (scope.range.end_line, scope.range.end_column)
+            })
+            // A nested scope starts no earlier than its parent; of two starting together the
+            // shorter is inside the other.
+            .max_by_key(|scope| {
+                (
+                    (scope.range.start_line, scope.range.start_column),
+                    std::cmp::Reverse((scope.range.end_line, scope.range.end_column)),
+                )
+            })
+            .map(|scope| &scope.id)
+    }
+
+    fn rust_context(&self, file_id: &'a FileId) -> Option<ResolutionContext<'a>> {
+        let file = self.rust_files.get(file_id)?;
+        Some(ResolutionContext::new(
+            file_id,
+            file.path,
+            None,
+            Language::Rust,
+            self.repository,
+            self.symbols,
+            self.scopes,
+            self.bindings,
+            self.inheritance,
+            open_kioku_languages::semantics_for(&Language::Rust)?,
+        ))
+    }
+}
+
+/// Which name-matched items of the use site's own file Rust scoping keeps out of reach. Worked
+/// out on the first same-file candidate only, since most tokens match none.
+struct ScopeFilter<'m, 'c> {
+    model: Option<&'m RegistryScopeModel<'m>>,
+    chunk: &'c CodeChunk,
+    token_use: &'c TokenUse,
+    site: OnceCell<Option<(ResolutionContext<'m>, &'m ScopeId)>>,
+}
+
+impl<'m, 'c> ScopeFilter<'m, 'c> {
+    fn new(
+        model: Option<&'m RegistryScopeModel<'m>>,
+        chunk: &'c CodeChunk,
+        token_use: &'c TokenUse,
+    ) -> Self {
+        Self {
+            model,
+            chunk,
+            token_use,
+            site: OnceCell::new(),
+        }
+    }
+
+    fn admits(&self, symbol: &Symbol) -> bool {
+        let token = self.token_use.token.as_str();
+        if symbol.file_id != self.chunk.file_id || !symbol_matches_token(symbol, token) {
+            return true;
+        }
+        let site = self.site.get_or_init(|| {
+            let model = self.model?;
+            let scope_id = model.rust_use_scope(self.chunk, self.token_use)?;
+            let (file_id, _) = model.rust_files.get_key_value(&self.chunk.file_id)?;
+            Some((model.rust_context(file_id)?, scope_id))
+        });
+        match site {
+            Some((ctx, scope_id)) => !rust_rules_out_same_file_item(ctx, scope_id, token, symbol),
+            None => true,
+        }
+    }
 }
 
 impl SymbolRegistry {
@@ -118,33 +273,46 @@ impl SymbolRegistry {
         registry
     }
 
-    fn resolve(&self, chunk: &CodeChunk, token: &str) -> Resolution {
-        if let Some(resolution) = self.resolve_import_target(chunk, token) {
+    fn resolve(&self, chunk: &CodeChunk, token: &str, scope: &ScopeFilter<'_, '_>) -> Resolution {
+        // An item of this file that Rust scoping keeps out of reach is not the target by any
+        // strategy: the registry's imports are file-wide, so an import resolved to this file (a
+        // `use super::*` beside `use mock_clock::now;`) would offer it again, and so would the
+        // name-based fallbacks. See `scoped_resolution` for what its removal may decide.
+        let admits = |symbol: &Symbol| scope.admits(symbol);
+        if let Some(resolution) = self.resolve_import_target(chunk, token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_same_file(chunk, token) {
+        if let Some(resolution) = self.resolve_same_file(chunk, token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_same_module(chunk, token) {
+        if let Some(resolution) = self.resolve_same_module(chunk, token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_unique_project_name(token) {
+        if let Some(resolution) = self.resolve_unique_project_name(token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_suffix_with_import_reachability(chunk, token) {
+        if let Some(resolution) =
+            self.resolve_suffix_with_import_reachability(chunk, token, &admits)
+        {
             return resolution;
         }
-        self.resolve_fuzzy(token).unwrap_or_else(|| Resolution {
-            symbol: None,
-            strategy: "unresolved",
-            candidates: 0,
-            confidence: Confidence::Low,
-            ambiguity_reason: Some("no registry candidate matched".into()),
-            speculative: true,
-        })
+        self.resolve_fuzzy(token, &admits)
+            .unwrap_or_else(|| Resolution {
+                symbol: None,
+                strategy: "unresolved",
+                candidates: 0,
+                confidence: Confidence::Low,
+                ambiguity_reason: Some("no registry candidate matched".into()),
+                speculative: true,
+            })
     }
 
-    fn resolve_import_target(&self, chunk: &CodeChunk, token: &str) -> Option<Resolution> {
+    fn resolve_import_target(
+        &self,
+        chunk: &CodeChunk,
+        token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
+    ) -> Option<Resolution> {
         let mut candidates = Vec::new();
         let indices = self.by_file_imports.get(&chunk.file_id);
         for &idx in indices.into_iter().flatten() {
@@ -170,23 +338,33 @@ impl SymbolRegistry {
                 );
             }
         }
-        resolution_from_candidates("direct-import", candidates, Confidence::High, false)
+        scoped_resolution("direct-import", candidates, admits, Confidence::High, false)
     }
 
-    fn resolve_same_file(&self, chunk: &CodeChunk, token: &str) -> Option<Resolution> {
+    fn resolve_same_file(
+        &self,
+        chunk: &CodeChunk,
+        token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
+    ) -> Option<Resolution> {
         let candidates = self
             .by_file
             .get(&chunk.file_id)
             .into_iter()
             .flatten()
             .filter_map(|id| self.by_id.get(id))
-            .filter(|symbol| symbol_matches_token(symbol, token))
+            .filter(|symbol| symbol_matches_token(symbol, token) && admits(symbol))
             .cloned()
             .collect::<Vec<_>>();
         resolution_from_candidates("same-file", candidates, Confidence::High, false)
     }
 
-    fn resolve_same_module(&self, chunk: &CodeChunk, token: &str) -> Option<Resolution> {
+    fn resolve_same_module(
+        &self,
+        chunk: &CodeChunk,
+        token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
+    ) -> Option<Resolution> {
         let current = chunk
             .symbol_id
             .as_ref()
@@ -201,10 +379,14 @@ impl SymbolRegistry {
             .filter(|symbol| symbol_matches_token(symbol, token))
             .cloned()
             .collect::<Vec<_>>();
-        resolution_from_candidates("same-module", candidates, Confidence::Medium, false)
+        scoped_resolution("same-module", candidates, admits, Confidence::Medium, false)
     }
 
-    fn resolve_unique_project_name(&self, token: &str) -> Option<Resolution> {
+    fn resolve_unique_project_name(
+        &self,
+        token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
+    ) -> Option<Resolution> {
         let candidates = self.by_simple_name.get(token)?;
         if candidates.len() > COMMON_NAME_CAP {
             return Some(Resolution {
@@ -224,13 +406,20 @@ impl SymbolRegistry {
             .filter_map(|id| self.by_id.get(id))
             .cloned()
             .collect::<Vec<_>>();
-        resolution_from_candidates("unique-project-name", symbols, Confidence::Medium, true)
+        scoped_resolution(
+            "unique-project-name",
+            symbols,
+            admits,
+            Confidence::Medium,
+            true,
+        )
     }
 
     fn resolve_suffix_with_import_reachability(
         &self,
         chunk: &CodeChunk,
         token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
     ) -> Option<Resolution> {
         let import_indices = self.by_file_imports.get(&chunk.file_id);
         let imported_suffixes = import_indices
@@ -255,15 +444,16 @@ impl SymbolRegistry {
                 }
             })
             .collect::<Vec<_>>();
-        resolution_from_candidates(
+        scoped_resolution(
             "suffix-import-reachability",
             candidates,
+            admits,
             Confidence::Low,
             true,
         )
     }
 
-    fn resolve_fuzzy(&self, token: &str) -> Option<Resolution> {
+    fn resolve_fuzzy(&self, token: &str, admits: &dyn Fn(&Symbol) -> bool) -> Option<Resolution> {
         if token.len() <= 3 || self.by_simple_name.len() > MAX_SIMPLE_NAMES_FOR_FUZZY {
             return None;
         }
@@ -278,7 +468,7 @@ impl SymbolRegistry {
             .take(COMMON_NAME_CAP + 1)
             .cloned()
             .collect::<Vec<_>>();
-        resolution_from_candidates("fuzzy-fallback", candidates, Confidence::Low, true)
+        scoped_resolution("fuzzy-fallback", candidates, admits, Confidence::Low, true)
     }
 }
 
@@ -287,6 +477,7 @@ pub fn resolve_symbol_edges(
     symbols: &[Symbol],
     import_resolutions: &[ImportResolution],
     scip_available: bool,
+    scope_model: Option<&RegistryScopeModel<'_>>,
 ) -> RegistryReport {
     let registry = SymbolRegistry::new(symbols, import_resolutions);
     // Scoped to this run: dropped with the report, so nothing accumulates in a
@@ -298,7 +489,8 @@ pub fn resolve_symbol_edges(
     let per_chunk_results: Vec<_> = chunks
         .par_iter()
         .map(|chunk| {
-            let resolution = resolve_chunk(&registry, chunk, scip_available, &interner);
+            let resolution =
+                resolve_chunk(&registry, chunk, scip_available, scope_model, &interner);
             (
                 resolution.facts,
                 resolution.notes,
@@ -322,7 +514,8 @@ pub fn resolve_symbol_edges(
         if unresolved_budget == 0 || unresolved_count == 0 {
             continue;
         }
-        let tokens = resolve_chunk(&registry, chunk, scip_available, &interner).unresolved;
+        let tokens =
+            resolve_chunk(&registry, chunk, scip_available, scope_model, &interner).unresolved;
         for token in tokens.into_iter().take(unresolved_budget) {
             report.quality_notes.push(QualityNote::new(
                 QualityNoteKind::SymbolRegistryUnresolved,
@@ -361,6 +554,7 @@ fn resolve_chunk(
     registry: &SymbolRegistry,
     chunk: &CodeChunk,
     scip_available: bool,
+    scope_model: Option<&RegistryScopeModel<'_>>,
     interner: &StringInterner,
 ) -> ChunkResolution {
     let mut facts = Vec::new();
@@ -380,7 +574,8 @@ fn resolve_chunk(
         {
             continue;
         }
-        let resolution = registry.resolve(chunk, &token_use.token);
+        let scope = ScopeFilter::new(scope_model, chunk, &token_use);
+        let resolution = registry.resolve(chunk, &token_use.token, &scope);
         let resolved_id = resolution
             .symbol
             .as_ref()
@@ -411,6 +606,33 @@ fn resolve_chunk(
         notes,
         unresolved,
     }
+}
+
+/// `resolution_from_candidates` over the candidates `admits` keeps.
+///
+/// Only the same-file match is decided by the scoping rule, so only there may dropping an item
+/// leave a unique winner. Elsewhere the dropped item was a match the strategy's own rule found:
+/// a name that is not unique in the project, or an import reaching two items, stays ambiguous
+/// rather than turning the survivor into a new edge. With no survivor the strategy matched
+/// nothing and the next one runs.
+fn scoped_resolution(
+    strategy: &'static str,
+    candidates: Vec<Symbol>,
+    admits: &dyn Fn(&Symbol) -> bool,
+    confidence: Confidence,
+    speculative: bool,
+) -> Option<Resolution> {
+    let (kept, dropped): (Vec<_>, Vec<_>) =
+        candidates.into_iter().partition(|symbol| admits(symbol));
+    if kept.is_empty() || dropped.is_empty() {
+        return resolution_from_candidates(strategy, kept, confidence, speculative);
+    }
+    resolution_from_candidates(
+        strategy,
+        kept.into_iter().chain(dropped).collect(),
+        confidence,
+        speculative,
+    )
 }
 
 fn resolution_from_candidates(
@@ -552,10 +774,15 @@ fn push_token_use(
         .chars()
         .find(|ch| !ch.is_whitespace())
         .is_some_and(|ch| ch == '(');
+    let token_start = token_end - token.len();
+    let before = line[..token_start].trim_end();
+    let bare = !(before.ends_with("::") || (before.ends_with('.') && !before.ends_with("..")));
     uses.push(TokenUse {
         token: token.to_string(),
         line: line_index as u32 + 1,
+        column: token_start as u32 + 1,
         is_call,
+        bare,
     });
 }
 
@@ -730,6 +957,7 @@ mod tests {
             &symbols,
             &[import_resolution("entry", "./util", "util")],
             false,
+            None,
         );
         let fact = report
             .analysis_facts
@@ -765,6 +993,7 @@ mod tests {
             &symbols,
             &[],
             false,
+            None,
         );
         assert!(report
             .analysis_facts
@@ -793,6 +1022,7 @@ mod tests {
             &symbols,
             &[],
             false,
+            None,
         );
         let fact = report
             .analysis_facts
@@ -840,6 +1070,7 @@ mod tests {
             &symbols,
             &[],
             false,
+            None,
         );
         assert!(report.quality_notes.iter().any(|note| {
             note.kind == QualityNoteKind::SymbolRegistryCaveat
@@ -865,6 +1096,7 @@ mod tests {
             &symbols,
             &[],
             false,
+            None,
         );
         assert!(report.analysis_facts.is_empty());
         assert!(report.quality_notes.iter().any(|note| {
@@ -913,7 +1145,8 @@ mod tests {
                 .build()
                 .unwrap();
             for _ in 0..5 {
-                let report = pool.install(|| resolve_symbol_edges(&chunks, &symbols, &[], false));
+                let report =
+                    pool.install(|| resolve_symbol_edges(&chunks, &symbols, &[], false, None));
                 let unresolved = report
                     .quality_notes
                     .iter()
@@ -969,6 +1202,7 @@ mod tests {
             &symbols,
             &[],
             true,
+            None,
         );
         let fact = report.analysis_facts.first().unwrap();
         assert_eq!(fact.confidence, Confidence::Medium);
