@@ -85,14 +85,24 @@ impl TestSelection {
             caveats: Vec::new(),
         };
         if selection.tests.is_empty() {
-            selection.caveats.push(selection.empty_caveat(path));
+            selection
+                .caveats
+                .push(selection.empty_caveat(path, ranked.runnable_count));
         }
         Ok(selection)
     }
 
-    /// Why `tests` is empty. "No tests" and "tests none of which run" call for different work,
-    /// so the two never share a sentence.
-    fn empty_caveat(&self, path: &Path) -> String {
+    /// Why `tests` is empty. "No tests", "tests none of which run" and "tests the limit left
+    /// out" call for different work, so no two share a sentence. Decided from what matched
+    /// before `limit`, never from the page.
+    fn empty_caveat(&self, path: &Path, runnable_count: usize) -> String {
+        if runnable_count > 0 {
+            return format!(
+                "{runnable_count} runnable test target(s) matched `{}`, but `limit` is 0, so \
+                 none was returned",
+                path.display()
+            );
+        }
         if path.as_os_str().is_empty() {
             return "no changed path was given, so no test target was selected; pass the \
                     repository-relative path of the file being changed"
@@ -135,6 +145,9 @@ struct CandidateTests {
 /// Ranked, capped validation targets and the matched targets withheld from ranking.
 struct RankedTests {
     tests: Vec<TestTarget>,
+    /// Runnable targets matched before `limit` was applied, so an empty page is not read as
+    /// an empty match.
+    runnable_count: usize,
     excluded: Vec<TestTarget>,
 }
 
@@ -399,6 +412,7 @@ impl<'a> TestSelector<'a> {
                 .then_with(|| a.1.name.cmp(&b.1.name))
         });
         Ok(RankedTests {
+            runnable_count: scored.len(),
             tests: scored
                 .into_iter()
                 .map(|(_, test)| test)
@@ -566,6 +580,7 @@ impl<'a> TestSelector<'a> {
                 .then_with(|| a.1.name.cmp(&b.1.name))
         });
         Ok(RankedTests {
+            runnable_count: scored.len(),
             tests: scored
                 .into_iter()
                 .map(|(_, test)| test)
@@ -1499,6 +1514,40 @@ mod tests {
         assert!(selection.caveats.is_empty(), "{:?}", selection.caveats);
         let json = serde_json::to_value(&selection).unwrap();
         assert_eq!(json["excluded"]["disabled"], 1, "{json}");
+    }
+
+    /// An empty page is not an empty match: with `limit` 0 the runnable target still exists,
+    /// so neither the "none found" nor the "all excluded" caveat may be given.
+    #[test]
+    fn a_zero_limit_does_not_claim_the_change_has_no_runnable_tests() {
+        let store = selection_store(vec![
+            origin_target(
+                "rounds half up",
+                open_kioku_core::TestTargetOrigin::RegistrationCall,
+            ),
+            origin_target(
+                "skips stale rows",
+                open_kioku_core::TestTargetOrigin::DisabledRegistrationCall,
+            ),
+        ]);
+
+        let selection = TestSelector::new(&store)
+            .select_for_changed_path(Path::new("src/rates.ts"), 0)
+            .unwrap();
+
+        assert!(selection.tests.is_empty());
+        assert_eq!(
+            selection.caveats,
+            vec![
+                "1 runnable test target(s) matched `src/rates.ts`, but `limit` is 0, so none \
+                 was returned"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            selection.excluded.get(&TestExclusionReason::Disabled),
+            Some(&1)
+        );
     }
 
     /// The sample is bounded; the count is not.
