@@ -699,6 +699,12 @@ impl<'a> ContextPackBuilder<'a> {
                 &budget,
                 &mut diagnostics,
             );
+            // Ranges are final once widening is done: each positional ref now names its own
+            // line's record, in the selection ledger as well as on the result.
+            let mut selected = selected;
+            for result in &mut selected {
+                evidence_pairs::publish_positional_refs(result);
+            }
             record_selected_units(&selected, &mut diagnostics);
             selected
         };
@@ -720,10 +726,6 @@ impl<'a> ContextPackBuilder<'a> {
         // derived only from evidence that survived the primary limit; hidden retrieval candidates
         // cannot widen symbols, dependency seeds, or the allowed edit boundary.
         let mut primary_files = bounded_primary_results(primary, limit);
-        // Final ranges are known: each positional ref now names its own line's record.
-        for result in &mut primary_files {
-            evidence_pairs::publish_positional_refs(result);
-        }
         let primary_symbols = primary_files
             .iter()
             .filter_map(|result| result.symbol.clone())
@@ -902,6 +904,10 @@ impl<'a> ContextPackBuilder<'a> {
             .into_iter()
             .chain(evidence_pairs::enforce_pairing(&mut supporting_files))
             .collect::<Vec<_>>();
+        debug_assert!(
+            unpaired.is_empty(),
+            "the pack would publish unpaired evidence refs: {unpaired:?}"
+        );
         retrieval_diagnostics.caveats.extend(unpaired);
         let boundary_evidence_refs = primary_files
             .iter()
@@ -2753,6 +2759,9 @@ fn rerank_fused_for_task_with_files(
             ));
         }
         result.reconcile_score_breakdown();
+        // Core names a result that states no line with one placeholder ref; a result's refs
+        // pair with its lines, so a line-less result carries none.
+        evidence_pairs::pair_evidence_refs(result);
     }
     // Quality tier first: docs and tests are support material for a task that is not about
     // them, however strongly they mention its anchors; then anchor relevance, authority, score.

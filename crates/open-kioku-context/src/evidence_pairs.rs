@@ -40,6 +40,20 @@ pub(crate) fn pair_evidence_refs(result: &mut SearchResult) -> bool {
     false
 }
 
+/// [`pair_evidence_refs`] for a result that is already inside the pipeline. Results enter
+/// through `StreamCandidate::from_result` or fusion, which pair them; a result that still
+/// carries refs that do not pair here has lost a line's ref on the way, and a debug build
+/// fails rather than healing it. A result with lines and no refs yet (an index hit) is paired.
+pub(crate) fn ensure_paired(result: &mut SearchResult) {
+    let had_refs = !result.evidence_refs.is_empty();
+    let repaired = pair_evidence_refs(result);
+    debug_assert!(
+        !(repaired && had_refs),
+        "evidence refs of `{}` did not pair with its lines inside the pipeline",
+        result.path.display()
+    );
+}
+
 /// Appends `line` with the ref of the fact it states, or a positional id when the line has no
 /// id of its own. A line the result already carries is not repeated.
 ///
@@ -47,7 +61,7 @@ pub(crate) fn pair_evidence_refs(result: &mut SearchResult) -> bool {
 /// chunk number their lines from zero. Any other ref the result already cites names a fact
 /// the result already states, so the line is not added and the fact is not counted twice.
 pub(crate) fn push_evidence(result: &mut SearchResult, line: String, evidence_ref: Option<String>) {
-    pair_evidence_refs(result);
+    ensure_paired(result);
     if result.evidence.contains(&line) {
         return;
     }
@@ -69,7 +83,7 @@ pub(crate) fn merge_evidence(target: &mut SearchResult, source: &SearchResult) {
     let mut source_refs = source.evidence_refs.clone();
     if source_refs.len() != source.evidence.len() {
         let mut paired = source.clone();
-        pair_evidence_refs(&mut paired);
+        ensure_paired(&mut paired);
         source_refs = paired.evidence_refs;
     }
     for (line, evidence_ref) in source.evidence.iter().zip(source_refs) {
@@ -79,7 +93,7 @@ pub(crate) fn merge_evidence(target: &mut SearchResult, source: &SearchResult) {
 
 /// Orders the result's evidence lines by text, each keeping its ref.
 pub(crate) fn sort_evidence_by_line(result: &mut SearchResult) {
-    pair_evidence_refs(result);
+    ensure_paired(result);
     let mut pairs = std::mem::take(&mut result.evidence)
         .into_iter()
         .zip(std::mem::take(&mut result.evidence_refs))
@@ -92,7 +106,7 @@ pub(crate) fn sort_evidence_by_line(result: &mut SearchResult) {
 /// published under. Refs from other producers (graph edges, symbols, documents, region steps)
 /// keep their ids.
 pub(crate) fn publish_positional_refs(result: &mut SearchResult) {
-    pair_evidence_refs(result);
+    ensure_paired(result);
     let ids = search_result_evidence_ids(&result.path, &result.line_range, result.evidence.len());
     for (evidence_ref, id) in result.evidence_refs.iter_mut().zip(ids) {
         if evidence_ref.starts_with(POSITIONAL_REF_PREFIX) {

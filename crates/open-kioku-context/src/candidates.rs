@@ -129,6 +129,8 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
                 .into_iter()
                 .filter(|result| !is_document_candidate_path(&result.path.to_string_lossy()))
             {
+                // Any `SearchIndex` can sit behind this source; its refs are paired on entry.
+                pair_evidence_refs(&mut result);
                 if term != request.task {
                     push_evidence(
                         &mut result,

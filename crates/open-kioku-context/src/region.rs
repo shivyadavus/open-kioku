@@ -22,7 +22,7 @@ use open_kioku_core::{
     SearchResult, Symbol,
 };
 
-use crate::evidence_pairs::{pair_evidence_refs, push_evidence};
+use crate::evidence_pairs::{ensure_paired, push_evidence};
 use crate::{estimate_search_result_tokens, normalize_path};
 
 pub(crate) const ENCLOSING_SYMBOL_REF: &str = "region:enclosing-symbol";
@@ -93,7 +93,7 @@ pub(crate) fn widen_selected_regions(
         let original_keys = unit_indices(&selected, &path)
             .into_iter()
             .map(|index| {
-                pair_evidence_refs(&mut selected[index]);
+                ensure_paired(&mut selected[index]);
                 (index, RetrievalUnitKey::from_result(&selected[index]))
             })
             .collect::<Vec<_>>();

@@ -248,6 +248,58 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
 /// - floating-point scores/weights become 0.0 (rankings for the tiny fixture are
 ///   deterministic, but float scoring internals are not part of the contract)
 /// - absolute repo paths become "<REPO>"
+fn assert_context_refs_pair_with_lines(pack: &serde_json::Value) {
+    let records = pack["evidence"]
+        .as_array()
+        .expect("pack evidence is an array");
+    let message_of = |id: &str| {
+        let matching = records
+            .iter()
+            .filter(|record| record["id"] == id)
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "{id} should resolve to one record");
+        matching[0]["message"].clone()
+    };
+    let primary = pack["primary_files"]
+        .as_array()
+        .expect("primary files are an array");
+    assert!(!primary.is_empty());
+    for result in primary {
+        let lines = result["evidence"].as_array().unwrap();
+        let refs = result["evidence_refs"].as_array().unwrap();
+        assert_eq!(refs.len(), lines.len(), "{result}");
+        for (line, evidence_ref) in lines.iter().zip(refs) {
+            let evidence_ref = evidence_ref.as_str().unwrap();
+            if evidence_ref.starts_with("search:") {
+                assert_eq!(&message_of(evidence_ref), line, "{evidence_ref}");
+            }
+        }
+    }
+    let units = pack["retrieval_diagnostics"]["selection"]["selected_units"]
+        .as_array()
+        .expect("selected units are an array");
+    let primary_units = units
+        .iter()
+        .filter(|unit| unit["kind"] == "primary")
+        .collect::<Vec<_>>();
+    assert!(!primary_units.is_empty());
+    for unit in primary_units {
+        let result = primary
+            .iter()
+            .find(|result| {
+                result["path"] == unit["path"] && result["line_range"] == unit["line_range"]
+            })
+            .unwrap_or_else(|| panic!("selected unit {unit} is a primary result"));
+        let lines = result["evidence"].as_array().unwrap();
+        for (index, evidence_ref) in unit["evidence_refs"].as_array().unwrap().iter().enumerate() {
+            let evidence_ref = evidence_ref.as_str().unwrap();
+            if evidence_ref.starts_with("search:") {
+                assert_eq!(message_of(evidence_ref), lines[index], "{evidence_ref}");
+            }
+        }
+    }
+}
+
 fn normalize_plan_response(value: &mut serde_json::Value, repo_paths: &[String]) {
     match value {
         serde_json::Value::Object(map) => {
@@ -300,6 +352,21 @@ fn test_mcp_plan_change_snapshot() {
         .args(["index", "."])
         .assert()
         .success();
+
+    // The context pack for the same task: each selected unit's refs, like each primary
+    // result's, pair with the unit's lines, and a retrieval ref names its own line's record.
+    let context_output = Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["--json", "context", "add a subtract function next to add"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let pack: serde_json::Value =
+        serde_json::from_slice(&context_output).expect("context pack is JSON");
+    assert_context_refs_pair_with_lines(&pack);
 
     // MCP tools/call plan_change with a fixed task against the fixture.
     let mcp_req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan_change","arguments":{"task":"add a subtract function next to add","limit":5,"format":"json"}}}"#;
