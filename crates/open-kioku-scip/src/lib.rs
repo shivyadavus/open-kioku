@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 pub struct ScipImport {
     pub symbols: Vec<Symbol>,
     pub occurrences: Vec<SymbolOccurrence>,
+    /// Documents the caller's filter withheld: none of their symbols or occurrences is here.
+    #[serde(default)]
+    pub withheld_documents: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -24,6 +27,8 @@ pub struct ScipImportReport {
     pub occurrences: Vec<SymbolOccurrence>,
     pub imported_paths: Vec<PathBuf>,
     pub skipped_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub withheld_documents: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -36,6 +41,10 @@ pub struct ScipIndexReport {
     pub symbols: usize,
     pub occurrences: usize,
     pub exact_references: usize,
+    /// SCIP documents withheld by the caller's filter, counted and never named: the filter is
+    /// the security path policy, and the path of a withheld document is what it protects.
+    #[serde(default)]
+    pub withheld_documents: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -56,10 +65,15 @@ pub enum ScipGeneratorStatus {
     TimedOut,
 }
 
+/// Generate (when the mode asks for it) and import the configured SCIP indexes. `withhold` is
+/// asked about each document's repository-relative path; a document it withholds contributes
+/// no symbol and no occurrence, because a SCIP symbol string spells the module path and its
+/// display name is the file's own content.
 pub fn prepare_and_import_scip(
     root: impl AsRef<Path>,
     config: &ScipConfig,
     repository_id: &RepositoryId,
+    withhold: &dyn Fn(&Path) -> bool,
 ) -> Result<(ScipImportReport, ScipIndexReport)> {
     let root = root.as_ref();
     let mut generated_paths = Vec::new();
@@ -80,9 +94,10 @@ pub fn prepare_and_import_scip(
             occurrences: Vec::new(),
             imported_paths: Vec::new(),
             skipped_paths: config.paths.clone(),
+            withheld_documents: 0,
         }
     } else {
-        import_configured_scip_files(root, &config.paths, repository_id)?
+        import_configured_scip_files(root, &config.paths, repository_id, withhold)?
     };
 
     if matches!(config.mode, ScipMode::Required) && imported.imported_paths.is_empty() {
@@ -105,14 +120,17 @@ pub fn prepare_and_import_scip(
         symbols: imported.symbols.len(),
         occurrences: imported.occurrences.len(),
         exact_references,
+        withheld_documents: imported.withheld_documents,
     };
     Ok((imported, report))
 }
 
+/// Import each configured SCIP index; `withhold` as in [`prepare_and_import_scip`].
 pub fn import_configured_scip_files(
     root: impl AsRef<Path>,
     paths: &[PathBuf],
     repository_id: &RepositoryId,
+    withhold: &dyn Fn(&Path) -> bool,
 ) -> Result<ScipImportReport> {
     let root = root.as_ref();
     let mut report = ScipImportReport {
@@ -120,6 +138,7 @@ pub fn import_configured_scip_files(
         occurrences: Vec::new(),
         imported_paths: Vec::new(),
         skipped_paths: Vec::new(),
+        withheld_documents: 0,
     };
 
     for relative_path in paths {
@@ -128,9 +147,10 @@ pub fn import_configured_scip_files(
             report.skipped_paths.push(relative_path.clone());
             continue;
         }
-        let imported = import_scip_file(&absolute_path, repository_id)?;
+        let imported = read_scip_file(&absolute_path, repository_id, withhold)?;
         report.symbols.extend(imported.symbols);
         report.occurrences.extend(imported.occurrences);
+        report.withheld_documents += imported.withheld_documents;
         report.imported_paths.push(relative_path.clone());
     }
     dedup_import(&mut report.symbols, &mut report.occurrences);
@@ -328,26 +348,46 @@ fn find_in_path(binary: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Every document of one SCIP index, unfiltered.
 pub fn import_scip_file(
     path: impl AsRef<Path>,
     repository_id: &RepositoryId,
 ) -> Result<ScipImport> {
-    let path = path.as_ref();
+    read_scip_file(path.as_ref(), repository_id, &|_| false)
+}
+
+fn read_scip_file(
+    path: &Path,
+    repository_id: &RepositoryId,
+    withhold: &dyn Fn(&Path) -> bool,
+) -> Result<ScipImport> {
     if !path.exists() {
         return Ok(ScipImport {
             symbols: Vec::new(),
             occurrences: Vec::new(),
+            withheld_documents: 0,
         });
     }
     let bytes = fs::read(path)?;
     let index = Index::parse_from_bytes(&bytes).map_err(|err| OkError::Index(err.to_string()))?;
-    Ok(convert_index(index, repository_id))
+    Ok(convert_index(index, repository_id, withhold))
 }
 
-fn convert_index(index: Index, repository_id: &RepositoryId) -> ScipImport {
+fn convert_index(
+    index: Index,
+    repository_id: &RepositoryId,
+    withhold: &dyn Fn(&Path) -> bool,
+) -> ScipImport {
     let mut symbols = Vec::new();
     let mut occurrences = Vec::new();
+    let mut withheld_documents = 0;
     for document in index.documents {
+        let admitted =
+            repository_relative(&document.relative_path).is_some_and(|judged| !withhold(&judged));
+        if !admitted {
+            withheld_documents += 1;
+            continue;
+        }
         let file_id = FileId::new(stable_id(&document.relative_path));
         let language = language_from_scip(&document.language);
         for info in &document.symbols {
@@ -391,7 +431,30 @@ fn convert_index(index: Index, repository_id: &RepositoryId) -> ScipImport {
     ScipImport {
         symbols,
         occurrences,
+        withheld_documents,
     }
+}
+
+/// `relative_path` as discovery spells a repository path (`/`-separated, no `./`), or `None`
+/// when it is not one: absolute (`/…`, `C:/…`) or with a `..` segment. Such a document cannot
+/// name an indexed file, and the path policy, whose globs are anchored at the repository root,
+/// cannot judge it, so it is withheld rather than trusted. Case is kept as written: discovery
+/// matches `[paths] deny` globs case-sensitively too, and the secret-like rules ignore case.
+fn repository_relative(relative_path: &str) -> Option<PathBuf> {
+    let slashed = relative_path.replace('\\', "/");
+    let bytes = slashed.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return None;
+    }
+    let mut judged = PathBuf::new();
+    for component in Path::new(&slashed).components() {
+        match component {
+            Component::Normal(part) => judged.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(judged)
 }
 
 fn dedup_import(symbols: &mut Vec<Symbol>, occurrences: &mut Vec<SymbolOccurrence>) {
@@ -620,12 +683,93 @@ mod tests {
     }
 
     #[test]
+    fn a_withheld_document_contributes_no_symbols_or_occurrences() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = "scip rust test src/lib.rs/ Worker#";
+        let hidden = "scip rust test vault/keys.rs/ VaultKey#";
+        let document = |path: &str, defines: &str, references: &str| {
+            let mut document = Document::new();
+            document.relative_path = path.into();
+            document.language = "rust".into();
+            let mut info = SymbolInformation::new();
+            info.symbol = defines.into();
+            document.symbols.push(info);
+            let mut definition = Occurrence::new();
+            definition.symbol = defines.into();
+            definition.range = vec![0, 11, 17];
+            definition.symbol_roles = SymbolRole::Definition.value();
+            document.occurrences.push(definition);
+            let mut reference = Occurrence::new();
+            reference.symbol = references.into();
+            reference.range = vec![2, 0, 6];
+            document.occurrences.push(reference);
+            document
+        };
+        let mut index = Index::new();
+        index.documents.push(document("src/lib.rs", shared, shared));
+        index
+            .documents
+            .push(document("./vault/keys.rs", hidden, shared));
+        // Spellings that are not plain repository paths are withheld too: judged as written,
+        // each would slip past a policy anchored at the repository root.
+        for (position, path) in [
+            "vault\\win.rs",
+            "src\\..\\vault\\up.rs",
+            "x/../vault/up.rs",
+            "/abs/repo/vault/abs.rs",
+            "C:\\repo\\vault\\drive.rs",
+            "../outside/vault.rs",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let symbol = format!("scip rust test spelled/{position}/ Spelled#");
+            index.documents.push(document(path, &symbol, shared));
+        }
+        // Discovery matches deny globs case-sensitively, so a differently cased directory is
+        // not the denied one there either: the filter sees the case as written.
+        let cased = "scip rust test Vault/case.rs/ Cased#";
+        index
+            .documents
+            .push(document("Vault/case.rs", cased, shared));
+        scip::write_message_to_file(temp.path().join("index.scip"), index).unwrap();
+
+        let report = import_configured_scip_files(
+            temp.path(),
+            &[PathBuf::from("index.scip")],
+            &RepositoryId::new("repo"),
+            &|path| path.starts_with("vault"),
+        )
+        .unwrap();
+
+        assert_eq!(report.withheld_documents, 7);
+        let mut names = report
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, vec![cased, shared]);
+        // A withheld document's reference to an admitted symbol goes with it.
+        let admitted = [
+            super::stable_id("src/lib.rs"),
+            super::stable_id("Vault/case.rs"),
+        ];
+        assert_eq!(report.occurrences.len(), 4, "{:?}", report.occurrences);
+        assert!(report
+            .occurrences
+            .iter()
+            .all(|occurrence| admitted.contains(&occurrence.file_id.0)));
+    }
+
+    #[test]
     fn configured_scip_import_skips_missing_relative_paths() {
         let temp = tempfile::tempdir().unwrap();
         let report = import_configured_scip_files(
             temp.path(),
             &[PathBuf::from(".ok/indexes/rust.scip")],
             &RepositoryId::new("repo"),
+            &|_| false,
         )
         .unwrap();
 
@@ -643,6 +787,7 @@ mod tests {
             temp.path(),
             &[PathBuf::from("../outside.scip")],
             &RepositoryId::new("repo"),
+            &|_| false,
         )
         .unwrap_err();
 
@@ -711,9 +856,13 @@ mod tests {
         scip::write_message_to_file(temp.path().join("index.scip"), index).unwrap();
 
         let config = OkConfig::default().scip;
-        let (imported, report) =
-            prepare_and_import_scip(temp.path(), &config, &RepositoryId::new("java-proof"))
-                .unwrap();
+        let (imported, report) = prepare_and_import_scip(
+            temp.path(),
+            &config,
+            &RepositoryId::new("java-proof"),
+            &|_| false,
+        )
+        .unwrap();
 
         assert_eq!(report.imported_paths, vec![PathBuf::from("index.scip")]);
         assert_eq!(report.exact_references, 1);

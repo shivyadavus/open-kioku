@@ -159,10 +159,9 @@ copy of the artifact:
   every `file:` reference in the graph dictionary, name an indexed file; edge evidence and
   history facts name indexed files; and every graph dictionary entry is keyed by its value's
   hash. SCIP symbols and occurrences are the one exception to belonging to an indexed file:
-  `ok index` stores them for every document a SCIP index covers, including files discovery
-  skipped, and since readers resolve a file through the files table, such a row serves no
-  file path or content. Its qualified name is the full SCIP symbol string, which usually
-  spells the module path, so a symbol search can still return that fragment. An artifact
+  `ok index` stores them for a document discovery skipped for a reason other than security
+  (generated or `.gitignore`d code), so a reference into it still resolves, and the check
+  accepts them; the policy step below then removes them. An artifact
   that breaks any of the others is refused, `--allow-foreign` or not, because no writer
   produces one: `ok watch` removes the facts other files hold about a file it deletes, as a
   full index never records them.
@@ -181,8 +180,15 @@ copy of the artifact:
   history of a path excluded for any other reason is kept, as `ok index` keeps it. Secret-like paths the exporter
   listed as skipped are withheld under the importing repository's `redact_secrets`. Rules
   that do not depend on local configuration — vendor detection, pruning of build and
-  dependency directories, the size limit, symlinks — are not applied again. The search index
-  is rebuilt from what remains.
+  dependency directories, the size limit, symlinks — are not applied again. Every SCIP symbol
+  and occurrence no indexed file owns is removed as well, with the graph edges at those
+  symbols (an indexed file's `references` edge names the symbol): such a row records only a
+  hash of its document's path, so the local policy cannot be checked against it, and a path
+  this repository denies but the exporter only ignored would otherwise be served through the
+  SCIP symbol string, which spells the module path. The import reports the count as a caveat
+  and a `scip` quality note and lowers `quality.scip_symbols`, `scip_occurrences` and
+  `scip_exact_references` to match; `ok index` imports SCIP for generated or ignored code
+  again. The search index is rebuilt from what remains.
 
 The published manifest carries the result as `snapshot`: `imported_from_commit`,
 `local_commit`, `relation` (`same_commit`, `related` or `foreign`), `commits_behind`,

@@ -2366,36 +2366,199 @@ fn protobuf_field(number: u32, bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A SCIP index with one document, for a file discovery skips, holding one symbol and its
-/// definition. Written by hand so the test needs no SCIP generator.
-fn scip_index_for(relative_path: &str, symbol: &str) -> Vec<u8> {
-    let mut information = protobuf_field(1, symbol.as_bytes());
-    information.extend(protobuf_field(6, b"GeneratedApi"));
-    let mut occurrence = protobuf_field(1, &[0, 11, 23]);
-    occurrence.extend(protobuf_field(2, symbol.as_bytes()));
-    occurrence.extend([3 << 3, 1]); // symbol_roles: Definition
-    let mut document = protobuf_field(1, relative_path.as_bytes());
-    document.extend(protobuf_field(2, &occurrence));
-    document.extend(protobuf_field(3, &information));
-    document.extend(protobuf_field(4, b"rust"));
-    protobuf_field(2, &document)
+/// A SCIP index with one document per `(path, defined symbol, referenced symbols)`: each
+/// defines its symbol on line 1 and references the others on the lines after it.
+fn scip_index(documents: &[(&str, &str, &[&str])]) -> Vec<u8> {
+    let occurrence = |range: &[u8], symbol: &str, definition: bool| {
+        let mut occurrence = protobuf_field(1, range);
+        occurrence.extend(protobuf_field(2, symbol.as_bytes()));
+        if definition {
+            occurrence.extend([3 << 3, 1]); // symbol_roles: Definition
+        }
+        occurrence
+    };
+    let mut index = Vec::new();
+    for (path, defines, references) in documents {
+        let display = defines
+            .trim_end_matches('#')
+            .rsplit('/')
+            .next()
+            .unwrap_or(defines);
+        let mut information = protobuf_field(1, defines.as_bytes());
+        information.extend(protobuf_field(6, display.as_bytes()));
+        let mut document = protobuf_field(1, path.as_bytes());
+        document.extend(protobuf_field(2, &occurrence(&[0, 11, 23], defines, true)));
+        for (line, symbol) in references.iter().enumerate() {
+            let line = u8::try_from(line + 1).expect("a fixture references few symbols");
+            document.extend(protobuf_field(
+                2,
+                &occurrence(&[line, 4, 16], symbol, false),
+            ));
+        }
+        document.extend(protobuf_field(3, &information));
+        document.extend(protobuf_field(4, b"rust"));
+        index.extend(protobuf_field(2, &document));
+    }
+    index
 }
 
-/// SCIP covers every document it was generated for, including files discovery skipped, and
-/// `ok index` stores those symbols with a `file_id` no file row has. That is a state the
-/// writer produces, so the import's consistency check accepts it, and the rows serve no path.
+/// Everything MCP `search_symbols` serves for `query` (every symbol when `None`), as text.
+fn mcp_search_symbols(repo: &std::path::Path, query: Option<&str>) -> String {
+    let arguments = match query {
+        Some(query) => serde_json::json!({ "query": query, "limit": 500 }),
+        None => serde_json::json!({ "limit": 500 }),
+    };
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "search_symbols", "arguments": arguments },
+    });
+    let response = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        &request.to_string(),
+    );
+    let response: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+    let symbols = &response["result"]["structuredContent"]["symbols"];
+    assert!(symbols.is_array(), "{response}");
+    symbols.to_string()
+}
+
+const SCIP_PACKAGE: &str = "rust-analyzer cargo fixture 0.1.0 ";
+
+/// A SCIP symbol string spells its document's module path, and its display name is that
+/// file's content. `ok index` imports no symbol or occurrence from a SCIP document whose path
+/// the security policy excludes, whether by `[paths] deny` or the secret-like rules, while a
+/// document discovery skipped for any other reason (ignored generated code) still resolves.
 #[test]
-fn snapshot_import_accepts_scip_symbols_for_a_file_discovery_skipped() {
+fn index_imports_no_scip_symbol_for_a_denied_or_secret_like_path() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
+    let worker = format!("{SCIP_PACKAGE}src/lib/Worker#");
+    let generated = format!("{SCIP_PACKAGE}generated/api/GeneratedApi#");
+    let denied = format!("{SCIP_PACKAGE}src/secrets/vault/VaultKey#");
+    let secret_like = format!("{SCIP_PACKAGE}certs/tls/TlsSigner#");
+    let denied_windows = format!("{SCIP_PACKAGE}src/secrets/win/VaultKeyWindows#");
+    let denied_parent = format!("{SCIP_PACKAGE}src/secrets/up/VaultKeyParent#");
+    for (path, content) in [
+        (
+            "src/lib.rs",
+            "pub struct Worker;\nfn run() { generated::GeneratedApi; }\n",
+        ),
+        // Denied by the default `[paths] deny` (`**/secrets/**`).
+        (
+            "src/secrets/vault.rs",
+            "pub struct VaultKey;\nGeneratedApi\n",
+        ),
+        // Secret-like by name (`*.pem`).
+        ("certs/tls.pem", "pub struct TlsSigner;\n"),
+    ] {
+        fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+        fs::write(repo.join(path), content).unwrap();
+    }
+    fs::write(
+        repo.join("index.scip"),
+        scip_index(&[
+            ("src/lib.rs", &worker, &[&generated]),
+            ("generated/api.rs", &generated, &[]),
+            ("src/secrets/vault.rs", &denied, &[&generated]),
+            ("./certs/tls.pem", &secret_like, &[]),
+            // Not plain repository paths: judged as written, each would pass the deny glob.
+            ("src\\secrets\\win.rs", &denied_windows, &[]),
+            ("x/../src/secrets/up.rs", &denied_parent, &[]),
+        ]),
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    commit_all(repo, "initial");
+    // Generated after the commit and ignored, so discovery skips it and it is untracked.
+    fs::write(repo.join(".gitignore"), ".ok/\ngenerated/\n").unwrap();
+    fs::create_dir_all(repo.join("generated")).unwrap();
+    fs::write(repo.join("generated/api.rs"), "pub struct GeneratedApi;\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    for query in [
+        None,
+        Some("VaultKey"),
+        Some("TlsSigner"),
+        Some("secrets"),
+        Some("certs"),
+        Some("tls"),
+    ] {
+        let served = mcp_search_symbols(repo, query);
+        for fragment in ["VaultKey", "TlsSigner", "secrets", "certs", "tls"] {
+            assert!(
+                !served.contains(fragment),
+                "search_symbols {query:?} served `{fragment}`: {served}"
+            );
+        }
+    }
+    // Ignored generated code is not a security exclusion: its symbol is still there, and so
+    // is the indexed file's reference to it, but not the denied file's.
+    assert!(
+        mcp_search_symbols(repo, Some("GeneratedApi")).contains(&generated),
+        "the generated symbol must still be imported"
+    );
+    let references: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "symbol", "refs", "GeneratedApi"]);
+        command
+    }))
+    .unwrap();
+    assert_eq!(
+        references.as_array().map(Vec::len),
+        Some(1),
+        "only src/lib.rs's reference is admitted: {references}"
+    );
+    let status = status_json(repo);
+    let notes = status["quality"]["quality_notes"].to_string();
+    assert!(
+        notes.contains("4 SCIP document(s) for paths the security policy excludes"),
+        "{notes}"
+    );
+    assert!(
+        !notes.contains("tls.pem") && !notes.contains("vault.rs"),
+        "{notes}"
+    );
+}
+
+/// SCIP covers every document it was generated for, and `ok index` keeps the rows of a
+/// document discovery skipped for a reason other than security (ignored generated code) with a
+/// `file_id` no file row has. The import accepts that state, but those rows record only a
+/// hash of their path, so this repository's policy cannot judge them: a path it denies that
+/// the exporter's did not would pass. They are removed, with the graph edges at them, and the
+/// removal is reported.
+#[test]
+fn snapshot_import_removes_scip_rows_no_indexed_file_owns() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let worker = format!("{SCIP_PACKAGE}src/lib/Worker#");
+    let generated = format!("{SCIP_PACKAGE}generated/api/GeneratedApi#");
+    let vault = format!("{SCIP_PACKAGE}internal/vault/keys/VaultKey#");
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::write(repo.join("src/lib.rs"), "pub struct Worker;\n").unwrap();
     fs::write(
         repo.join("index.scip"),
-        scip_index_for(
-            "generated/api.rs",
-            "rust-analyzer cargo fixture 0.1.0 generated/api/GeneratedApi#",
-        ),
+        scip_index(&[
+            ("src/lib.rs", &worker, &[&generated, &vault]),
+            ("generated/api.rs", &generated, &[]),
+            ("internal/vault/keys.rs", &vault, &[]),
+        ]),
     )
     .unwrap();
     run({
@@ -2405,36 +2568,90 @@ fn snapshot_import_accepts_scip_symbols_for_a_file_discovery_skipped() {
     });
     commit_all(repo, "initial");
     // Generated after the first commit and ignored, so discovery skips it and it is untracked.
-    fs::write(repo.join(".gitignore"), ".ok/\ngenerated/\n").unwrap();
+    fs::write(repo.join(".gitignore"), ".ok/\ngenerated/\ninternal/\n").unwrap();
     commit_all(repo, "ignore generated sources");
-    fs::create_dir_all(repo.join("generated")).unwrap();
-    fs::write(repo.join("generated/api.rs"), "pub struct GeneratedApi;\n").unwrap();
+    for (path, content) in [
+        ("generated/api.rs", "pub struct GeneratedApi;\n"),
+        ("internal/vault/keys.rs", "pub struct VaultKey;\n"),
+    ] {
+        fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+        fs::write(repo.join(path), content).unwrap();
+    }
     run({
         let mut command = ok();
         command.arg("index").arg(repo);
         command
     });
-    {
+    let unanchored = || -> i64 {
         let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
-        let orphaned: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM symbols WHERE file_id NOT IN (SELECT id FROM files) \
-                 AND json_extract(json, '$.provenance') = 'scip'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(
-            orphaned > 0,
-            "the fixture must store a SCIP symbol for an unindexed file"
-        );
-    }
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM symbols WHERE file_id NOT IN (SELECT id FROM files) \
+                     AND json_extract(json, '$.provenance') = 'scip') \
+                  + (SELECT COUNT(*) FROM occurrences WHERE file_id NOT IN \
+                     (SELECT id FROM files) AND json_extract(json, '$.provenance') = 'scip')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        unanchored(),
+        4,
+        "the exporter admits both ignored documents' symbols and definitions"
+    );
+    assert!(mcp_search_symbols(repo, Some("VaultKey")).contains("internal/vault"));
     export_snapshot(repo);
 
+    // This repository denies what the exporter only ignored.
+    let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    assert!(config.contains("\"**/secrets/**\","), "{config}");
+    fs::write(
+        repo.join("ok.toml"),
+        config.replacen(
+            "\"**/secrets/**\",",
+            "\"**/secrets/**\", \"internal/vault/**\",",
+            1,
+        ),
+    )
+    .unwrap();
     let imported = import_snapshot_json(repo, &[]);
     assert_eq!(
         imported["snapshot"]["relation"], "same_commit",
         "{imported}"
+    );
+    let caveats = imported["caveats"].to_string();
+    assert!(
+        caveats.contains("2 SCIP symbol(s) and 2 occurrence(s) for files outside the imported index were removed"),
+        "{imported}"
+    );
+    assert_eq!(unanchored(), 0);
+    for query in [None, Some("VaultKey"), Some("vault"), Some("GeneratedApi")] {
+        let served = mcp_search_symbols(repo, query);
+        for fragment in ["VaultKey", "vault", "GeneratedApi", "generated/"] {
+            assert!(
+                !served.contains(fragment),
+                "search_symbols {query:?} served `{fragment}`: {served}"
+            );
+        }
+    }
+    // The indexed file's references to the removed symbols named them in its graph edges.
+    let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+    let named: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM graph_strings WHERE value LIKE '%VaultKey%' \
+             OR value LIKE '%GeneratedApi%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(named, 0, "no graph string may name a removed symbol");
+    let status = status_json(repo);
+    assert_eq!(status["quality"]["scip_symbols"], 1, "{status}");
+    assert!(
+        status["quality"]["quality_notes"]
+            .to_string()
+            .contains("for files outside the imported index were removed"),
+        "{status}"
     );
     let search = run({
         let mut command = ok();
