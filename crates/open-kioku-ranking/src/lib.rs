@@ -1292,8 +1292,16 @@ mod tests {
             .any(|component| component.signal == "boundary_fit" && component.raw_value >= 1.0));
     }
 
+    /// The ordering here is carried by the exact-identity tier in `compare_reranked`, which
+    /// sorts identity matches ahead of any score: the exact candidate's fused score stays below
+    /// the prefix candidate's. The fixture cannot isolate `exact_reference` from that tier,
+    /// because the tier, `boundary_fit`'s 18.0 and the `symbol_name_hit` part of
+    /// `exact_reference` all come from `exact_identity_match` — a prefix candidate given equal
+    /// `boundary_fit` would have to match the query exactly, and would then share the tier and
+    /// the `exact_reference` hit too. So the `exact_reference` contribution is asserted
+    /// directly instead of through the order (#512).
     #[test]
-    fn exact_structured_identifier_outranks_a_higher_scoring_prefix_match() {
+    fn exact_identity_tier_orders_a_structured_identifier_above_a_higher_scoring_prefix_match() {
         let mut exact = make_result("src/RouterRegistry.java", 32.0);
         exact.symbol = Some(Symbol {
             id: SymbolId::new("router-registry"),
@@ -1338,10 +1346,20 @@ mod tests {
         );
 
         assert_eq!(results[0].path, Path::new("src/RouterRegistry.java"));
-        assert!(results[0]
+        assert!(
+            results[0].score < results[1].score,
+            "the order must come from the identity tier, not from outscoring the prefix match: \
+             {} vs {}",
+            results[0].score,
+            results[1].score
+        );
+        let exact_reference = results[0]
             .score_breakdown
             .iter()
-            .any(|component| component.signal == "exact_reference"));
+            .find(|component| component.signal == "exact_reference")
+            .expect("the exact candidate carries an exact_reference component");
+        assert_eq!(exact_reference.raw_value, 1.0);
+        assert_eq!(exact_reference.contribution, 1.0);
         assert!(!results[1]
             .score_breakdown
             .iter()
