@@ -1711,26 +1711,30 @@ fn rule_evidence_refs(
     }
 }
 
-/// Refs that name exact facts: every line of an exact-reference result, an exact symbol
-/// anchor, and a graph edge.
+/// Every ref of an exact-reference result (a source- or SCIP-derived occurrence).
 fn exact_evidence_refs<'a>(
     results: impl IntoIterator<Item = &'a SearchResult>,
 ) -> BTreeSet<String> {
-    let mut exact = BTreeSet::new();
-    for result in results {
-        let whole_result = result.is_exact_reference();
-        exact.extend(
-            result
-                .derived_evidence_ids()
-                .into_iter()
-                .filter(|evidence_ref| whole_result || is_exact_ref_scheme(evidence_ref)),
-        );
-    }
-    exact
+    results
+        .into_iter()
+        .filter(|result| result.is_exact_reference())
+        .flat_map(|result| result.derived_evidence_ids())
+        .collect()
 }
 
-fn is_exact_ref_scheme(evidence_ref: &str) -> bool {
-    evidence_ref.starts_with("symbol:") || evidence_ref.starts_with("edge:")
+/// Which refs a cap keeps first: an exact-reference result's refs, then exact `symbol:`
+/// anchors, then direct graph edges (`edge:`, which the graph stream does not filter by
+/// provenance), then everything else.
+fn cap_tier(evidence_ref: &str, exact: &BTreeSet<String>) -> u8 {
+    if exact.contains(evidence_ref) {
+        0
+    } else if evidence_ref.starts_with("symbol:") {
+        1
+    } else if evidence_ref.starts_with("edge:") {
+        2
+    } else {
+        3
+    }
 }
 
 fn capped_refs(refs: Vec<String>, limit: usize, exact: &BTreeSet<String>) -> (Vec<String>, usize) {
@@ -1738,25 +1742,25 @@ fn capped_refs(refs: Vec<String>, limit: usize, exact: &BTreeSet<String>) -> (Ve
     (authority_capped_refs(refs, limit, exact), omitted)
 }
 
-/// The refs a cap keeps, listed in file order. Exact facts are kept first: in file order a
-/// result's lexical `search:` lines sort ahead of its `symbol:` anchor, so a plain cut
-/// dropped the exact fact and kept the heuristic ones. File order still decides among refs
-/// of equal authority, so a capped list keeps the first lines of each path; as text
-/// `:10-12` would sort before `:2-4`.
+/// The refs a cap keeps, listed in file order. Which refs are kept goes by [`cap_tier`]
+/// first: in file order `edge:` sorts ahead of `search:` and `symbol:`, and a result's
+/// lexical `search:` lines ahead of its `symbol:` anchor, so a plain cut kept heuristic refs
+/// and dropped exact ones. Within a tier file order decides, so a capped list keeps the first
+/// lines of each path; as text `:10-12` would sort before `:2-4`.
 fn authority_capped_refs(refs: Vec<String>, limit: usize, exact: &BTreeSet<String>) -> Vec<String> {
     let mut refs = refs;
     refs.sort_by(|left, right| compare_evidence_refs(left, right));
     if refs.len() <= limit {
         return refs;
     }
-    let (mut kept, heuristic): (Vec<_>, Vec<_>) = refs.into_iter().partition(|evidence_ref| {
-        exact.contains(evidence_ref) || is_exact_ref_scheme(evidence_ref)
+    refs.sort_by(|left, right| {
+        cap_tier(left, exact)
+            .cmp(&cap_tier(right, exact))
+            .then_with(|| compare_evidence_refs(left, right))
     });
-    kept.truncate(limit);
-    let room = limit - kept.len();
-    kept.extend(heuristic.into_iter().take(room));
-    kept.sort_by(|left, right| compare_evidence_refs(left, right));
-    kept
+    refs.truncate(limit);
+    refs.sort_by(|left, right| compare_evidence_refs(left, right));
+    refs
 }
 
 /// The path, start line, end line and evidence-line index of a `search:` ref.
@@ -3877,6 +3881,41 @@ mod tests {
                 boundary.evidence_refs
             );
         }
+    }
+
+    #[test]
+    fn graph_edges_alone_past_the_cap_never_displace_exact_references_or_symbol_anchors() {
+        // Sixty graph-neighbour edges sort ahead of everything; an exact reference and a
+        // symbol anchor must still survive the 50-ref boundary cap and a 10-ref rule cap.
+        let mut neighbours = test_search_result("src/limits.rs");
+        neighbours.evidence = (0..61).map(|line| format!("graph line {line}")).collect();
+        neighbours.evidence_refs = (0..60).map(|edge| format!("edge:{edge:03}")).collect();
+        neighbours.evidence_refs.push("symbol:limit-anchor".into());
+        let mut exact = test_search_result("src/zz_caller.rs");
+        exact.exact_reference_provenance = Some(EvidenceSourceType::Scip);
+        exact.evidence_refs = vec!["search:src/zz_caller.rs:1-3:0".into()];
+        let exact_refs = exact_evidence_refs([&neighbours, &exact]);
+
+        let boundary = boundary_evidence_refs(
+            std::slice::from_ref(&neighbours),
+            std::slice::from_ref(&exact),
+            &exact_refs,
+        );
+        assert_eq!(boundary.len(), 50);
+        for kept in ["search:src/zz_caller.rs:1-3:0", "symbol:limit-anchor"] {
+            assert!(boundary.contains(&kept.to_string()), "{kept} was cut");
+        }
+
+        let (rule_refs, omitted) = capped_refs(
+            neighbours.evidence_refs.clone(),
+            MAX_RULE_EVIDENCE_REFS,
+            &exact_refs,
+        );
+        assert_eq!(omitted, 51);
+        assert!(rule_refs.contains(&"symbol:limit-anchor".to_string()));
+        let mut ordered = rule_refs.clone();
+        ordered.sort_by(|left, right| compare_evidence_refs(left, right));
+        assert_eq!(rule_refs, ordered);
     }
 
     #[test]
