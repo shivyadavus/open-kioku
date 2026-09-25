@@ -459,7 +459,9 @@ impl Indexer {
                 config,
                 scip_report: None,
                 test_count: 0,
-                excluded_test_targets: Some(BTreeMap::new()),
+                // No source was read, so no test was examined: `Some({})` would claim none was
+                // excluded.
+                excluded_test_targets: None,
                 import_count: 0,
                 analysis: AnalysisCounts::default(),
                 quality_notes: &mode_quality_notes(mode),
@@ -3590,6 +3592,10 @@ class Util {
         assert_eq!(snapshot.manifest.symbol_count, 0);
         assert_eq!(snapshot.manifest.chunk_count, 0);
         assert!(snapshot.files.is_empty());
+        assert_eq!(
+            snapshot.manifest.quality.excluded_test_targets, None,
+            "no test was examined, so the exclusion count is unrecorded, not empty"
+        );
         assert!(snapshot
             .manifest
             .quality

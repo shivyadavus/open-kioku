@@ -755,6 +755,10 @@ fn quality_provider_report(
         Some(manifest) => manifest.quality.excluded_test_targets.clone(),
         None => Some(std::collections::BTreeMap::new()),
     };
+    // Cross-project mode reads no source, so it examines no test and leaves the count
+    // unrecorded; re-indexing in that mode would not change that.
+    let cross_project =
+        manifest.is_some_and(|manifest| manifest.index_mode == IndexMode::CrossProject);
     let import_count = manifest
         .map(|manifest| manifest.quality.import_count)
         .unwrap_or(0);
@@ -796,11 +800,15 @@ fn quality_provider_report(
         },
         evidence: match &excluded_tests {
             Some(excluded) => tests_evidence(test_count, excluded),
+            None if cross_project => format!(
+                "{test_count} indexed test target(s); {CROSS_PROJECT_TESTS_NOT_APPLICABLE}"
+            ),
             None => format!("{test_count} indexed test target(s)"),
         },
         next_step: tests_next_step(
             test_count,
             &excluded_tests,
+            cross_project,
             "Index test files before relying on validation recommendations.",
         ),
     });
@@ -879,6 +887,7 @@ fn quality_provider_report(
         next_step: tests_next_step(
             test_count,
             &excluded_tests,
+            cross_project,
             "Add or index tests so plans can return concrete validation commands.",
         ),
     });
@@ -920,17 +929,28 @@ fn all_tests_excluded(
     }
 }
 
+const CROSS_PROJECT_TESTS_NOT_APPLICABLE: &str =
+    "not applicable in cross-project mode; see each linked project's own index";
+
 /// With no runnable target, advise what would change that. Indexing more test files cannot help
 /// a repository whose indexed tests are all skipped.
 fn tests_next_step(
     test_count: usize,
     excluded: &Option<std::collections::BTreeMap<open_kioku_core::TestExclusionReason, usize>>,
+    cross_project: bool,
     no_tests_advice: &str,
 ) -> Option<String> {
     if test_count > 0 {
         return None;
     }
     let Some(excluded) = excluded else {
+        if cross_project {
+            return Some(
+                "Cross-project mode reads no source, so it indexes no tests; see each linked \
+                 project's own index."
+                    .into(),
+            );
+        }
         return Some(format!(
             "{no_tests_advice} This index predates the count of skipped tests: re-index to tell \
              skipped tests from absent ones."
@@ -2196,23 +2216,33 @@ mod tests_provider_tests {
     #[test]
     fn the_tests_next_step_tells_absent_skipped_and_unrecorded_apart() {
         assert_eq!(
-            tests_next_step(0, &Some(BTreeMap::new()), ADVICE).as_deref(),
+            tests_next_step(0, &Some(BTreeMap::new()), false, ADVICE).as_deref(),
             Some(ADVICE)
         );
 
         let skipped = Some(BTreeMap::from([(TestExclusionReason::Disabled, 3)]));
-        let step = tests_next_step(0, &skipped, ADVICE).unwrap();
+        let step = tests_next_step(0, &skipped, false, ADVICE).unwrap();
         assert!(step.starts_with("Enable the skipped tests"), "{step}");
         assert!(!step.contains("Index test files"), "{step}");
 
-        let step = tests_next_step(0, &None, ADVICE).unwrap();
+        let step = tests_next_step(0, &None, false, ADVICE).unwrap();
         assert!(
             step.contains("re-index to tell skipped tests from absent ones"),
             "{step}"
         );
 
-        assert_eq!(tests_next_step(2, &skipped, ADVICE), None);
-        assert_eq!(tests_next_step(2, &None, ADVICE), None);
+        assert_eq!(tests_next_step(2, &skipped, false, ADVICE), None);
+        assert_eq!(tests_next_step(2, &None, false, ADVICE), None);
+    }
+
+    /// Cross-project mode leaves the count unrecorded because it reads no source; advising a
+    /// re-index there would send the reader round in a circle.
+    #[test]
+    fn the_tests_next_step_does_not_advise_reindexing_a_cross_project_index() {
+        let step = tests_next_step(0, &None, true, ADVICE).unwrap();
+        assert!(step.contains("Cross-project mode reads no source"), "{step}");
+        assert!(!step.contains("re-index"), "{step}");
+        assert!(!step.contains("Index test files"), "{step}");
     }
 
     #[test]
