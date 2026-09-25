@@ -837,6 +837,8 @@ mod tests {
                 "format fixture",
             )],
             evidence_quality: Default::default(),
+            validation_omitted: 0,
+            validation_omitted_ids: Vec::new(),
         };
 
         let rendered = render_plan_toon(&report);
