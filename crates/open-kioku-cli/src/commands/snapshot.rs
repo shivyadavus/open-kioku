@@ -272,6 +272,7 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
             filtered.paths_removed
         ));
     }
+    caveats.extend(filtered.scip_caveat.clone());
     Ok(SnapshotImportReport {
         ok: true,
         imported: true,
@@ -462,6 +463,17 @@ fn assess_snapshot_revision(
 struct SnapshotPolicyFilter {
     paths_removed: usize,
     by_source: BTreeMap<String, usize>,
+    /// Set when SCIP rows no indexed file owns were removed.
+    scip_caveat: Option<String>,
+}
+
+fn unanchored_scip_caveat(symbols: usize, occurrences: usize) -> String {
+    format!(
+        "{symbols} SCIP symbol(s) and {occurrences} occurrence(s) for files outside the imported \
+         index were removed: they record only a hash of their file's path, so this \
+         repository's index policy cannot be checked against them. Run `ok index` to import \
+         SCIP for generated or ignored code the policy admits"
+    )
 }
 
 /// Check the staged database and apply this repository's index policy to it, with the
@@ -481,6 +493,9 @@ struct SnapshotPolicyFilter {
 ///   denied path is removed too, as `ok index` withholds such history when it reads it: an
 ///   artifact from an older release or another policy must not serve a path the security
 ///   policy here denies;
+/// - every SCIP symbol and occurrence no indexed file owns is removed with the graph edges at
+///   those symbols: `ok index` keeps them for generated or ignored code the security policy
+///   admits, but they record only a hash of their path, so the policy here cannot judge them;
 /// - secret-like paths the exporter recorded as skipped are withheld under this repository's
 ///   `redact_secrets`.
 ///
@@ -564,10 +579,29 @@ fn apply_local_policy_to_snapshot(
     }
     filter.paths_removed = filter.by_source.values().sum();
     let purge = store.purge_paths(&indexed, &history, &nodes, manifest)?;
+    let scip = store.purge_unanchored_scip_rows()?;
     drop(store);
 
     manifest.file_count = manifest.file_count.saturating_sub(purge.files_removed);
-    manifest.symbol_count = manifest.symbol_count.saturating_sub(purge.symbols_removed);
+    manifest.symbol_count = manifest
+        .symbol_count
+        .saturating_sub(purge.symbols_removed + scip.symbols_removed);
+    if scip.symbols_removed + scip.occurrences_removed > 0 {
+        let caveat = unanchored_scip_caveat(scip.symbols_removed, scip.occurrences_removed);
+        let quality = &mut manifest.quality;
+        quality.scip_symbols = quality.scip_symbols.saturating_sub(scip.symbols_removed);
+        quality.scip_occurrences = quality
+            .scip_occurrences
+            .saturating_sub(scip.occurrences_removed);
+        quality.scip_exact_references = quality
+            .scip_exact_references
+            .saturating_sub(scip.references_removed);
+        quality.quality_notes.push(open_kioku_core::QualityNote::new(
+            open_kioku_core::QualityNoteKind::Scip,
+            caveat.clone(),
+        ));
+        filter.scip_caveat = Some(caveat);
+    }
     manifest.chunk_count = manifest.chunk_count.saturating_sub(purge.chunks_removed);
     for (file, exclusion) in &excluded_files {
         open_kioku_ingest::path_policy::record_excluded_indexed_file(

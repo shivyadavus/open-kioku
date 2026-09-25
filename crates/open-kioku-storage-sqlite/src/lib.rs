@@ -634,6 +634,68 @@ impl SqliteStore {
         Ok(report)
     }
 
+    /// Remove every SCIP symbol and occurrence that no indexed file owns, with every graph edge
+    /// at those symbols' nodes. `ok index` keeps SCIP rows for documents discovery skipped
+    /// (generated or gitignored code) unless the security policy excludes their path, but the
+    /// rows carry only a hash of that path, so a reader of someone else's index cannot tell
+    /// which ones this repository's policy would have excluded. They are removed rather than
+    /// guessed about. The manifest is not written.
+    pub fn purge_unanchored_scip_rows(&self) -> Result<ScipPurge> {
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        let symbol_ids = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id FROM symbols WHERE file_id NOT IN (SELECT id FROM files) \
+                     AND json_extract(json, '$.provenance') = 'scip' ORDER BY id",
+                )
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(storage_err)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(storage_err)?
+        };
+        let mut report = ScipPurge::default();
+        let mut orphan_candidates = HashSet::new();
+        for id in &symbol_ids {
+            let node_id = open_kioku_core::identity::symbol_id_node_id(&SymbolId::new(id.clone()));
+            if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, &node_id.0)? {
+                report.graph_edges_removed +=
+                    delete_edges_at_node(&tx, sid, &mut orphan_candidates)?;
+                orphan_candidates.insert(sid);
+            }
+        }
+        remove_orphan_graph_strings(&tx, orphan_candidates)?;
+        report.symbols_removed = tx
+            .execute(
+                "DELETE FROM symbols WHERE file_id NOT IN (SELECT id FROM files) \
+                 AND json_extract(json, '$.provenance') = 'scip'",
+                [],
+            )
+            .map_err(storage_err)?;
+        report.references_removed = tx
+            .execute(
+                "DELETE FROM occurrences WHERE file_id NOT IN (SELECT id FROM files) \
+                 AND json_extract(json, '$.provenance') = 'scip' AND is_definition = 0",
+                [],
+            )
+            .map_err(storage_err)?;
+        report.occurrences_removed = report.references_removed
+            + tx.execute(
+                "DELETE FROM occurrences WHERE file_id NOT IN (SELECT id FROM files) \
+                 AND json_extract(json, '$.provenance') = 'scip'",
+                [],
+            )
+            .map_err(storage_err)?;
+        tx.commit().map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
+        Ok(report)
+    }
+
     fn replace_index_with_documents_and_manifest(
         &self,
         data: IndexData<'_>,
@@ -2943,10 +3005,11 @@ const CONSISTENCY_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "rows that belong to no indexed file",
-        // Symbols and occurrences imported from a SCIP index are stored for every document
-        // the index covers, including files discovery skipped, so theirs may name no indexed
-        // file. They carry only a `file_id`, and every reader resolves a path through the
-        // files table, so such a row serves no file path or content.
+        // `ok index` stores SCIP symbols and occurrences for documents discovery skipped
+        // (generated or ignored code) unless the security policy excludes their path, so theirs
+        // may name no indexed file. A writer produces them, so they are not a violation; an
+        // import removes them afterwards (`purge_unanchored_scip_rows`), because they carry
+        // only a hash of their path and the local policy cannot judge them.
         "SELECT (SELECT COUNT(*) FROM symbols WHERE (file_id NOT IN (SELECT id FROM files) \
                  AND json_extract(json, '$.provenance') IS NOT 'scip') \
                  OR json_extract(json, '$.file_id') IS NOT file_id) \
@@ -3011,6 +3074,17 @@ pub struct PathPurge {
     pub chunks_removed: usize,
     /// Document sections, facts about removed files, and history rows.
     pub other_rows_removed: usize,
+}
+
+/// What [`SqliteStore::purge_unanchored_scip_rows`] removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScipPurge {
+    pub symbols_removed: usize,
+    /// Every occurrence removed, definitions included.
+    pub occurrences_removed: usize,
+    /// The removed occurrences that were references, not definitions.
+    pub references_removed: usize,
+    pub graph_edges_removed: usize,
 }
 
 /// What reconciling the stored graph with a snapshot's graph changed; see
