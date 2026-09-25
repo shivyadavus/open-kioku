@@ -3099,6 +3099,7 @@ dependencies = [
  "open-kioku-storage",
  "predicates",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "uuid",

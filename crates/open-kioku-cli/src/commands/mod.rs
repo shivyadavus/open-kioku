@@ -982,11 +982,8 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Command::Tests { changed } => {
             let store = open_store(&repo)?;
-            output(
-                cli.json,
-                &TestSelector::new(&store).for_changed_path_with_evidence(&changed, 20)?,
-                || {},
-            )?;
+            let selection = TestSelector::new(&store).select_for_changed_path(&changed, 20)?;
+            output(cli.json, &selection, || print_test_selection(&selection))?;
         }
         Command::Context {
             task,
@@ -1840,4 +1837,25 @@ fn escape_markdown(text: &str) -> String {
         escaped.push(character);
     }
     escaped
+}
+
+/// Rendered when the selection is too large to print as JSON. The withheld count and the
+/// caveats are printed as well: a list without them reads as every test that exists.
+fn print_test_selection(selection: &open_kioku_tests::TestSelection) {
+    for test in &selection.tests {
+        let tier = serde_json::to_value(test.selection_tier)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        match &test.command {
+            Some(command) => println!("{tier}\t{}\t{command}", test.name),
+            None => println!("{tier}\t{}", test.name),
+        }
+    }
+    for (reason, count) in &selection.excluded {
+        println!("excluded: {count} {}", reason.describe());
+    }
+    for caveat in &selection.caveats {
+        println!("caveat: {caveat}");
+    }
 }

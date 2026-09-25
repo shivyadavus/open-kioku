@@ -1,0 +1,22 @@
+{
+  "id": "find-tests-excluded",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [
+      "1 indexed test target(s) found for `src/billing.rs`, all excluded as validation evidence (1 disabled test the runner skips). Enable the skipped tests (`test.skip`, `it.todo`, `test.failing`) before relying on validation recommendations."
+    ],
+    "excluded": {
+      "disabled": 1
+    },
+    "excluded_sample": [
+      {
+        "id": "test-billing-skipped",
+        "line": 3,
+        "name": "publishes an invoice once",
+        "path": "src/billing.test.ts",
+        "reason": "disabled"
+      }
+    ],
+    "tests": []
+  }
+}

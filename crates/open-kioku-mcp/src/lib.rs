@@ -914,9 +914,12 @@ async fn dispatch(
             // `path` that is present but not a string is an error, not a
             // silently broader answer.
             let path = optional_str(&params, "path")?.unwrap_or_default();
-            Ok(json!(
-                TestSelector::new(store).for_changed_path(Path::new(path), limit(&params))?
-            ))
+            // The selection `ok tests` reports, so both surfaces rank the same targets and
+            // account for the same withheld ones.
+            Ok(json!(TestSelector::new(store).select_for_changed_path(
+                Path::new(path),
+                limit(&params)
+            )?))
         }
         "get_definition" => {
             let query = required_str(&params, "query")?;
@@ -1734,7 +1737,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("retrieve_context", "Retrieve the original uncompressed source code snippet associated with a compressed context handle.", json!({"type":"object","required":["handle"],"properties":{"handle":{"type":"string","description":"The handle ID returned by build_context_pack with compress=true."}}})),
         ("plan_change", "Generate an evidence-backed pre-edit plan for a task: primary files to edit, expected impact, changed-line ranges, edit boundaries, and recommended test targets. `detail` chooses between the full plan, a concise preflight decision, and a patch plan that writes nothing. With persist=true the plan is turned into a versioned ChangeContractV1, stored under .ok/contracts by default, which verify_change can later hold the actual edit to.", json!({"type":"object","properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan. Required unless persist=true is given an existing `plan` or `plan_json`."},"detail":{"type":"string","enum":["plan","preflight","patch"],"description":"Which artifact to return. 'plan' (default) is the full evidence-backed report; 'preflight' is one concise start decision with verdict, confirmed edit files, risks, and evidence quality; 'patch' is a patch plan that writes no files. Ignored when persist=true. An unknown value is an invalid-params error (-32602)."},"persist":{"type":"boolean","description":"Set true to build a versioned change contract from the plan instead of returning the plan itself. Defaults to false. This is the only path that writes."},"store":{"type":"boolean","description":"With persist=true, whether the contract is written under .ok/contracts. Defaults to true; set false for a transient contract that is returned but not stored."},"plan":{"type":"object","description":"With persist=true, an inline PlanReport object to build the contract from instead of planning afresh."},"plan_json":{"type":"string","description":"With persist=true, a JSON-encoded PlanReport to build the contract from instead of planning afresh."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon","html","text"],"description":"Output format. The full plan defaults to 'markdown', which is what an agent should read; ask for 'json' when the plan will be saved and passed to verify_change. Preflight defaults to 'json' and also accepts 'markdown', 'html', and 'text'. Contracts default to 'json'."}}})),
         ("verify_change", "Verify what actually changed against what was declared. Checks an actual unified diff or changed file list against a saved PlanReport or against a stored or inline change contract, covering boundary constraints, expected file coverage, API surface stability, and dependency policy. Supplying an existing verification report instead explains that report - decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests - without verifying anything. Optionally executes configured validation commands and persists timestamped attestation records.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport to verify against."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport to verify against."},"contract_id":{"type":"string","description":"Id of a contract stored under .ok/contracts to verify against. Stored ids append verification records to that contract."},"contract":{"type":"object","description":"Inline ChangeContractV1 or StoredContractRecord object to verify against."},"contract_json":{"type":"string","description":"JSON-encoded ChangeContractV1 or StoredContractRecord to verify against."},"verification":{"type":"object","description":"An existing ContractVerificationReport to explain. When present, nothing is verified."},"verification_json":{"type":"string","description":"A JSON-encoded ContractVerificationReport to explain. When present, nothing is verified."},"explain":{"type":"boolean","description":"Set true with a contract to return the explanation of the resulting verification report rather than the report itself. Defaults to false."},"diff":{"type":"string","description":"The unified diff (git diff format) showing the actual changes to verify."},"since_plan":{"type":"string","description":"Git revision or range (e.g., 'HEAD~1', 'abc123..def456') used with git diff --unified=0 to derive changed files and diff input automatically."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files. Used when diff is not provided."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers supporting the change."},"validation_attestations":{"type":"array","items":{"type":"object"},"description":"Previously recorded validation attestations to replay during contract verification."},"traceability_strict":{"type":"boolean","description":"Set true to reject any evidence references not present in the saved plan or contract, enforcing full traceability. Defaults to false (lenient mode allows extra evidence)."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API surface changes (additions, removals, signature modifications) and flag them as warnings. Defaults to false."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph changes and flag forbidden dependency additions based on architecture policy. Defaults to false; a configured policy enables it anyway."},"run_commands":{"type":"boolean","description":"Set true to execute shell validation commands (test runners, linters) defined in the plan or contract on the local machine. Commands run synchronously and their exit codes are recorded. Defaults to false."},"write_attestation":{"type":"boolean","description":"Set true together with run_commands to persist timestamped pass/fail attestation records under .ok/contracts/validation/. With a contract it requires a stored contract_id. Defaults to false."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format for contract verification and for explanations. Defaults to json."}}})),
-        ("find_tests_for_change", "Identify the test files that should be run to validate a change, ranked by relevance from naming conventions, import relationships, and co-change history. With a `path` the ranking is for that changed file; without one it reports the repository-wide stored test evidence.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs'). Omit for the repository-wide test evidence."},"limit":{"type":"integer","description":"Maximum number of test file recommendations to return, ranked by relevance. Defaults to 20."}}})),
+        ("find_tests_for_change", "Identify the test files that should be run to validate a change, ranked by relevance from naming conventions, import relationships, and co-change history. With a `path` the ranking is for that changed file; without one it reports the repository-wide stored test evidence. Matched test targets that cannot validate the change, such as tests the runner skips, are counted by reason in `excluded` and sampled in `excluded_sample`, never listed in `tests`; an empty `tests` carries a caveat saying whether no test was found or every one found was excluded.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs'). Omit for the repository-wide test evidence."},"limit":{"type":"integer","description":"Maximum number of test file recommendations to return, ranked by relevance. Defaults to 20."}}})),
         ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher, or, when called with no `query`, return the versioned evidence schema instead: supported node types, edge types, query properties, and the Tier-1 relationship-semantic capability matrix. (Note: the DSL is NOT full Cypher.) Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","properties":{"query":{"type":"string","description":"The graph query string to execute. Omit or leave empty to return the evidence schema instead of running a query."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
     ];
 
@@ -3528,6 +3531,16 @@ mod tests {
                 "find_errors_for_symbol_disabled.json",
                 r#"{"jsonrpc":"2.0","id":"find-errors","method":"find_errors_for_symbol","params":{"query":"publish_invoice_event"}}"#,
             ),
+            // The one indexed target for `src/billing.rs` is skipped: counted, sampled and
+            // explained, never recommended.
+            (
+                "find_tests_for_change_all_excluded.json",
+                r#"{"jsonrpc":"2.0","id":"find-tests-excluded","method":"find_tests_for_change","params":{"path":"src/billing.rs"}}"#,
+            ),
+            (
+                "find_tests_for_change_none_found.json",
+                r#"{"jsonrpc":"2.0","id":"find-tests-none","method":"find_tests_for_change","params":{"path":"src/routes.rs"}}"#,
+            ),
             (
                 "find_recent_failures_disabled.json",
                 r#"{"jsonrpc":"2.0","id":"recent-failures","method":"find_recent_failures","params":{"limit":1}}"#,
@@ -4532,7 +4545,33 @@ mod tests {
                 text: "pub fn publish_invoice_event() {}".into(),
                 symbol_id: Some(symbol.id.clone()),
             };
-            let files = vec![file.clone(), other_file];
+            // A test file whose one test the runner skips, so `find_tests_for_change` has a
+            // withheld target to account for.
+            let skipped_test_file = File {
+                id: FileId::new("file-billing-test"),
+                repository_id: RepositoryId::new("repo"),
+                path: "src/billing.test.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 64,
+                content_hash: "hash-billing-test".into(),
+                is_generated: false,
+                is_vendor: false,
+            };
+            let skipped_test = open_kioku_core::TestTarget {
+                id: "test-billing-skipped".into(),
+                name: "publishes an invoice once".into(),
+                file_id: skipped_test_file.id.clone(),
+                range: Some(LineRange::single(3)),
+                command: Some("npx vitest run src/billing.test.ts".into()),
+                confidence: Confidence::Low,
+                reason: "disabled test registration call in a test-path file".into(),
+                evidence_refs: Vec::new(),
+                score_breakdown: Vec::new(),
+                selection_tier: open_kioku_core::TestSelectionTier::Optional,
+                tier_justification: Vec::new(),
+                origin: open_kioku_core::TestTargetOrigin::DisabledRegistrationCall,
+            };
+            let files = vec![file.clone(), other_file, skipped_test_file];
             let symbols = vec![
                 symbol.clone(),
                 secondary_symbol.clone(),
@@ -4558,7 +4597,7 @@ mod tests {
                     files: &files,
                     symbols: &symbols,
                     chunks: &chunks,
-                    tests: &[],
+                    tests: &[skipped_test],
                     imports: &[],
                     occurrences: &[],
                     analysis_facts: &analysis_facts,
