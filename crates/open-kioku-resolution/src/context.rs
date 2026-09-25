@@ -1,5 +1,5 @@
 use crate::evidence::ResolutionEvidence;
-use crate::index::{BindingIndex, ScopeIndex, SymbolIndex};
+use crate::index::{BindingIndex, ModuleBody, ScopeIndex, SymbolIndex};
 use crate::inheritance::InheritanceIndex;
 use open_kioku_core::{
     Confidence, FileId, Language, ModuleId, Scope, ScopeId, ScopeKind, Symbol, SymbolId, SymbolKind,
@@ -459,9 +459,10 @@ pub(crate) enum RustRelativeModule<'s> {
 ///
 /// Each `super` leaves the innermost module, and an inline `mod` block is a module, so a path
 /// leaves the file only after climbing out of every block around it. A segment naming an inline
-/// `mod` block of the module reached so far descends into it; any other segment continues in the
-/// module files below, where the file path decides. `None` when the scopes cannot place the path:
-/// an unknown use-site scope, a block whose name the index lost, or a segment naming two modules.
+/// `mod` block of the module reached so far descends into it; any other segment, `mod name;`
+/// included, continues in the module files below, where the file path decides. `None` when the
+/// scopes cannot place the path: an unknown use-site scope, a block whose name the index lost, a
+/// segment naming two modules, or a `mod` item the index cannot tell a block from a declaration.
 pub(crate) fn rust_relative_module<'s>(
     ctx: &ResolutionContext<'s>,
     scope_id: &ScopeId,
@@ -484,14 +485,17 @@ pub(crate) fn rust_relative_module<'s>(
         let modules = declared_items(ctx, &module.id, segment, &|symbol: &Symbol| {
             symbol.kind == SymbolKind::Module
         });
-        let body = match modules.as_slice() {
-            [] => None,
-            [only] => ctx.scopes.module_body(only),
+        match modules.as_slice() {
+            [] => {}
+            [only] => match ctx.scopes.module_body(only) {
+                ModuleBody::Inline(body) => {
+                    module = body;
+                    continue;
+                }
+                ModuleBody::OutOfLine => {}
+                ModuleBody::Unknown => return None,
+            },
             _ => return None,
-        };
-        if let Some(body) = body {
-            module = body;
-            continue;
         }
         let mut path = rust_inline_module_path(ctx, module)?;
         path.extend(segments[index..].iter().map(ToString::to_string));
@@ -516,15 +520,17 @@ fn rust_inline_module_path(ctx: &ResolutionContext<'_>, module: &Scope) -> Optio
     None
 }
 
-/// Items of this file that the module scope `module` declares itself under `name` and `accept`
-/// admits: what a path ending in that module names.
+/// Items of this file that a path ending in the module scope `module` names under `name`: one the
+/// module declares, or one it brings in through `use super::name;`, `use self::name;` or
+/// `use super::*`, followed as [`nearest_lexical_items`] does. Any other import of the name, and
+/// a glob that may supply it, leaves no item of this file proven.
 pub(crate) fn rust_module_items(
     ctx: &ResolutionContext<'_>,
     module: &ScopeId,
     name: &str,
     accept: impl Fn(&Symbol) -> bool,
 ) -> Vec<SymbolId> {
-    declared_items(ctx, module, name, &accept)
+    nearest_lexical_items(ctx, module, name, accept).unwrap_or_default()
 }
 
 /// Whether an import recorded at `binding_scope` binds its names at `level`. In Python the import

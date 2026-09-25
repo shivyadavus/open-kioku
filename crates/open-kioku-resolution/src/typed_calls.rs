@@ -164,8 +164,9 @@ pub(crate) fn resolve_module_member_outcome(
 /// A Rust call through a `crate::`, `self::` or `super::` path. `self` and `super` start from the
 /// innermost module around the call, an inline `mod` block included: `super::f()` in
 /// `mod tests` of `src/worker.rs` names the `f` that file declares, not one in the crate root. A
-/// path ending in a module of this file names an item that module declares itself; one ending
-/// outside the file's scopes names items by the qualified names its module path spells.
+/// path ending in a module of this file names an item that module declares or brings in from
+/// another module of the file; one ending outside the file's scopes names items by the qualified
+/// names its module path spells.
 fn resolve_rust_qualified_module_outcome(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
@@ -833,8 +834,8 @@ mod tests {
     use crate::index::{BindingIndex, ScopeIndex, SymbolIndex};
     use crate::inheritance::InheritanceIndex;
     use open_kioku_core::{
-        Binding, BindingId, CallSiteId, FileId, Language, ReceiverKind, Scope, ScopeKind,
-        SourceRange, Symbol, Visibility,
+        Binding, BindingId, CallSiteId, FileId, Language, ModuleDeclarationSite, ReceiverKind,
+        Scope, ScopeKind, SourceRange, Symbol, Visibility,
     };
 
     #[test]
@@ -1217,54 +1218,72 @@ mod tests {
         );
     }
 
-    /// `src/worker.rs` declaring `fn f` and `mod outer { fn f; mod inner { fn g; fn t() { .. } } }`
-    /// beside a crate root `src/lib.rs` that declares its own `fn f`. Qualified names are the
-    /// file's, as tree-sitter spells them, so every `f` of the worker shares one.
+    /// `src/worker.rs` declaring `fn f`, `mod child;` and
+    /// `mod outer { fn f; mod helpers; mod inner { fn g; fn t() { .. } } }` beside a crate root
+    /// `src/lib.rs` that declares its own `fn f`. Qualified names are the file's, as tree-sitter
+    /// spells them, so every `f` of the worker shares one. As the parser does, each bodiless
+    /// `mod name;` has a scope of its own; `declarations` says whether the index also holds the
+    /// module declarations that tell such a scope from a block.
     fn with_inline_mod_context<T>(
         extra: Vec<Symbol>,
+        declarations: bool,
         test: impl FnOnce(&ResolutionContext<'_>) -> T,
     ) -> T {
         let worker = FileId::new("file:src/worker.rs");
-        let scope = |id: &str, parent: Option<&str>, owner: Option<&str>, kind: ScopeKind| Scope {
+        let range = |line: u32| SourceRange {
+            start_line: line,
+            start_column: 1,
+            end_line: line + 1,
+            end_column: 1,
+        };
+        let scope = |id: &str, parent: Option<&str>, owner: Option<&str>, kind, line| Scope {
             id: ScopeId::new(id),
             file_id: worker.clone(),
             parent_id: parent.map(ScopeId::new),
             owner_symbol_id: owner.map(SymbolId::new),
             kind,
-            range: SourceRange {
-                start_line: 1,
-                start_column: 1,
-                end_line: 50,
-                end_column: 1,
-            },
+            range: range(line),
         };
-        let scopes = ScopeIndex::build(vec![
-            scope("scope:worker", None, None, ScopeKind::File),
-            scope(
-                "scope:outer",
-                Some("scope:worker"),
-                Some("sym:mod:outer"),
-                ScopeKind::Module,
-            ),
-            scope(
-                "scope:inner",
-                Some("scope:outer"),
-                Some("sym:mod:inner"),
-                ScopeKind::Module,
-            ),
+        let module = |id: &str, parent: &str, owner: &str, line| {
+            scope(id, Some(parent), Some(owner), ScopeKind::Module, line)
+        };
+        let mut scopes = ScopeIndex::build(vec![
+            scope("scope:worker", None, None, ScopeKind::File, 1),
+            module("scope:child", "scope:worker", "sym:mod:child", 2),
+            module("scope:outer", "scope:worker", "sym:mod:outer", 3),
+            module("scope:helpers", "scope:outer", "sym:mod:helpers", 4),
+            module("scope:inner", "scope:outer", "sym:mod:inner", 5),
             scope(
                 "scope:t",
                 Some("scope:inner"),
                 Some("sym:inner:t"),
                 ScopeKind::Function,
+                6,
             ),
             scope(
                 "scope:t:body",
                 Some("scope:t"),
                 Some("sym:inner:t"),
                 ScopeKind::Block,
+                7,
             ),
         ]);
+        if declarations {
+            let declaration = |parent: &str, name: &str, has_body, line| ModuleDeclarationSite {
+                file_id: worker.clone(),
+                scope_id: Some(ScopeId::new(parent)),
+                name: name.into(),
+                has_body,
+                has_path_attribute: false,
+                range: range(line),
+            };
+            scopes.record_module_declarations(&[
+                declaration("scope:worker", "child", false, 2),
+                declaration("scope:worker", "outer", true, 3),
+                declaration("scope:outer", "helpers", false, 4),
+                declaration("scope:outer", "inner", true, 5),
+            ]);
+        }
         let item = |id: &str, name: &str, kind: SymbolKind, file: &str, scope: &str| Symbol {
             id: SymbolId::new(id),
             name: name.into(),
@@ -1281,14 +1300,29 @@ mod tests {
             signature: None,
             visibility: Visibility::Public,
         };
+        let function = SymbolKind::Function;
         let mut symbols = vec![
-            item("sym:lib:f", "f", SymbolKind::Function, "lib", "scope:lib"),
+            item("sym:lib:f", "f", function.clone(), "lib", "scope:lib"),
             item(
                 "sym:worker:f",
                 "f",
-                SymbolKind::Function,
+                function.clone(),
                 "worker",
                 "scope:worker",
+            ),
+            item(
+                "sym:mod:child",
+                "child",
+                SymbolKind::Module,
+                "worker",
+                "scope:worker",
+            ),
+            item(
+                "sym:child:c",
+                "c",
+                function.clone(),
+                "worker::child",
+                "scope:c",
             ),
             item(
                 "sym:mod:outer",
@@ -1300,7 +1334,14 @@ mod tests {
             item(
                 "sym:outer:f",
                 "f",
-                SymbolKind::Function,
+                function.clone(),
+                "worker",
+                "scope:outer",
+            ),
+            item(
+                "sym:mod:helpers",
+                "helpers",
+                SymbolKind::Module,
                 "worker",
                 "scope:outer",
             ),
@@ -1314,17 +1355,11 @@ mod tests {
             item(
                 "sym:inner:g",
                 "g",
-                SymbolKind::Function,
+                function.clone(),
                 "worker",
                 "scope:inner",
             ),
-            item(
-                "sym:inner:t",
-                "t",
-                SymbolKind::Function,
-                "worker",
-                "scope:inner",
-            ),
+            item("sym:inner:t", "t", function, "worker", "scope:inner"),
         ];
         symbols.extend(extra);
         let symbol_index = SymbolIndex::build(symbols);
@@ -1375,7 +1410,7 @@ mod tests {
 
     #[test]
     fn rust_relative_paths_start_from_the_innermost_inline_mod() {
-        with_inline_mod_context(Vec::new(), |ctx| {
+        with_inline_mod_context(Vec::new(), true, |ctx| {
             let at = |scope: &str, receiver: &str, callee: &str| {
                 proven_target(ctx, &module_path_call(scope, receiver, callee))
             };
@@ -1422,14 +1457,16 @@ mod tests {
     }
 
     #[test]
-    fn rust_relative_path_into_an_unindexed_module_proves_nothing_in_this_file() {
-        // `super::f` in `inner` names what `outer` declares; `outer` declares no `f` here, so no
-        // item of the file or the crate root may stand in for it.
-        with_inline_mod_context(Vec::new(), |ctx| {
+    fn rust_relative_path_through_a_bodiless_mod_follows_the_module_file() {
+        // `super::f` in `inner` names what `outer` declares; `outer` declares no `h`, so no item
+        // of the file or the crate root may stand in for it.
+        with_inline_mod_context(Vec::new(), true, |ctx| {
             let call = module_path_call("scope:t:body", "super", "h");
             assert_eq!(proven_target(ctx, &call), None);
         });
-        // `super::helpers` in `inner` is a module file below `outer`'s path, spelled by name.
+        // `mod helpers;` in `outer` is the file `src/worker/outer/helpers.rs`, and `mod child;`
+        // at file level is `src/worker/child.rs`: the path continues there by name rather than
+        // in the empty scope the parser gives the declaration.
         let helper = Symbol {
             id: SymbolId::new("sym:helpers:h"),
             name: "h".into(),
@@ -1442,13 +1479,39 @@ mod tests {
             provenance: EvidenceSourceType::TreeSitter,
             module_id: None,
             parent_symbol_id: None,
-            scope_id: Some(ScopeId::new("scope:helpers")),
+            scope_id: Some(ScopeId::new("scope:helpers:file")),
             signature: None,
             visibility: Visibility::Public,
         };
-        with_inline_mod_context(vec![helper], |ctx| {
-            let call = module_path_call("scope:t:body", "super::helpers", "h");
-            assert_eq!(proven_target(ctx, &call).as_deref(), Some("sym:helpers:h"));
+        with_inline_mod_context(vec![helper.clone()], true, |ctx| {
+            let at = |scope: &str, receiver: &str, callee: &str| {
+                proven_target(ctx, &module_path_call(scope, receiver, callee))
+            };
+            assert_eq!(
+                at("scope:t:body", "super::helpers", "h").as_deref(),
+                Some("sym:helpers:h")
+            );
+            assert_eq!(
+                at("scope:worker", "self::child", "c").as_deref(),
+                Some("sym:child:c")
+            );
+            assert_eq!(
+                at("scope:t:body", "super::super::child", "c").as_deref(),
+                Some("sym:child:c")
+            );
+        });
+        // Without the declarations an empty `mod` scope may be a block or a declaration, so the
+        // path proves nothing; a block that encloses scopes is still one.
+        with_inline_mod_context(vec![helper], false, |ctx| {
+            let at = |scope: &str, receiver: &str, callee: &str| {
+                proven_target(ctx, &module_path_call(scope, receiver, callee))
+            };
+            assert_eq!(at("scope:t:body", "super::helpers", "h"), None);
+            assert_eq!(at("scope:worker", "self::child", "c"), None);
+            assert_eq!(
+                at("scope:worker", "self::outer::inner", "g").as_deref(),
+                Some("sym:inner:g")
+            );
         });
     }
 }

@@ -699,7 +699,8 @@ impl Indexer {
         let symbol_index = open_kioku_resolution::SymbolIndex::build(symbols.clone());
         import_registry.resolve_symbols_skipping(&symbol_index, &file_map, &rust_file_ids);
 
-        let scope_index = open_kioku_resolution::ScopeIndex::build(scopes.clone());
+        let mut scope_index = open_kioku_resolution::ScopeIndex::build(scopes.clone());
+        scope_index.record_module_declarations(&module_declarations);
         let rust_modules = imports::RustModuleTree::new(
             &files,
             &project_model,
