@@ -1,11 +1,155 @@
 use open_kioku_core::{
-    AnalysisFact, Confidence, EvidenceSourceType, File, FileId, ScoreComponent, TestSelectionTier,
-    TestTarget,
+    AnalysisFact, Confidence, EvidenceSourceType, File, FileId, ScoreComponent,
+    TestExclusionReason, TestSelectionTier, TestTarget,
 };
 use open_kioku_errors::Result;
 use open_kioku_storage::MetadataStore;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+
+/// Most excluded targets a [`TestSelection`] names; the rest are counted, not listed.
+pub const EXCLUDED_TEST_SAMPLE_LIMIT: usize = 5;
+
+/// Validation targets selected for one changed file, and what was withheld from them.
+///
+/// `tests` holds only targets that can stand as validation evidence. Indexed targets matched
+/// to the change that cannot are counted in `excluded` by reason and sampled in
+/// `excluded_sample`, never mixed into `tests` where an agent could run them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TestSelection {
+    pub tests: Vec<TestTarget>,
+    /// Matched targets withheld because they cannot stand as validation evidence, by reason.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub excluded: BTreeMap<TestExclusionReason, usize>,
+    /// Up to [`EXCLUDED_TEST_SAMPLE_LIMIT`] of the withheld targets, ordered by path and line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_sample: Vec<ExcludedTestTarget>,
+    /// Set whenever `tests` is empty, saying why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caveats: Vec<String>,
+}
+
+/// One indexed test target a selection withheld, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludedTestTarget {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub reason: TestExclusionReason,
+}
+
+impl TestSelection {
+    /// Total targets withheld, across every reason.
+    pub fn excluded_count(&self) -> usize {
+        self.excluded.values().sum()
+    }
+
+    fn from_ranked(store: &dyn MetadataStore, path: &Path, ranked: RankedTests) -> Result<Self> {
+        let mut excluded = BTreeMap::new();
+        let mut sample = Vec::new();
+        for test in ranked.excluded {
+            let Some(reason) = test.validation_exclusion() else {
+                continue;
+            };
+            *excluded.entry(reason).or_default() += 1;
+            sample.push((test, reason));
+        }
+        sample.sort_by(|(left, _), (right, _)| {
+            left.file_id
+                .0
+                .cmp(&right.file_id.0)
+                .then_with(|| range_start(left).cmp(&range_start(right)))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let excluded_sample = sample
+            .into_iter()
+            .take(EXCLUDED_TEST_SAMPLE_LIMIT)
+            .map(|(test, reason)| {
+                Ok(ExcludedTestTarget {
+                    path: store.file_by_id(&test.file_id)?.map(|file| file.path),
+                    line: test.range.as_ref().map(|range| range.start),
+                    id: test.id,
+                    name: test.name,
+                    reason,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut selection = Self {
+            tests: ranked.tests,
+            excluded,
+            excluded_sample,
+            caveats: Vec::new(),
+        };
+        if selection.tests.is_empty() {
+            selection
+                .caveats
+                .push(selection.empty_caveat(path, ranked.runnable_count));
+        }
+        Ok(selection)
+    }
+
+    /// Why `tests` is empty. "No tests", "tests none of which run" and "tests the limit left
+    /// out" call for different work, so no two share a sentence. Decided from what matched
+    /// before `limit`, never from the page.
+    fn empty_caveat(&self, path: &Path, runnable_count: usize) -> String {
+        if runnable_count > 0 {
+            return format!(
+                "{runnable_count} runnable test target(s) matched `{}`, but `limit` is 0, so \
+                 none was returned",
+                path.display()
+            );
+        }
+        if path.as_os_str().is_empty() {
+            return "no changed path was given, so no test target was selected; pass the \
+                    repository-relative path of the file being changed"
+                .into();
+        }
+        let excluded = self.excluded_count();
+        if excluded == 0 {
+            return format!("no indexed test target was found for `{}`", path.display());
+        }
+        let reasons = self
+            .excluded
+            .iter()
+            .map(|(reason, count)| format!("{count} {}", reason.describe()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let remedies = self
+            .excluded
+            .keys()
+            .map(|reason| reason.remedy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "{excluded} indexed test target(s) found for `{}`, all excluded as validation \
+             evidence ({reasons}). {remedies}",
+            path.display()
+        )
+    }
+}
+
+fn range_start(test: &TestTarget) -> u32 {
+    test.range.as_ref().map_or(0, |range| range.start)
+}
+
+/// Matched targets split by whether they can stand as validation evidence.
+struct CandidateTests {
+    runnable: Vec<TestTarget>,
+    excluded: Vec<TestTarget>,
+}
+
+/// Ranked, capped validation targets and the matched targets withheld from ranking.
+struct RankedTests {
+    tests: Vec<TestTarget>,
+    /// Runnable targets matched before `limit` was applied, so an empty page is not read as
+    /// an empty match.
+    runnable_count: usize,
+    excluded: Vec<TestTarget>,
+}
 
 pub struct TestSelector<'a> {
     store: &'a dyn MetadataStore,
@@ -20,7 +164,7 @@ impl<'a> TestSelector<'a> {
         &self,
         path: &Path,
         test_files_with_overlap: &std::collections::HashSet<open_kioku_core::FileId>,
-    ) -> Result<Vec<TestTarget>> {
+    ) -> Result<CandidateTests> {
         let mut file_ids = test_files_with_overlap.clone();
 
         let changed_stem = path
@@ -84,13 +228,14 @@ impl<'a> TestSelector<'a> {
 
         let file_ids_vec = file_ids.into_iter().collect::<Vec<_>>();
         // The one funnel both selection paths use: a test the runner skips is not validation
-        // evidence, so no caller can recommend, rank, or require it.
-        Ok(self
+        // evidence, so no caller can recommend, rank, or require it. It is set aside rather
+        // than dropped, so a surface can say the change has tests none of which run.
+        let (runnable, excluded) = self
             .store
             .tests_for_files(&file_ids_vec)?
             .into_iter()
-            .filter(|test| test.counts_as_validation_evidence())
-            .collect())
+            .partition(|test| test.counts_as_validation_evidence());
+        Ok(CandidateTests { runnable, excluded })
     }
 
     pub fn for_changed_path(&self, path: &Path, limit: usize) -> Result<Vec<TestTarget>> {
@@ -100,7 +245,9 @@ impl<'a> TestSelector<'a> {
             .map(|file| (&file.id, file))
             .collect::<HashMap<_, _>>();
         let repo_root = self.repo_root()?;
-        let tests = self.get_tests_for_path(path, &std::collections::HashSet::new())?;
+        let tests = self
+            .get_tests_for_path(path, &std::collections::HashSet::new())?
+            .runnable;
         let changed_stem = path
             .file_stem()
             .and_then(|value| value.to_str())
@@ -170,6 +317,10 @@ impl<'a> TestSelector<'a> {
     }
 
     pub fn for_changed_path_fast(&self, path: &Path, limit: usize) -> Result<Vec<TestTarget>> {
+        Ok(self.ranked_fast(path, limit)?.tests)
+    }
+
+    fn ranked_fast(&self, path: &Path, limit: usize) -> Result<RankedTests> {
         let repo_root = self.repo_root()?;
         let files_by_id = if repo_root.is_some() {
             self.files_by_id().unwrap_or_default()
@@ -188,7 +339,8 @@ impl<'a> TestSelector<'a> {
         let validation_facts = self.validation_facts()?;
         let changed_file_id = self.store.get_file_by_path(path)?.map(|file| file.id);
         let mut scored = Vec::new();
-        for mut test in self.get_tests_for_path(path, &std::collections::HashSet::new())? {
+        let candidates = self.get_tests_for_path(path, &std::collections::HashSet::new())?;
+        for mut test in candidates.runnable {
             let test_path = files_by_id
                 .get(&test.file_id)
                 .map(|file| file.path.as_path());
@@ -259,11 +411,15 @@ impl<'a> TestSelector<'a> {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.1.name.cmp(&b.1.name))
         });
-        Ok(scored
-            .into_iter()
-            .map(|(_, test)| test)
-            .take(limit)
-            .collect())
+        Ok(RankedTests {
+            runnable_count: scored.len(),
+            tests: scored
+                .into_iter()
+                .map(|(_, test)| test)
+                .take(limit)
+                .collect(),
+            excluded: candidates.excluded,
+        })
     }
 
     pub fn for_changed_path_with_evidence(
@@ -271,6 +427,19 @@ impl<'a> TestSelector<'a> {
         path: &Path,
         limit: usize,
     ) -> Result<Vec<TestTarget>> {
+        Ok(self.ranked_with_evidence(path, limit)?.tests)
+    }
+
+    /// The selection `ok tests` and `find_tests_for_change` report: the ranked targets of
+    /// [`Self::for_changed_path_with_evidence`], plus an account of the indexed targets it
+    /// withheld and a caveat whenever the list is empty, saying whether the change has no
+    /// tests or has tests none of which can validate it.
+    pub fn select_for_changed_path(&self, path: &Path, limit: usize) -> Result<TestSelection> {
+        let ranked = self.ranked_with_evidence(path, limit)?;
+        TestSelection::from_ranked(self.store, path, ranked)
+    }
+
+    fn ranked_with_evidence(&self, path: &Path, limit: usize) -> Result<RankedTests> {
         let changed_file = self.store.get_file_by_path(path)?;
         let repo_root = self.repo_root()?;
         let files_by_id = self.files_by_id().unwrap_or_default();
@@ -284,7 +453,7 @@ impl<'a> TestSelector<'a> {
             std::collections::HashSet::new()
         };
         if changed_symbols.is_empty() {
-            return self.for_changed_path_fast(path, limit);
+            return self.ranked_fast(path, limit);
         }
 
         let changed_stem = path
@@ -320,7 +489,8 @@ impl<'a> TestSelector<'a> {
         }
 
         let mut scored = Vec::new();
-        for mut test in self.get_tests_for_path(path, &test_files_with_overlap)? {
+        let candidates = self.get_tests_for_path(path, &test_files_with_overlap)?;
+        for mut test in candidates.runnable {
             let test_path = files_by_id
                 .get(&test.file_id)
                 .map(|file| file.path.as_path());
@@ -409,11 +579,15 @@ impl<'a> TestSelector<'a> {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.1.name.cmp(&b.1.name))
         });
-        Ok(scored
-            .into_iter()
-            .map(|(_, test)| test)
-            .take(limit)
-            .collect())
+        Ok(RankedTests {
+            runnable_count: scored.len(),
+            tests: scored
+                .into_iter()
+                .map(|(_, test)| test)
+                .take(limit)
+                .collect(),
+            excluded: candidates.excluded,
+        })
     }
 
     fn repo_root(&self) -> Result<Option<PathBuf>> {
@@ -914,7 +1088,7 @@ mod tests {
     use open_kioku_core::{
         AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType,
         Import, IndexManifest, Language, LineRange, RepositoryId, ScoreComponent, Symbol, SymbolId,
-        SymbolOccurrence, TestTarget,
+        SymbolOccurrence, TestExclusionReason, TestTarget,
     };
     use open_kioku_errors::Result;
     use open_kioku_storage::{IndexData, MetadataStore};
@@ -1218,6 +1392,190 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(names.contains(&"rounds half up"), "{names:?}");
         assert!(!names.contains(&"skips stale rows"), "{names:?}");
+    }
+
+    /// A store holding one test file, `src/rates.test.ts`, which a change to `src/rates.ts`
+    /// matches by stem, carrying `tests`.
+    fn selection_store(tests: Vec<TestTarget>) -> EvidenceStore {
+        EvidenceStore {
+            files: vec![
+                file("source", "src/rates.ts"),
+                file("test-file", "src/rates.test.ts"),
+            ],
+            tests,
+            occurrences: Vec::new(),
+            analysis_facts: Vec::new(),
+        }
+    }
+
+    /// A change whose only tests are skipped must not read as a change with no tests: the
+    /// recommendation list stays empty, and the account says what was withheld and why.
+    #[test]
+    fn a_selection_of_only_disabled_targets_reports_them_as_excluded() {
+        let store = selection_store(vec![
+            origin_target(
+                "skips stale rows",
+                open_kioku_core::TestTargetOrigin::DisabledRegistrationCall,
+            ),
+            origin_target(
+                "handles negative rates",
+                open_kioku_core::TestTargetOrigin::DisabledRegistrationCall,
+            ),
+        ]);
+
+        let selection = TestSelector::new(&store)
+            .select_for_changed_path(Path::new("src/rates.ts"), 5)
+            .unwrap();
+
+        assert!(selection.tests.is_empty(), "{:?}", selection.tests);
+        assert_eq!(
+            selection.excluded.get(&TestExclusionReason::Disabled),
+            Some(&2)
+        );
+        let sampled = selection
+            .excluded_sample
+            .iter()
+            .map(|target| (target.name.as_str(), target.reason))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sampled,
+            vec![
+                ("handles negative rates", TestExclusionReason::Disabled),
+                ("skips stale rows", TestExclusionReason::Disabled),
+            ]
+        );
+        assert_eq!(
+            selection.excluded_sample[0].path.as_deref(),
+            Some(Path::new("src/rates.test.ts"))
+        );
+        assert_eq!(selection.caveats.len(), 1, "{:?}", selection.caveats);
+        let caveat = &selection.caveats[0];
+        assert!(
+            caveat.starts_with("2 indexed test target(s) found for `src/rates.ts`, all excluded"),
+            "{caveat}"
+        );
+        assert!(
+            caveat.contains(open_kioku_core::DISABLED_TEST_TARGET),
+            "{caveat}"
+        );
+        assert!(!caveat.contains("no indexed test target"), "{caveat}");
+    }
+
+    #[test]
+    fn a_selection_with_no_targets_says_none_were_found() {
+        let store = selection_store(Vec::new());
+
+        let selection = TestSelector::new(&store)
+            .select_for_changed_path(Path::new("src/rates.ts"), 5)
+            .unwrap();
+
+        assert!(selection.tests.is_empty());
+        assert!(selection.excluded.is_empty());
+        assert!(selection.excluded_sample.is_empty());
+        assert_eq!(
+            selection.caveats,
+            vec!["no indexed test target was found for `src/rates.ts`".to_string()]
+        );
+        let json = serde_json::to_value(&selection).unwrap();
+        assert!(json.get("excluded").is_none(), "{json}");
+    }
+
+    /// A runnable target is recommended and a skipped one beside it is counted, never listed
+    /// with the recommendations. A non-empty list needs no caveat.
+    #[test]
+    fn a_mixed_selection_recommends_the_runnable_target_and_counts_the_disabled_one() {
+        let store = selection_store(vec![
+            origin_target(
+                "rounds half up",
+                open_kioku_core::TestTargetOrigin::RegistrationCall,
+            ),
+            origin_target(
+                "skips stale rows",
+                open_kioku_core::TestTargetOrigin::DisabledRegistrationCall,
+            ),
+        ]);
+
+        let selection = TestSelector::new(&store)
+            .select_for_changed_path(Path::new("src/rates.ts"), 5)
+            .unwrap();
+
+        let names = selection
+            .tests
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["rounds half up"]);
+        assert_eq!(
+            selection.excluded.get(&TestExclusionReason::Disabled),
+            Some(&1)
+        );
+        assert_eq!(selection.excluded_sample.len(), 1);
+        assert_eq!(selection.excluded_sample[0].name, "skips stale rows");
+        assert!(selection.caveats.is_empty(), "{:?}", selection.caveats);
+        let json = serde_json::to_value(&selection).unwrap();
+        assert_eq!(json["excluded"]["disabled"], 1, "{json}");
+    }
+
+    /// An empty page is not an empty match: with `limit` 0 the runnable target still exists,
+    /// so neither the "none found" nor the "all excluded" caveat may be given.
+    #[test]
+    fn a_zero_limit_does_not_claim_the_change_has_no_runnable_tests() {
+        let store = selection_store(vec![
+            origin_target(
+                "rounds half up",
+                open_kioku_core::TestTargetOrigin::RegistrationCall,
+            ),
+            origin_target(
+                "skips stale rows",
+                open_kioku_core::TestTargetOrigin::DisabledRegistrationCall,
+            ),
+        ]);
+
+        let selection = TestSelector::new(&store)
+            .select_for_changed_path(Path::new("src/rates.ts"), 0)
+            .unwrap();
+
+        assert!(selection.tests.is_empty());
+        assert_eq!(
+            selection.caveats,
+            vec![
+                "1 runnable test target(s) matched `src/rates.ts`, but `limit` is 0, so none \
+                 was returned"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            selection.excluded.get(&TestExclusionReason::Disabled),
+            Some(&1)
+        );
+    }
+
+    /// The sample is bounded; the count is not.
+    #[test]
+    fn the_excluded_sample_is_capped_while_the_count_is_exact() {
+        let store = selection_store(
+            (0..super::EXCLUDED_TEST_SAMPLE_LIMIT + 3)
+                .map(|index| {
+                    origin_target(
+                        &format!("todo {index}"),
+                        open_kioku_core::TestTargetOrigin::DisabledRegistrationCall,
+                    )
+                })
+                .collect(),
+        );
+
+        let selection = TestSelector::new(&store)
+            .select_for_changed_path(Path::new("src/rates.ts"), 5)
+            .unwrap();
+
+        assert_eq!(
+            selection.excluded_sample.len(),
+            super::EXCLUDED_TEST_SAMPLE_LIMIT
+        );
+        assert_eq!(
+            selection.excluded_count(),
+            super::EXCLUDED_TEST_SAMPLE_LIMIT + 3
+        );
     }
 
     /// Evidence that a disabled test overlaps the change says where it would run, not that it

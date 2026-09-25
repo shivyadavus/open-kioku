@@ -9,7 +9,7 @@ use open_kioku_core::{
     HistoryRecordId, HistorySnapshot, Import, IndexCoverage, IndexManifest, IndexMode,
     IndexPhaseReport, IndexQuality, Language, LineRange, QualityNote, QualityNoteKind, Repository,
     RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol, SymbolId, SymbolOccurrence,
-    TestTarget, HISTORY_SCHEMA_VERSION,
+    TestExclusionReason, TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -459,6 +459,7 @@ impl Indexer {
                 config,
                 scip_report: None,
                 test_count: 0,
+                excluded_test_targets: Some(BTreeMap::new()),
                 import_count: 0,
                 analysis: AnalysisCounts::default(),
                 quality_notes: &mode_quality_notes(mode),
@@ -1187,6 +1188,9 @@ impl Indexer {
                 .iter()
                 .filter(|test| test.counts_as_validation_evidence())
                 .count(),
+            // The disabled targets are counted beside it, so a repository whose tests are all
+            // skipped does not read as one that has none.
+            excluded_test_targets: Some(excluded_test_targets(&tests)),
             import_count: imports.len(),
             analysis: AnalysisCounts {
                 static_facts: static_analysis_facts,
@@ -1884,11 +1888,20 @@ struct AnalysisCounts {
     architecture_facts: usize,
 }
 
+fn excluded_test_targets(tests: &[TestTarget]) -> BTreeMap<TestExclusionReason, usize> {
+    let mut excluded = BTreeMap::new();
+    for reason in tests.iter().filter_map(TestTarget::validation_exclusion) {
+        *excluded.entry(reason).or_default() += 1;
+    }
+    excluded
+}
+
 struct IndexQualityInput<'a> {
     root: &'a Path,
     config: &'a OkConfig,
     scip_report: Option<&'a ScipIndexReport>,
     test_count: usize,
+    excluded_test_targets: Option<BTreeMap<TestExclusionReason, usize>>,
     import_count: usize,
     analysis: AnalysisCounts,
     quality_notes: &'a [QualityNote],
@@ -2040,6 +2053,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             scip_occurrences: report.occurrences,
             scip_exact_references: report.exact_references,
             test_count: input.test_count,
+            excluded_test_targets: input.excluded_test_targets.clone(),
             import_count: input.import_count,
             build_systems,
             codeql_databases,
@@ -2076,6 +2090,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             scip_occurrences: 0,
             scip_exact_references: 0,
             test_count: input.test_count,
+            excluded_test_targets: input.excluded_test_targets.clone(),
             import_count: input.import_count,
             build_systems,
             codeql_databases,
@@ -3497,6 +3512,18 @@ class Util {
         assert!(
             snapshot.manifest.quality.test_count < snapshot.tests.len(),
             "the disabled stubs must not be counted: {names:?}"
+        );
+        // They are counted beside it instead, so `ok status` can tell skipped from absent.
+        assert_eq!(
+            snapshot
+                .manifest
+                .quality
+                .excluded_test_targets
+                .as_ref()
+                .and_then(|excluded| excluded.get(&open_kioku_core::TestExclusionReason::Disabled))
+                .copied(),
+            Some(snapshot.tests.len() - enabled),
+            "{names:?}"
         );
     }
 

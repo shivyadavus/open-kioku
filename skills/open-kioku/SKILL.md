@@ -44,7 +44,9 @@ parameter named below says otherwise.
    - `dependency_path` for how two nodes connect, or one node's neighbours when `to` is omitted.
    - `explain_flow` for indexed endpoints and the call paths they start.
 6. **`find_tests_for_change`** — pick what to run. A ranked test is a candidate,
-   not proof of coverage.
+   not proof of coverage. An empty `tests` list comes with a caveat: read it, and
+   `excluded`, before concluding the change has no tests — skipped tests are
+   counted there, not listed.
 7. **`plan_change`** — the evidence-backed plan with edit boundaries.
    `detail: "preflight"` for a short start decision, `detail: "patch"` for a patch
    plan, `persist: true` to store a versioned change contract (this writes).

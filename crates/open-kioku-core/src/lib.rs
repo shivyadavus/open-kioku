@@ -2430,6 +2430,40 @@ pub enum TestTargetOrigin {
     DisabledRegistrationCall,
 }
 
+/// Why an indexed [`TestTarget`] cannot stand as validation evidence. Surfaces that withhold
+/// such targets count them by this reason, so an empty recommendation list says whether the
+/// change has no tests or has tests none of which run.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TestExclusionReason {
+    /// A registration the runner will not execute: `test.skip`, `it.todo`, `test.failing`.
+    Disabled,
+}
+
+impl TestExclusionReason {
+    /// The phrase every surface uses for a target excluded for this reason, so `ok status`,
+    /// `ok tests`, `find_tests_for_change` and the context pack describe one index one way.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Disabled => DISABLED_TEST_TARGET,
+        }
+    }
+
+    /// What would make targets excluded for this reason count again, as one sentence.
+    pub fn remedy(self) -> &'static str {
+        match self {
+            Self::Disabled => {
+                "Enable the skipped tests (`test.skip`, `it.todo`, `test.failing`) before relying on validation recommendations."
+            }
+        }
+    }
+}
+
+/// How a disabled registration is described wherever it is withheld from validation.
+pub const DISABLED_TEST_TARGET: &str = "disabled test the runner skips";
+
 /// Selection strength for a validation candidate.
 ///
 /// Encodes the RI3.7 rule for test selection: required or strongly recommended tests must be
@@ -2466,7 +2500,17 @@ impl TestTarget {
     /// the runner skips, so counting it would let a file of `test.skip` calls satisfy a
     /// task family that requires validation evidence.
     pub fn counts_as_validation_evidence(&self) -> bool {
-        !matches!(self.origin, TestTargetOrigin::DisabledRegistrationCall)
+        self.validation_exclusion().is_none()
+    }
+
+    /// Why this target cannot stand as validation evidence, or `None` when it can.
+    pub fn validation_exclusion(&self) -> Option<TestExclusionReason> {
+        match self.origin {
+            TestTargetOrigin::DisabledRegistrationCall => Some(TestExclusionReason::Disabled),
+            TestTargetOrigin::Symbol
+            | TestTargetOrigin::TestFileSymbol
+            | TestTargetOrigin::RegistrationCall => None,
+        }
     }
 
     /// Whether provenance alone establishes that this is a test: the index extracted it from a
@@ -4497,7 +4541,15 @@ pub struct IndexQuality {
     pub scip_symbols: usize,
     pub scip_occurrences: usize,
     pub scip_exact_references: usize,
+    /// Indexed test targets that can stand as validation evidence.
     pub test_count: usize,
+    /// Indexed test targets left out of `test_count` because they cannot stand as validation
+    /// evidence, by reason. Kept apart so a repository whose tests are all skipped reads as
+    /// such rather than as one with no tests. `None` on manifests written before it was
+    /// recorded, so a reader can tell "not recorded" from "nothing excluded" (`{}`) and say
+    /// that a re-index is needed rather than guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_test_targets: Option<BTreeMap<TestExclusionReason, usize>>,
     pub import_count: usize,
     #[serde(default)]
     pub build_systems: Vec<String>,
