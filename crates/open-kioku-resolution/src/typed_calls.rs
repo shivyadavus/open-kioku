@@ -166,7 +166,8 @@ pub(crate) fn resolve_module_member_outcome(
 /// `mod tests` of `src/worker.rs` names the `f` that file declares, not one in the crate root. A
 /// path ending in a module of this file names an item that module declares or brings in from
 /// another module of the file; one ending outside the file's scopes names items by the qualified
-/// names its module path spells.
+/// names its module path spells, unless the declared module tree shows the file holding them, or
+/// this file, is not the module its path spells.
 fn resolve_rust_qualified_module_outcome(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
@@ -189,6 +190,10 @@ fn resolve_rust_qualified_module_outcome(
                 RustModulePathStrategy::ModuleScope,
             ),
             RustRelativeModule::Outside { climbs, path } => {
+                // The path is read off this file's own path, which a `#[path]` mount makes wrong.
+                if !ctx.scopes.may_be_module_at_its_path(ctx.file_id) {
+                    return None;
+                }
                 let names =
                     rust_outside_member_names(ctx.file_path, climbs, &path, &call.callee_name)?;
                 (
@@ -198,6 +203,15 @@ fn resolve_rust_qualified_module_outcome(
             }
         }
     };
+    if matches!(strategy, RustModulePathStrategy::CrateQualified) {
+        // A file the module tree does not declare where its path says, such as the default
+        // location of a `#[path]` module, is not the module its qualified name spells.
+        targets.retain(|target| {
+            ctx.symbols
+                .get(target)
+                .is_some_and(|symbol| ctx.scopes.may_be_module_at_its_path(&symbol.file_id))
+        });
+    }
     normalize_symbol_ids(&mut targets);
     if targets.is_empty() {
         return None;
@@ -1229,6 +1243,17 @@ mod tests {
         declarations: bool,
         test: impl FnOnce(&ResolutionContext<'_>) -> T,
     ) -> T {
+        with_misplaced_module_files(extra, declarations, &[], test)
+    }
+
+    /// [`with_inline_mod_context`], with `misplaced` recorded as the files the declared module
+    /// tree shows are not the module their path spells.
+    fn with_misplaced_module_files<T>(
+        extra: Vec<Symbol>,
+        declarations: bool,
+        misplaced: &[&str],
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
         let worker = FileId::new("file:src/worker.rs");
         let range = |line: u32| SourceRange {
             start_line: line,
@@ -1284,12 +1309,18 @@ mod tests {
                 declaration("scope:outer", "inner", true, 5),
             ]);
         }
+        scopes.record_misplaced_rust_module_files(
+            misplaced
+                .iter()
+                .map(|path| FileId::new(format!("file:{path}")))
+                .collect(),
+        );
         let item = |id: &str, name: &str, kind: SymbolKind, file: &str, scope: &str| Symbol {
             id: SymbolId::new(id),
             name: name.into(),
             qualified_name: format!("src::{file}::{name}"),
             kind,
-            file_id: FileId::new(format!("file:src/{file}.rs")),
+            file_id: FileId::new(format!("file:src/{}.rs", file.replace("::", "/"))),
             range: None,
             language: Language::Rust,
             confidence: Confidence::Exact,
@@ -1513,5 +1544,42 @@ mod tests {
                 Some("sym:inner:g")
             );
         });
+    }
+
+    #[test]
+    fn rust_module_paths_spelled_from_file_paths_skip_misplaced_module_files() {
+        // `mod child;` in `src/worker.rs`, with `src/worker/child.rs` holding `c`; the crate root
+        // `src/lib.rs` declares `f`.
+        let resolve = |misplaced: &[&str]| {
+            with_misplaced_module_files(Vec::new(), true, misplaced, |ctx| {
+                let at = |scope: &str, receiver: &str, callee: &str| {
+                    proven_target(ctx, &module_path_call(scope, receiver, callee))
+                };
+                (
+                    at("scope:worker", "self::child", "c"),
+                    at("scope:worker", "crate::worker::child", "c"),
+                    at("scope:worker", "super", "f"),
+                    at("scope:worker", "self", "f"),
+                )
+            })
+        };
+        let placed = resolve(&[]);
+        assert_eq!(placed.0.as_deref(), Some("sym:child:c"));
+        assert_eq!(placed.1.as_deref(), Some("sym:child:c"));
+        assert_eq!(placed.2.as_deref(), Some("sym:lib:f"));
+
+        // `#[path = "elsewhere.rs"] mod child;` leaves `src/worker/child.rs` at the default
+        // location, where no declaration places it: neither path may prove its `c`.
+        let decoy = resolve(&["src/worker/child.rs"]);
+        assert_eq!(decoy.0, None);
+        assert_eq!(decoy.1, None);
+        assert_eq!(decoy.2.as_deref(), Some("sym:lib:f"));
+
+        // `src/worker.rs` itself mounted by `#[path]` from another module: `super` read off its
+        // file path is not its parent, while an item of the file stays proven.
+        let mounted = resolve(&["src/worker.rs"]);
+        assert_eq!(mounted.0, None);
+        assert_eq!(mounted.2, None);
+        assert_eq!(mounted.3.as_deref(), Some("sym:worker:f"));
     }
 }

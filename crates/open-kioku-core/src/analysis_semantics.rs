@@ -19,7 +19,11 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// v6: the symbol-registry pass applies the same Rust module scoping to its heuristic edges, so a
 /// bare name no longer matches an item of its file that the use site cannot see; v5 indexes hold
 /// such `CALLS` and `REFERENCES` edges.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v6";
+/// v7: a Rust `crate::`, `self::` or `super::` path the resolver spells from file paths neither
+/// starts nor ends in a file the declared module tree shows is not the module its path spells, such
+/// as the default location of a `#[path]` module or a file a `#[path]` mounts; v6 indexes hold
+/// such `CALLS` edges.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v7";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

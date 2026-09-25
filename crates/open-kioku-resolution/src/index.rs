@@ -133,6 +133,8 @@ pub struct ScopeIndex {
     module_has_body: HashMap<ScopeId, bool>,
     /// `mod` scopes that enclose another scope, which only a block can.
     modules_with_children: HashSet<ScopeId>,
+    /// Rust files that the declared module tree shows are not the module their path spells.
+    misplaced_rust_module_files: HashSet<FileId>,
 }
 
 /// What the `mod` item a module symbol names turned out to be.
@@ -194,6 +196,20 @@ impl ScopeIndex {
             }
         }
         self.module_has_body.extend(has_body);
+    }
+
+    /// Records the Rust files that the declared module tree shows are not the module their path
+    /// spells: the default location of a `#[path]` module, a file a `#[path]` mounts, and any other
+    /// file of a crate's source tree that is not declared as a file by the module above it. A Rust
+    /// path whose target the resolver spells from file paths neither starts nor ends in one.
+    pub fn record_misplaced_rust_module_files(&mut self, files: HashSet<FileId>) {
+        self.misplaced_rust_module_files.extend(files);
+    }
+
+    /// Whether `file` may be the module its path spells: nothing recorded says otherwise. A file
+    /// the module tree cannot place either way keeps that reading.
+    pub(crate) fn may_be_module_at_its_path(&self, file: &FileId) -> bool {
+        !self.misplaced_rust_module_files.contains(file)
     }
 
     pub fn get(&self, id: &ScopeId) -> Option<&Scope> {

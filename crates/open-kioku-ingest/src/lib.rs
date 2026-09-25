@@ -709,6 +709,7 @@ impl Indexer {
             &module_declarations,
             &scope_index,
         );
+        scope_index.record_misplaced_rust_module_files(rust_modules.misplaced_module_files());
         import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
         // Import bindings and file-level import edges follow the same declared module tree, and
         // `rust_modules` borrows the project model that moves into `semantic_repo` below.
