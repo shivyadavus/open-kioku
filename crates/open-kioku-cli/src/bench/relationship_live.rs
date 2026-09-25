@@ -888,6 +888,133 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // The file's own `target_fn` is not in scope inside `mod tests`, which imports the name
+        // from a crate the index does not hold.
+        "mod_block_parent_item" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use mock_clock::target_fn;\n\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `Client` in `caller_fn` is the imported `reqwest::Client`, not `fakes::Client`.
+        "sibling_mod_same_file_type" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "mod fakes {\n    pub struct Client;\n\n    impl Client {\n        pub fn new() -> Self {\n            Client\n        }\n\n        pub fn target_fn(&self) {}\n    }\n}\n\nuse reqwest::Client;\n\npub fn caller_fn() {\n    let client = Client::new();\n    client.target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `use super::*;` brings the file's own `target_fn` into `mod tests`.
+        "mod_block_super_glob_item" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `use super::target_fn;` names the file's own `target_fn` from inside `mod tests`.
+        "mod_block_super_item_import" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use super::target_fn;\n\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A second glob beside `use super::*;` cannot take the file's own `target_fn` away:
+        // were it to supply the name too, the call would not compile.
+        "mod_block_super_glob_beside_other_glob" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use proptest::prelude::*;\n\n    #[test]\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A bare call inside a method never names an associated function of the `impl`; here
+        // it names the unresolved import.
+        "impl_associated_fn_not_in_scope" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "use helpers::target_fn;\n\npub struct Session;\n\nimpl Session {\n    pub fn target_fn(&self) {}\n\n    pub fn caller_fn(&self) {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // The same call binds through its import to the free function, not to the method of the
+        // same name. The free function lives in another file so the target selector is unique.
+        "impl_associated_fn_beside_free_fn" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod clock;\npub mod worker;\n"),
+                ("src/clock.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/worker.rs",
+                    "use crate::clock::target_fn;\n\npub struct Session;\n\nimpl Session {\n    pub fn target_fn(&self) {}\n\n    pub fn caller_fn(&self) {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // An item of the `mod` block itself needs no import.
+        "mod_block_own_item" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn production() {}\n\n#[cfg(test)]\nmod tests {\n    fn target_fn() {}\n\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // The module's `use crate::clock::target_fn;` names the call's target, not the file's
+        // own `target_fn`.
+        "mod_block_import_over_parent_item" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod clock;\npub mod worker;\n"),
+                ("src/clock.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use crate::clock::target_fn;\n\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `use super::*;` brings the file's own `Token` into `mod tests`.
+        "mod_block_super_glob_type" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub struct Token;\n\nimpl Token {\n    pub fn target_fn(&self) {}\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    fn caller_fn(value: Token) {\n        value.target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
         // `callee.rs` beside `callee/mod.rs` leaves the module file ambiguous. The module is not
         // named `target`: discovery skips any `target/` directory as build output, which would
         // index only one of the two files.

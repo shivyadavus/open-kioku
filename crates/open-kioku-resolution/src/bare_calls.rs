@@ -146,6 +146,15 @@ pub(crate) fn resolve_bare_call_outcome(
                     .map(|symbol| {
                         symbol.parent_symbol_id.is_none()
                             && matches!(symbol.kind, SymbolKind::Function)
+                            // Not even a candidate where Rust scoping rules the item out: the
+                            // name is imported at the call, or the item is in another module.
+                            && !(ctx.language == Language::Rust
+                                && crate::context::rust_rules_out_same_file_item(
+                                    ctx,
+                                    &call.scope_id,
+                                    &call.callee_name,
+                                    symbol,
+                                ))
                     })
                     .unwrap_or(false)
             })
@@ -252,34 +261,9 @@ fn nearest_lexical_scope_candidates(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
 ) -> Option<Vec<SymbolId>> {
-    let mut current_scope_id = Some(call.scope_id.clone());
-    let mut visited = std::collections::HashSet::new();
-    while let Some(scope_id) = current_scope_id {
-        if !visited.insert(scope_id.clone()) {
-            break;
-        }
-        let mut candidates = ctx
-            .symbols
-            .lookup_file_scope_name(ctx.file_id, &scope_id, &call.callee_name)
-            .iter()
-            .filter(|id| {
-                ctx.symbols
-                    .get(id)
-                    .map(|symbol| matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method))
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        normalize_symbol_ids(&mut candidates);
-        if !candidates.is_empty() {
-            return Some(candidates);
-        }
-        current_scope_id = ctx
-            .scopes
-            .get(&scope_id)
-            .and_then(|scope| scope.parent_id.clone());
-    }
-    None
+    crate::context::nearest_lexical_items(ctx, &call.scope_id, &call.callee_name, |symbol| {
+        matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method)
+    })
 }
 
 fn find_members_by_name(
@@ -1129,6 +1113,437 @@ mod tests {
                 scope("scope:tests:t", Some("scope:tests"), ScopeKind::Function),
             ],
             |ctx| assert_eq!(proven_bare_call_target(ctx, "scope:tests:t", "spawn"), None),
+        );
+    }
+
+    /// `fn now() {}` at file level; `mod tests { [imports] fn helper() {} fn t() { .. } }`; and a
+    /// sibling `mod other { fn t() { .. } }`.
+    fn mod_block_layout() -> Vec<Scope> {
+        vec![
+            scope("scope:file", None, ScopeKind::File),
+            scope("scope:tests", Some("scope:file"), ScopeKind::Module),
+            scope("scope:tests:t", Some("scope:tests"), ScopeKind::Function),
+            scope(
+                "scope:tests:t:body",
+                Some("scope:tests:t"),
+                ScopeKind::Block,
+            ),
+            scope("scope:other", Some("scope:file"), ScopeKind::Module),
+            scope("scope:other:t", Some("scope:other"), ScopeKind::Function),
+        ]
+    }
+
+    fn mod_block_symbols() -> Vec<Symbol> {
+        vec![
+            symbol("symbol:now", "now", "file:src/lib.rs", Some("scope:file")),
+            symbol(
+                "symbol:tests:helper",
+                "helper",
+                "file:src/lib.rs",
+                Some("scope:tests"),
+            ),
+            symbol("symbol:clock:now", "now", "file:src/clock.rs", None),
+        ]
+    }
+
+    #[test]
+    fn rust_lexical_lookup_stops_at_the_enclosing_mod_block() {
+        let proven = |imports: Vec<ImportBinding>, scope_id: &str, callee: &str| {
+            with_resolution_context(
+                mod_block_symbols(),
+                Vec::new(),
+                imports,
+                mod_block_layout(),
+                |ctx| proven_bare_call_target(ctx, scope_id, callee),
+            )
+        };
+        let cases = [
+            (
+                "`use crate::clock::now;` in the module names the imported item",
+                vec![import_binding(
+                    "scope:tests",
+                    "now",
+                    "crate::clock::now",
+                    Some("symbol:clock:now"),
+                )],
+                "scope:tests:t:body",
+                "now",
+                Some("symbol:clock:now"),
+            ),
+            (
+                "an unresolved import in the module is not replaced by the file's item",
+                vec![import_binding(
+                    "scope:tests",
+                    "now",
+                    "crate::clock::now",
+                    None,
+                )],
+                "scope:tests:t:body",
+                "now",
+                None,
+            ),
+            (
+                "the file's item is not in scope inside the module without an import",
+                Vec::new(),
+                "scope:tests:t:body",
+                "now",
+                None,
+            ),
+            (
+                "`use super::*;` brings the file's item into the module",
+                vec![glob_import("scope:tests", "super::*")],
+                "scope:tests:t:body",
+                "now",
+                Some("symbol:now"),
+            ),
+            (
+                "an explicit import in the module shadows the item `use super::*;` reaches",
+                vec![
+                    glob_import("scope:tests", "super::*"),
+                    import_binding(
+                        "scope:tests",
+                        "now",
+                        "crate::clock::now",
+                        Some("symbol:clock:now"),
+                    ),
+                ],
+                "scope:tests:t:body",
+                "now",
+                Some("symbol:clock:now"),
+            ),
+            (
+                "beside another glob, `use super::*;` still reaches an item the file declares",
+                vec![
+                    glob_import("scope:tests", "super::*"),
+                    glob_import("scope:tests", "proptest::prelude::*"),
+                ],
+                "scope:tests:t:body",
+                "now",
+                Some("symbol:now"),
+            ),
+            (
+                "beside another glob, an item the file only imports may come from either glob",
+                vec![
+                    glob_import("scope:tests", "super::*"),
+                    glob_import("scope:tests", "proptest::prelude::*"),
+                    import_binding(
+                        "scope:file",
+                        "tick",
+                        "crate::clock::now",
+                        Some("symbol:clock:now"),
+                    ),
+                ],
+                "scope:tests:t:body",
+                "tick",
+                None,
+            ),
+            (
+                "a glob in a function body may shadow the module's item",
+                vec![glob_import("scope:tests:t:body", "crate::fakes::*")],
+                "scope:tests:t:body",
+                "helper",
+                None,
+            ),
+            (
+                "`use self::helper;` in a block names the module's own item",
+                vec![import_binding(
+                    "scope:tests:t:body",
+                    "helper",
+                    "self::helper",
+                    None,
+                )],
+                "scope:tests:t:body",
+                "helper",
+                Some("symbol:tests:helper"),
+            ),
+            (
+                "`use super::now;` names the file's item",
+                vec![import_binding("scope:tests", "now", "super::now", None)],
+                "scope:tests:t:body",
+                "now",
+                Some("symbol:now"),
+            ),
+            (
+                "`use super::now as tick;` names it under the alias",
+                vec![import_binding("scope:tests", "tick", "super::now", None)],
+                "scope:tests:t:body",
+                "tick",
+                Some("symbol:now"),
+            ),
+            (
+                "`use super::helpers::now;` names an item of another module",
+                vec![import_binding(
+                    "scope:tests",
+                    "now",
+                    "super::helpers::now",
+                    None,
+                )],
+                "scope:tests:t:body",
+                "now",
+                None,
+            ),
+            (
+                "`use super::super::now;` climbs past the file",
+                vec![import_binding(
+                    "scope:tests",
+                    "now",
+                    "super::super::now",
+                    None,
+                )],
+                "scope:tests:t:body",
+                "now",
+                None,
+            ),
+            (
+                "an item of the module itself is in scope",
+                Vec::new(),
+                "scope:tests:t:body",
+                "helper",
+                Some("symbol:tests:helper"),
+            ),
+            (
+                "an item of a sibling module is not",
+                Vec::new(),
+                "scope:other:t",
+                "helper",
+                None,
+            ),
+        ];
+        for (layout, imports, scope_id, callee, expected) in cases {
+            assert_eq!(
+                proven(imports, scope_id, callee).as_deref(),
+                expected,
+                "{layout}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_same_file_fallback_skips_items_rust_scoping_rules_out() {
+        let candidates = |imports: Vec<ImportBinding>, scope_id: &str| {
+            with_resolution_context(
+                mod_block_symbols(),
+                Vec::new(),
+                imports,
+                mod_block_layout(),
+                |ctx| match resolve_bare_call_outcome(&call_in(scope_id, "now"), ctx) {
+                    ResolutionOutcome::Proven { candidate } => {
+                        panic!("unexpected proven edge {candidate:?}")
+                    }
+                    ResolutionOutcome::Unresolved { candidates, .. }
+                    | ResolutionOutcome::Ambiguous { candidates, .. } => candidates
+                        .into_iter()
+                        .map(|candidate| candidate.target_symbol_id.0)
+                        .collect::<Vec<_>>(),
+                    other => panic!("unexpected outcome {other:?}"),
+                },
+            )
+        };
+        // `mod tests { use mock_clock::now; }`: the file's `now` is not even a candidate.
+        assert!(candidates(
+            vec![import_binding(
+                "scope:tests",
+                "now",
+                "mock_clock::now",
+                None
+            )],
+            "scope:tests:t:body"
+        )
+        .is_empty());
+        // A sibling `mod other` without imports cannot name the file's `now` either.
+        assert!(candidates(Vec::new(), "scope:other:t").is_empty());
+        // `mod tests { use super::*; fn t() { use Kind::*; now() } }`: the block glob leaves the
+        // call unproven, but the file's `now` stays a candidate through `use super::*`.
+        assert_eq!(
+            candidates(
+                vec![
+                    glob_import("scope:tests", "super::*"),
+                    glob_import("scope:tests:t:body", "Kind::*"),
+                ],
+                "scope:tests:t:body"
+            ),
+            vec!["symbol:now".to_string()]
+        );
+        // An explicit import of another path beats the glob, so the file's `now` is not one.
+        assert!(candidates(
+            vec![
+                glob_import("scope:tests", "super::*"),
+                glob_import("scope:tests:t:body", "Kind::*"),
+                import_binding("scope:tests", "now", "mock_clock::now", None),
+            ],
+            "scope:tests:t:body"
+        )
+        .is_empty());
+        // An in-crate path the index could not place may name the file's `now`.
+        assert_eq!(
+            candidates(
+                vec![import_binding(
+                    "scope:tests",
+                    "now",
+                    "crate::worker::now",
+                    None
+                )],
+                "scope:tests:t:body"
+            ),
+            vec!["symbol:now".to_string()]
+        );
+    }
+
+    #[test]
+    fn rust_import_in_a_nearer_block_shadows_an_item_of_the_module() {
+        // `fn now() {}` at file level; `fn t() { use crate::clock::now; now() }`.
+        let scopes = vec![
+            scope("scope:file", None, ScopeKind::File),
+            scope("scope:t", Some("scope:file"), ScopeKind::Function),
+            scope("scope:t:body", Some("scope:t"), ScopeKind::Block),
+        ];
+        for (imports, expected) in [
+            (
+                vec![import_binding(
+                    "scope:t:body",
+                    "now",
+                    "crate::clock::now",
+                    Some("symbol:clock:now"),
+                )],
+                Some("symbol:clock:now"),
+            ),
+            (vec![glob_import("scope:t:body", "crate::clock::*")], None),
+            (Vec::new(), Some("symbol:now")),
+        ] {
+            with_resolution_context(
+                mod_block_symbols(),
+                Vec::new(),
+                imports.clone(),
+                scopes.clone(),
+                |ctx| {
+                    assert_eq!(
+                        proven_bare_call_target(ctx, "scope:t:body", "now").as_deref(),
+                        expected,
+                        "{imports:?}"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn rust_associated_function_is_not_in_lexical_scope() {
+        // `fn helper() {}` at file level; `impl Parser { fn helper(&self) {} fn run(&self) {
+        // helper() } }`: the bare call names the free function.
+        let scopes = vec![
+            scope("scope:file", None, ScopeKind::File),
+            scope("scope:impl", Some("scope:file"), ScopeKind::Trait),
+            scope("scope:impl:run", Some("scope:impl"), ScopeKind::Function),
+        ];
+        let method = Symbol {
+            kind: SymbolKind::Method,
+            ..symbol(
+                "symbol:Parser:helper",
+                "helper",
+                "file:src/lib.rs",
+                Some("scope:impl"),
+            )
+        };
+        let free = symbol(
+            "symbol:helper",
+            "helper",
+            "file:src/lib.rs",
+            Some("scope:file"),
+        );
+        with_resolution_context(
+            vec![method.clone(), free],
+            Vec::new(),
+            Vec::new(),
+            scopes.clone(),
+            |ctx| {
+                assert_eq!(
+                    proven_bare_call_target(ctx, "scope:impl:run", "helper").as_deref(),
+                    Some("symbol:helper")
+                );
+            },
+        );
+        with_resolution_context(vec![method], Vec::new(), Vec::new(), scopes, |ctx| {
+            assert_eq!(
+                proven_bare_call_target(ctx, "scope:impl:run", "helper"),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn rust_same_file_type_is_a_candidate_only_from_its_own_module() {
+        // `mod fakes { pub struct Client; }`, `use reqwest::Client;` (optional) and `fn run()` at
+        // file level; `mod tests { [use super::*;] fn t() }`; and `struct Local` in `tests`.
+        let scopes = vec![
+            scope("scope:file", None, ScopeKind::File),
+            scope("scope:fakes", Some("scope:file"), ScopeKind::Module),
+            scope("scope:run", Some("scope:file"), ScopeKind::Function),
+            scope("scope:tests", Some("scope:file"), ScopeKind::Module),
+            scope("scope:tests:t", Some("scope:tests"), ScopeKind::Function),
+        ];
+        let class = |id: &str, name: &str, scope_id: &str| Symbol {
+            kind: SymbolKind::Class,
+            ..symbol(id, name, "file:src/lib.rs", Some(scope_id))
+        };
+        let symbols = || {
+            vec![
+                class("symbol:fakes:Client", "Client", "scope:fakes"),
+                class("symbol:Config", "Config", "scope:file"),
+                class("symbol:tests:Local", "Local", "scope:tests"),
+            ]
+        };
+        let reqwest = || import_binding("scope:file", "Client", "reqwest::Client", None);
+        let candidates = |imports: Vec<ImportBinding>, scope_id: &str, name: &str| {
+            with_resolution_context(symbols(), Vec::new(), imports, scopes.clone(), |ctx| {
+                crate::typed_calls::collect_type_candidates(ctx, &ScopeId::new(scope_id), name)
+            })
+        };
+        let ids = |ids: &[&str]| ids.iter().map(|id| SymbolId::new(*id)).collect::<Vec<_>>();
+
+        assert_eq!(
+            candidates(vec![reqwest()], "scope:run", "Client"),
+            ids(&[]),
+            "`Client` in `run` names the unresolved import, not `fakes::Client`"
+        );
+        assert_eq!(
+            candidates(Vec::new(), "scope:run", "Client"),
+            ids(&[]),
+            "a type in a sibling module needs a path or an import"
+        );
+        assert_eq!(
+            candidates(Vec::new(), "scope:run", "Config"),
+            ids(&["symbol:Config"])
+        );
+        assert_eq!(
+            candidates(Vec::new(), "scope:tests:t", "Config"),
+            ids(&[]),
+            "the file's type is not in scope inside a `mod` block without an import"
+        );
+        assert_eq!(
+            candidates(
+                vec![glob_import("scope:tests", "super::*")],
+                "scope:tests:t",
+                "Config"
+            ),
+            ids(&["symbol:Config"])
+        );
+        assert_eq!(
+            candidates(Vec::new(), "scope:tests:t", "Local"),
+            ids(&["symbol:tests:Local"])
+        );
+        assert_eq!(
+            candidates(
+                vec![import_binding(
+                    "scope:tests",
+                    "Config",
+                    "super::Config",
+                    None
+                )],
+                "scope:tests:t",
+                "Config"
+            ),
+            ids(&["symbol:Config"]),
+            "`use super::Config;` names the file's type"
         );
     }
 
