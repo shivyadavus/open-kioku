@@ -16,6 +16,7 @@ use open_kioku_core::{
     Symbol, SymbolKind, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
+use open_kioku_git::unified_diff::{DiffLine, HunkScanner, MalformedDiff};
 use open_kioku_impact::ImpactEngine;
 use open_kioku_plan::ContractBuilder;
 use open_kioku_storage::{MetadataStore, OkStore, SearchIndex};
@@ -280,14 +281,48 @@ impl<'a> ChangeVerifier<'a> {
         plan: &PlanReport,
         input: VerifyChangeInput,
     ) -> Result<ChangeVerificationReport> {
-        if let Ok(contract) = ContractBuilder::from_plan(plan) {
-            return ContractVerifier::new(self.store)
-                .with_search_index(self.search_index)
-                .with_contract_store(self.contract_store)
-                .verify_plan_adapter(repo, &contract, plan, input)
-                .map(|report| report.change_report);
+        let contract_error = match ContractBuilder::from_plan(plan) {
+            Ok(contract) => {
+                return ContractVerifier::new(self.store)
+                    .with_search_index(self.search_index)
+                    .with_contract_store(self.contract_store)
+                    .verify_plan_adapter(repo, &contract, plan, input)
+                    .map(|report| report.change_report);
+            }
+            Err(err) => err,
+        };
+        // Both delta checks classify against a contract, and this plan could not become one.
+        // A check that was enabled but did not run is said so, and keeps the verdict off `pass`.
+        let skipped = [
+            (
+                input.check_api_surface,
+                "api_surface_check_not_run",
+                "API-surface",
+            ),
+            (
+                input.check_dependency_delta,
+                "dependency_delta_check_not_run",
+                "dependency-delta",
+            ),
+        ]
+        .into_iter()
+        .filter(|(enabled, _, _)| *enabled)
+        .map(|(_, kind, check)| VerificationFinding {
+            path: None,
+            kind: kind.into(),
+            reason: format!(
+                "the {check} check was enabled but not run: it compares against a change \
+                 contract, and this plan could not become one ({contract_error})"
+            ),
+            evidence_refs: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+        let mut report = self.verify_plan_direct(repo, plan, input)?;
+        if !skipped.is_empty() && report.verdict == VerificationVerdict::Pass {
+            report.verdict = VerificationVerdict::Warn;
         }
-        self.verify_plan_direct(repo, plan, input)
+        report.warnings.extend(skipped);
+        Ok(report)
     }
 
     fn verify_plan_direct(
@@ -312,6 +347,7 @@ impl<'a> ChangeVerifier<'a> {
 
         let mut boundary_violations =
             boundary_violations(plan, &changed_files, &previous_paths, &input.evidence_refs);
+        boundary_violations.extend(malformed_diff_violation(input.unified_diff.as_deref()));
         if input.traceability_strict {
             boundary_violations.extend(unknown_evidence_ref_violations(plan, &input.evidence_refs));
         }
@@ -2403,11 +2439,11 @@ impl DependencyDeltaClassificationKey for DependencyDeltaClassification {
 pub fn changed_files_from_unified_diff(diff: &str) -> Vec<PathBuf> {
     let mut paths = BTreeSet::new();
     let mut pending_old: Option<String> = None;
-    let mut hunk = HunkBody::default();
+    let mut scanner = HunkScanner::new();
     for line in diff.lines() {
         // A hunk's content lines are never headers: a removed `-- x` or an added `++ y` reads
         // as `--- x` or `+++ y` and is not a path.
-        if hunk.take(line) {
+        if scanner.scan(line) != DiffLine::Header {
             continue;
         }
         if let Some(rest) = line.strip_prefix("diff --git ") {
@@ -2415,10 +2451,6 @@ pub fn changed_files_from_unified_diff(diff: &str) -> Vec<PathBuf> {
             if let (_, Some(path)) = git_header_paths(rest) {
                 paths.insert(PathBuf::from(path));
             }
-            continue;
-        }
-        if let Some(header) = line.strip_prefix("@@ ") {
-            hunk = HunkBody::start(header);
             continue;
         }
         if let Some(path) = line.strip_prefix("--- ") {
@@ -2700,89 +2732,70 @@ pub type HunkRanges = (Option<LineRange>, Option<LineRange>);
 /// Hunk ranges per path from the `@@ -a,b +c,d @@` headers of a unified diff, in file order.
 /// A pure deletion (`+c,0`) is reported at line `c`, the line after which text was removed.
 pub fn changed_hunks_from_unified_diff(diff: &str) -> BTreeMap<PathBuf, Vec<HunkRanges>> {
+    scan_unified_diff(diff).hunks
+}
+
+/// Where a unified diff stops matching its own hunk headers, with the path of the entry it
+/// happened in when one had been named. The file lists read from such a diff can miss an
+/// entry whose headers an over-counted hunk consumed, or hold a content line read as a path.
+fn unified_diff_malformation(diff: &str) -> Option<(Option<PathBuf>, MalformedDiff)> {
+    scan_unified_diff(diff).malformed
+}
+
+struct UnifiedDiffScan {
+    hunks: BTreeMap<PathBuf, Vec<HunkRanges>>,
+    malformed: Option<(Option<PathBuf>, MalformedDiff)>,
+}
+
+fn scan_unified_diff(diff: &str) -> UnifiedDiffScan {
     let mut hunks = BTreeMap::<PathBuf, Vec<HunkRanges>>::new();
     let mut current: Option<PathBuf> = None;
     let mut pending_old: Option<String> = None;
-    let mut body = HunkBody::default();
+    let mut scanner = HunkScanner::new();
+    let mut malformed = None;
     for line in diff.lines() {
-        if body.take(line) {
-            continue;
+        let kind = scanner.scan(line);
+        if malformed.is_none() {
+            // Taken before this line is read as a header, so it names the entry the broken
+            // hunk belongs to rather than the one the line starts.
+            malformed = scanner.malformation().map(|malformation| {
+                let path = current
+                    .clone()
+                    .or_else(|| pending_old.as_ref().map(PathBuf::from));
+                (path, malformation.clone())
+            });
         }
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            pending_old = None;
-            current = git_header_paths(rest).1.map(PathBuf::from);
-            continue;
-        }
-        if let Some(path) = line.strip_prefix("--- ") {
-            pending_old = diff_path(path);
-            continue;
-        }
-        if let Some(path) = line.strip_prefix("+++ ") {
-            if let Some(path) = diff_path(path).or_else(|| pending_old.take()) {
-                current = Some(PathBuf::from(path));
+        match kind {
+            DiffLine::Content => {}
+            DiffLine::HunkHeader(header) => {
+                let (Some(path), Some((old, new))) = (current.as_ref(), parse_hunk_header(header))
+                else {
+                    continue;
+                };
+                if old.is_some() || new.is_some() {
+                    hunks.entry(path.clone()).or_default().push((old, new));
+                }
             }
-            continue;
-        }
-        if let Some(header) = line.strip_prefix("@@ ") {
-            body = HunkBody::start(header);
-            let (Some(path), Some((old, new))) = (current.as_ref(), parse_hunk_header(header))
-            else {
-                continue;
-            };
-            if old.is_some() || new.is_some() {
-                hunks.entry(path.clone()).or_default().push((old, new));
+            DiffLine::Header => {
+                if let Some(rest) = line.strip_prefix("diff --git ") {
+                    pending_old = None;
+                    current = git_header_paths(rest).1.map(PathBuf::from);
+                } else if let Some(path) = line.strip_prefix("--- ") {
+                    pending_old = diff_path(path);
+                } else if let Some(path) = line.strip_prefix("+++ ") {
+                    if let Some(path) = diff_path(path).or_else(|| pending_old.take()) {
+                        current = Some(PathBuf::from(path));
+                    }
+                }
             }
         }
     }
-    hunks
-}
-
-/// The lines a hunk still holds, from the counts in its `@@ -a,b +c,d @@` header (an omitted
-/// count is 1). While any remain, a line is content whatever it starts with; once both reach
-/// zero, the next line is a header again, which is where a following git or plain entry begins.
-#[derive(Default)]
-struct HunkBody {
-    old: u32,
-    new: u32,
-}
-
-impl HunkBody {
-    fn start(header: &str) -> Self {
-        let mut parts = header.split_whitespace();
-        let count = |side: Option<&str>, marker: char| -> u32 {
-            side.and_then(|side| side.strip_prefix(marker))
-                .and_then(|side| match side.split_once(',') {
-                    Some((_, count)) => count.parse::<u32>().ok(),
-                    None => Some(1),
-                })
-                .unwrap_or(0)
-        };
-        let old = count(parts.next(), '-');
-        let new = count(parts.next(), '+');
-        Self { old, new }
-    }
-
-    /// Whether `line` is content of this hunk, counting it off if so. A line the remaining
-    /// counts cannot place, such as `diff --git`, ends the hunk.
-    fn take(&mut self, line: &str) -> bool {
-        if self.old == 0 && self.new == 0 {
-            return false;
+    if malformed.is_none() {
+        if let Err(malformation) = scanner.finish() {
+            malformed = Some((current, malformation));
         }
-        match line.as_bytes().first() {
-            Some(b'-') if self.old > 0 => self.old -= 1,
-            Some(b'+') if self.new > 0 => self.new -= 1,
-            Some(b' ') | None if self.old > 0 && self.new > 0 => {
-                self.old -= 1;
-                self.new -= 1;
-            }
-            Some(b'\\') => {}
-            _ => {
-                *self = Self::default();
-                return false;
-            }
-        }
-        true
     }
+    UnifiedDiffScan { hunks, malformed }
 }
 
 /// `-a,b +c,d` (a `,count` of 1 may be omitted) into `(old, new)` line ranges.
@@ -2809,6 +2822,27 @@ fn hunk_side_range(side: &str) -> Option<Option<LineRange>> {
         start,
         end: start.saturating_add(count - 1),
     }))
+}
+
+/// A supplied diff whose hunks disagree with their headers fails verification: the changed
+/// files read from it may lack an entry an over-counted hunk consumed, so no boundary or
+/// forbidden-path check can vouch for the change.
+fn malformed_diff_violation(diff: Option<&str>) -> Option<VerificationFinding> {
+    let (path, malformation) = unified_diff_malformation(diff?)?;
+    let entry = path
+        .as_ref()
+        .map(|path| format!(" in the entry for `{}`", normalize_path(path)))
+        .unwrap_or_default();
+    Some(VerificationFinding {
+        path: path.map(|path| PathBuf::from(normalize_path(&path))),
+        kind: "malformed_diff".into(),
+        reason: format!(
+            "the supplied diff is malformed{entry} at {malformation}; the changed files read \
+             from it may be incomplete, so boundary checks cannot vouch for this change. \
+             Supply the complete, unedited diff"
+        ),
+        evidence_refs: Vec::new(),
+    })
 }
 
 fn changed_files_from_input(input: &VerifyChangeInput) -> Vec<PathBuf> {
@@ -4538,6 +4572,125 @@ rename to src/menu.rs
                 (Path::new("src/y.rs"), 1)
             ]
         );
+    }
+
+    fn malformed_diff_finding(report: &ChangeVerificationReport) -> Option<&VerificationFinding> {
+        report
+            .boundary_violations
+            .iter()
+            .find(|finding| finding.kind == "malformed_diff")
+    }
+
+    #[test]
+    fn a_well_formed_diff_is_not_reported_as_malformed() {
+        let diff = "--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -1,2 +1,2 @@\n context\n--- old\n+++ new\n\\ No newline at end of file\n";
+        let report = verify_diff(&plan_forbidding_secrets(&["src/handler.rs"]), diff);
+        assert!(malformed_diff_finding(&report).is_none(), "{report:?}");
+        assert_eq!(report.changed_files, vec![PathBuf::from("src/handler.rs")]);
+    }
+
+    #[test]
+    fn an_over_counted_hunk_that_swallows_the_next_entry_fails_naming_its_file() {
+        // The first hunk declares three added lines; the next entry's headers would be two of
+        // them, leaving `src/secrets/keys.rs` out of the changed files.
+        let diff = "--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -1,2 +1,3 @@\n-a\n+b\n--- a/src/secrets/keys.rs\n+++ b/src/secrets/keys.rs\n@@ -1 +1 @@\n-c\n+d\n";
+        let report = verify_diff(&plan_forbidding_secrets(&["src/handler.rs"]), diff);
+
+        assert_eq!(report.verdict, VerificationVerdict::Fail);
+        let finding = malformed_diff_finding(&report).expect("malformed diff is reported");
+        assert_eq!(finding.path.as_deref(), Some(Path::new("src/handler.rs")));
+        assert!(finding.reason.contains("line 8"), "{}", finding.reason);
+    }
+
+    #[test]
+    fn a_truncated_diff_fails_naming_the_file_it_stops_in() {
+        // `git diff | head` cuts the last hunk short.
+        let diff = "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -1,4 +1,4 @@\n-a\n-b\n+c\n";
+        let report = verify_diff(&plan_forbidding_secrets(&["src/handler.rs"]), diff);
+
+        assert_eq!(report.verdict, VerificationVerdict::Fail);
+        let finding = malformed_diff_finding(&report).expect("malformed diff is reported");
+        assert_eq!(finding.path.as_deref(), Some(Path::new("src/handler.rs")));
+    }
+
+    #[test]
+    fn an_under_counted_hunk_fails_rather_than_reading_content_as_a_path() {
+        let diff = "--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -1 +1 @@\n-a\n+b\n+++ b/src/elsewhere.rs\n+more\n";
+        let report = verify_diff(&plan_forbidding_secrets(&["src/handler.rs"]), diff);
+
+        assert_eq!(report.verdict, VerificationVerdict::Fail);
+        let finding = malformed_diff_finding(&report).expect("malformed diff is reported");
+        assert_eq!(finding.path.as_deref(), Some(Path::new("src/handler.rs")));
+        assert!(finding.reason.contains("line 6"), "{}", finding.reason);
+    }
+
+    #[test]
+    fn a_hunk_header_whose_count_does_not_parse_fails() {
+        // An unparsed count used to become zero, leaving the hunk's lines to be read as
+        // headers.
+        let diff = "--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -1,x +1,2 @@\n-a\n+b\n+c\n";
+        let report = verify_diff(&plan_forbidding_secrets(&["src/handler.rs"]), diff);
+
+        assert_eq!(report.verdict, VerificationVerdict::Fail);
+        let finding = malformed_diff_finding(&report).expect("malformed diff is reported");
+        assert_eq!(finding.path.as_deref(), Some(Path::new("src/handler.rs")));
+        assert!(
+            finding.reason.contains("does not parse"),
+            "{}",
+            finding.reason
+        );
+    }
+
+    #[test]
+    fn a_requested_delta_check_that_cannot_run_on_the_plan_path_is_reported() {
+        let mut plan = plan_with_boundary_evidence();
+        plan.recommended_change_boundary.evidence_refs.clear();
+        assert!(ContractBuilder::from_plan(&plan).is_err());
+        let store = RuntimeStore::new().without_runtime();
+        let verify = |check_api_surface, check_dependency_delta| {
+            ChangeVerifier::new(&store)
+                .verify(
+                    Path::new("."),
+                    &plan,
+                    VerifyChangeInput {
+                        changed_files: vec![PathBuf::from("src/handler.rs")],
+                        check_api_surface,
+                        check_dependency_delta,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        };
+        let kinds = |report: &ChangeVerificationReport| {
+            report
+                .warnings
+                .iter()
+                .map(|warning| warning.kind.as_str())
+                .filter(|kind| kind.ends_with("_check_not_run"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        let unrequested = verify(false, false);
+        assert!(kinds(&unrequested).is_empty(), "{unrequested:?}");
+
+        let requested = verify(true, true);
+        assert_eq!(
+            kinds(&requested),
+            vec![
+                "api_surface_check_not_run",
+                "dependency_delta_check_not_run"
+            ]
+        );
+        assert!(requested.api_surface_deltas.is_empty());
+        assert_ne!(requested.verdict, VerificationVerdict::Pass);
+        let reason = &requested
+            .warnings
+            .iter()
+            .find(|w| w.kind == "api_surface_check_not_run")
+            .unwrap()
+            .reason;
+        assert!(reason.contains("evidence reference"), "{reason}");
     }
 
     #[test]

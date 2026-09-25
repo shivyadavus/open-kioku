@@ -2882,6 +2882,7 @@ dependencies = [
  "open-kioku-contract",
  "open-kioku-core",
  "open-kioku-errors",
+ "open-kioku-git",
  "open-kioku-impact",
  "open-kioku-plan",
  "open-kioku-storage",
