@@ -5567,6 +5567,74 @@ mod tests {
     }
 
     #[test]
+    fn history_score_reasons_stay_paired_with_their_components_after_sorting() {
+        // Two similar changes and three co-change neighbours: sorted alone, "2 similar
+        // historical change(s)" moves ahead of "3 persisted co-change neighbor(s)" while the
+        // components keep production order, so a consumer pairing them by index swapped their
+        // facts.
+        let mut snapshot = history_snapshot();
+        let mut third = snapshot.cochange_edges[1].clone();
+        third.id = HistoryRecordId::new("cochange-bench");
+        third.cochanged_path = "benches/library.rs".into();
+        snapshot.cochange_edges.push(third);
+        let store = make_store();
+        store.put_history_snapshot(&snapshot).unwrap();
+
+        let summary = store
+            .history_score_components(
+                &HistorySignalQuery {
+                    path: "src/lib.rs".into(),
+                    task: None,
+                    symbols: Vec::new(),
+                },
+                8,
+            )
+            .unwrap();
+
+        assert!(
+            summary
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("similar change overlap: 2 similar")),
+            "{summary:#?}"
+        );
+        assert!(
+            summary
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("similar change overlap: 3 persisted")),
+            "{summary:#?}"
+        );
+        assert_eq!(summary.reasons.len(), summary.components.len());
+        let mut sorted = summary.reasons.clone();
+        sorted.sort();
+        assert_eq!(summary.reasons, sorted);
+        for (reason, component) in summary.reasons.iter().zip(&summary.components) {
+            let expected_prefix = if reason.starts_with("history churn") {
+                "history-churn:"
+            } else if reason.starts_with("ownership risk") {
+                "history-author:"
+            } else if reason.starts_with("reviewer affinity") {
+                "history-reviewer:"
+            } else if reason.contains("persisted co-change") {
+                "history-cochange:"
+            } else if reason.contains("similar historical change") {
+                "history-similar:"
+            } else {
+                panic!("unexpected history reason `{reason}`");
+            };
+            assert!(
+                component
+                    .evidence_ids
+                    .iter()
+                    .all(|id| id.starts_with(expected_prefix)),
+                "`{reason}` is paired with {:?}",
+                component.evidence_ids
+            );
+        }
+    }
+
+    #[test]
     fn similar_changes_limit_is_deterministic_and_reports_truncation() {
         let store = make_store();
         store

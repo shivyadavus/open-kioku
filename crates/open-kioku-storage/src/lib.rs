@@ -834,8 +834,7 @@ fn history_signal_summary<T: HistoryStore + ?Sized>(
 
     summary.evidence_refs.sort();
     summary.evidence_refs.dedup();
-    summary.reasons.sort();
-    summary.reasons.dedup();
+    sort_reasons_with_components(&mut summary);
     summary.uncertainty.sort();
     summary.uncertainty.dedup();
     if summary.components.is_empty() && summary.uncertainty.is_empty() {
@@ -844,6 +843,23 @@ fn history_signal_summary<T: HistoryStore + ?Sized>(
             .push("no bounded history signals were available for this path".into());
     }
     summary
+}
+
+/// Each producer pushes one reason with each component, and consumers pair them by index, so
+/// a component moves with its reason. Sorting the reasons alone gave the similar-change line
+/// the co-change component's facts whenever the two counts sorted the other way round.
+fn sort_reasons_with_components(summary: &mut HistorySignalSummary) {
+    if summary.reasons.len() != summary.components.len() {
+        summary.reasons.sort();
+        summary.reasons.dedup();
+        return;
+    }
+    let mut pairs = std::mem::take(&mut summary.reasons)
+        .into_iter()
+        .zip(std::mem::take(&mut summary.components))
+        .collect::<Vec<_>>();
+    pairs.sort_by(|left, right| left.0.cmp(&right.0));
+    (summary.reasons, summary.components) = pairs.into_iter().unzip();
 }
 
 fn add_churn_signal(summary: &mut HistorySignalSummary, churn: &ChurnSummary) {
