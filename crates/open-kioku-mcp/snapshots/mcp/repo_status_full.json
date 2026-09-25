@@ -24,20 +24,20 @@
         },
         "project_resolver_version": "project-resolver-v1",
         "proof_policy_version": "ri3-proof-policy-v1",
-        "relationship_resolver_version": "ri3-relationship-resolver-v5",
+        "relationship_resolver_version": "ri3-relationship-resolver-v6",
         "stable_identity_version": "stable-identity-v1",
         "version": 1
       },
-      "fingerprint": "55f8123643ec558b200c832b1b54d9daaaad55fe714dd0e4c7606e626788055f"
+      "fingerprint": "4778511a6c19c1ae8a429113e3cb570d663a0c8249b7ab1ec8a08939d820092a"
     },
     "analysis_semantics_status": {
       "affected_components": [],
       "affected_languages": [],
-      "current_fingerprint": "55f8123643ec558b200c832b1b54d9daaaad55fe714dd0e4c7606e626788055f",
+      "current_fingerprint": "4778511a6c19c1ae8a429113e3cb570d663a0c8249b7ab1ec8a08939d820092a",
       "reasons": [],
       "recommended_action": "none",
       "status": "compatible",
-      "stored_fingerprint": "55f8123643ec558b200c832b1b54d9daaaad55fe714dd0e4c7606e626788055f"
+      "stored_fingerprint": "4778511a6c19c1ae8a429113e3cb570d663a0c8249b7ab1ec8a08939d820092a"
     },
     "chunk_count": 1,
     "coverage": null,

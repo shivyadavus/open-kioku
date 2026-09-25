@@ -104,6 +104,11 @@ struct RelationshipBenchCase {
     candidate_count_expected: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metamorphic_group: Option<String>,
+    /// For a `MustNotEmit` case, a non-authoritative relationship from the source is a violation
+    /// too. Without it only authoritative edges are checked, though heuristic edges still reach
+    /// callers and impact.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    forbid_heuristic_edges: bool,
     /// Versioned adversarial/scenario family exercised by the live producer.
     scenario: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -748,6 +753,14 @@ fn validate_relationship_bench_corpus(corpus: &RelationshipBenchCorpus) -> anyho
                 metamorphic_contracts.insert(group.to_string(), contract);
             }
         }
+        if case.forbid_heuristic_edges
+            && case.expected_outcome != RelationshipBenchExpectedOutcome::MustNotEmit
+        {
+            anyhow::bail!(
+                "case {} sets forbid_heuristic_edges but is not a MustNotEmit case",
+                case.id
+            );
+        }
         match case.expected_outcome {
             RelationshipBenchExpectedOutcome::MustEmit => {
                 let Some(target) = &case.expected_target else {
@@ -1269,6 +1282,33 @@ fn score_relationship_case(
                     observed_authoritative_targets,
                 });
             }
+            if case.forbid_heuristic_edges {
+                let heuristic_targets = relationships
+                    .iter()
+                    .filter(|relationship| {
+                        relationship.authority != open_kioku_core::RelationshipAuthority::Authoritative
+                            && relationship.relationship == case.relationship
+                            && relationship.source_identity == case.source.identity
+                    })
+                    .map(|relationship| relationship.target_identity.as_str())
+                    .collect::<Vec<_>>();
+                if !heuristic_targets.is_empty() {
+                    // Not added to `false_positives`, which measures authoritative precision.
+                    score.metrics.negative_cases_with_false_positive = 1;
+                    score.metrics.must_not_emit_cases_with_false_positive = 1;
+                    score.diagnostics.push(RelationshipBenchDiagnostic {
+                        case_id: case.id.clone(),
+                        kind: "must_not_emit_heuristic_violation".into(),
+                        message: format!(
+                            "{} non-authoritative relationship(s) were emitted for a case that forbids them: {}",
+                            heuristic_targets.len(),
+                            heuristic_targets.join(", ")
+                        ),
+                        expected_target_identity: None,
+                        observed_authoritative_targets: Vec::new(),
+                    });
+                }
+            }
         }
     }
     score
@@ -1627,6 +1667,7 @@ mod relationship_bench_v2_tests {
             forbidden_proof_kinds: BTreeSet::new(),
             candidate_count_expected: None,
             metamorphic_group: None,
+            forbid_heuristic_edges: false,
             scenario: "unit".into(),
             notes: None,
         }
@@ -1697,6 +1738,38 @@ mod relationship_bench_v2_tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("incomplete"));
+    }
+
+    #[test]
+    fn forbid_heuristic_edges_makes_a_heuristic_edge_a_must_not_emit_violation() {
+        let mut negative = case("negative", RelationshipBenchExpectedOutcome::MustNotEmit);
+        negative.forbid_heuristic_edges = true;
+        let report = score_relationship_bench_with_metadata(
+            &corpus(vec![negative]),
+            &[observation(
+                "negative",
+                RelationshipBenchObservedOutcome::Unresolved,
+                vec![observed("symbol:heuristic", RelationshipAuthority::Heuristic)],
+            )],
+            RelationshipBenchRunMetadata::default(),
+        )
+        .unwrap();
+        assert_eq!(report.overall.false_positives, 0);
+        assert_eq!(report.overall.must_not_emit_cases_with_false_positive, 1);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == "must_not_emit_heuristic_violation"
+                && diagnostic.message.contains("symbol:heuristic")
+        }));
+    }
+
+    #[test]
+    fn forbid_heuristic_edges_requires_a_must_not_emit_case() {
+        let mut ambiguous = case(
+            "ambiguous",
+            RelationshipBenchExpectedOutcome::AmbiguousNoAuthoritativeEdge,
+        );
+        ambiguous.forbid_heuristic_edges = true;
+        assert!(validate_relationship_bench_corpus(&corpus(vec![ambiguous])).is_err());
     }
 
     #[test]

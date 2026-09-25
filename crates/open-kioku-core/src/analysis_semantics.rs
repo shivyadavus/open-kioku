@@ -16,7 +16,10 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// v5: a Rust `self::` or `super::` path starts from the innermost module around the use site, an
 /// inline `mod` block included; v4 climbed from the file's module path, so `super::f()` in
 /// `mod tests` proved an edge to the parent module's `f` instead of the file's own.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v5";
+/// v6: the symbol-registry pass applies the same Rust module scoping to its heuristic edges, so a
+/// bare name no longer matches an item of its file that the use site cannot see; v5 indexes hold
+/// such `CALLS` and `REFERENCES` edges.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v6";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

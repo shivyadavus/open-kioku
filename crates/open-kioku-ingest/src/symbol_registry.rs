@@ -1,11 +1,18 @@
 use open_kioku_core::{
-    identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, FileId, GraphEdgeType,
-    GraphNodeType, ImportResolution, QualityNote, QualityNoteKind, ResolutionStatus,
-    StringInterner, Symbol, SymbolId, SymbolKind,
+    identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType,
+    GraphNodeType, ImportResolution, Language, QualityNote, QualityNoteKind, ResolutionStatus,
+    Scope, ScopeId, ScopeKind, StringInterner, Symbol, SymbolId, SymbolKind,
 };
+use open_kioku_resolution::{
+    context::rust_rules_out_same_file_item, BindingIndex, InheritanceIndex, ResolutionContext,
+    ScopeIndex, SymbolIndex,
+};
+use open_kioku_semantic_model::{ImportBinding, SemanticRepository, GLOB_IMPORT_LOCAL_NAME};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 const COMMON_NAME_CAP: usize = 32;
 const MAX_TOKENS_PER_CHUNK: usize = 80;
@@ -54,7 +61,357 @@ struct Resolution {
 struct TokenUse {
     token: String,
     line: u32,
+    /// 1-based byte column of the token's first character, as scope ranges count columns.
+    column: u32,
     is_call: bool,
+    /// Not the tail of a `path::`, the member of a `receiver.` or the name a `mod` item
+    /// declares: only a bare name is looked up in the scopes around its use. A `mod` item's
+    /// scope covers its own name, so that name would read as a use inside the module it declares.
+    bare: bool,
+}
+
+/// The resolver's scope and import model, which lets a Rust bare name match a same-file item
+/// only where the resolver's module scoping lets the use site see it (#526).
+pub struct RegistryScopeModel<'a> {
+    repository: &'a SemanticRepository,
+    symbols: &'a SymbolIndex,
+    scopes: &'a ScopeIndex,
+    bindings: &'a BindingIndex,
+    inheritance: &'a InheritanceIndex,
+    rust_files: HashMap<&'a FileId, RustFileScopes<'a>>,
+    /// Names of the repository's modules: a `use` path starting with one may name a module of
+    /// this crate rather than an external crate.
+    module_names: HashSet<&'a str>,
+}
+
+struct RustFileScopes<'a> {
+    path: &'a Path,
+    scopes: Vec<&'a Scope>,
+}
+
+impl<'a> RegistryScopeModel<'a> {
+    pub fn new(
+        files: &'a [File],
+        repository: &'a SemanticRepository,
+        symbols: &'a SymbolIndex,
+        scopes: &'a ScopeIndex,
+        bindings: &'a BindingIndex,
+        inheritance: &'a InheritanceIndex,
+    ) -> Self {
+        let mut rust_files = files
+            .iter()
+            .filter(|file| file.language == Language::Rust)
+            .map(|file| {
+                (
+                    &file.id,
+                    RustFileScopes {
+                        path: file.path.as_path(),
+                        scopes: Vec::new(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for scope in scopes.scopes.values() {
+            if let Some(file) = rust_files.get_mut(&scope.file_id) {
+                file.scopes.push(scope);
+            }
+        }
+        let module_names = symbols
+            .by_id
+            .values()
+            .filter(|symbol| matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package))
+            .map(|symbol| symbol.name.as_str())
+            .collect();
+        Self {
+            repository,
+            symbols,
+            scopes,
+            bindings,
+            inheritance,
+            rust_files,
+            module_names,
+        }
+    }
+
+    /// Whether the resolver's verdict that a same-file item is out of reach of `name` at
+    /// `scope_id` rests only on imports it models exactly.
+    ///
+    /// The resolver's rule fails closed: an import it cannot place counts as naming another item,
+    /// and a module reaches only what `use super::*` globs bring in. That is right for proving an
+    /// edge, but the registry drops a candidate on the verdict, so a path such as
+    /// `use super::helpers::make;`, `use self::inner::*;`, `use crate::*;` or a glob inside a
+    /// function body would cost a valid call its only caller edge. Only a verdict that no such
+    /// import could overturn removes a candidate.
+    fn rust_verdict_is_exact(&self, file_id: &FileId, scope_id: &ScopeId, name: &str) -> bool {
+        let named = self.file_imports(file_id, name);
+        let globs = self.file_imports(file_id, GLOB_IMPORT_LOCAL_NAME);
+        let mut current = self.scopes.get(scope_id);
+        let mut use_module = None;
+        for _ in 0..=self.scopes.scopes.len() {
+            let Some(scope) = current else {
+                break;
+            };
+            let here = named
+                .iter()
+                .filter(|binding| !binding.is_glob && binding.scope_id == scope.id)
+                .collect::<Vec<_>>();
+            if !here.is_empty() {
+                // The nearest explicit import decides, as in the resolver.
+                return here.iter().all(|binding| self.import_is_modeled(binding));
+            }
+            if matches!(scope.kind, ScopeKind::Module | ScopeKind::File) {
+                use_module = Some(scope);
+                break;
+            }
+            // A glob inside a block may bring the name in from anywhere.
+            if globs.iter().any(|glob| {
+                glob.scope_id == scope.id && self.may_name_this_crate(&glob.source_module)
+            }) {
+                return false;
+            }
+            current = scope
+                .parent_id
+                .as_ref()
+                .and_then(|parent| self.scopes.get(parent));
+        }
+        let Some(use_module) = use_module else {
+            return false;
+        };
+        // Every module the resolver's reachability walk visits: only `use super::*` globs are
+        // followed, so any other glob of this crate leaves the verdict open.
+        let mut pending = vec![use_module];
+        let mut seen = HashSet::new();
+        while let Some(module) = pending.pop() {
+            if !seen.insert(&module.id) {
+                continue;
+            }
+            for glob in globs.iter().filter(|glob| glob.scope_id == module.id) {
+                match super_glob_depth(&glob.source_module) {
+                    Some(depth) => match self.module_above(module, depth) {
+                        Some(parent) => pending.push(parent),
+                        None => return false,
+                    },
+                    None if self.may_name_this_crate(&glob.source_module) => return false,
+                    None => {}
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether the resolver places `binding` exactly: a resolved target, a `self::`/`super::`
+    /// path to one item, a `crate::` path (which it never rules out without a target), or an
+    /// external crate.
+    fn import_is_modeled(&self, binding: &ImportBinding) -> bool {
+        if binding.target_symbol.is_some() || binding.target_file.is_some() {
+            return true;
+        }
+        let source = binding.source_module.as_str();
+        let Some((path, _item)) = source.rsplit_once("::") else {
+            return false;
+        };
+        let first = path.split("::").next().unwrap_or_default();
+        match first {
+            "crate" => true,
+            "self" if path == "self" => self.relative_item_is_declared(binding, 0),
+            "super" if path.split("::").all(|segment| segment == "super") => {
+                self.relative_item_is_declared(binding, path.split("::").count())
+            }
+            "self" | "super" => false,
+            _ => !self.may_name_this_crate(source),
+        }
+    }
+
+    /// Whether the module a one-item `self::x` or `super::x` path names declares `x` itself, with
+    /// no import there that could bind it instead. The resolver maps such a path to the item the
+    /// module declares; rustc binds it to whatever the module's scope holds, which may be a `use`
+    /// of another module's item (`use a::x;` or `pub use a::*;` in the parent).
+    fn relative_item_is_declared(&self, binding: &ImportBinding, depth: usize) -> bool {
+        let Some((_, item)) = binding.source_module.rsplit_once("::") else {
+            return false;
+        };
+        let Some(start) = self.enclosing_module(&binding.scope_id) else {
+            return false;
+        };
+        let Some(module) = self.module_above(start, depth) else {
+            return false;
+        };
+        let declares = !self
+            .symbols
+            .lookup_file_scope_name(&binding.file_id, &module.id, item)
+            .is_empty();
+        let imported = self
+            .file_imports(&binding.file_id, item)
+            .iter()
+            .any(|other| !other.is_glob && other.scope_id == module.id);
+        let globbed = self
+            .file_imports(&binding.file_id, GLOB_IMPORT_LOCAL_NAME)
+            .iter()
+            .any(|glob| {
+                glob.scope_id == module.id && self.may_name_this_crate(&glob.source_module)
+            });
+        declares && !imported && !globbed
+    }
+
+    /// The nearest module or file scope at or above `scope_id`.
+    fn enclosing_module(&self, scope_id: &ScopeId) -> Option<&'a Scope> {
+        let mut current = self.scopes.get(scope_id);
+        for _ in 0..=self.scopes.scopes.len() {
+            let scope = current?;
+            if matches!(scope.kind, ScopeKind::Module | ScopeKind::File) {
+                return Some(scope);
+            }
+            current = scope.parent_id.as_ref().and_then(|id| self.scopes.get(id));
+        }
+        None
+    }
+
+    /// Whether `source` may be a path into this crate rather than into an external one.
+    fn may_name_this_crate(&self, source: &str) -> bool {
+        let first = source.split("::").next().unwrap_or_default();
+        matches!(first, "crate" | "self" | "super" | "Self") || self.module_names.contains(first)
+    }
+
+    fn file_imports(&self, file_id: &FileId, local_name: &str) -> &'a [ImportBinding] {
+        self.repository
+            .imports
+            .by_file_local_name
+            .get(&(file_id.clone(), local_name.to_string()))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The module `depth` levels above `module`, when it is in this file.
+    fn module_above(&self, module: &'a Scope, depth: usize) -> Option<&'a Scope> {
+        let mut current = module;
+        for _ in 0..depth {
+            if current.kind != ScopeKind::Module {
+                return None;
+            }
+            let mut parent = self.scopes.get(current.parent_id.as_ref()?);
+            current = loop {
+                let scope = parent?;
+                if matches!(scope.kind, ScopeKind::Module | ScopeKind::File) {
+                    break scope;
+                }
+                parent = scope.parent_id.as_ref().and_then(|id| self.scopes.get(id));
+            };
+        }
+        Some(current)
+    }
+
+    /// The innermost scope of a Rust file around a bare token, or `None` when the token is not a
+    /// bare Rust name or its file has no scopes, in which case scoping rules nothing out.
+    fn rust_use_scope(&self, chunk: &CodeChunk, token_use: &TokenUse) -> Option<&'a ScopeId> {
+        if chunk.language != Language::Rust || !token_use.bare {
+            return None;
+        }
+        let file = self.rust_files.get(&chunk.file_id)?;
+        let position = (
+            chunk
+                .range
+                .start
+                .saturating_add(token_use.line)
+                .saturating_sub(1),
+            token_use.column,
+        );
+        file.scopes
+            .iter()
+            .filter(|scope| {
+                (scope.range.start_line, scope.range.start_column) <= position
+                    && position <= (scope.range.end_line, scope.range.end_column)
+            })
+            // A nested scope starts no earlier than its parent; of two starting together the
+            // shorter is inside the other.
+            .max_by_key(|scope| {
+                (
+                    (scope.range.start_line, scope.range.start_column),
+                    std::cmp::Reverse((scope.range.end_line, scope.range.end_column)),
+                )
+            })
+            .map(|scope| &scope.id)
+    }
+
+    fn rust_context(&self, file_id: &'a FileId) -> Option<ResolutionContext<'a>> {
+        let file = self.rust_files.get(file_id)?;
+        Some(ResolutionContext::new(
+            file_id,
+            file.path,
+            None,
+            Language::Rust,
+            self.repository,
+            self.symbols,
+            self.scopes,
+            self.bindings,
+            self.inheritance,
+            open_kioku_languages::semantics_for(&Language::Rust)?,
+        ))
+    }
+}
+
+/// Which name-matched items of the use site's own file Rust scoping keeps out of reach. Worked
+/// out on the first same-file candidate only, since most tokens match none.
+struct ScopeFilter<'m, 'c> {
+    model: Option<&'m RegistryScopeModel<'m>>,
+    chunk: &'c CodeChunk,
+    token_use: &'c TokenUse,
+    site: OnceCell<Option<(ResolutionContext<'m>, &'m ScopeId)>>,
+    exact: OnceCell<bool>,
+    /// Items this use was kept from, so another use of the name on its line does not take them.
+    ruled_out: RefCell<Vec<SymbolId>>,
+}
+
+impl<'m, 'c> ScopeFilter<'m, 'c> {
+    fn new(
+        model: Option<&'m RegistryScopeModel<'m>>,
+        chunk: &'c CodeChunk,
+        token_use: &'c TokenUse,
+    ) -> Self {
+        Self {
+            model,
+            chunk,
+            token_use,
+            site: OnceCell::new(),
+            exact: OnceCell::new(),
+            ruled_out: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn admits(&self, symbol: &Symbol) -> bool {
+        let token = self.token_use.token.as_str();
+        if symbol.file_id != self.chunk.file_id || !symbol_matches_token(symbol, token) {
+            return true;
+        }
+        let site = self.site.get_or_init(|| {
+            let model = self.model?;
+            let scope_id = model.rust_use_scope(self.chunk, self.token_use)?;
+            let (file_id, _) = model.rust_files.get_key_value(&self.chunk.file_id)?;
+            Some((model.rust_context(file_id)?, scope_id))
+        });
+        let Some((ctx, scope_id)) = site else {
+            return true;
+        };
+        let ruled_out = rust_rules_out_same_file_item(ctx, scope_id, token, symbol)
+            && self.model.is_some_and(|model| {
+                *self.exact.get_or_init(|| {
+                    model.rust_verdict_is_exact(&self.chunk.file_id, scope_id, token)
+                })
+            });
+        if ruled_out {
+            self.ruled_out.borrow_mut().push(symbol.id.clone());
+        }
+        !ruled_out
+    }
+}
+
+/// `super::*` is 1 and `super::super::*` is 2; any other path is `None`.
+fn super_glob_depth(source: &str) -> Option<usize> {
+    let path = source.strip_suffix("::*")?;
+    let segments = path.split("::").collect::<Vec<_>>();
+    segments
+        .iter()
+        .all(|segment| *segment == "super")
+        .then_some(segments.len())
 }
 
 impl SymbolRegistry {
@@ -118,33 +475,46 @@ impl SymbolRegistry {
         registry
     }
 
-    fn resolve(&self, chunk: &CodeChunk, token: &str) -> Resolution {
-        if let Some(resolution) = self.resolve_import_target(chunk, token) {
+    fn resolve(&self, chunk: &CodeChunk, token: &str, scope: &ScopeFilter<'_, '_>) -> Resolution {
+        // An item of this file that Rust scoping keeps out of reach is not the target by any
+        // strategy: the registry's imports are file-wide, so an import resolved to this file (a
+        // `use super::*` beside `use mock_clock::now;`) would offer it again, and so would the
+        // name-based fallbacks. See `scoped_resolution` for what its removal may decide.
+        let admits = |symbol: &Symbol| scope.admits(symbol);
+        if let Some(resolution) = self.resolve_import_target(chunk, token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_same_file(chunk, token) {
+        if let Some(resolution) = self.resolve_same_file(chunk, token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_same_module(chunk, token) {
+        if let Some(resolution) = self.resolve_same_module(chunk, token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_unique_project_name(token) {
+        if let Some(resolution) = self.resolve_unique_project_name(token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_suffix_with_import_reachability(chunk, token) {
+        if let Some(resolution) =
+            self.resolve_suffix_with_import_reachability(chunk, token, &admits)
+        {
             return resolution;
         }
-        self.resolve_fuzzy(token).unwrap_or_else(|| Resolution {
-            symbol: None,
-            strategy: "unresolved",
-            candidates: 0,
-            confidence: Confidence::Low,
-            ambiguity_reason: Some("no registry candidate matched".into()),
-            speculative: true,
-        })
+        self.resolve_fuzzy(token, &admits)
+            .unwrap_or_else(|| Resolution {
+                symbol: None,
+                strategy: "unresolved",
+                candidates: 0,
+                confidence: Confidence::Low,
+                ambiguity_reason: Some("no registry candidate matched".into()),
+                speculative: true,
+            })
     }
 
-    fn resolve_import_target(&self, chunk: &CodeChunk, token: &str) -> Option<Resolution> {
+    fn resolve_import_target(
+        &self,
+        chunk: &CodeChunk,
+        token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
+    ) -> Option<Resolution> {
         let mut candidates = Vec::new();
         let indices = self.by_file_imports.get(&chunk.file_id);
         for &idx in indices.into_iter().flatten() {
@@ -170,10 +540,15 @@ impl SymbolRegistry {
                 );
             }
         }
-        resolution_from_candidates("direct-import", candidates, Confidence::High, false)
+        scoped_resolution("direct-import", candidates, admits, Confidence::High, false)
     }
 
-    fn resolve_same_file(&self, chunk: &CodeChunk, token: &str) -> Option<Resolution> {
+    fn resolve_same_file(
+        &self,
+        chunk: &CodeChunk,
+        token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
+    ) -> Option<Resolution> {
         let candidates = self
             .by_file
             .get(&chunk.file_id)
@@ -183,10 +558,15 @@ impl SymbolRegistry {
             .filter(|symbol| symbol_matches_token(symbol, token))
             .cloned()
             .collect::<Vec<_>>();
-        resolution_from_candidates("same-file", candidates, Confidence::High, false)
+        scoped_resolution("same-file", candidates, admits, Confidence::High, false)
     }
 
-    fn resolve_same_module(&self, chunk: &CodeChunk, token: &str) -> Option<Resolution> {
+    fn resolve_same_module(
+        &self,
+        chunk: &CodeChunk,
+        token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
+    ) -> Option<Resolution> {
         let current = chunk
             .symbol_id
             .as_ref()
@@ -201,10 +581,14 @@ impl SymbolRegistry {
             .filter(|symbol| symbol_matches_token(symbol, token))
             .cloned()
             .collect::<Vec<_>>();
-        resolution_from_candidates("same-module", candidates, Confidence::Medium, false)
+        scoped_resolution("same-module", candidates, admits, Confidence::Medium, false)
     }
 
-    fn resolve_unique_project_name(&self, token: &str) -> Option<Resolution> {
+    fn resolve_unique_project_name(
+        &self,
+        token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
+    ) -> Option<Resolution> {
         let candidates = self.by_simple_name.get(token)?;
         if candidates.len() > COMMON_NAME_CAP {
             return Some(Resolution {
@@ -224,13 +608,20 @@ impl SymbolRegistry {
             .filter_map(|id| self.by_id.get(id))
             .cloned()
             .collect::<Vec<_>>();
-        resolution_from_candidates("unique-project-name", symbols, Confidence::Medium, true)
+        scoped_resolution(
+            "unique-project-name",
+            symbols,
+            admits,
+            Confidence::Medium,
+            true,
+        )
     }
 
     fn resolve_suffix_with_import_reachability(
         &self,
         chunk: &CodeChunk,
         token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
     ) -> Option<Resolution> {
         let import_indices = self.by_file_imports.get(&chunk.file_id);
         let imported_suffixes = import_indices
@@ -255,15 +646,16 @@ impl SymbolRegistry {
                 }
             })
             .collect::<Vec<_>>();
-        resolution_from_candidates(
+        scoped_resolution(
             "suffix-import-reachability",
             candidates,
+            admits,
             Confidence::Low,
             true,
         )
     }
 
-    fn resolve_fuzzy(&self, token: &str) -> Option<Resolution> {
+    fn resolve_fuzzy(&self, token: &str, admits: &dyn Fn(&Symbol) -> bool) -> Option<Resolution> {
         if token.len() <= 3 || self.by_simple_name.len() > MAX_SIMPLE_NAMES_FOR_FUZZY {
             return None;
         }
@@ -278,7 +670,7 @@ impl SymbolRegistry {
             .take(COMMON_NAME_CAP + 1)
             .cloned()
             .collect::<Vec<_>>();
-        resolution_from_candidates("fuzzy-fallback", candidates, Confidence::Low, true)
+        scoped_resolution("fuzzy-fallback", candidates, admits, Confidence::Low, true)
     }
 }
 
@@ -287,6 +679,7 @@ pub fn resolve_symbol_edges(
     symbols: &[Symbol],
     import_resolutions: &[ImportResolution],
     scip_available: bool,
+    scope_model: Option<&RegistryScopeModel<'_>>,
 ) -> RegistryReport {
     let registry = SymbolRegistry::new(symbols, import_resolutions);
     // Scoped to this run: dropped with the report, so nothing accumulates in a
@@ -298,7 +691,8 @@ pub fn resolve_symbol_edges(
     let per_chunk_results: Vec<_> = chunks
         .par_iter()
         .map(|chunk| {
-            let resolution = resolve_chunk(&registry, chunk, scip_available, &interner);
+            let resolution =
+                resolve_chunk(&registry, chunk, scip_available, scope_model, &interner);
             (
                 resolution.facts,
                 resolution.notes,
@@ -322,7 +716,8 @@ pub fn resolve_symbol_edges(
         if unresolved_budget == 0 || unresolved_count == 0 {
             continue;
         }
-        let tokens = resolve_chunk(&registry, chunk, scip_available, &interner).unresolved;
+        let tokens =
+            resolve_chunk(&registry, chunk, scip_available, scope_model, &interner).unresolved;
         for token in tokens.into_iter().take(unresolved_budget) {
             report.quality_notes.push(QualityNote::new(
                 QualityNoteKind::SymbolRegistryUnresolved,
@@ -361,12 +756,17 @@ fn resolve_chunk(
     registry: &SymbolRegistry,
     chunk: &CodeChunk,
     scip_available: bool,
+    scope_model: Option<&RegistryScopeModel<'_>>,
     interner: &StringInterner,
 ) -> ChunkResolution {
     let mut facts = Vec::new();
     let mut notes = Vec::new();
     let mut unresolved = Vec::new();
     let mut seen = HashSet::new();
+    // Items Rust scoping kept from a bare use of a name, per line. The dedup below keys on the
+    // token, line and target, so a bare `path` resolved to a method used to absorb `dir.path()`
+    // on its line; with the bare use ruled out, the member use would surface the same edge.
+    let mut ruled_out = HashSet::new();
 
     for token_use in token_uses(&chunk.text)
         .into_iter()
@@ -380,7 +780,16 @@ fn resolve_chunk(
         {
             continue;
         }
-        let resolution = registry.resolve(chunk, &token_use.token);
+        let scope = ScopeFilter::new(scope_model, chunk, &token_use);
+        let resolution = registry.resolve(chunk, &token_use.token, &scope);
+        for id in scope.ruled_out.take() {
+            ruled_out.insert((token_use.token.clone(), token_use.line, id));
+        }
+        if resolution.symbol.as_ref().is_some_and(|symbol| {
+            ruled_out.contains(&(token_use.token.clone(), token_use.line, symbol.id.clone()))
+        }) {
+            continue;
+        }
         let resolved_id = resolution
             .symbol
             .as_ref()
@@ -411,6 +820,32 @@ fn resolve_chunk(
         notes,
         unresolved,
     }
+}
+
+/// `resolution_from_candidates` over the candidates `admits` keeps, when it keeps all or none.
+///
+/// Ruling some candidates out does not show that the name means the rest: a `mod tests` helper
+/// out of reach of a `let path = dir.path()` says nothing about the `path` method that remains.
+/// A strategy that matched a ruled-out item beside others stays ambiguous, as it was. With no
+/// survivor the strategy matched nothing and the next one runs.
+fn scoped_resolution(
+    strategy: &'static str,
+    candidates: Vec<Symbol>,
+    admits: &dyn Fn(&Symbol) -> bool,
+    confidence: Confidence,
+    speculative: bool,
+) -> Option<Resolution> {
+    let (kept, dropped): (Vec<_>, Vec<_>) =
+        candidates.into_iter().partition(|symbol| admits(symbol));
+    if kept.is_empty() || dropped.is_empty() {
+        return resolution_from_candidates(strategy, kept, confidence, speculative);
+    }
+    resolution_from_candidates(
+        strategy,
+        kept.into_iter().chain(dropped).collect(),
+        confidence,
+        speculative,
+    )
 }
 
 fn resolution_from_candidates(
@@ -552,10 +987,20 @@ fn push_token_use(
         .chars()
         .find(|ch| !ch.is_whitespace())
         .is_some_and(|ch| ch == '(');
+    let token_start = token_end - token.len();
+    let before = line[..token_start].trim_end();
+    let declares_module = before
+        .strip_suffix("mod")
+        .is_some_and(|rest| rest.is_empty() || rest.ends_with(char::is_whitespace));
+    let bare = !(before.ends_with("::")
+        || (before.ends_with('.') && !before.ends_with(".."))
+        || declares_module);
     uses.push(TokenUse {
         token: token.to_string(),
         line: line_index as u32 + 1,
+        column: token_start as u32 + 1,
         is_call,
+        bare,
     });
 }
 
@@ -730,6 +1175,7 @@ mod tests {
             &symbols,
             &[import_resolution("entry", "./util", "util")],
             false,
+            None,
         );
         let fact = report
             .analysis_facts
@@ -765,6 +1211,7 @@ mod tests {
             &symbols,
             &[],
             false,
+            None,
         );
         assert!(report
             .analysis_facts
@@ -793,6 +1240,7 @@ mod tests {
             &symbols,
             &[],
             false,
+            None,
         );
         let fact = report
             .analysis_facts
@@ -840,6 +1288,7 @@ mod tests {
             &symbols,
             &[],
             false,
+            None,
         );
         assert!(report.quality_notes.iter().any(|note| {
             note.kind == QualityNoteKind::SymbolRegistryCaveat
@@ -865,6 +1314,7 @@ mod tests {
             &symbols,
             &[],
             false,
+            None,
         );
         assert!(report.analysis_facts.is_empty());
         assert!(report.quality_notes.iter().any(|note| {
@@ -913,7 +1363,8 @@ mod tests {
                 .build()
                 .unwrap();
             for _ in 0..5 {
-                let report = pool.install(|| resolve_symbol_edges(&chunks, &symbols, &[], false));
+                let report =
+                    pool.install(|| resolve_symbol_edges(&chunks, &symbols, &[], false, None));
                 let unresolved = report
                     .quality_notes
                     .iter()
@@ -969,6 +1420,7 @@ mod tests {
             &symbols,
             &[],
             true,
+            None,
         );
         let fact = report.analysis_facts.first().unwrap();
         assert_eq!(fact.confidence, Confidence::Medium);

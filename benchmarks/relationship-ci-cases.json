@@ -763,6 +763,40 @@
       "notes": "Regression case: `self::target_fn()` inside `mod tests { use super::*; }` names the file's own `target_fn`, which the glob brings into the block's namespace."
     },
     {
+      "id": "ci-rust-calls-37-mod_block_parent_item_heuristic",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_parent_item_heuristic",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_parent_item_heuristic:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "forbid_heuristic_edges": true,
+      "scenario": "mod_block_parent_item_heuristic",
+      "notes": "Regression case (#526): inside `mod tests { use mock_clock::target_fn; }` the file's own `target_fn` is not in scope, so no CALLS edge of any authority may link the call to it, including the symbol-registry pass's same-file edge, which reaches get_references callers and impact's possible impact."
+    },
+    {
+      "id": "ci-rust-calls-38-sibling_mod_item_heuristic",
+      "fixture_id": "ci/ri3/rust/calls/sibling_mod_item_heuristic",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:sibling_mod_item_heuristic:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "forbid_heuristic_edges": true,
+      "scenario": "sibling_mod_item_heuristic",
+      "notes": "Regression case (#526): an item of a sibling `mod` block is not in scope by its bare name, so no CALLS edge of any authority may link the call to it."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",

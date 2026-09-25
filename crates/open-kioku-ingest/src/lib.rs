@@ -764,11 +764,20 @@ impl Indexer {
         let resolver_fact_count = resolver_report.analysis_facts.len();
         analysis_facts.extend(resolver_report.analysis_facts.clone());
 
+        let registry_scope_model = symbol_registry::RegistryScopeModel::new(
+            &files,
+            &semantic_repo,
+            &symbol_index,
+            &scope_index,
+            &binding_index,
+            &inheritance_index,
+        );
         let registry_report = symbol_registry::resolve_symbol_edges(
             &chunks,
             &symbols,
             &resolver_report.resolutions,
             config.scip.enabled,
+            Some(&registry_scope_model),
         );
         let registry_fact_count = registry_report.analysis_facts.len();
 
