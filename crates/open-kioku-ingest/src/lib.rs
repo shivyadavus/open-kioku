@@ -459,7 +459,7 @@ impl Indexer {
                 config,
                 scip_report: None,
                 test_count: 0,
-                excluded_test_targets: BTreeMap::new(),
+                excluded_test_targets: Some(BTreeMap::new()),
                 import_count: 0,
                 analysis: AnalysisCounts::default(),
                 quality_notes: &mode_quality_notes(mode),
@@ -1190,7 +1190,7 @@ impl Indexer {
                 .count(),
             // The disabled targets are counted beside it, so a repository whose tests are all
             // skipped does not read as one that has none.
-            excluded_test_targets: excluded_test_targets(&tests),
+            excluded_test_targets: Some(excluded_test_targets(&tests)),
             import_count: imports.len(),
             analysis: AnalysisCounts {
                 static_facts: static_analysis_facts,
@@ -1901,7 +1901,7 @@ struct IndexQualityInput<'a> {
     config: &'a OkConfig,
     scip_report: Option<&'a ScipIndexReport>,
     test_count: usize,
-    excluded_test_targets: BTreeMap<TestExclusionReason, usize>,
+    excluded_test_targets: Option<BTreeMap<TestExclusionReason, usize>>,
     import_count: usize,
     analysis: AnalysisCounts,
     quality_notes: &'a [QualityNote],
@@ -3519,7 +3519,8 @@ class Util {
                 .manifest
                 .quality
                 .excluded_test_targets
-                .get(&open_kioku_core::TestExclusionReason::Disabled)
+                .as_ref()
+                .and_then(|excluded| excluded.get(&open_kioku_core::TestExclusionReason::Disabled))
                 .copied(),
             Some(snapshot.tests.len() - enabled),
             "{names:?}"

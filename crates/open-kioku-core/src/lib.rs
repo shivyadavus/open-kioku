@@ -4545,10 +4545,11 @@ pub struct IndexQuality {
     pub test_count: usize,
     /// Indexed test targets left out of `test_count` because they cannot stand as validation
     /// evidence, by reason. Kept apart so a repository whose tests are all skipped reads as
-    /// such rather than as one with no tests. Empty on manifests written before it was
-    /// recorded, which read as no per-reason data rather than as nothing excluded.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub excluded_test_targets: BTreeMap<TestExclusionReason, usize>,
+    /// such rather than as one with no tests. `None` on manifests written before it was
+    /// recorded, so a reader can tell "not recorded" from "nothing excluded" (`{}`) and say
+    /// that a re-index is needed rather than guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_test_targets: Option<BTreeMap<TestExclusionReason, usize>>,
     pub import_count: usize,
     #[serde(default)]
     pub build_systems: Vec<String>,

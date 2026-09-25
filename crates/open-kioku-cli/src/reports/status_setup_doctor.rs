@@ -229,13 +229,12 @@ fn render_status_markdown(
             ));
         }
         let quality = &manifest.quality;
-        if quality.excluded_test_targets.is_empty() {
-            out.push_str(&format!("| Tests | {} |\n", quality.test_count));
-        } else {
-            out.push_str(&format!(
+        match &quality.excluded_test_targets {
+            Some(excluded) if !excluded.is_empty() => out.push_str(&format!(
                 "| Tests | {} |\n",
-                tests_evidence(quality.test_count, &quality.excluded_test_targets)
-            ));
+                tests_evidence(quality.test_count, excluded)
+            )),
+            _ => out.push_str(&format!("| Tests | {} |\n", quality.test_count)),
         }
         out.push_str(&format!(
             "| Imports | {} |\n",
@@ -750,9 +749,12 @@ fn quality_provider_report(
     let test_count = manifest
         .map(|manifest| manifest.quality.test_count)
         .unwrap_or(0);
-    let excluded_tests = manifest
-        .map(|manifest| manifest.quality.excluded_test_targets.clone())
-        .unwrap_or_default();
+    // No manifest means nothing is indexed, which the "index test files" advice covers. A
+    // manifest without the count predates it, and cannot tell skipped tests from absent ones.
+    let excluded_tests = match manifest {
+        Some(manifest) => manifest.quality.excluded_test_targets.clone(),
+        None => Some(std::collections::BTreeMap::new()),
+    };
     let import_count = manifest
         .map(|manifest| manifest.quality.import_count)
         .unwrap_or(0);
@@ -792,7 +794,10 @@ fn quality_provider_report(
         } else {
             CheckStatus::Warn
         },
-        evidence: tests_evidence(test_count, &excluded_tests),
+        evidence: match &excluded_tests {
+            Some(excluded) => tests_evidence(test_count, excluded),
+            None => format!("{test_count} indexed test target(s)"),
+        },
         next_step: tests_next_step(
             test_count,
             &excluded_tests,
@@ -862,13 +867,14 @@ fn quality_provider_report(
             "Gradle-scoped validation commands enabled for indexed Java test paths".into()
         } else if test_count > 0 {
             "indexed validation candidates available".into()
-        } else if excluded_tests.is_empty() {
-            "no indexed validation candidates".into()
         } else {
-            format!(
-                "no indexed validation candidates; {}",
-                all_tests_excluded(&excluded_tests)
-            )
+            match &excluded_tests {
+                Some(excluded) if !excluded.is_empty() => format!(
+                    "no indexed validation candidates; {}",
+                    all_tests_excluded(excluded)
+                ),
+                _ => "no indexed validation candidates".into(),
+            }
         },
         next_step: tests_next_step(
             test_count,
@@ -918,12 +924,18 @@ fn all_tests_excluded(
 /// a repository whose indexed tests are all skipped.
 fn tests_next_step(
     test_count: usize,
-    excluded: &std::collections::BTreeMap<open_kioku_core::TestExclusionReason, usize>,
+    excluded: &Option<std::collections::BTreeMap<open_kioku_core::TestExclusionReason, usize>>,
     no_tests_advice: &str,
 ) -> Option<String> {
     if test_count > 0 {
         return None;
     }
+    let Some(excluded) = excluded else {
+        return Some(format!(
+            "{no_tests_advice} This index predates the count of skipped tests: re-index to tell \
+             skipped tests from absent ones."
+        ));
+    };
     if excluded.is_empty() {
         return Some(no_tests_advice.into());
     }
@@ -2169,4 +2181,49 @@ fn login_returns_valid_token() {
             format!("ok mcp install claude --repo {repo_display}"),
         ],
     })
+}
+
+#[cfg(test)]
+mod tests_provider_tests {
+    use super::*;
+    use open_kioku_core::TestExclusionReason;
+    use std::collections::BTreeMap;
+
+    const ADVICE: &str = "Index test files before relying on validation recommendations.";
+
+    /// Three states, three answers: nothing indexed, everything skipped, and an index too old
+    /// to say which. Only the first may advise indexing test files without qualification.
+    #[test]
+    fn the_tests_next_step_tells_absent_skipped_and_unrecorded_apart() {
+        assert_eq!(
+            tests_next_step(0, &Some(BTreeMap::new()), ADVICE).as_deref(),
+            Some(ADVICE)
+        );
+
+        let skipped = Some(BTreeMap::from([(TestExclusionReason::Disabled, 3)]));
+        let step = tests_next_step(0, &skipped, ADVICE).unwrap();
+        assert!(step.starts_with("Enable the skipped tests"), "{step}");
+        assert!(!step.contains("Index test files"), "{step}");
+
+        let step = tests_next_step(0, &None, ADVICE).unwrap();
+        assert!(
+            step.contains("re-index to tell skipped tests from absent ones"),
+            "{step}"
+        );
+
+        assert_eq!(tests_next_step(2, &skipped, ADVICE), None);
+        assert_eq!(tests_next_step(2, &None, ADVICE), None);
+    }
+
+    #[test]
+    fn the_tests_evidence_names_what_was_withheld() {
+        assert_eq!(
+            tests_evidence(0, &BTreeMap::new()),
+            "0 indexed test target(s)"
+        );
+        assert_eq!(
+            tests_evidence(1, &BTreeMap::from([(TestExclusionReason::Disabled, 2)])),
+            "1 runnable indexed test target(s); excluded: 2 disabled test the runner skips"
+        );
+    }
 }
