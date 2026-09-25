@@ -1521,13 +1521,20 @@ fn change_boundary(
     let allowed_symbols = allowed_symbols_for_boundary(relevant_symbols, &allowed_files);
     // A rule with no evidence of its own borrows from the plan's capped boundary list, not the
     // context boundary's uncapped one, so every borrowed ref is in `evidence_by_section.boundary`.
-    let evidence_refs = boundary_evidence_refs(primary_context, &impact.direct_impacts);
+    let exact = exact_evidence_refs(
+        primary_context
+            .iter()
+            .chain(impact.direct_impacts.iter())
+            .chain(impact.indirect_impacts.iter()),
+    );
+    let evidence_refs = boundary_evidence_refs(primary_context, &impact.direct_impacts, &exact);
     let allowed_rules = boundary_file_rules(
         &allowed_files,
         primary_context,
         &context_boundary.allowed_rules,
         "primary context matched the requested edit intent",
         &evidence_refs,
+        &exact,
     );
     let caution_rules = caution_file_rules(
         &caution_files,
@@ -1535,6 +1542,7 @@ fn change_boundary(
         &context_boundary.caution_rules,
         "downstream impact candidate should be reviewed before editing",
         &evidence_refs,
+        &exact,
     );
 
     ChangeBoundary {
@@ -1581,12 +1589,13 @@ fn boundary_file_rules(
     upstream_rules: &[BoundaryFileRule],
     fallback_reason: &str,
     fallback_evidence_refs: &[String],
+    exact: &BTreeSet<String>,
 ) -> Vec<BoundaryFileRule> {
     paths
         .iter()
         .map(|path| {
             if let Some(rule) = upstream_rules.iter().find(|rule| rule.path == *path) {
-                return capped_upstream_rule(rule);
+                return capped_upstream_rule(rule, exact);
             }
             let (evidence_refs, evidence_refs_omitted) = rule_evidence_refs(
                 stable_refs(
@@ -1596,6 +1605,7 @@ fn boundary_file_rules(
                         .flat_map(|result| result.derived_evidence_ids()),
                 ),
                 fallback_evidence_refs,
+                exact,
             );
             let symbols = evidence_results
                 .iter()
@@ -1622,12 +1632,13 @@ fn caution_file_rules(
     upstream_rules: &[BoundaryFileRule],
     fallback_reason: &str,
     fallback_evidence_refs: &[String],
+    exact: &BTreeSet<String>,
 ) -> Vec<BoundaryFileRule> {
     paths
         .iter()
         .map(|path| {
             if let Some(rule) = upstream_rules.iter().find(|rule| rule.path == *path) {
-                return capped_upstream_rule(rule);
+                return capped_upstream_rule(rule, exact);
             }
             let impact_results = impact
                 .direct_impacts
@@ -1642,6 +1653,7 @@ fn caution_file_rules(
                         .flat_map(|result| result.derived_evidence_ids()),
                 ),
                 fallback_evidence_refs,
+                exact,
             );
             // RI3.7: caution wording distinguishes structurally proven dependents from
             // possible (heuristic) ones instead of presenting both with equal certainty.
@@ -1687,21 +1699,64 @@ fn caution_file_rules(
 /// A rule's own refs under `MAX_RULE_EVIDENCE_REFS`, or, when its path has none, the first refs
 /// of the plan's boundary list under `MAX_RULE_FALLBACK_EVIDENCE_REFS`; with the count the cap
 /// left out, so a shortened list is never mistaken for the whole evidence.
-fn rule_evidence_refs(own: Vec<String>, fallback: &[String]) -> (Vec<String>, usize) {
+fn rule_evidence_refs(
+    own: Vec<String>,
+    fallback: &[String],
+    exact: &BTreeSet<String>,
+) -> (Vec<String>, usize) {
     if own.is_empty() {
-        capped_refs(fallback.to_vec(), MAX_RULE_FALLBACK_EVIDENCE_REFS)
+        capped_refs(fallback.to_vec(), MAX_RULE_FALLBACK_EVIDENCE_REFS, exact)
     } else {
-        capped_refs(own, MAX_RULE_EVIDENCE_REFS)
+        capped_refs(own, MAX_RULE_EVIDENCE_REFS, exact)
     }
 }
 
-fn capped_refs(mut refs: Vec<String>, limit: usize) -> (Vec<String>, usize) {
-    // File order, so a capped list keeps the first lines of each path; as text `:10-12` would
-    // sort before `:2-4`.
-    refs.sort_by(|left, right| compare_evidence_refs(left, right));
+/// Refs that name exact facts: every line of an exact-reference result, an exact symbol
+/// anchor, and a graph edge.
+fn exact_evidence_refs<'a>(
+    results: impl IntoIterator<Item = &'a SearchResult>,
+) -> BTreeSet<String> {
+    let mut exact = BTreeSet::new();
+    for result in results {
+        let whole_result = result.is_exact_reference();
+        exact.extend(
+            result
+                .derived_evidence_ids()
+                .into_iter()
+                .filter(|evidence_ref| whole_result || is_exact_ref_scheme(evidence_ref)),
+        );
+    }
+    exact
+}
+
+fn is_exact_ref_scheme(evidence_ref: &str) -> bool {
+    evidence_ref.starts_with("symbol:") || evidence_ref.starts_with("edge:")
+}
+
+fn capped_refs(refs: Vec<String>, limit: usize, exact: &BTreeSet<String>) -> (Vec<String>, usize) {
     let omitted = refs.len().saturating_sub(limit);
-    refs.truncate(limit);
-    (refs, omitted)
+    (authority_capped_refs(refs, limit, exact), omitted)
+}
+
+/// The refs a cap keeps, listed in file order. Exact facts are kept first: in file order a
+/// result's lexical `search:` lines sort ahead of its `symbol:` anchor, so a plain cut
+/// dropped the exact fact and kept the heuristic ones. File order still decides among refs
+/// of equal authority, so a capped list keeps the first lines of each path; as text
+/// `:10-12` would sort before `:2-4`.
+fn authority_capped_refs(refs: Vec<String>, limit: usize, exact: &BTreeSet<String>) -> Vec<String> {
+    let mut refs = refs;
+    refs.sort_by(|left, right| compare_evidence_refs(left, right));
+    if refs.len() <= limit {
+        return refs;
+    }
+    let (mut kept, heuristic): (Vec<_>, Vec<_>) = refs.into_iter().partition(|evidence_ref| {
+        exact.contains(evidence_ref) || is_exact_ref_scheme(evidence_ref)
+    });
+    kept.truncate(limit);
+    let room = limit - kept.len();
+    kept.extend(heuristic.into_iter().take(room));
+    kept.sort_by(|left, right| compare_evidence_refs(left, right));
+    kept
 }
 
 /// The path, start line, end line and evidence-line index of a `search:` ref.
@@ -1739,8 +1794,9 @@ fn parsed_search_ref(evidence_ref: &str) -> Option<SearchRefParts<'_>> {
 
 /// An upstream rule keeps its own refs under the same cap, adding what the cap drops to any
 /// count it already carried.
-fn capped_upstream_rule(rule: &BoundaryFileRule) -> BoundaryFileRule {
-    let (evidence_refs, omitted) = capped_refs(rule.evidence_refs.clone(), MAX_RULE_EVIDENCE_REFS);
+fn capped_upstream_rule(rule: &BoundaryFileRule, exact: &BTreeSet<String>) -> BoundaryFileRule {
+    let (evidence_refs, omitted) =
+        capped_refs(rule.evidence_refs.clone(), MAX_RULE_EVIDENCE_REFS, exact);
     BoundaryFileRule {
         evidence_refs,
         evidence_refs_omitted: rule.evidence_refs_omitted + omitted,
@@ -1796,14 +1852,16 @@ fn default_forbidden_boundary_rules() -> Vec<BoundaryForbiddenRule> {
     .collect()
 }
 
-fn boundary_evidence_refs(primary: &[SearchResult], impacts: &[SearchResult]) -> Vec<String> {
+fn boundary_evidence_refs(
+    primary: &[SearchResult],
+    impacts: &[SearchResult],
+    exact: &BTreeSet<String>,
+) -> Vec<String> {
     let refs = primary
         .iter()
         .chain(impacts.iter())
         .flat_map(|result| result.derived_evidence_ids());
-    let mut refs = file_ordered_refs(refs);
-    refs.truncate(50);
-    refs
+    authority_capped_refs(file_ordered_refs(refs), 50, exact)
 }
 
 fn evidence_by_section(
@@ -3750,6 +3808,75 @@ mod tests {
             .evidence_refs
             .iter()
             .any(|evidence_ref| evidence_ref.starts_with("context:unrelated:")));
+    }
+
+    #[test]
+    fn exact_refs_survive_the_rule_and_boundary_caps_ahead_of_lexical_lines() {
+        // A primary result with eleven lexical lines and one exact symbol-anchor line: the
+        // `search:` refs sort ahead of `symbol:`, so a cap applied in file order cut the anchor.
+        let mut anchored = test_search_result("src/limits.rs");
+        anchored.evidence = (0..12).map(|line| format!("lexical line {line}")).collect();
+        anchored.evidence_refs = (0..12)
+            .map(|line| format!("search:src/limits.rs:1-3:{line}"))
+            .collect();
+        anchored.evidence_refs[5] = "symbol:limit-anchor".into();
+        // Twenty more primary results fill the boundary list past its cap with lexical refs.
+        let mut primary = vec![anchored];
+        primary.extend((0..20).map(|rank| {
+            let mut result = test_search_result(&format!("src/primary_{rank:02}.rs"));
+            result.evidence = (0..3).map(|line| format!("lexical line {line}")).collect();
+            result
+        }));
+        // An exact reference in a file that sorts last.
+        let mut exact = test_search_result("src/zz_caller.rs");
+        exact.exact_reference_provenance = Some(EvidenceSourceType::Scip);
+        exact.evidence_refs = vec!["search:src/zz_caller.rs:1-3:0".into()];
+        let impact = ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
+            proven_impact: Vec::new(),
+            possible_impact: Vec::new(),
+            target: "src/limits.rs".into(),
+            direct_impacts: vec![exact],
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+
+        let boundary = change_boundary(&primary, &[], &impact, &ChangeBoundary::default());
+
+        let rule = boundary
+            .allowed_rules
+            .iter()
+            .find(|rule| rule.path == Path::new("src/limits.rs"))
+            .expect("the anchored file is allowed");
+        assert_eq!(rule.evidence_refs.len(), MAX_RULE_EVIDENCE_REFS);
+        assert_eq!(rule.evidence_refs_omitted, 2);
+        assert!(
+            rule.evidence_refs
+                .contains(&"symbol:limit-anchor".to_string()),
+            "{:?}",
+            rule.evidence_refs
+        );
+        // Survivors are still listed in file order.
+        let mut ordered = rule.evidence_refs.clone();
+        ordered.sort_by(|left, right| compare_evidence_refs(left, right));
+        assert_eq!(rule.evidence_refs, ordered);
+
+        assert_eq!(boundary.evidence_refs.len(), 50);
+        for exact_ref in ["symbol:limit-anchor", "search:src/zz_caller.rs:1-3:0"] {
+            assert!(
+                boundary.evidence_refs.contains(&exact_ref.to_string()),
+                "{exact_ref} was cut: {:?}",
+                boundary.evidence_refs
+            );
+        }
     }
 
     #[test]
