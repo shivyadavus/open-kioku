@@ -200,3 +200,140 @@ fn rust_out_of_scope_item_does_not_leave_a_unique_project_name() {
         .collect::<Vec<_>>();
     assert!(facts.is_empty(), "unexpected registry edge: {facts:?}");
 }
+
+/// A call whose import the resolver's scoping rule cannot place keeps the registry's edge: the
+/// rule fails closed for proof, but dropping a candidate on it would cost a valid call its only
+/// caller edge.
+fn assert_unplaced_import_keeps_edge(worker: &str, caller: &str, target: &str) {
+    let snapshot = index_rust(worker);
+    let facts = registry_calls(&snapshot, caller, target);
+    assert_eq!(facts.len(), 1, "{facts:?}");
+}
+
+#[test]
+fn rust_import_through_a_sibling_module_keeps_the_registry_edge() {
+    assert_unplaced_import_keeps_edge(
+        "#[cfg(test)]\nmod helpers {\n    pub fn make() {}\n}\n\n#[cfg(test)]\nmod tests {\n    use super::helpers::make;\n    fn t() {\n        make();\n    }\n}\n",
+        "t",
+        "make",
+    );
+}
+
+#[test]
+fn rust_self_path_import_keeps_the_registry_edge() {
+    assert_unplaced_import_keeps_edge(
+        "mod inner {\n    pub fn target_fn() {}\n}\nuse self::inner::target_fn;\n\npub fn caller() {\n    target_fn();\n}\n",
+        "caller",
+        "target_fn",
+    );
+}
+
+#[test]
+fn rust_self_path_glob_keeps_the_registry_edge() {
+    assert_unplaced_import_keeps_edge(
+        "mod inner {\n    pub fn target_fn() {}\n}\nuse self::inner::*;\n\npub fn caller() {\n    target_fn();\n}\n",
+        "caller",
+        "target_fn",
+    );
+}
+
+#[test]
+fn rust_unprefixed_module_reexport_keeps_the_registry_edge() {
+    assert_unplaced_import_keeps_edge(
+        "mod inner {\n    pub fn target_fn() {}\n}\npub use inner::target_fn;\n\npub fn caller() {\n    target_fn();\n}\n",
+        "caller",
+        "target_fn",
+    );
+}
+
+#[test]
+fn rust_crate_path_glob_of_this_file_keeps_the_registry_edge() {
+    assert_unplaced_import_keeps_edge(
+        "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use crate::worker::*;\n    fn t() {\n        target_fn();\n    }\n}\n",
+        "t",
+        "target_fn",
+    );
+}
+
+#[test]
+fn rust_super_glob_inside_a_function_keeps_the_registry_edge() {
+    assert_unplaced_import_keeps_edge(
+        "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {\n        use super::*;\n        target_fn();\n    }\n}\n",
+        "t",
+        "target_fn",
+    );
+}
+
+#[test]
+fn rust_crate_glob_in_the_crate_root_keeps_the_registry_edge() {
+    let snapshot = index(&[
+        ("Cargo.toml", PACKAGE),
+        (
+            "src/lib.rs",
+            "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use crate::*;\n    fn t() {\n        target_fn();\n    }\n}\n",
+        ),
+    ]);
+    let facts = registry_calls(&snapshot, "t", "target_fn");
+    assert_eq!(facts.len(), 1, "{facts:?}");
+}
+
+#[test]
+fn rust_member_call_does_not_take_the_ruled_out_items_place_on_its_line() {
+    // `path` in `let path = dir.path()` is a local; the ruled-out same-file `path` must not
+    // come back as the target of `dir.path()` on the same line.
+    let snapshot = index_rust(
+        "pub struct Store;\n\nimpl Store {\n    pub fn path(&self) {}\n}\n\n#[cfg(test)]\nmod tests {\n    use mock_fs::path;\n\n    fn t(dir: Dir) {\n        let path = dir.path();\n    }\n}\n",
+    );
+    let facts = registry_calls(&snapshot, "t", "path");
+    assert!(facts.is_empty(), "unexpected registry edge: {facts:?}");
+}
+
+#[test]
+fn rust_ruling_out_some_same_file_items_does_not_pick_the_rest() {
+    // Two same-file `helper`s: the `mod tests` one is out of reach from `caller`, but that does
+    // not show that `caller` means the other; the name stays ambiguous as before.
+    let snapshot = index_rust(
+        "pub struct Store;\n\nimpl Store {\n    pub fn helper(&self) {}\n}\n\npub fn caller(dir: Dir) {\n    let helper = dir.helper();\n}\n\n#[cfg(test)]\nmod tests {\n    fn helper() {}\n}\n",
+    );
+    let caller = snapshot
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "caller")
+        .unwrap();
+    let facts = snapshot
+        .analysis_facts
+        .iter()
+        .filter(|fact| {
+            fact.source.starts_with("open-kioku-symbol-registry/")
+                && fact.symbol_id.as_ref() == Some(&caller.id)
+                && fact.target.ends_with("helper")
+        })
+        .collect::<Vec<_>>();
+    assert!(facts.is_empty(), "unexpected registry edge: {facts:?}");
+}
+
+#[test]
+fn rust_module_declaration_names_keep_their_registry_references() {
+    // A `mod` item's scope covers its own name; `m2` in `pub mod m2;` is not a use inside `m2`.
+    let with = index(&[
+        ("Cargo.toml", PACKAGE),
+        ("src/lib.rs", "pub mod m1; pub mod m2;\n"),
+        ("src/m1.rs", "pub fn one() {}\n"),
+        ("src/m2.rs", "pub fn two() {}\n"),
+    ]);
+    let m1 = with
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "m1")
+        .unwrap();
+    let m2 = with
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "m2")
+        .unwrap();
+    assert!(with.analysis_facts.iter().any(|fact| {
+        fact.source.starts_with("open-kioku-symbol-registry/")
+            && fact.symbol_id.as_ref() == Some(&m1.id)
+            && fact.target == m2.qualified_name
+    }));
+}
