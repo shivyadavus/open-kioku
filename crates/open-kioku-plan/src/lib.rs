@@ -1931,7 +1931,7 @@ fn next_steps(
     }
     if validation_omitted > 0 {
         steps.push(format!(
-            "Decide whether to also run the {validation_omitted} plausible validation target(s) past the plan's cap; `ok verify` reports each one as a missing test."
+            "Decide whether to also run the {validation_omitted} plausible validation target(s) past the plan's cap (listed in `validation_omitted_ids`); `ok verify` reports any of them it recommends as a missing test."
         ));
     }
     steps.push(
