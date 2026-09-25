@@ -527,6 +527,7 @@ pub fn task_candidate_request(
     let intent = TaskSearchIntent::parse(task).with_repository_vocabulary(files, symbols);
     candidates::CandidateRequest::new(task, intent.search_terms(task), limit)
         .with_lattice_terms(intent.lattice_terms())
+        .with_task_respellings(task_respellings(task))
 }
 
 impl<'a> ContextPackBuilder<'a> {
@@ -605,7 +606,8 @@ impl<'a> ContextPackBuilder<'a> {
         let request =
             candidates::CandidateRequest::new(task, intent.search_terms(task), candidate_limit)
                 .with_path_prefixes(path_prefixes)
-                .with_lattice_terms(intent.lattice_terms());
+                .with_lattice_terms(intent.lattice_terms())
+                .with_task_respellings(task_respellings(task));
         let routed_external_sources = external_sources
             .iter()
             .copied()
@@ -2471,6 +2473,11 @@ impl TaskSearchIntent {
     /// authority for a symbol the task did not name.
     fn lexical_search_terms(&self, task: &str) -> Vec<String> {
         let mut terms = self.search_terms(task);
+        for respelling in task_respellings(task) {
+            if !terms.contains(&respelling) {
+                terms.insert(1, respelling);
+            }
+        }
         for term in &self.lattice_anchors {
             if term.term.len() >= 3 && !terms.iter().any(|existing| existing == &term.term) {
                 terms.push(term.term.clone());
@@ -3673,6 +3680,31 @@ fn task_alias_terms(task: &str) -> Vec<String> {
         }
     }
     aliases
+}
+
+/// The whole task with each word that has a code-vocabulary alias replaced by it, when any
+/// does; other words keep their spelling so identifiers still split on case.
+fn task_respellings(task: &str) -> Vec<String> {
+    let mut changed = false;
+    let words = task
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let lower = word.to_ascii_lowercase();
+            let alias = task_token_alias(&lower);
+            if alias == lower {
+                word.to_string()
+            } else {
+                changed = true;
+                alias
+            }
+        })
+        .collect::<Vec<_>>();
+    if changed {
+        vec![words.join(" ")]
+    } else {
+        Vec::new()
+    }
 }
 
 fn task_token_alias(token: &str) -> String {
@@ -6469,6 +6501,19 @@ mod tests {
         let selected = select_context_units(vec![first, second], &budget, &mut diagnostics);
         assert_eq!(selected.len(), 1);
         assert_eq!(diagnostics.selection.omitted_due_to_caps.len(), 1);
+    }
+
+    #[test]
+    fn task_respelling_rewrites_only_aliased_words_and_keeps_identifier_case() {
+        assert_eq!(
+            task_respellings("add history configuration defaults"),
+            vec!["add history config default".to_string()]
+        );
+        assert_eq!(
+            task_respellings("Configured PlanEngine defaults"),
+            vec!["config PlanEngine default".to_string()]
+        );
+        assert!(task_respellings("parse git log cochange records").is_empty());
     }
 
     #[test]

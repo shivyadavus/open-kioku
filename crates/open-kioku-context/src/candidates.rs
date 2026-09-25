@@ -42,6 +42,10 @@ pub struct CandidateRequest {
     /// last, but the exact-symbol stream never sees them, so a stem or one-edit hop cannot
     /// claim exact authority for a symbol the task did not name.
     pub(crate) lattice_terms: Vec<crate::lattice::LatticeTerm>,
+    /// The whole task rewritten in the spelling code uses for the same words (`configuration`
+    /// -> `config`, `defaults` -> `default`). Lexical sources score it in the same tier as the
+    /// task as written, because it is the same query rather than a narrower one.
+    pub(crate) task_respellings: Vec<String>,
 }
 
 impl CandidateRequest {
@@ -52,6 +56,7 @@ impl CandidateRequest {
             limit: limit.clamp(1, 200),
             scope: CandidateScope::default(),
             lattice_terms: Vec::new(),
+            task_respellings: Vec::new(),
         }
     }
 
@@ -65,6 +70,11 @@ impl CandidateRequest {
         lattice_terms: Vec<crate::lattice::LatticeTerm>,
     ) -> Self {
         self.lattice_terms = lattice_terms;
+        self
+    }
+
+    pub(crate) fn with_task_respellings(mut self, task_respellings: Vec<String>) -> Self {
+        self.task_respellings = task_respellings;
         self
     }
 }
@@ -120,27 +130,60 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
         // being merged by minimum. Merging by minimum let whichever file happened to be #1 for
         // "case" or "fields" tie with the #1 hit for the task itself; on a 10k-file corpus that
         // put the pack's lexical stream at less than half the recall of plain `ok search`.
+        //
+        // The one exception is the task respelled in code vocabulary: it is the whole task,
+        // not a sub-query, so its hits are scored against the literal task's hits and the best
+        // `limit` of both take the first ranks. Queried after every literal term instead, a
+        // file matching the whole task only in code spelling (`HistoryConfig`,
+        // `default_history_max_commits` for "history configuration defaults") ranked behind
+        // every file that matched one literal word.
         let mut by_path = BTreeMap::<String, (usize, SearchResult)>::new();
         let mut next_rank = 1usize;
         for (term, lattice_evidence) in terms {
-            for mut result in self
+            let mut hits = self
                 .index
                 .search(term, request.limit)?
                 .into_iter()
                 .filter(|result| !is_document_candidate_path(&result.path.to_string_lossy()))
-            {
-                // Any `SearchIndex` can sit behind this source; its refs are paired on entry.
-                pair_evidence_refs(&mut result);
-                if term != request.task {
-                    push_evidence(
-                        &mut result,
-                        format!("expanded task query `{term}` matched indexed search"),
-                        None,
+                .map(|mut result| {
+                    // Any `SearchIndex` can sit behind this source; its refs are paired on entry.
+                    pair_evidence_refs(&mut result);
+                    if term != request.task {
+                        push_evidence(
+                            &mut result,
+                            format!("expanded task query `{term}` matched indexed search"),
+                            None,
+                        );
+                    }
+                    if let Some(evidence) = &lattice_evidence {
+                        push_evidence(&mut result, evidence.clone(), None);
+                    }
+                    result
+                })
+                .collect::<Vec<_>>();
+            if term == request.task && !request.task_respellings.is_empty() {
+                let mut respelled = Vec::new();
+                for respelling in &request.task_respellings {
+                    let evidence = format!(
+                        "task respelled in code vocabulary `{respelling}` matched indexed search"
+                    );
+                    respelled.extend(
+                        self.index
+                            .search(respelling, request.limit)?
+                            .into_iter()
+                            .filter(|result| {
+                                !is_document_candidate_path(&result.path.to_string_lossy())
+                            })
+                            .map(|mut result| {
+                                pair_evidence_refs(&mut result);
+                                push_evidence(&mut result, evidence.clone(), None);
+                                result
+                            }),
                     );
                 }
-                if let Some(evidence) = &lattice_evidence {
-                    push_evidence(&mut result, evidence.clone(), None);
-                }
+                hits = merge_whole_task_spellings(hits, respelled, request.limit);
+            }
+            for result in hits {
                 let key = normalize_candidate_path(&result.path.to_string_lossy());
                 match by_path.get_mut(&key) {
                     Some((_, existing)) => merge_evidence(existing, &result),
@@ -769,6 +812,72 @@ fn candidate_preferred_as_representative(
                 .is_gt())
 }
 
+/// The first tier of the lexical stream when the task has a code-vocabulary respelling: the
+/// best `limit` hits of both spellings by score, then every literal hit that tier displaced, in
+/// its own order. A literal whole-task match is demoted by a respelling, never dropped; only
+/// respelled-only hits past the cap are left out, so a respelling cannot double the whole
+/// task's share of the stream. A chunk both spellings reach is kept once, at its better score,
+/// carrying the evidence lines of both matches.
+fn merge_whole_task_spellings(
+    literal: Vec<SearchResult>,
+    respelled: Vec<SearchResult>,
+    limit: usize,
+) -> Vec<SearchResult> {
+    type ChunkKey = (std::path::PathBuf, Option<(u32, u32)>);
+    let chunk_key = |result: &SearchResult| -> ChunkKey {
+        (
+            result.path.clone(),
+            result
+                .line_range
+                .as_ref()
+                .map(|range| (range.start, range.end)),
+        )
+    };
+    let literal_keys = literal.iter().map(chunk_key).collect::<BTreeSet<_>>();
+    let mut merged = literal.iter().cloned().chain(respelled).collect::<Vec<_>>();
+    merged.sort_by(compare_whole_task_hits);
+    let mut kept = Vec::<SearchResult>::with_capacity(merged.len());
+    let mut position = BTreeMap::<ChunkKey, usize>::new();
+    for result in merged {
+        let key = chunk_key(&result);
+        match position.get(&key) {
+            Some(&index) => merge_evidence(&mut kept[index], &result),
+            None => {
+                position.insert(key, kept.len());
+                kept.push(result);
+            }
+        }
+    }
+    let displaced = kept.split_off(kept.len().min(limit));
+    let mut displaced_by_key = displaced
+        .into_iter()
+        .filter(|result| literal_keys.contains(&chunk_key(result)))
+        .map(|result| (chunk_key(&result), result))
+        .collect::<BTreeMap<_, _>>();
+    // Displaced literal hits keep the order the literal query gave them.
+    kept.extend(
+        literal
+            .iter()
+            .filter_map(|result| displaced_by_key.remove(&chunk_key(result))),
+    );
+    kept
+}
+
+/// Descending score, then path and line range, so hits of the task and of its respelling
+/// interleave the same way from every index of the same tree.
+fn compare_whole_task_hits(left: &SearchResult, right: &SearchResult) -> Ordering {
+    right
+        .score
+        .partial_cmp(&left.score)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| left.path.cmp(&right.path))
+        .then_with(|| {
+            let bounds =
+                |result: &SearchResult| result.line_range.as_ref().map(|r| (r.start, r.end));
+            bounds(left).cmp(&bounds(right))
+        })
+}
+
 fn merge_evidence_refs(target: &mut Vec<String>, incoming: &[String]) {
     for evidence in incoming {
         if !target.iter().any(|existing| existing == evidence) {
@@ -1293,6 +1402,104 @@ mod tests {
             .evidence
             .iter()
             .any(|evidence| evidence.contains("expanded task query `case`")));
+    }
+
+    #[test]
+    fn task_respelled_in_code_vocabulary_competes_with_the_literal_task() {
+        let task = "add history configuration defaults";
+        let respelled = "add history config default";
+        let index = TermAwareIndex {
+            by_term: std::collections::BTreeMap::from([
+                (
+                    task.to_string(),
+                    vec![
+                        result("src/history_report.rs", 30.0, None),
+                        result("src/settings_docs.rs", 12.0, None),
+                    ],
+                ),
+                (
+                    respelled.to_string(),
+                    vec![
+                        result("src/config.rs", 32.0, Some("HistoryConfig")),
+                        result("src/history_report.rs", 24.0, None),
+                    ],
+                ),
+                (
+                    "history".to_string(),
+                    vec![result("src/git_history.rs", 40.0, None)],
+                ),
+            ]),
+        };
+        let source = SearchIndexCandidateSource::new(index);
+        let request = CandidateRequest::new(task, vec![task.into(), "history".into()], 10)
+            .with_task_respellings(vec![respelled.into()]);
+        let stream = source.retrieve(&request).unwrap();
+        let paths = stream
+            .candidates
+            .iter()
+            .map(|candidate| candidate.result.path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        // Both spellings of the whole task share the first tier by score; a single-word
+        // sub-query still ranks after them however high its own score.
+        assert_eq!(
+            paths,
+            vec![
+                "src/config.rs",
+                "src/history_report.rs",
+                "src/settings_docs.rs",
+                "src/git_history.rs",
+            ]
+        );
+        assert!(stream.candidates[0].result.evidence.iter().any(|line| line
+            == "task respelled in code vocabulary `add history config default` matched indexed search"));
+    }
+
+    #[test]
+    fn task_respelling_demotes_but_never_drops_literal_whole_task_hits() {
+        let task = "configuration defaults";
+        let respelled = "config default";
+        let index = TermAwareIndex {
+            by_term: std::collections::BTreeMap::from([
+                (
+                    task.to_string(),
+                    vec![
+                        result("src/a.rs", 9.0, None),
+                        result("src/b.rs", 5.0, None),
+                        result("src/e.rs", 4.0, None),
+                    ],
+                ),
+                (
+                    respelled.to_string(),
+                    vec![
+                        result("src/c.rs", 7.0, None),
+                        result("src/d.rs", 6.0, None),
+                        result("src/a.rs", 8.0, None),
+                    ],
+                ),
+            ]),
+        };
+        let source = SearchIndexCandidateSource::new(index);
+        let request = CandidateRequest::new(task, vec![task.into()], 3)
+            .with_task_respellings(vec![respelled.into()]);
+        let stream = source.retrieve(&request).unwrap();
+        let paths = stream
+            .candidates
+            .iter()
+            .map(|candidate| candidate.result.path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        // The first three by score share the tier; the literal hits it displaced follow in
+        // their own order, and only the respelled-only hit past the cap is left out.
+        assert_eq!(
+            paths,
+            vec!["src/a.rs", "src/c.rs", "src/d.rs", "src/b.rs", "src/e.rs"]
+        );
+        // The chunk both spellings reached is kept once, at its literal score, and also carries
+        // the respelled match line.
+        let both = &stream.candidates[0].result;
+        assert_eq!(both.score, 9.0);
+        assert!(both.evidence.iter().any(|line| line
+            == "task respelled in code vocabulary `config default` matched indexed search"));
+        assert_eq!(both.evidence.len(), both.evidence_refs.len());
     }
 
     #[test]
