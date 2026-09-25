@@ -7,33 +7,39 @@
       ".py"
     ],
     "path_prefix_count": 0,
-    "frozen_from": "commit-derived-bench run 34201235176 (ubuntu-latest), main after #390 (generated files indexed and ranked below hand-written source)",
-    "frozen_on": "2026-09-08",
+    "frozen_from": "commit-derived-bench run 36130905144 (ubuntu-latest)",
+    "frozen_on": "2026-09-25",
     "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers",
     "base": "withheld: the base commit lives in the BENCH_<CODE>_BASE repository secret; a full hash identifies the repository",
-    "yield_note": "yield fields (gold_file_yield@B, gold_line_yield@B and their CIs) were scored before the denominator change in ae59bb1 (abstaining cases now score 0 rather than being excluded); they are informational, nothing gates on them, and the next re-freeze replaces them"
+    "source_commit": "bd5d06ab5580d023ec8e8eaa97c3d56ade93ab9f"
   },
   "cases": 462,
   "label": "dev",
-  "median_secs": 1.3414461612701416,
+  "median_secs": 1.2255314588546753,
   "metrics": {
-    "R@1": 0.3961,
+    "R@1": 0.3983,
     "R@5": 0.5996,
     "R@10": 0.6645,
-    "R@20": 0.7251,
-    "MRR": 0.4897,
-    "gold_recall@20": 0.6117,
-    "gold_file_yield@4000": 0.5387,
-    "gold_line_yield@4000": 0.17,
-    "gold_file_yield@8000": 0.5447,
-    "gold_line_yield@8000": 0.1723,
-    "gold_file_yield@16000": 0.5479,
-    "gold_line_yield@16000": 0.1749,
+    "R@20": 0.7208,
+    "MRR": 0.4905,
+    "gold_recall@20": 0.6306,
+    "gold_file_yield@4000": 0.5875,
+    "gold_line_yield@4000": 0.2112,
+    "gold_file_yield@8000": 0.6165,
+    "gold_line_yield@8000": 0.2153,
+    "gold_file_yield@16000": 0.6284,
+    "gold_line_yield@16000": 0.2179,
+    "gold_file_yield_primary@4000": 0.5285,
+    "gold_line_yield_primary@4000": 0.2033,
+    "gold_file_yield_primary@8000": 0.5363,
+    "gold_line_yield_primary@8000": 0.2056,
+    "gold_file_yield_primary@16000": 0.5439,
+    "gold_line_yield_primary@16000": 0.2082,
     "tokens_to_first_gold_p50": 0
   },
   "ci": {
     "R@1": [
-      0.3528,
+      0.355,
       0.4416
     ],
     "R@5": [
@@ -45,49 +51,670 @@
       0.71
     ],
     "R@20": [
-      0.6818,
-      0.7641
+      0.6775,
+      0.7597
     ],
     "MRR": [
-      0.4499,
-      0.5306
+      0.4507,
+      0.531
     ],
     "gold_recall@20": [
-      0.5741,
-      0.6497
+      0.5922,
+      0.6697
     ],
     "gold_file_yield@4000": [
-      0.5031,
-      0.5774
+      0.5474,
+      0.6282
     ],
     "gold_line_yield@4000": [
-      0.1414,
-      0.1979
+      0.1805,
+      0.2435
     ],
     "gold_file_yield@8000": [
-      0.5087,
-      0.5825
+      0.577,
+      0.656
     ],
     "gold_line_yield@8000": [
-      0.1442,
-      0.2002
+      0.1841,
+      0.2466
     ],
     "gold_file_yield@16000": [
-      0.5133,
-      0.5867
+      0.59,
+      0.6674
     ],
     "gold_line_yield@16000": [
-      0.1468,
-      0.2035
+      0.1864,
+      0.2492
+    ],
+    "gold_file_yield_primary@4000": [
+      0.4925,
+      0.5683
+    ],
+    "gold_line_yield_primary@4000": [
+      0.1722,
+      0.2345
+    ],
+    "gold_file_yield_primary@8000": [
+      0.4994,
+      0.5742
+    ],
+    "gold_line_yield_primary@8000": [
+      0.1743,
+      0.237
+    ],
+    "gold_file_yield_primary@16000": [
+      0.5084,
+      0.5814
+    ],
+    "gold_line_yield_primary@16000": [
+      0.1765,
+      0.2399
     ],
     "tokens_to_first_gold_p50": [
-      0.0,
-      35.0
+      0,
+      409.5
     ]
   },
   "yield_budgets": [
     4000,
     8000,
     16000
-  ]
+  ],
+  "by_task_family": {
+    "min_cases": 34,
+    "scored_cases": 462,
+    "unassigned_cases": 0,
+    "assignment": "retrieval_diagnostics.routing.task_family",
+    "families": {
+      "issue_to_code": {
+        "cases": 195,
+        "insufficient": false,
+        "metrics": {
+          "R@1": 0.4769,
+          "R@5": 0.6564,
+          "R@10": 0.7231,
+          "R@20": 0.759,
+          "MRR": 0.5581,
+          "gold_recall@20": 0.6385,
+          "gold_file_yield@4000": 0.5913,
+          "gold_line_yield@4000": 0.2586,
+          "gold_file_yield@8000": 0.6256,
+          "gold_line_yield@8000": 0.2647,
+          "gold_file_yield@16000": 0.6359,
+          "gold_line_yield@16000": 0.2673,
+          "gold_file_yield_primary@4000": 0.5205,
+          "gold_line_yield_primary@4000": 0.2469,
+          "gold_file_yield_primary@8000": 0.535,
+          "gold_line_yield_primary@8000": 0.2521,
+          "gold_file_yield_primary@16000": 0.5427,
+          "gold_line_yield_primary@16000": 0.2546,
+          "tokens_to_first_gold_p50": 0
+        },
+        "ci": {
+          "R@1": [
+            0.4051,
+            0.5436
+          ],
+          "R@5": [
+            0.5897,
+            0.7231
+          ],
+          "R@10": [
+            0.6564,
+            0.7795
+          ],
+          "R@20": [
+            0.6923,
+            0.8205
+          ],
+          "MRR": [
+            0.4936,
+            0.6191
+          ],
+          "gold_recall@20": [
+            0.5785,
+            0.6977
+          ],
+          "gold_file_yield@4000": [
+            0.532,
+            0.6492
+          ],
+          "gold_line_yield@4000": [
+            0.208,
+            0.3119
+          ],
+          "gold_file_yield@8000": [
+            0.5658,
+            0.6851
+          ],
+          "gold_line_yield@8000": [
+            0.2131,
+            0.3194
+          ],
+          "gold_file_yield@16000": [
+            0.5759,
+            0.6951
+          ],
+          "gold_line_yield@16000": [
+            0.2159,
+            0.3213
+          ],
+          "gold_file_yield_primary@4000": [
+            0.4632,
+            0.5756
+          ],
+          "gold_line_yield_primary@4000": [
+            0.1978,
+            0.2985
+          ],
+          "gold_file_yield_primary@8000": [
+            0.4729,
+            0.5901
+          ],
+          "gold_line_yield_primary@8000": [
+            0.1994,
+            0.3039
+          ],
+          "gold_file_yield_primary@16000": [
+            0.4817,
+            0.6021
+          ],
+          "gold_line_yield_primary@16000": [
+            0.204,
+            0.3077
+          ],
+          "tokens_to_first_gold_p50": [
+            0.0,
+            0
+          ]
+        },
+        "case_coverage": {
+          "share_of_scored": 0.4221,
+          "with_selected_units": 195,
+          "with_line_ranges": 195
+        },
+        "membership_fingerprint": "sha256:5d27505288b5cdb14b9ab337c1972e08c5e30ac934f5234d93eccaec0e84be83"
+      },
+      "code_to_test": {
+        "cases": 63,
+        "insufficient": false,
+        "metrics": {
+          "R@1": 0.3492,
+          "R@5": 0.5556,
+          "R@10": 0.6825,
+          "R@20": 0.746,
+          "MRR": 0.46,
+          "gold_recall@20": 0.714,
+          "gold_file_yield@4000": 0.6981,
+          "gold_line_yield@4000": 0.2092,
+          "gold_file_yield@8000": 0.7061,
+          "gold_line_yield@8000": 0.2145,
+          "gold_file_yield@16000": 0.714,
+          "gold_line_yield@16000": 0.2177,
+          "gold_file_yield_primary@4000": 0.6479,
+          "gold_line_yield_primary@4000": 0.2047,
+          "gold_file_yield_primary@8000": 0.6558,
+          "gold_line_yield_primary@8000": 0.2047,
+          "gold_file_yield_primary@16000": 0.6638,
+          "gold_line_yield_primary@16000": 0.2078,
+          "tokens_to_first_gold_p50": 1128.5
+        },
+        "ci": {
+          "R@1": [
+            0.2381,
+            0.4603
+          ],
+          "R@5": [
+            0.4286,
+            0.6825
+          ],
+          "R@10": [
+            0.5714,
+            0.7937
+          ],
+          "R@20": [
+            0.6508,
+            0.8571
+          ],
+          "MRR": [
+            0.3612,
+            0.5647
+          ],
+          "gold_recall@20": [
+            0.6111,
+            0.8093
+          ],
+          "gold_file_yield@4000": [
+            0.5976,
+            0.7976
+          ],
+          "gold_line_yield@4000": [
+            0.1261,
+            0.3003
+          ],
+          "gold_file_yield@8000": [
+            0.6058,
+            0.8024
+          ],
+          "gold_line_yield@8000": [
+            0.1319,
+            0.3069
+          ],
+          "gold_file_yield@16000": [
+            0.6111,
+            0.8093
+          ],
+          "gold_line_yield@16000": [
+            0.1349,
+            0.3129
+          ],
+          "gold_file_yield_primary@4000": [
+            0.5447,
+            0.7484
+          ],
+          "gold_line_yield_primary@4000": [
+            0.1231,
+            0.298
+          ],
+          "gold_file_yield_primary@8000": [
+            0.5526,
+            0.7593
+          ],
+          "gold_line_yield_primary@8000": [
+            0.1231,
+            0.298
+          ],
+          "gold_file_yield_primary@16000": [
+            0.5606,
+            0.7646
+          ],
+          "gold_line_yield_primary@16000": [
+            0.1248,
+            0.3003
+          ],
+          "tokens_to_first_gold_p50": [
+            0,
+            1919.5
+          ]
+        },
+        "case_coverage": {
+          "share_of_scored": 0.1364,
+          "with_selected_units": 63,
+          "with_line_ranges": 63
+        },
+        "membership_fingerprint": "sha256:2015fcfb30dbe2b99255412851bf6d42024691ba444a643d8d9f9c1c822aa73a"
+      },
+      "trace_to_code": {
+        "cases": 13,
+        "insufficient": true,
+        "metrics": {
+          "R@1": 0.5385,
+          "R@5": 0.7692,
+          "R@10": 0.8462,
+          "R@20": 0.8462,
+          "MRR": 0.6073,
+          "gold_recall@20": 0.7615,
+          "gold_file_yield@4000": 0.7462,
+          "gold_line_yield@4000": 0.2456,
+          "gold_file_yield@8000": 0.7615,
+          "gold_line_yield@8000": 0.2456,
+          "gold_file_yield@16000": 0.7615,
+          "gold_line_yield@16000": 0.2456,
+          "gold_file_yield_primary@4000": 0.6692,
+          "gold_line_yield_primary@4000": 0.2456,
+          "gold_file_yield_primary@8000": 0.6692,
+          "gold_line_yield_primary@8000": 0.2456,
+          "gold_file_yield_primary@16000": 0.6692,
+          "gold_line_yield_primary@16000": 0.2456,
+          "tokens_to_first_gold_p50": 0
+        },
+        "ci": {
+          "R@1": [
+            0.2308,
+            0.7692
+          ],
+          "R@5": [
+            0.5385,
+            1.0
+          ],
+          "R@10": [
+            0.6154,
+            1.0
+          ],
+          "R@20": [
+            0.6154,
+            1.0
+          ],
+          "MRR": [
+            0.3594,
+            0.8269
+          ],
+          "gold_recall@20": [
+            0.5231,
+            0.9538
+          ],
+          "gold_file_yield@4000": [
+            0.4923,
+            0.9385
+          ],
+          "gold_line_yield@4000": [
+            0.0769,
+            0.4324
+          ],
+          "gold_file_yield@8000": [
+            0.5231,
+            0.9538
+          ],
+          "gold_line_yield@8000": [
+            0.0769,
+            0.4324
+          ],
+          "gold_file_yield@16000": [
+            0.5231,
+            0.9538
+          ],
+          "gold_line_yield@16000": [
+            0.0769,
+            0.4324
+          ],
+          "gold_file_yield_primary@4000": [
+            0.4385,
+            0.8846
+          ],
+          "gold_line_yield_primary@4000": [
+            0.0769,
+            0.4324
+          ],
+          "gold_file_yield_primary@8000": [
+            0.4385,
+            0.8846
+          ],
+          "gold_line_yield_primary@8000": [
+            0.0769,
+            0.4324
+          ],
+          "gold_file_yield_primary@16000": [
+            0.4385,
+            0.8846
+          ],
+          "gold_line_yield_primary@16000": [
+            0.0769,
+            0.4324
+          ],
+          "tokens_to_first_gold_p50": [
+            0,
+            1792
+          ]
+        },
+        "case_coverage": {
+          "share_of_scored": 0.0281,
+          "with_selected_units": 13,
+          "with_line_ranges": 13
+        },
+        "membership_fingerprint": "sha256:74741cccf58c5f4e9854d40d0a7eea8b3b8f3bee4005e141cc8199e027e0eff4"
+      },
+      "edit_to_ripple": {
+        "cases": 1,
+        "insufficient": true,
+        "metrics": {
+          "R@1": 0.0,
+          "R@5": 0.0,
+          "R@10": 0.0,
+          "R@20": 0.0,
+          "MRR": 0.0,
+          "gold_recall@20": 0.0
+        },
+        "ci": {
+          "R@1": [
+            0.0,
+            0.0
+          ],
+          "R@5": [
+            0.0,
+            0.0
+          ],
+          "R@10": [
+            0.0,
+            0.0
+          ],
+          "R@20": [
+            0.0,
+            0.0
+          ],
+          "MRR": [
+            0.0,
+            0.0
+          ],
+          "gold_recall@20": [
+            0.0,
+            0.0
+          ]
+        },
+        "case_coverage": {
+          "share_of_scored": 0.0022,
+          "with_selected_units": 0,
+          "with_line_ranges": 1
+        },
+        "membership_fingerprint": "sha256:99268568ca745790b7a14efd8b0e68ea94b8c78ecff75aa7571d665eaa723d6b"
+      },
+      "documentation": {
+        "cases": 10,
+        "insufficient": true,
+        "metrics": {
+          "R@1": 0.2,
+          "R@5": 0.4,
+          "R@10": 0.4,
+          "R@20": 0.4,
+          "MRR": 0.3,
+          "gold_recall@20": 0.4,
+          "gold_file_yield@4000": 0.35,
+          "gold_line_yield@4000": 0.25,
+          "gold_file_yield@8000": 0.35,
+          "gold_line_yield@8000": 0.25,
+          "gold_file_yield@16000": 0.4,
+          "gold_line_yield@16000": 0.25,
+          "gold_file_yield_primary@4000": 0.35,
+          "gold_line_yield_primary@4000": 0.25,
+          "gold_file_yield_primary@8000": 0.35,
+          "gold_line_yield_primary@8000": 0.25,
+          "gold_file_yield_primary@16000": 0.35,
+          "gold_line_yield_primary@16000": 0.25,
+          "tokens_to_first_gold_p50": 305.0
+        },
+        "ci": {
+          "R@1": [
+            0.0,
+            0.5
+          ],
+          "R@5": [
+            0.1,
+            0.7
+          ],
+          "R@10": [
+            0.1,
+            0.7
+          ],
+          "R@20": [
+            0.1,
+            0.7
+          ],
+          "MRR": [
+            0.1,
+            0.55
+          ],
+          "gold_recall@20": [
+            0.1,
+            0.7
+          ],
+          "gold_file_yield@4000": [
+            0.1,
+            0.65
+          ],
+          "gold_line_yield@4000": [
+            0.0,
+            0.55
+          ],
+          "gold_file_yield@8000": [
+            0.1,
+            0.65
+          ],
+          "gold_line_yield@8000": [
+            0.0,
+            0.55
+          ],
+          "gold_file_yield@16000": [
+            0.1,
+            0.7
+          ],
+          "gold_line_yield@16000": [
+            0.0,
+            0.55
+          ],
+          "gold_file_yield_primary@4000": [
+            0.1,
+            0.65
+          ],
+          "gold_line_yield_primary@4000": [
+            0.0,
+            0.55
+          ],
+          "gold_file_yield_primary@8000": [
+            0.1,
+            0.65
+          ],
+          "gold_line_yield_primary@8000": [
+            0.0,
+            0.55
+          ],
+          "gold_file_yield_primary@16000": [
+            0.1,
+            0.65
+          ],
+          "gold_line_yield_primary@16000": [
+            0.0,
+            0.55
+          ],
+          "tokens_to_first_gold_p50": [
+            0.0,
+            1151
+          ]
+        },
+        "case_coverage": {
+          "share_of_scored": 0.0216,
+          "with_selected_units": 10,
+          "with_line_ranges": 10
+        },
+        "membership_fingerprint": "sha256:c951208b4a8e462ef2babab50512cc787c2f74b2ba847500e5b9c207afe0c4b4"
+      },
+      "general": {
+        "cases": 180,
+        "insufficient": false,
+        "metrics": {
+          "R@1": 0.3333,
+          "R@5": 0.5556,
+          "R@10": 0.6,
+          "R@20": 0.6833,
+          "MRR": 0.4328,
+          "gold_recall@20": 0.5996,
+          "gold_file_yield@4000": 0.5497,
+          "gold_line_yield@4000": 0.1572,
+          "gold_file_yield@8000": 0.583,
+          "gold_line_yield@8000": 0.1591,
+          "gold_file_yield@16000": 0.5969,
+          "gold_line_yield@16000": 0.1619,
+          "gold_file_yield_primary@4000": 0.4981,
+          "gold_line_yield_primary@4000": 0.151,
+          "gold_file_yield_primary@8000": 0.4995,
+          "gold_line_yield_primary@8000": 0.1513,
+          "gold_file_yield_primary@16000": 0.5079,
+          "gold_line_yield_primary@16000": 0.1541,
+          "tokens_to_first_gold_p50": 292
+        },
+        "ci": {
+          "R@1": [
+            0.2667,
+            0.4056
+          ],
+          "R@5": [
+            0.4778,
+            0.6278
+          ],
+          "R@10": [
+            0.5222,
+            0.6667
+          ],
+          "R@20": [
+            0.6111,
+            0.75
+          ],
+          "MRR": [
+            0.3713,
+            0.4963
+          ],
+          "gold_recall@20": [
+            0.5334,
+            0.6619
+          ],
+          "gold_file_yield@4000": [
+            0.4839,
+            0.6116
+          ],
+          "gold_line_yield@4000": [
+            0.1161,
+            0.2035
+          ],
+          "gold_file_yield@8000": [
+            0.5171,
+            0.6444
+          ],
+          "gold_line_yield@8000": [
+            0.1186,
+            0.2051
+          ],
+          "gold_file_yield@16000": [
+            0.5291,
+            0.6584
+          ],
+          "gold_line_yield@16000": [
+            0.1224,
+            0.2069
+          ],
+          "gold_file_yield_primary@4000": [
+            0.4343,
+            0.5589
+          ],
+          "gold_line_yield_primary@4000": [
+            0.1116,
+            0.1952
+          ],
+          "gold_file_yield_primary@8000": [
+            0.4357,
+            0.5597
+          ],
+          "gold_line_yield_primary@8000": [
+            0.1125,
+            0.1955
+          ],
+          "gold_file_yield_primary@16000": [
+            0.4438,
+            0.5684
+          ],
+          "gold_line_yield_primary@16000": [
+            0.1158,
+            0.1983
+          ],
+          "tokens_to_first_gold_p50": [
+            0.0,
+            1168
+          ]
+        },
+        "case_coverage": {
+          "share_of_scored": 0.3896,
+          "with_selected_units": 180,
+          "with_line_ranges": 180
+        },
+        "membership_fingerprint": "sha256:2326594db879af09c9b020e5d5718a8b75d1759d7c494dca94dfc515a4436f44"
+      }
+    }
+  }
 }
