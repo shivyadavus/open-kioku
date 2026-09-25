@@ -1,4 +1,6 @@
-use crate::rust_use_path::{map_rust_crate_name_path, map_rust_use_path, RustUsePath};
+use crate::rust_use_path::{
+    map_rust_crate_name_path, map_rust_module_file, map_rust_use_path, RustUsePath,
+};
 use open_kioku_core::{
     File, FileId, ImportSite, Language, ModuleDeclarationSite, ScopeId, ScopeKind, SymbolId,
     SymbolKind,
@@ -141,6 +143,30 @@ impl<'a> RustModuleTree<'a> {
         } else {
             declaring
         }
+    }
+
+    /// The Rust files of a crate's `src/` tree that the declared module tree does not place where
+    /// their path says: neither a crate root nor a file whose every module, from the crate root
+    /// down, is declared as a file by the module above it. That covers a file mounted by `#[path]`,
+    /// one at the default location of a `#[path]` or inline module, and one no `mod` declares,
+    /// since the module their path spells is not the one rustc compiles them as. A file with no
+    /// `Cargo.toml` above it is read against a top-level `src/`; one the tree cannot place either
+    /// way (under `src/bin/`, `tests/` or `examples/`) is not listed.
+    pub(crate) fn misplaced_module_files(&self) -> HashSet<FileId> {
+        self.files
+            .iter()
+            .filter(|(_, path)| {
+                let crate_dir = self
+                    .project
+                    .nearest_root_for(path, Language::Rust)
+                    .map_or(Path::new(""), |root| root.path.as_path());
+                map_rust_module_file(crate_dir, path).is_some_and(|file| {
+                    file.importer_root.is_none()
+                        && !self.declares_file_modules(&file, &file.importer_module)
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Extension-less paths of the files that can hold `module` in the importer's crate.
@@ -1380,6 +1406,76 @@ mod tests {
         assert_eq!(
             bound_target(&registry, "src/auth/keys.rs", "open").as_deref(),
             Some("symbol:src/session.rs:open")
+        );
+    }
+
+    #[test]
+    fn misplaced_module_files_are_those_the_module_tree_does_not_place_at_their_path() {
+        // `w.rs` mounts `elsewhere.rs` as `w::pathed` with `#[path]`, so neither `elsewhere.rs`
+        // nor the `w/pathed.rs` at the default location is the module its path spells. `deep` is
+        // declared inside an inline `mod inner` and `orphan.rs` by nothing. `bin/` and `tests/`
+        // files are crate roots of their own, which the tree does not place either way.
+        let files = [
+            "src/lib.rs",
+            "src/w.rs",
+            "src/w/child.rs",
+            "src/w/pathed.rs",
+            "src/elsewhere.rs",
+            "src/nest.rs",
+            "src/nest/inner/deep.rs",
+            "src/orphan.rs",
+            "src/bin/tool.rs",
+            "tests/it.rs",
+        ]
+        .map(source_file);
+        let mut project = ProjectModel::new();
+        project.roots.push(ProjectRoot {
+            path: PathBuf::new(),
+            language: Language::Rust,
+            package_name: None,
+            source_roots: Vec::new(),
+        });
+        let declarations = vec![
+            mod_decl("src/lib.rs", "w"),
+            mod_decl("src/lib.rs", "nest"),
+            mod_decl("src/w.rs", "child"),
+            ModuleDeclarationSite {
+                has_path_attribute: true,
+                ..mod_decl("src/w.rs", "pathed")
+            },
+            ModuleDeclarationSite {
+                scope_id: Some(ScopeId::new("scope:nest:inner")),
+                ..mod_decl("src/nest.rs", "deep")
+            },
+        ];
+        let scopes = open_kioku_resolution::ScopeIndex::build(vec![inline_module_scope(
+            "scope:nest:inner",
+            "src/nest.rs",
+        )]);
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+
+        let mut misplaced = modules
+            .misplaced_module_files()
+            .into_iter()
+            .map(|file| file.0)
+            .collect::<Vec<_>>();
+        misplaced.sort();
+        assert_eq!(
+            misplaced,
+            vec![
+                "file:src/elsewhere.rs",
+                "file:src/nest/inner/deep.rs",
+                "file:src/orphan.rs",
+                "file:src/w/pathed.rs",
+            ]
+        );
+
+        // Without a `Cargo.toml` the files are read against the top-level `src/`.
+        let no_manifest = ProjectModel::new();
+        let bare = RustModuleTree::new(&files, &no_manifest, &declarations, &scopes);
+        assert_eq!(
+            bare.misplaced_module_files(),
+            modules.misplaced_module_files()
         );
     }
 

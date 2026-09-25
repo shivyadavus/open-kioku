@@ -48,33 +48,11 @@ pub(crate) fn map_rust_use_path(
     importer: &Path,
     use_path: &str,
 ) -> Option<RustUsePath> {
-    let src_root = src_root_of(crate_dir);
-    let importer = importer.to_string_lossy().replace('\\', "/");
-    let module_file = importer
-        .strip_prefix(src_root.as_str())?
-        .strip_prefix('/')?;
-    let mut importer_module = module_file
-        .strip_suffix(".rs")?
-        .split('/')
-        .collect::<Vec<_>>();
-    // Each file under `src/bin/` is the root of its own binary crate.
-    if matches!(importer_module.as_slice(), ["bin", _, ..]) {
-        return None;
-    }
-    let importer_root = match importer_module.as_slice() {
-        ["lib"] => Some("lib"),
-        ["main"] => Some("main"),
-        _ => None,
-    };
-    if importer_root.is_some() {
-        importer_module.clear();
-    } else if importer_module.last() == Some(&"mod") {
-        importer_module.pop();
-    }
-
-    let importer_module_names = importer_module
+    let file = map_rust_module_file(crate_dir, importer)?;
+    let mut importer_module = file
+        .importer_module
         .iter()
-        .map(|segment| segment.to_string())
+        .map(String::as_str)
         .collect::<Vec<_>>();
     let mut parts = use_path.split("::");
     let first = parts.next()?;
@@ -104,10 +82,42 @@ pub(crate) fn map_rust_use_path(
     }
     segments.extend(rest);
     Some(RustUsePath {
-        src_root,
         segments: segments.into_iter().map(str::to_string).collect(),
-        importer_module: importer_module_names,
         relative: first != "crate",
+        ..file
+    })
+}
+
+/// The module that `file`, repository-relative, holds in the package at `crate_dir` as its path
+/// implies, as a path with no segments: `src/auth/keys.rs` is `["auth", "keys"]` and `src/lib.rs`
+/// the crate root. `None` outside `src/` and under `src/bin/`, as for [`map_rust_use_path`].
+pub(crate) fn map_rust_module_file(crate_dir: &Path, file: &Path) -> Option<RustUsePath> {
+    let src_root = src_root_of(crate_dir);
+    let file = file.to_string_lossy().replace('\\', "/");
+    let module_file = file.strip_prefix(src_root.as_str())?.strip_prefix('/')?;
+    let mut module = module_file
+        .strip_suffix(".rs")?
+        .split('/')
+        .collect::<Vec<_>>();
+    // Each file under `src/bin/` is the root of its own binary crate.
+    if matches!(module.as_slice(), ["bin", _, ..]) {
+        return None;
+    }
+    let importer_root = match module.as_slice() {
+        ["lib"] => Some("lib"),
+        ["main"] => Some("main"),
+        _ => None,
+    };
+    if importer_root.is_some() {
+        module.clear();
+    } else if module.last() == Some(&"mod") {
+        module.pop();
+    }
+    Some(RustUsePath {
+        src_root,
+        segments: Vec::new(),
+        importer_module: module.into_iter().map(str::to_string).collect(),
+        relative: false,
         importer_root,
     })
 }
