@@ -22,6 +22,7 @@ use open_kioku_core::{
     SearchResult, Symbol,
 };
 
+use crate::evidence_pairs::{ensure_paired, push_evidence};
 use crate::{estimate_search_result_tokens, normalize_path};
 
 pub(crate) const ENCLOSING_SYMBOL_REF: &str = "region:enclosing-symbol";
@@ -92,7 +93,7 @@ pub(crate) fn widen_selected_regions(
         let original_keys = unit_indices(&selected, &path)
             .into_iter()
             .map(|index| {
-                ensure_evidence_refs(&mut selected[index]);
+                ensure_paired(&mut selected[index]);
                 (index, RetrievalUnitKey::from_result(&selected[index]))
             })
             .collect::<Vec<_>>();
@@ -182,13 +183,14 @@ impl FileRegion<'_> {
                 ));
                 continue;
             }
-            candidate
-                .evidence_refs
-                .push(format!("{ENCLOSING_SYMBOL_REF}:{}", symbol.id));
-            candidate.evidence.push(format!(
-                "region widened to enclosing symbol `{}` (lines {}-{})",
-                symbol.qualified_name, covered.start, covered.end
-            ));
+            push_evidence(
+                &mut candidate,
+                format!(
+                    "region widened to enclosing symbol `{}` (lines {}-{})",
+                    symbol.qualified_name, covered.start, covered.end
+                ),
+                Some(format!("{ENCLOSING_SYMBOL_REF}:{}", symbol.id)),
+            );
             selected[index] = candidate;
             self.file_tokens = self.file_tokens.saturating_add(delta);
             *remaining = remaining.saturating_sub(delta);
@@ -225,13 +227,14 @@ impl FileRegion<'_> {
                 continue;
             }
             let mut unit = result.clone();
-            ensure_evidence_refs(&mut unit);
-            unit.evidence_refs
-                .push(format!("{RANKED_UNIT_REF}:{}", position + 1));
-            unit.evidence.push(format!(
-                "same-file unit re-admitted by region widening (task rank {})",
-                position + 1
-            ));
+            push_evidence(
+                &mut unit,
+                format!(
+                    "same-file unit re-admitted by region widening (task rank {})",
+                    position + 1
+                ),
+                Some(format!("{RANKED_UNIT_REF}:{}", position + 1)),
+            );
             withdraw_omission(diagnostics, &unit);
             let insert_at = unit_indices(selected, self.path)
                 .last()
@@ -295,14 +298,18 @@ impl FileRegion<'_> {
                     if self.file_tokens.saturating_add(delta) > self.cap || delta > *remaining {
                         continue;
                     }
-                    candidate.evidence_refs.push(format!(
-                        "{ADJACENT_UNIT_REF}:{}-{}",
-                        chunk.range.start, chunk.range.end
-                    ));
-                    candidate.evidence.push(format!(
-                        "region extended to adjacent chunk (lines {}-{})",
-                        chunk.range.start, chunk.range.end
-                    ));
+                    // The chunk is named with its path: a range alone is ambiguous across files.
+                    push_evidence(
+                        &mut candidate,
+                        format!(
+                            "region extended to adjacent chunk (lines {}-{})",
+                            chunk.range.start, chunk.range.end
+                        ),
+                        Some(format!(
+                            "{ADJACENT_UNIT_REF}:{}:{}-{}",
+                            self.path, chunk.range.start, chunk.range.end
+                        )),
+                    );
                     selected[index] = candidate;
                     self.file_tokens = self.file_tokens.saturating_add(delta);
                     *remaining = remaining.saturating_sub(delta);
@@ -400,12 +407,6 @@ fn region_snippet(chunks: &[&CodeChunk], wanted: &LineRange) -> Option<(LineRang
         }
     }
     covered.map(|range| (range, lines.join("\n")))
-}
-
-fn ensure_evidence_refs(result: &mut SearchResult) {
-    if result.evidence_refs.is_empty() {
-        result.evidence_refs = result.derived_evidence_ids();
-    }
 }
 
 fn retarget_trace(
@@ -546,7 +547,7 @@ mod tests {
             symbol: None,
             score: 1.0,
             match_reason: "fixture".into(),
-            evidence: Vec::new(),
+            evidence: vec!["fixture match".into()],
             evidence_refs: Vec::new(),
             confidence: 0.9,
             score_breakdown: Vec::new(),

@@ -436,16 +436,24 @@
     ],
     "evidence_by_section": {
       "boundary": [
-        "region:adjacent-unit:1-4",
-        "region:adjacent-unit:4-6",
-        "search:src/main.rs:1-4:0",
-        "search:src/main.rs:1-4:1",
-        "search:src/main.rs:5-7:0",
-        "search:src/main.rs:5-7:1",
-        "search:src/routes.rs:2-3:0",
-        "search:src/routes.rs:2-3:1",
-        "search:src/routes.rs:4-6:0",
-        "search:src/routes.rs:4-6:1"
+        "region:adjacent-unit:src/main.rs:1-4",
+        "region:adjacent-unit:src/routes.rs:4-6",
+        "search:src/main.rs:1-7:0",
+        "search:src/main.rs:1-7:1",
+        "search:src/main.rs:1-7:2",
+        "search:src/main.rs:1-7:3",
+        "search:src/main.rs:1-7:4",
+        "search:src/main.rs:1-7:5",
+        "search:src/main.rs:1-7:6",
+        "search:src/main.rs:1-7:7",
+        "search:src/routes.rs:2-6:0",
+        "search:src/routes.rs:2-6:1",
+        "search:src/routes.rs:2-6:2",
+        "search:src/routes.rs:2-6:3",
+        "search:src/routes.rs:2-6:4",
+        "search:src/routes.rs:2-6:5",
+        "search:src/routes.rs:2-6:6",
+        "search:src/routes.rs:2-6:7"
       ],
       "history": [],
       "impact": [
@@ -460,16 +468,24 @@
         "negative:validation:add-a-subtract-function-next-to-add-no"
       ],
       "primary_context": [
-        "region:adjacent-unit:1-4",
-        "region:adjacent-unit:4-6",
-        "search:src/main.rs:1-4:0",
-        "search:src/main.rs:1-4:1",
-        "search:src/main.rs:5-7:0",
-        "search:src/main.rs:5-7:1",
-        "search:src/routes.rs:2-3:0",
-        "search:src/routes.rs:2-3:1",
-        "search:src/routes.rs:4-6:0",
-        "search:src/routes.rs:4-6:1"
+        "region:adjacent-unit:src/main.rs:1-4",
+        "region:adjacent-unit:src/routes.rs:4-6",
+        "search:src/main.rs:1-7:0",
+        "search:src/main.rs:1-7:1",
+        "search:src/main.rs:1-7:2",
+        "search:src/main.rs:1-7:3",
+        "search:src/main.rs:1-7:4",
+        "search:src/main.rs:1-7:5",
+        "search:src/main.rs:1-7:6",
+        "search:src/main.rs:1-7:7",
+        "search:src/routes.rs:2-6:0",
+        "search:src/routes.rs:2-6:1",
+        "search:src/routes.rs:2-6:2",
+        "search:src/routes.rs:2-6:3",
+        "search:src/routes.rs:2-6:4",
+        "search:src/routes.rs:2-6:5",
+        "search:src/routes.rs:2-6:6",
+        "search:src/routes.rs:2-6:7"
       ],
       "validation": []
     },
@@ -641,11 +657,15 @@
           "region extended to adjacent chunk (lines 1-4)"
         ],
         "evidence_refs": [
-          "search:src/main.rs:1-4:0",
-          "search:src/main.rs:1-4:1",
-          "search:src/main.rs:5-7:0",
-          "search:src/main.rs:5-7:1",
-          "region:adjacent-unit:1-4"
+          "search:src/main.rs:1-7:0",
+          "search:src/main.rs:1-7:1",
+          "search:src/main.rs:1-7:2",
+          "search:src/main.rs:1-7:3",
+          "search:src/main.rs:1-7:4",
+          "search:src/main.rs:1-7:5",
+          "search:src/main.rs:1-7:6",
+          "search:src/main.rs:1-7:7",
+          "region:adjacent-unit:src/main.rs:1-4"
         ],
         "line_range": {
           "end": 7,
@@ -682,8 +702,12 @@
           {
             "contribution": 0.0,
             "evidence_ids": [
-              "search:src/main.rs:1-4:0",
               "search:src/main.rs:1-4:1",
+              "search:src/main.rs:1-4:2",
+              "search:src/main.rs:1-4:4",
+              "search:src/main.rs:1-4:5",
+              "search:src/main.rs:1-4:6",
+              "search:src/main.rs:1-4:7",
               "search:src/main.rs:5-7:0",
               "search:src/main.rs:5-7:1"
             ],
@@ -696,10 +720,14 @@
           {
             "contribution": 0.0,
             "evidence_ids": [
-              "search:src/main.rs:1-4:0",
-              "search:src/main.rs:1-4:1",
               "search:src/main.rs:5-7:0",
-              "search:src/main.rs:5-7:1"
+              "search:src/main.rs:5-7:1",
+              "search:src/main.rs:1-4:1",
+              "search:src/main.rs:1-4:2",
+              "search:src/main.rs:1-4:4",
+              "search:src/main.rs:1-4:5",
+              "search:src/main.rs:1-4:6",
+              "search:src/main.rs:1-4:7"
             ],
             "normalized_value": 0.0,
             "rationale": "adjusted component total to match surfaced score: tantivy hybrid lexical match",
@@ -741,11 +769,15 @@
           "region extended to adjacent chunk (lines 4-6)"
         ],
         "evidence_refs": [
-          "search:src/routes.rs:2-3:0",
-          "search:src/routes.rs:2-3:1",
-          "search:src/routes.rs:4-6:0",
-          "search:src/routes.rs:4-6:1",
-          "region:adjacent-unit:4-6"
+          "search:src/routes.rs:2-6:0",
+          "search:src/routes.rs:2-6:1",
+          "search:src/routes.rs:2-6:2",
+          "search:src/routes.rs:2-6:3",
+          "search:src/routes.rs:2-6:4",
+          "search:src/routes.rs:2-6:5",
+          "search:src/routes.rs:2-6:6",
+          "search:src/routes.rs:2-6:7",
+          "region:adjacent-unit:src/routes.rs:4-6"
         ],
         "line_range": {
           "end": 6,
@@ -784,8 +816,12 @@
             "evidence_ids": [
               "search:src/routes.rs:2-3:0",
               "search:src/routes.rs:2-3:1",
-              "search:src/routes.rs:4-6:0",
-              "search:src/routes.rs:4-6:1"
+              "search:src/routes.rs:2-3:2",
+              "search:src/routes.rs:2-3:3",
+              "search:src/routes.rs:2-3:4",
+              "search:src/routes.rs:2-3:5",
+              "search:src/routes.rs:2-3:6",
+              "search:src/routes.rs:2-3:7"
             ],
             "normalized_value": 0.0,
             "rationale": "source rank 2 with Heuristic authority: fusion_profile=rrf_measured_v1; production lexical index ranked this file",
@@ -798,8 +834,12 @@
             "evidence_ids": [
               "search:src/routes.rs:2-3:0",
               "search:src/routes.rs:2-3:1",
-              "search:src/routes.rs:4-6:0",
-              "search:src/routes.rs:4-6:1"
+              "search:src/routes.rs:2-3:2",
+              "search:src/routes.rs:2-3:3",
+              "search:src/routes.rs:2-3:4",
+              "search:src/routes.rs:2-3:5",
+              "search:src/routes.rs:2-3:6",
+              "search:src/routes.rs:2-3:7"
             ],
             "normalized_value": 0.0,
             "rationale": "adjusted component total to match surfaced score: tantivy hybrid lexical match",
@@ -836,11 +876,15 @@
       "allowed_rules": [
         {
           "evidence_refs": [
-            "region:adjacent-unit:1-4",
-            "search:src/main.rs:1-4:0",
-            "search:src/main.rs:1-4:1",
-            "search:src/main.rs:5-7:0",
-            "search:src/main.rs:5-7:1"
+            "region:adjacent-unit:src/main.rs:1-4",
+            "search:src/main.rs:1-7:0",
+            "search:src/main.rs:1-7:1",
+            "search:src/main.rs:1-7:2",
+            "search:src/main.rs:1-7:3",
+            "search:src/main.rs:1-7:4",
+            "search:src/main.rs:1-7:5",
+            "search:src/main.rs:1-7:6",
+            "search:src/main.rs:1-7:7"
           ],
           "path": "src/main.rs",
           "reason": "primary context matched the requested edit intent",
@@ -850,11 +894,15 @@
         },
         {
           "evidence_refs": [
-            "region:adjacent-unit:4-6",
-            "search:src/routes.rs:2-3:0",
-            "search:src/routes.rs:2-3:1",
-            "search:src/routes.rs:4-6:0",
-            "search:src/routes.rs:4-6:1"
+            "region:adjacent-unit:src/routes.rs:4-6",
+            "search:src/routes.rs:2-6:0",
+            "search:src/routes.rs:2-6:1",
+            "search:src/routes.rs:2-6:2",
+            "search:src/routes.rs:2-6:3",
+            "search:src/routes.rs:2-6:4",
+            "search:src/routes.rs:2-6:5",
+            "search:src/routes.rs:2-6:6",
+            "search:src/routes.rs:2-6:7"
           ],
           "path": "src/routes.rs",
           "reason": "primary context matched the requested edit intent",
@@ -867,31 +915,47 @@
       "caution_files": [],
       "caution_rules": [],
       "evidence_refs": [
-        "region:adjacent-unit:1-4",
-        "region:adjacent-unit:4-6",
-        "search:src/main.rs:1-4:0",
-        "search:src/main.rs:1-4:1",
-        "search:src/main.rs:5-7:0",
-        "search:src/main.rs:5-7:1",
-        "search:src/routes.rs:2-3:0",
-        "search:src/routes.rs:2-3:1",
-        "search:src/routes.rs:4-6:0",
-        "search:src/routes.rs:4-6:1"
+        "region:adjacent-unit:src/main.rs:1-4",
+        "region:adjacent-unit:src/routes.rs:4-6",
+        "search:src/main.rs:1-7:0",
+        "search:src/main.rs:1-7:1",
+        "search:src/main.rs:1-7:2",
+        "search:src/main.rs:1-7:3",
+        "search:src/main.rs:1-7:4",
+        "search:src/main.rs:1-7:5",
+        "search:src/main.rs:1-7:6",
+        "search:src/main.rs:1-7:7",
+        "search:src/routes.rs:2-6:0",
+        "search:src/routes.rs:2-6:1",
+        "search:src/routes.rs:2-6:2",
+        "search:src/routes.rs:2-6:3",
+        "search:src/routes.rs:2-6:4",
+        "search:src/routes.rs:2-6:5",
+        "search:src/routes.rs:2-6:6",
+        "search:src/routes.rs:2-6:7"
       ],
       "expansion_requirements": [
         {
           "reason": "Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or history analysis.",
           "required_evidence_refs": [
-            "region:adjacent-unit:1-4",
-            "region:adjacent-unit:4-6",
-            "search:src/main.rs:1-4:0",
-            "search:src/main.rs:1-4:1",
-            "search:src/main.rs:5-7:0",
-            "search:src/main.rs:5-7:1",
-            "search:src/routes.rs:2-3:0",
-            "search:src/routes.rs:2-3:1",
-            "search:src/routes.rs:4-6:0",
-            "search:src/routes.rs:4-6:1"
+            "region:adjacent-unit:src/main.rs:1-4",
+            "region:adjacent-unit:src/routes.rs:4-6",
+            "search:src/main.rs:1-7:0",
+            "search:src/main.rs:1-7:1",
+            "search:src/main.rs:1-7:2",
+            "search:src/main.rs:1-7:3",
+            "search:src/main.rs:1-7:4",
+            "search:src/main.rs:1-7:5",
+            "search:src/main.rs:1-7:6",
+            "search:src/main.rs:1-7:7",
+            "search:src/routes.rs:2-6:0",
+            "search:src/routes.rs:2-6:1",
+            "search:src/routes.rs:2-6:2",
+            "search:src/routes.rs:2-6:3",
+            "search:src/routes.rs:2-6:4",
+            "search:src/routes.rs:2-6:5",
+            "search:src/routes.rs:2-6:6",
+            "search:src/routes.rs:2-6:7"
           ]
         }
       ],
