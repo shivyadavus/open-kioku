@@ -353,6 +353,30 @@ fn test_mcp_plan_change_snapshot() {
                 "{derived} should resolve to one record"
             );
         }
+        // Refs pair with lines: the i-th ref names the fact the i-th line states, and a
+        // retrieval ref resolves to the record carrying that very line.
+        let lines = context["evidence"].as_array().unwrap();
+        let refs = context["evidence_refs"].as_array().unwrap();
+        assert_eq!(refs.len(), lines.len(), "{path}: {refs:?} vs {lines:?}");
+        let unique_refs = refs
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique_refs.len(), refs.len(), "{path}: {refs:?}");
+        for (line, evidence_ref) in lines.iter().zip(refs) {
+            let evidence_ref = evidence_ref.as_str().unwrap();
+            if !evidence_ref.starts_with("search:") {
+                continue;
+            }
+            let record = records
+                .iter()
+                .find(|record| record["id"] == evidence_ref)
+                .unwrap_or_else(|| panic!("{evidence_ref} resolves to no record"));
+            assert_eq!(
+                &record["message"], line,
+                "{evidence_ref} names another line"
+            );
+        }
         for evidence_ref in context["evidence_refs"].as_array().unwrap() {
             let evidence_ref = evidence_ref.as_str().unwrap();
             let matching = records

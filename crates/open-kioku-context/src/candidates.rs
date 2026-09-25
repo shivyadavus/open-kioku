@@ -8,6 +8,10 @@ use open_kioku_storage::SearchIndex;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::evidence_pairs::{
+    merge_evidence, pair_evidence_refs, push_evidence, sort_evidence_by_line,
+};
+
 pub mod builtins;
 
 pub const MEASURED_VALIDATION_PRIOR: f32 = 0.5;
@@ -126,26 +130,18 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
                 .filter(|result| !is_document_candidate_path(&result.path.to_string_lossy()))
             {
                 if term != request.task {
-                    let evidence = format!("expanded task query `{term}` matched indexed search");
-                    if !result.evidence.contains(&evidence) {
-                        result.evidence.push(evidence);
-                    }
+                    push_evidence(
+                        &mut result,
+                        format!("expanded task query `{term}` matched indexed search"),
+                        None,
+                    );
                 }
                 if let Some(evidence) = &lattice_evidence {
-                    if !result.evidence.contains(evidence) {
-                        result.evidence.push(evidence.clone());
-                    }
+                    push_evidence(&mut result, evidence.clone(), None);
                 }
                 let key = normalize_candidate_path(&result.path.to_string_lossy());
                 match by_path.get_mut(&key) {
-                    Some((_, existing)) => {
-                        for evidence in &result.evidence {
-                            if !existing.evidence.contains(evidence) {
-                                existing.evidence.push(evidence.clone());
-                            }
-                        }
-                        merge_evidence_refs(&mut existing.evidence_refs, &result.evidence_refs);
-                    }
+                    Some((_, existing)) => merge_evidence(existing, &result),
                     None => {
                         by_path.insert(key, (next_rank, result));
                         next_rank += 1;
@@ -227,6 +223,8 @@ impl StreamCandidate {
     ) -> Self {
         let raw_score = Some(result.score);
         let evidence_refs = result.derived_evidence_ids();
+        let mut result = result;
+        pair_evidence_refs(&mut result);
         Self {
             result,
             raw_score,
@@ -520,14 +518,12 @@ pub fn fuse_candidate_streams(
                 fused_score: 0.0,
                 authority: candidate.authority,
                 contributions: Vec::new(),
-                extra_evidence_refs: Vec::new(),
                 best_rank: rank,
                 best_authority: candidate.authority,
             });
             entry.fused_score += rrf_contribution;
             entry.authority = entry.authority.max(candidate.authority);
             entry.contributions.push(contribution);
-            merge_evidence_refs(&mut entry.extra_evidence_refs, &candidate.evidence_refs);
 
             if candidate_preferred_as_representative(
                 candidate.authority,
@@ -586,10 +582,9 @@ pub fn fuse_candidate_streams(
                 .then_with(|| left.rationale.cmp(&right.rationale))
         });
         entry.representative.score = entry.fused_score;
-        merge_evidence_refs(
-            &mut entry.representative.evidence_refs,
-            &entry.extra_evidence_refs,
-        );
+        // The other streams' refs for this unit stay on their contributions below; appending
+        // them to the representative gave it refs that no line of its own states.
+        pair_evidence_refs(&mut entry.representative);
         for contribution in &entry.contributions {
             let weight = config
                 .source_weights
@@ -708,7 +703,6 @@ struct FusedEntry {
     fused_score: f32,
     authority: RetrievalAuthority,
     contributions: Vec<RetrievalContribution>,
-    extra_evidence_refs: Vec<String>,
     best_rank: usize,
     best_authority: RetrievalAuthority,
 }
@@ -725,11 +719,8 @@ fn dedupe_stream_candidates(
         if let Some(index) = positions.get(&key).copied() {
             let existing = &mut deduped[index];
             merge_evidence_refs(&mut existing.evidence_refs, &candidate.evidence_refs);
-            merge_evidence_refs(&mut existing.result.evidence, &candidate.result.evidence);
-            merge_evidence_refs(
-                &mut existing.result.evidence_refs,
-                &candidate.result.evidence_refs,
-            );
+            merge_evidence(&mut existing.result, &candidate.result);
+            sort_evidence_by_line(&mut existing.result);
             existing.result.confidence =
                 existing.result.confidence.max(candidate.result.confidence);
 

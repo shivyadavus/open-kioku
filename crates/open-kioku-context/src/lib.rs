@@ -1,4 +1,5 @@
 use chrono::Utc;
+use evidence_pairs::{merge_evidence, push_evidence};
 use open_kioku_core::{
     negative_evidence_scope, AnalysisFact, ChangeBoundary, CodeChunk, Confidence,
     ConfidenceBreakdown, ConfidenceSignalInput, ContextBudget, ContextPack, ContextSelectedUnit,
@@ -16,6 +17,7 @@ use open_kioku_storage::{HistoryStore, OkStore, SearchIndex};
 use open_kioku_tests::TestSelector;
 
 pub mod candidates;
+mod evidence_pairs;
 mod lattice;
 mod region;
 pub mod routing;
@@ -718,6 +720,10 @@ impl<'a> ContextPackBuilder<'a> {
         // derived only from evidence that survived the primary limit; hidden retrieval candidates
         // cannot widen symbols, dependency seeds, or the allowed edit boundary.
         let mut primary_files = bounded_primary_results(primary, limit);
+        // Final ranges are known: each positional ref now names its own line's record.
+        for result in &mut primary_files {
+            evidence_pairs::publish_positional_refs(result);
+        }
         let primary_symbols = primary_files
             .iter()
             .filter_map(|result| result.symbol.clone())
@@ -759,8 +765,8 @@ impl<'a> ContextPackBuilder<'a> {
         let runtime_signals =
             runtime_signals_for_context(self.store, task, &primary_files, &supporting_files, 12)?;
         // Records for the retrieval evidence lines are taken before runtime and history
-        // annotation append lines whose refs are not index-aligned with them; those producers
-        // publish their own records below.
+        // annotation append lines that cite those producers' facts; the producers publish
+        // their own records below.
         let primary_evidence = primary_files
             .iter()
             .take(20)
@@ -892,6 +898,11 @@ impl<'a> ContextPackBuilder<'a> {
                 "context retrieval blocked because task-family required evidence was missing: {missing}"
             ));
         }
+        let unpaired = evidence_pairs::enforce_pairing(&mut primary_files)
+            .into_iter()
+            .chain(evidence_pairs::enforce_pairing(&mut supporting_files))
+            .collect::<Vec<_>>();
+        retrieval_diagnostics.caveats.extend(unpaired);
         let boundary_evidence_refs = primary_files
             .iter()
             .flat_map(|result| result.derived_evidence_ids())
@@ -1944,18 +1955,14 @@ fn annotate_results_with_runtime(results: &mut [SearchResult], signals: &[Runtim
             .collect::<Vec<_>>()
             .join(", ");
         for signal in &matched {
-            let evidence = format!(
-                "runtime corroboration `{}`: {}",
-                signal.kind, signal.message
+            push_evidence(
+                result,
+                format!(
+                    "runtime corroboration `{}`: {}",
+                    signal.kind, signal.message
+                ),
+                Some(signal.id.clone()),
             );
-            if !result.evidence.contains(&evidence) {
-                result.evidence.push(evidence);
-            }
-        }
-        for id in &evidence_ids {
-            if !result.evidence_refs.contains(id) {
-                result.evidence_refs.push(id.clone());
-            }
         }
         result.score += 0.15 * matched.len() as f32;
         result.confidence = result.confidence.max(0.75);
@@ -2123,14 +2130,7 @@ fn annotate_results_with_git_history(
                 indexed_at: Utc::now(),
                 ..Default::default()
             });
-            if !result.evidence.contains(&evidence) {
-                result.evidence.push(evidence);
-            }
-        }
-        for id in &evidence_ids {
-            if !result.evidence_refs.contains(id) {
-                result.evidence_refs.push(id.clone());
-            }
+            push_evidence(result, evidence, Some(fact.id.clone()));
         }
         result.score += (0.12 * matched.len() as f32).min(0.18);
         result.confidence = result.confidence.max(0.70);
@@ -2184,6 +2184,14 @@ fn annotate_result_with_history_signals(
             .filter(|_| paired)
             .unwrap_or(&component.rationale);
         let message = reason_line(reason);
+        // The line cites the component's first fact; the component keeps them all. A component
+        // from a store that cites nothing is named by its signal, and has no record to resolve to.
+        let line_ref = component
+            .evidence_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("history-signal:{path}:{}", component.signal));
+        push_evidence(result, message.clone(), Some(line_ref));
         for id in &component.evidence_ids {
             records.push(Evidence {
                 id: EvidenceId::new(id.clone()),
@@ -2199,17 +2207,6 @@ fn annotate_result_with_history_signals(
                 indexed_at: summary.generated_at,
                 ..Default::default()
             });
-        }
-    }
-    for reason in &summary.reasons {
-        let evidence = reason_line(reason);
-        if !result.evidence.contains(&evidence) {
-            result.evidence.push(evidence);
-        }
-    }
-    for evidence_ref in &summary.evidence_refs {
-        if !result.evidence_refs.contains(evidence_ref) {
-            result.evidence_refs.push(evidence_ref.clone());
         }
     }
     let contribution = summary
@@ -2564,28 +2561,22 @@ fn search_candidates(
         let lattice_evidence = intent.lattice_term(&term).map(|hop| hop.evidence());
         for mut result in search_chunks(chunks, files, symbols, &term, per_anchor_limit)? {
             if term != task {
-                result
-                    .evidence
-                    .push(format!("task anchor `{term}` matched"));
+                push_evidence(&mut result, format!("task anchor `{term}` matched"), None);
                 result.match_reason = format!("{}; task anchor `{term}`", result.match_reason);
             }
             if let Some(evidence) = &lattice_evidence {
-                result.evidence.push(evidence.clone());
+                push_evidence(&mut result, evidence.clone(), None);
             }
             let key = result_key(&result);
             match merged.get_mut(&key) {
                 Some(existing) => {
+                    merge_evidence(existing, &result);
                     if result.score > existing.score {
                         existing.score = result.score;
                         existing.snippet = result.snippet;
                         existing.line_range = result.line_range;
                         existing.symbol = result.symbol;
                         existing.score_breakdown = result.score_breakdown;
-                    }
-                    for evidence in result.evidence {
-                        if !existing.evidence.contains(&evidence) {
-                            existing.evidence.push(evidence);
-                        }
                     }
                     if !existing.match_reason.contains(&term) {
                         existing.match_reason =
@@ -2669,9 +2660,11 @@ fn rerank_fused_for_task_with_files(
             if contains_anchor(&haystack, anchor) {
                 result.score += 0.65;
                 result.confidence = result.confidence.max(0.85);
-                result
-                    .evidence
-                    .push(format!("primary task anchor `{anchor}` matched"));
+                push_evidence(
+                    result,
+                    format!("primary task anchor `{anchor}` matched"),
+                    None,
+                );
                 result.add_score_component(ScoreComponent::adjustment(
                     "primary_task_anchor_boost",
                     0.65,
@@ -2684,9 +2677,11 @@ fn rerank_fused_for_task_with_files(
             if contains_anchor(&haystack, anchor) {
                 result.score += 0.25;
                 result.confidence = result.confidence.max(0.65);
-                result
-                    .evidence
-                    .push(format!("reference task anchor `{anchor}` matched"));
+                push_evidence(
+                    result,
+                    format!("reference task anchor `{anchor}` matched"),
+                    None,
+                );
                 result.add_score_component(ScoreComponent::adjustment(
                     "reference_task_anchor_boost",
                     0.25,
@@ -2708,7 +2703,7 @@ fn rerank_fused_for_task_with_files(
                 };
                 result.score += boost;
                 result.confidence = result.confidence.max(0.7);
-                result.evidence.push(hop.evidence());
+                push_evidence(result, hop.evidence(), None);
                 result.add_score_component(ScoreComponent::adjustment(
                     "identifier_lattice_anchor_boost",
                     boost,
@@ -2728,9 +2723,11 @@ fn rerank_fused_for_task_with_files(
             if contains_anchor(&haystack, anchor) {
                 result.score += 0.35;
                 result.confidence = result.confidence.max(0.75);
-                result
-                    .evidence
-                    .push(format!("ticket/path task anchor `{anchor}` matched"));
+                push_evidence(
+                    result,
+                    format!("ticket/path task anchor `{anchor}` matched"),
+                    None,
+                );
                 result.add_score_component(ScoreComponent::adjustment(
                     "ticket_or_path_anchor_boost",
                     0.35,
@@ -2743,9 +2740,11 @@ fn rerank_fused_for_task_with_files(
             let scope = intent.scope_anchors.join("/");
             result.score += 0.35;
             result.confidence = result.confidence.max(0.75);
-            result
-                .evidence
-                .push(format!("commit scope `{scope}` names this path"));
+            push_evidence(
+                result,
+                format!("commit scope `{scope}` names this path"),
+                None,
+            );
             result.add_score_component(ScoreComponent::adjustment(
                 "commit_scope_path_boost",
                 0.35,
@@ -2765,9 +2764,11 @@ fn rerank_fused_for_task_with_files(
         if is_generated_result(&result.path, generated_paths)
             && !path_names_primary_anchor(&result.path, intent)
         {
-            result
-                .evidence
-                .push("generated file: ranked below hand-written source".to_string());
+            push_evidence(
+                result,
+                "generated file: ranked below hand-written source".to_string(),
+                None,
+            );
             result.add_score_component(ScoreComponent::adjustment(
                 "generated_file_demotion",
                 0.0,
@@ -3836,12 +3837,15 @@ mod tests {
         let records = annotate_result_with_history_signals(&SignalHistoryStore, &mut result)
             .expect("the double answers the signal summary");
 
+        assert_eq!(result.evidence_refs.len(), result.evidence.len());
+        // One line per component, citing its first fact; every fact still has a record.
         let history_refs = result
             .evidence_refs
             .iter()
             .filter(|evidence_ref| evidence_ref.starts_with("history-"))
             .collect::<Vec<_>>();
-        assert_eq!(history_refs.len(), 3);
+        assert_eq!(history_refs.len(), 2);
+        assert_eq!(records.len(), 3);
         for evidence_ref in history_refs {
             let matching = records
                 .iter()
@@ -3865,6 +3869,12 @@ mod tests {
                     .any(|line| line == record.message.as_str()),
                 "{evidence_ref} record message is not one of the result's lines"
             );
+            let line = result
+                .evidence_refs
+                .iter()
+                .position(|cited| cited == evidence_ref)
+                .map(|index| result.evidence[index].as_str());
+            assert_eq!(line, Some(record.message.as_str()));
         }
     }
 
@@ -4020,6 +4030,193 @@ mod tests {
             }
         }
         assert!(!evidence.iter().any(|item| item.id.0.starts_with("region:")));
+    }
+
+    #[test]
+    fn evidence_lines_and_refs_stay_paired_through_dedup_fusion_widening_and_annotation() {
+        use candidates::{fuse_candidate_streams, CandidateStream, FusionConfig, StreamCandidate};
+
+        let file = File {
+            id: open_kioku_core::FileId::new("rates"),
+            repository_id: open_kioku_core::RepositoryId::new("repo"),
+            path: "src/rates.rs".into(),
+            language: open_kioku_core::Language::Rust,
+            size_bytes: 1_000,
+            content_hash: "rates".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let chunk = |start: u32, end: u32| CodeChunk {
+            id: format!("rates:{start}"),
+            file_id: file.id.clone(),
+            range: LineRange { start, end },
+            language: open_kioku_core::Language::Rust,
+            text: (start..=end)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            symbol_id: None,
+        };
+        let chunks = vec![chunk(1, 4), chunk(5, 9)];
+        // Two index hits on one chunk, each numbering its lines from zero, as two query terms
+        // return them.
+        let hit = |lines: &[&str]| {
+            let mut result = SearchResult {
+                path: "src/rates.rs".into(),
+                line_range: Some(LineRange { start: 5, end: 9 }),
+                snippet: chunks[1].text.clone(),
+                symbol: None,
+                score: 1.0,
+                match_reason: "tantivy hybrid lexical match".into(),
+                evidence: lines.iter().map(|line| line.to_string()).collect(),
+                evidence_refs: Vec::new(),
+                confidence: 0.5,
+                score_breakdown: Vec::new(),
+                exact_reference_provenance: None,
+            };
+            result.reconcile_score_breakdown();
+            StreamCandidate::from_result(result, RetrievalAuthority::Heuristic, "lexical")
+        };
+        let lexical = CandidateStream::success(
+            RetrievalSourceKind::Lexical,
+            vec![
+                hit(&["BM25 lexical match", "query variant `rate` matched"]),
+                hit(&["BM25 lexical match", "query variant `limit` matched"]),
+            ],
+        );
+        let mut neighbor = hit(&["graph neighbor of `Limiter`"]);
+        neighbor.result.evidence_refs = vec!["edge:limiter-rates".into()];
+        neighbor.evidence_refs = vec!["edge:limiter-rates".into(), "edge:rates-limiter".into()];
+        let graph = CandidateStream::success(RetrievalSourceKind::Graph, vec![neighbor]);
+        // Two exact anchors in one other file: deduplication sorts their lines, and each ref
+        // has to move with its line.
+        let anchor = |name: &str, symbol: &str| {
+            let mut candidate = hit(&[&format!("exact semantic symbol anchor `{name}`")]);
+            candidate.result.path = "src/limits.rs".into();
+            candidate.result.evidence_refs = vec![format!("symbol:{symbol}")];
+            candidate.authority = RetrievalAuthority::Exact;
+            candidate
+        };
+        let exact = CandidateStream::success(
+            RetrievalSourceKind::ExactSemantic,
+            vec![anchor("second_limit", "1"), anchor("first_limit", "2")],
+        );
+
+        let fused = fuse_candidate_streams(&[lexical, graph, exact], 10, &FusionConfig::default());
+        for result in &fused.results {
+            assert_eq!(
+                evidence_pairs::pairing_violation(result),
+                None,
+                "{result:?}"
+            );
+        }
+        let limits = fused
+            .results
+            .iter()
+            .find(|result| result.path == std::path::Path::new("src/limits.rs"))
+            .expect("the exact anchors fuse into one unit");
+        assert_eq!(
+            limits.evidence,
+            vec![
+                "exact semantic symbol anchor `first_limit`",
+                "exact semantic symbol anchor `second_limit`",
+            ]
+        );
+        assert_eq!(limits.evidence_refs, vec!["symbol:2", "symbol:1"]);
+        let fused_results = fused
+            .results
+            .into_iter()
+            .filter(|result| result.path == std::path::Path::new("src/rates.rs"))
+            .collect::<Vec<_>>();
+        let mut diagnostics = fused.diagnostics;
+        let budget = ContextBudget {
+            region_files: 1,
+            region_tokens_per_file: 10_000,
+            ..ContextBudget::from_file_limit(8)
+        };
+        let mut primary = region::widen_selected_regions(
+            fused_results.clone(),
+            &fused_results,
+            std::slice::from_ref(&file),
+            &chunks,
+            &[],
+            &budget,
+            &mut diagnostics,
+        );
+        assert_eq!(primary.len(), 1);
+        assert_eq!(primary[0].line_range, Some(LineRange { start: 1, end: 9 }));
+        assert_eq!(evidence_pairs::pairing_violation(&primary[0]), None);
+
+        for result in &mut primary {
+            evidence_pairs::publish_positional_refs(result);
+        }
+        let records = primary
+            .iter()
+            .flat_map(primary_result_evidence)
+            .collect::<Vec<_>>();
+        annotate_results_with_runtime(
+            &mut primary,
+            &[RuntimeSignal {
+                id: "runtime:rate-limit-incident".into(),
+                kind: "incident".into(),
+                message: "rate limit exceeded".into(),
+                file_range: Some(FileRange {
+                    path: "src/rates.rs".into(),
+                    line_range: None,
+                }),
+                occurred_at: None,
+                confidence: Confidence::Medium,
+            }],
+        );
+        assert!(evidence_pairs::enforce_pairing(&mut primary).is_empty());
+
+        let result = &primary[0];
+        assert_eq!(
+            result.evidence,
+            vec![
+                "BM25 lexical match",
+                "query variant `limit` matched",
+                "query variant `rate` matched",
+                "region extended to adjacent chunk (lines 1-4)",
+                "runtime corroboration `incident`: rate limit exceeded",
+            ]
+        );
+        assert_eq!(
+            result.evidence_refs,
+            vec![
+                "search:src/rates.rs:1-9:0",
+                "search:src/rates.rs:1-9:1",
+                "search:src/rates.rs:1-9:2",
+                "region:adjacent-unit:src/rates.rs:1-4",
+                "runtime:rate-limit-incident",
+            ]
+        );
+        // Each retrieval ref resolves to the one record that states its own line.
+        for (line, evidence_ref) in result.evidence.iter().zip(&result.evidence_refs) {
+            let matching = records
+                .iter()
+                .filter(|record| record.id.0 == *evidence_ref)
+                .collect::<Vec<_>>();
+            if evidence_ref.starts_with("search:") {
+                assert_eq!(matching.len(), 1, "{evidence_ref} resolves to one record");
+                assert_eq!(matching[0].message.as_str(), line);
+            } else {
+                assert!(
+                    matching.is_empty(),
+                    "{evidence_ref} is not a retrieval record"
+                );
+            }
+        }
+        // The deduplicated lines are one retrieval fact for confidence, as before.
+        assert_eq!(open_kioku_core::distinct_evidence_count(&records), 1);
+        // The graph stream's edges stay on its contribution.
+        assert!(result.score_breakdown.iter().any(|component| {
+            component.evidence_ids
+                == vec![
+                    "edge:limiter-rates".to_string(),
+                    "edge:rates-limiter".to_string(),
+                ]
+        }));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::{compare_result_position, CandidateRequest, CandidateStream, StreamCandidate};
+use crate::evidence_pairs::{merge_evidence, push_evidence};
 use crate::{search_candidates, TaskSearchIntent};
 use open_kioku_core::{
     identity::symbol_node_id, AnalysisFact, CodeChunk, DocumentSection, EvidenceSourceType, File,
@@ -211,19 +212,24 @@ impl<'a> BuiltinCandidateContext<'a> {
                     path, section.range.start, section.range.end
                 );
                 let reason = format!("document section `{heading_label}` matched task vocabulary");
-                let result = SearchResult {
+                let mut result = SearchResult {
                     path: file.path.clone(),
                     line_range: Some(section.range.clone()),
                     snippet: section.text,
                     symbol: None,
                     score,
                     match_reason: reason.clone(),
-                    evidence: vec![reason, format!("document heading path: {heading_label}")],
+                    evidence: vec![reason],
                     evidence_refs: vec![evidence_ref],
                     confidence: 0.65,
                     score_breakdown: Vec::new(),
                     exact_reference_provenance: None,
                 };
+                push_evidence(
+                    &mut result,
+                    format!("document heading path: {heading_label}"),
+                    None,
+                );
                 scored.push((
                     score,
                     StreamCandidate::from_result(
@@ -303,7 +309,7 @@ impl<'a> BuiltinCandidateContext<'a> {
                     self.chunks,
                     1.0,
                     format!("exact semantic symbol anchor `{matched}`"),
-                    vec![format!("symbol:{}", symbol.id.0)],
+                    format!("symbol:{}", symbol.id.0),
                     if authority == RetrievalAuthority::Exact {
                         1.0
                     } else {
@@ -396,39 +402,29 @@ impl<'a> BuiltinCandidateContext<'a> {
                             .as_ref()
                             .and_then(|symbol_id| symbols_by_id.get(symbol_id).copied())
                             .cloned();
+                        // The line cites its first incident edge; the contribution below keeps
+                        // every edge that backs it.
                         let result = result_for_file(
                             file,
                             symbol,
                             self.chunks,
                             0.85,
                             format!("graph neighbor of `{}`", anchor.qualified_name),
-                            edge_ids.clone(),
+                            edge_ids[0].clone(),
                             0.9,
                         );
                         let key = normalized_path(&file.path);
-                        let candidate = StreamCandidate::from_result(
+                        let mut candidate = StreamCandidate::from_result(
                             result,
                             RetrievalAuthority::Corroborating,
                             "evidence-graph neighbor backed by a direct edge from an exact symbol",
                         );
+                        candidate.evidence_refs = edge_ids;
                         if let Some(existing) = by_path.get_mut(&key) {
-                            for evidence in candidate.result.evidence {
-                                if !existing.result.evidence.contains(&evidence) {
-                                    existing.result.evidence.push(evidence);
-                                }
-                            }
-                            for evidence_ref in candidate.evidence_refs {
-                                if !existing.evidence_refs.contains(&evidence_ref) {
-                                    existing.evidence_refs.push(evidence_ref.clone());
-                                }
-                                if !existing.result.evidence_refs.contains(&evidence_ref) {
-                                    existing.result.evidence_refs.push(evidence_ref);
-                                }
-                            }
+                            merge_evidence(&mut existing.result, &candidate.result);
+                            existing.evidence_refs.extend(candidate.evidence_refs);
                             existing.evidence_refs.sort();
                             existing.evidence_refs.dedup();
-                            existing.result.evidence_refs.sort();
-                            existing.result.evidence_refs.dedup();
                         } else {
                             by_path.insert(key, candidate);
                         }
@@ -661,7 +657,7 @@ impl<'a> BuiltinCandidateContext<'a> {
                         "historically similar change `{}`",
                         hit.change.commit.summary
                     ),
-                    vec![format!("history:similar-change:{}", hit.change.commit.id.0)],
+                    format!("history:similar-change:{}", hit.change.commit.id.0),
                     0.7,
                 );
                 by_path.entry(key).or_insert_with(|| {
@@ -752,7 +748,7 @@ impl<'a> BuiltinCandidateContext<'a> {
                     "{count} of {} past commits with a near-identical subject (`{summary}`) touched this file",
                     twins.len()
                 ),
-                vec![format!("history:subject-twin:{commit}")],
+                format!("history:subject-twin:{commit}"),
                 0.8,
             );
             votes.insert(
@@ -867,23 +863,29 @@ fn indexed_document_stream(
                 path, section.line_range.start, section.line_range.end
             );
             let reason = format!("document section `{heading_label}` matched task vocabulary");
-            let result = SearchResult {
+            let mut result = SearchResult {
                 path: section.path.clone(),
                 line_range: Some(section.line_range.clone()),
                 snippet: section.content.clone(),
                 symbol: None,
                 score,
                 match_reason: reason.clone(),
-                evidence: vec![
-                    reason,
-                    format!("document heading path: {heading_label}"),
-                    format!("document content hash: {}", section.content_hash),
-                ],
+                evidence: vec![reason],
                 evidence_refs: vec![evidence_ref],
                 confidence: 0.65,
                 score_breakdown: Vec::new(),
                 exact_reference_provenance: None,
             };
+            push_evidence(
+                &mut result,
+                format!("document heading path: {heading_label}"),
+                None,
+            );
+            push_evidence(
+                &mut result,
+                format!("document content hash: {}", section.content_hash),
+                None,
+            );
             Some((
                 score,
                 StreamCandidate::from_result(
@@ -975,7 +977,7 @@ fn result_for_runtime_fact(
         chunks,
         score,
         format!("runtime evidence: {}", fact.message),
-        vec![fact.id.clone()],
+        fact.id.clone(),
         fact.confidence.score(),
     )
 }
@@ -986,7 +988,7 @@ fn result_for_file(
     chunks: &[CodeChunk],
     score: f32,
     reason: String,
-    evidence_refs: Vec<String>,
+    evidence_ref: String,
     confidence: f32,
 ) -> SearchResult {
     let symbol_id = symbol.as_ref().map(|symbol| &symbol.id);
@@ -1005,7 +1007,7 @@ fn result_for_file(
         score,
         match_reason: reason.clone(),
         evidence: vec![reason],
-        evidence_refs,
+        evidence_refs: vec![evidence_ref],
         confidence,
         score_breakdown: Vec::new(),
         exact_reference_provenance: None,
