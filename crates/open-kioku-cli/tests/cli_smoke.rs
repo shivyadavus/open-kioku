@@ -2270,6 +2270,149 @@ fn snapshot_import_serves_no_path_the_local_policy_excludes() {
     assert!(!status.to_string().contains("vault.key"), "{status}");
 }
 
+/// An import that removes a path the local policy excludes leaves nothing on disk that names
+/// it (#549): not the facts other files hold about its symbols, which spell its module path
+/// (`internal::vault::keys::KeyAnchored`) where no path glob matches; not the graph nodes
+/// drawn for them or for its own facts; not the call-site dictionary entries its call sites
+/// used, whose ids spell its path; not the exporter's quality notes about it or the names in
+/// it; not the hotspot of the directory it alone was in; and not the free pages its rows were
+/// deleted from.
+#[test]
+fn snapshot_import_leaves_no_trace_of_a_path_the_local_policy_excludes() {
+    // Calls to names defined nowhere: each is a quality note in the exporter's manifest, enough
+    // of them that the manifest spans several pages.
+    let unresolved = (0..200)
+        .map(|n| format!("    sealing_probe_{n:03}();\n"))
+        .collect::<String>();
+    let keys = format!(
+        "use chrono::Utc;\n\npub struct KeyAnchored;\n\nimpl KeyAnchored {{\n    \
+         pub fn new() -> Self {{\n        KeyAnchored\n    }}\n\n    pub fn check(&self) {{}}\n}}\n\n\
+         pub fn rotate_sealed_material() -> u32 {{\n    derive_sealing_key();\n{unresolved}    \
+         seal_inner()\n}}\n\nfn seal_inner() -> u32 {{\n    7\n}}\n"
+    );
+    let temp = snapshot_fixture_repo_with(&[
+        // Names the struct, never where it lives.
+        (
+            "src/main.rs",
+            "fn main() {\n    let anchor = KeyAnchored::new();\n    anchor.check();\n}\n",
+        ),
+        ("internal/vault/keys.rs", keys.as_str()),
+    ]);
+    let repo = temp.path();
+    let db = repo.join(".ok/index.sqlite");
+    // The exporter indexed the file, resolved `main`'s uses to it, and aggregated its
+    // directory's history: the residue this test looks for exists before the import.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert!(
+            count(
+                "SELECT COUNT(*) FROM graph_nodes WHERE (file_id IS NULL OR file_id = '') \
+                 AND label = 'internal::vault::keys::KeyAnchored'"
+            ) > 0
+        );
+        assert!(
+            count(
+                "SELECT COUNT(*) FROM history_hotspots \
+                 WHERE entity_kind = 'module' AND path = 'internal/vault'"
+            ) > 0
+        );
+    }
+    export_snapshot(repo);
+    let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    assert!(config.contains("deny = [\n"));
+    fs::write(
+        repo.join("ok.toml"),
+        config.replacen("deny = [\n", "deny = [\n    \"internal/vault/**\",\n", 1),
+    )
+    .unwrap();
+
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(imported["snapshot"]["policy_filtered"], 1, "{imported}");
+
+    // No byte of the database, or of a sidecar beside it, holds a name only the removed rows
+    // held: its module path, a call site's id or a quality note (which spell the file's
+    // path), or a name nothing else uses.
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut path = db.clone().into_os_string();
+        path.push(suffix);
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        for needle in [
+            "vault::",
+            "vault/keys.rs:",
+            "vault/keys.rs for",
+            "sealed_material",
+            "seal_inner",
+            "derive_sealing_key",
+            "sealing_probe_",
+        ] {
+            assert!(
+                !bytes
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes()),
+                "{} holds `{needle}`",
+                std::path::Path::new(&path).display()
+            );
+        }
+    }
+
+    // No row names the directory. The one exception is the report of the exclusion itself:
+    // the manifest lists the denied file among the skipped paths, as `ok index` does.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let tables = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let mut named = Vec::new();
+    for table in &tables {
+        let mut statement = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+        let columns = statement.column_count();
+        let mut rows = statement.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            for column in 0..columns {
+                let text = match row.get_ref(column).unwrap() {
+                    rusqlite::types::ValueRef::Text(bytes)
+                    | rusqlite::types::ValueRef::Blob(bytes) => {
+                        String::from_utf8_lossy(bytes).into_owned()
+                    }
+                    _ => continue,
+                };
+                let text = if table == "manifests" {
+                    let mut manifest: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let skipped = manifest["quality"]["skipped_paths"].take();
+                    let denied = serde_json::json!({
+                        "path": "internal/vault/keys.rs",
+                        "reason": "denied",
+                        "source": "security_policy",
+                        "safe_to_show": true
+                    });
+                    assert!(skipped.as_array().unwrap().contains(&denied), "{skipped}");
+                    manifest.to_string()
+                } else {
+                    text
+                };
+                if text.contains("vault") {
+                    named.push(format!("{table}: {text}"));
+                }
+            }
+        }
+    }
+    assert!(named.is_empty(), "{named:#?}");
+    // What the admitted files hold is kept: `main`'s symbol and its directory's history.
+    for sql in [
+        "SELECT COUNT(*) FROM symbols WHERE name = 'main'",
+        "SELECT COUNT(*) FROM history_hotspots WHERE entity_kind = 'module' AND path = 'src'",
+    ] {
+        let count: i64 = conn.query_row(sql, [], |row| row.get(0)).unwrap();
+        assert!(count > 0, "{sql}");
+    }
+}
+
 /// `ok watch` replaces the rows of the files that changed. A deleted file's co-change facts
 /// held by an unchanged file used to survive it, so the next export carried a fact about a
 /// file the index no longer had, and the import refused it as inconsistent.
