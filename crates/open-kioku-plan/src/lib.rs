@@ -605,6 +605,8 @@ impl<'a> PlanEngine<'a> {
                 .cloned()
                 .collect::<Vec<_>>();
             return Ok(ImpactReport {
+                direct_impacts_omitted: 0,
+                indirect_impacts_omitted: 0,
                 proven_impact: Vec::new(),
                 possible_impact: Vec::new(),
                 target: impact_target
@@ -631,6 +633,8 @@ impl<'a> PlanEngine<'a> {
                 .for_file(&target.path)
         } else {
             Ok(ImpactReport {
+                direct_impacts_omitted: 0,
+                indirect_impacts_omitted: 0,
                 proven_impact: Vec::new(),
                 possible_impact: Vec::new(),
                 target: task.into(),
@@ -3182,6 +3186,8 @@ mod tests {
             retrieval_diagnostics: Default::default(),
         };
         let impact = ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
             target: "tests/auth_flow.rs".into(),
@@ -3468,6 +3474,8 @@ mod tests {
         exact.exact_reference_provenance = Some(open_kioku_core::EvidenceSourceType::Scip);
         direct_impacts.push(exact);
         let impact_with = |direct_impacts: Vec<SearchResult>, indirect: &[&str]| ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
             target: "src/auth.rs".into(),
@@ -3538,6 +3546,8 @@ mod tests {
         let mut impact_result = test_search_result("src/lib.rs");
         impact_result.reconcile_score_breakdown();
         let impact = ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
             target: "src/auth.rs".into(),
@@ -3585,6 +3595,8 @@ mod tests {
         wide.evidence = (0..12).map(|line| format!("reference {line}")).collect();
         let narrow = test_search_result("src/narrow.rs");
         let impact = ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
             target: "src/primary_00.rs".into(),
@@ -3685,6 +3697,8 @@ mod tests {
     #[test]
     fn capped_rule_refs_keep_the_first_lines_of_a_path() {
         let impact_at = |starts: &[u32]| ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
             target: "src/auth.rs".into(),
@@ -4252,6 +4266,8 @@ mod tests {
             ..Default::default()
         };
         let impact = ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
             target: "src/status_setup_doctor.rs".into(),
@@ -4284,6 +4300,8 @@ mod tests {
             reason: "fixture".into(),
         };
         let mut impact = ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
             proven_impact: vec![
                 proven("src/auth.rs", GraphEdgeType::UsesType),
                 proven("src/session.rs", GraphEdgeType::Calls),
@@ -4323,6 +4341,8 @@ mod tests {
 
         // A glob import (`use fx::*;`) proves an `IMPORTS` edge from `import_binding` alone.
         let impact = ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
             proven_impact: vec![RelationshipImpact {
                 path: PathBuf::from("tests/alpha_token.rs"),
                 symbol: None,

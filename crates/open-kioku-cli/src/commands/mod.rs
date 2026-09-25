@@ -940,6 +940,12 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         result.score
                     );
                 }
+                if report.direct_impacts_omitted > 0 {
+                    println!(
+                        "  ... {} more omitted by the list cap",
+                        report.direct_impacts_omitted
+                    );
+                }
                 if !report.indirect_impacts.is_empty() {
                     println!("\nIndirect impacts ({}):", report.indirect_impacts.len());
                     for result in report.indirect_impacts.iter().take(5) {
@@ -949,6 +955,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                             result.line_range.as_ref().map(|r| r.start).unwrap_or(0),
                             result.score
                         );
+                    }
+                    let unshown = report.indirect_impacts.len().saturating_sub(5)
+                        + report.indirect_impacts_omitted;
+                    if unshown > 0 {
+                        println!("  ... {unshown} more not shown");
                     }
                 }
             })?;

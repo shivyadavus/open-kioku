@@ -995,6 +995,8 @@ fn contract_to_plan_report(contract: &ChangeContractV1) -> PlanReport {
         primary_context: Vec::new(),
         relevant_symbols: Vec::new(),
         impact: ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
             target: contract.task.clone(),
@@ -5839,6 +5841,8 @@ rename to src/menu.rs
             primary_context: vec![],
             relevant_symbols: vec![],
             impact: open_kioku_core::ImpactReport {
+                direct_impacts_omitted: 0,
+                indirect_impacts_omitted: 0,
                 proven_impact: Vec::new(),
                 possible_impact: Vec::new(),
                 target: "target".into(),

@@ -2764,6 +2764,7 @@ dependencies = [
  "open-kioku-storage",
  "open-kioku-storage-sqlite",
  "rusqlite",
+ "serde_json",
  "tempfile",
 ]
 
