@@ -228,7 +228,15 @@ fn render_status_markdown(
                     .join("; ")
             ));
         }
-        out.push_str(&format!("| Tests | {} |\n", manifest.quality.test_count));
+        let quality = &manifest.quality;
+        if quality.excluded_test_targets.is_empty() {
+            out.push_str(&format!("| Tests | {} |\n", quality.test_count));
+        } else {
+            out.push_str(&format!(
+                "| Tests | {} |\n",
+                tests_evidence(quality.test_count, &quality.excluded_test_targets)
+            ));
+        }
         out.push_str(&format!(
             "| Imports | {} |\n",
             manifest.quality.import_count
@@ -742,6 +750,9 @@ fn quality_provider_report(
     let test_count = manifest
         .map(|manifest| manifest.quality.test_count)
         .unwrap_or(0);
+    let excluded_tests = manifest
+        .map(|manifest| manifest.quality.excluded_test_targets.clone())
+        .unwrap_or_default();
     let import_count = manifest
         .map(|manifest| manifest.quality.import_count)
         .unwrap_or(0);
@@ -781,12 +792,12 @@ fn quality_provider_report(
         } else {
             CheckStatus::Warn
         },
-        evidence: format!("{test_count} indexed test target(s)"),
-        next_step: if test_count == 0 {
-            Some("Index test files before relying on validation recommendations.".into())
-        } else {
-            None
-        },
+        evidence: tests_evidence(test_count, &excluded_tests),
+        next_step: tests_next_step(
+            test_count,
+            &excluded_tests,
+            "Index test files before relying on validation recommendations.",
+        ),
     });
     providers.push(QualityProviderReport {
         name: "imports",
@@ -851,16 +862,78 @@ fn quality_provider_report(
             "Gradle-scoped validation commands enabled for indexed Java test paths".into()
         } else if test_count > 0 {
             "indexed validation candidates available".into()
-        } else {
+        } else if excluded_tests.is_empty() {
             "no indexed validation candidates".into()
-        },
-        next_step: if test_count == 0 {
-            Some("Add or index tests so plans can return concrete validation commands.".into())
         } else {
-            None
+            format!(
+                "no indexed validation candidates; {}",
+                all_tests_excluded(&excluded_tests)
+            )
         },
+        next_step: tests_next_step(
+            test_count,
+            &excluded_tests,
+            "Add or index tests so plans can return concrete validation commands.",
+        ),
     });
     providers
+}
+
+/// The indexed test count, with the targets withheld from it named by reason: "0 runnable"
+/// beside "3 skipped" is a different repository from "0 indexed".
+fn tests_evidence(
+    test_count: usize,
+    excluded: &std::collections::BTreeMap<open_kioku_core::TestExclusionReason, usize>,
+) -> String {
+    if excluded.is_empty() {
+        return format!("{test_count} indexed test target(s)");
+    }
+    let withheld = excluded
+        .iter()
+        .map(|(reason, count)| format!("{count} {}", reason.describe()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{test_count} runnable indexed test target(s); excluded: {withheld}")
+}
+
+/// Worded as the context pack words it (`validation_unavailable_reason`), so one index is not
+/// described two ways.
+fn all_tests_excluded(
+    excluded: &std::collections::BTreeMap<open_kioku_core::TestExclusionReason, usize>,
+) -> String {
+    match excluded.keys().collect::<Vec<_>>().as_slice() {
+        [reason] => format!("every indexed test target is a {}", reason.describe()),
+        _ => format!(
+            "every indexed test target is excluded ({})",
+            excluded
+                .iter()
+                .map(|(reason, count)| format!("{count} {}", reason.describe()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// With no runnable target, advise what would change that. Indexing more test files cannot help
+/// a repository whose indexed tests are all skipped.
+fn tests_next_step(
+    test_count: usize,
+    excluded: &std::collections::BTreeMap<open_kioku_core::TestExclusionReason, usize>,
+    no_tests_advice: &str,
+) -> Option<String> {
+    if test_count > 0 {
+        return None;
+    }
+    if excluded.is_empty() {
+        return Some(no_tests_advice.into());
+    }
+    Some(
+        excluded
+            .keys()
+            .map(|reason| reason.remedy())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 fn advanced_quality_provider_report(
