@@ -937,6 +937,46 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // A second glob beside `use super::*;` cannot take the file's own `target_fn` away:
+        // were it to supply the name too, the call would not compile.
+        "mod_block_super_glob_beside_other_glob" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use proptest::prelude::*;\n\n    #[test]\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A bare call inside a method never names an associated function of the `impl`; here
+        // it names the unresolved import.
+        "impl_associated_fn_not_in_scope" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "use helpers::target_fn;\n\npub struct Session;\n\nimpl Session {\n    pub fn target_fn(&self) {}\n\n    pub fn caller_fn(&self) {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // The same call binds through its import to the free function, not to the method of the
+        // same name. The free function lives in another file so the target selector is unique.
+        "impl_associated_fn_beside_free_fn" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod clock;\npub mod worker;\n"),
+                ("src/clock.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/worker.rs",
+                    "use crate::clock::target_fn;\n\npub struct Session;\n\nimpl Session {\n    pub fn target_fn(&self) {}\n\n    pub fn caller_fn(&self) {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
         // An item of the `mod` block itself needs no import.
         "mod_block_own_item" => (
             vec![

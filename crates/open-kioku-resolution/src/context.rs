@@ -147,10 +147,12 @@ pub(crate) fn scoped_import<'r>(
 /// only inside the module that declares it, so the walk stops where the name could come from
 /// somewhere other than an enclosing item and leaves that case to the import rule: at a scope
 /// that imports the name, at a scope with a glob import, and at a `mod` block. Two imports name a
-/// module of this same file and continue there instead: `use super::name;` (or `super::super::`)
-/// looks the imported name up in the module it names, and a `mod` block whose only globs are the
-/// same `use super::*` path continues in that module, as [`scoped_import`] does. Associated items
-/// of an `impl` or `trait` are never in lexical scope.
+/// module of this same file and continue there instead: `use super::name;`, `use self::name;` or
+/// `use super::super::name;` looks the imported name up in the module it names, and a `mod` block
+/// whose only globs are the same `use super::*` path continues in that module, as
+/// [`scoped_import`] does. Beside another glob, `use super::*` still reaches an item the parent
+/// module declares itself: were the other glob to supply the name too, rustc would reject the use
+/// as ambiguous. Associated items of an `impl` or `trait` are never in lexical scope.
 pub(crate) fn nearest_lexical_items(
     ctx: &ResolutionContext<'_>,
     scope_id: &ScopeId,
@@ -169,26 +171,22 @@ pub(crate) fn nearest_lexical_items(
         let associated = rust
             && scope.is_some_and(|scope| matches!(scope.kind, ScopeKind::Class | ScopeKind::Trait));
         if !associated {
-            let mut items = ctx
-                .symbols
-                .lookup_file_scope_name(ctx.file_id, id, name)
-                .iter()
-                .filter(|item| ctx.symbols.get(item).is_some_and(&accept))
-                .cloned()
-                .collect::<Vec<_>>();
+            let items = declared_items(ctx, id, name, &accept);
             if !items.is_empty() {
-                items.sort_by(|left, right| left.0.cmp(&right.0));
-                items.dedup();
                 return Some(items);
             }
         }
         current = if rust {
             match rust_lexical_next(ctx, id, name) {
-                Some((next, imported)) => {
+                RustLexicalStep::Continue(next, imported) => {
                     name = imported;
                     Some(next)
                 }
-                None => None,
+                RustLexicalStep::DeclaredIn(module) => {
+                    let items = declared_items(ctx, module, name, &accept);
+                    return (!items.is_empty()).then_some(items);
+                }
+                RustLexicalStep::Stop => None,
             }
         } else {
             scope.and_then(|scope| scope.parent_id.as_ref())
@@ -197,14 +195,78 @@ pub(crate) fn nearest_lexical_items(
     None
 }
 
-/// Where a Rust lexical lookup of `name` continues after `scope_id` declares no such item, and
-/// the name it looks up there; `None` where the item cannot be proven to come from a scope of
-/// this file.
+/// Whether Rust scoping rules out `candidate`, an item of this file, as the target of `name` used
+/// at `scope_id`: an explicit import of the name is in scope there, or the item belongs to
+/// another module than the use site. Unknown scopes rule nothing out.
+pub(crate) fn rust_rules_out_same_file_item(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    name: &str,
+    candidate: &Symbol,
+) -> bool {
+    let named = file_imports(ctx.repository, ctx.file_id, name)
+        .iter()
+        .filter(|binding| !binding.is_glob)
+        .collect::<Vec<_>>();
+    let mut current = ctx.scopes.get(scope_id);
+    for _ in 0..=ctx.scopes.scopes.len() {
+        let Some(scope) = current else {
+            break;
+        };
+        if named.iter().any(|binding| binding.scope_id == scope.id) {
+            return true;
+        }
+        if matches!(scope.kind, ScopeKind::Module | ScopeKind::File) {
+            break;
+        }
+        current = scope
+            .parent_id
+            .as_ref()
+            .and_then(|parent| ctx.scopes.get(parent));
+    }
+    let use_module = enclosing_module_scope(ctx.scopes, scope_id);
+    let item_module = candidate
+        .scope_id
+        .as_ref()
+        .and_then(|item_scope| enclosing_module_scope(ctx.scopes, item_scope));
+    matches!((use_module, item_module), (Some(used), Some(item)) if used.id != item.id)
+}
+
+/// Items of this file named `name` that `scope_id` itself declares and `accept` admits.
+fn declared_items(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    name: &str,
+    accept: &impl Fn(&Symbol) -> bool,
+) -> Vec<SymbolId> {
+    let mut items = ctx
+        .symbols
+        .lookup_file_scope_name(ctx.file_id, scope_id, name)
+        .iter()
+        .filter(|item| ctx.symbols.get(item).is_some_and(accept))
+        .cloned()
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| left.0.cmp(&right.0));
+    items.dedup();
+    items
+}
+
+/// What a Rust lexical lookup does after a scope declares no matching item.
+enum RustLexicalStep<'s, 'n> {
+    /// Look `name` (possibly renamed by a `use super::name as alias;`) up in the scope.
+    Continue(&'s ScopeId, &'n str),
+    /// Only an item this module declares itself can be the target; nothing it imports is.
+    DeclaredIn(&'s ScopeId),
+    /// The item cannot be proven to come from a scope of this file.
+    Stop,
+}
+
+/// Where a Rust lexical lookup of `name` continues after `scope_id` declares no such item.
 fn rust_lexical_next<'s, 'n>(
     ctx: &ResolutionContext<'s>,
     scope_id: &ScopeId,
     name: &'n str,
-) -> Option<(&'s ScopeId, &'n str)>
+) -> RustLexicalStep<'s, 'n>
 where
     's: 'n,
 {
@@ -215,39 +277,61 @@ where
         .filter(binds_here)
         .collect::<Vec<_>>();
     if !named_here.is_empty() {
-        return rust_super_item_target(ctx.scopes, scope_id, &named_here);
+        return match rust_relative_item_target(ctx.scopes, scope_id, &named_here) {
+            Some((next, imported)) => RustLexicalStep::Continue(next, imported),
+            None => RustLexicalStep::Stop,
+        };
     }
-    let scope = ctx.scopes.get(scope_id)?;
+    let Some(scope) = ctx.scopes.get(scope_id) else {
+        return RustLexicalStep::Stop;
+    };
     let globs_here = file_imports(ctx.repository, ctx.file_id, GLOB_IMPORT_LOCAL_NAME)
         .iter()
         .filter(binds_here)
         .collect::<Vec<_>>();
     if !globs_here.is_empty() {
-        // A glob in a block may shadow an outer item or supply nothing and let the lookup go on,
-        // which the scopes of one file cannot tell apart; a module's `use super::*;` is exact.
-        return if scope.kind == ScopeKind::Module {
-            rust_super_glob_target(ctx.scopes, scope_id, &globs_here).map(|next| (next, name))
-        } else {
-            None
+        // A glob in a block may shadow an outer item, so a name the block does not declare stays
+        // open there. A module's globs cannot shadow one another: two that supply the same name
+        // make its use ambiguous, so `use super::*` beside other globs is exact for an item the
+        // parent declares, though not for one the parent only imports, which another glob may
+        // name as well.
+        if scope.kind != ScopeKind::Module {
+            return RustLexicalStep::Stop;
+        }
+        if let Some(parent) = rust_super_glob_target(ctx.scopes, scope_id, &globs_here) {
+            return RustLexicalStep::Continue(parent, name);
+        }
+        let super_globs = globs_here
+            .iter()
+            .copied()
+            .filter(|glob| rust_super_glob_depth(&glob.source_module).is_some())
+            .collect::<Vec<_>>();
+        return match rust_super_glob_target(ctx.scopes, scope_id, &super_globs) {
+            Some(parent) => RustLexicalStep::DeclaredIn(parent),
+            None => RustLexicalStep::Stop,
         };
     }
     if scope.kind == ScopeKind::Module {
-        return None;
+        return RustLexicalStep::Stop;
     }
-    scope.parent_id.as_ref().map(|parent| (parent, name))
+    match scope.parent_id.as_ref() {
+        Some(parent) => RustLexicalStep::Continue(parent, name),
+        None => RustLexicalStep::Stop,
+    }
 }
 
 /// The module scope and item name that the imports at `scope_id` name, when every one of them is
-/// the same `super::item` or `super::super::item` path and the module is in this file.
-fn rust_super_item_target<'s>(
+/// the same `self::item`, `super::item` or `super::super::item` path and the module is in this
+/// file.
+fn rust_relative_item_target<'s>(
     scopes: &'s ScopeIndex,
     scope_id: &ScopeId,
     imports: &[&'s ImportBinding],
 ) -> Option<(&'s ScopeId, &'s str)> {
-    let (depth, item) = rust_super_item_path(&imports.first()?.source_module)?;
+    let (depth, item) = rust_relative_item_path(&imports.first()?.source_module)?;
     if imports
         .iter()
-        .any(|import| rust_super_item_path(&import.source_module) != Some((depth, item)))
+        .any(|import| rust_relative_item_path(&import.source_module) != Some((depth, item)))
     {
         return None;
     }
@@ -261,12 +345,15 @@ fn rust_super_item_target<'s>(
     Some((&module.id, item))
 }
 
-/// `super::item` is `(1, "item")` and `super::super::item` is `(2, "item")`; any other path,
-/// a glob included, is `None`.
-fn rust_super_item_path(source: &str) -> Option<(usize, &str)> {
+/// `self::item` is `(0, "item")`, `super::item` is `(1, "item")` and `super::super::item` is
+/// `(2, "item")`; any other path, a glob included, is `None`.
+fn rust_relative_item_path(source: &str) -> Option<(usize, &str)> {
     let (path, item) = source.rsplit_once("::")?;
     if item == "*" || item.is_empty() {
         return None;
+    }
+    if path == "self" {
+        return Some((0, item));
     }
     let mut depth = 0usize;
     for segment in path.split("::") {

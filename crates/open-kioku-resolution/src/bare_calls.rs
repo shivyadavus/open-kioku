@@ -146,6 +146,15 @@ pub(crate) fn resolve_bare_call_outcome(
                     .map(|symbol| {
                         symbol.parent_symbol_id.is_none()
                             && matches!(symbol.kind, SymbolKind::Function)
+                            // Not even a candidate where Rust scoping rules the item out: the
+                            // name is imported at the call, or the item is in another module.
+                            && !(ctx.language == Language::Rust
+                                && crate::context::rust_rules_out_same_file_item(
+                                    ctx,
+                                    &call.scope_id,
+                                    &call.callee_name,
+                                    symbol,
+                                ))
                     })
                     .unwrap_or(false)
             })
@@ -1203,14 +1212,49 @@ mod tests {
                 Some("symbol:clock:now"),
             ),
             (
-                "a second glob beside `use super::*;` may supply the name",
+                "beside another glob, `use super::*;` still reaches an item the file declares",
                 vec![
                     glob_import("scope:tests", "super::*"),
-                    glob_import("scope:tests", "crate::fakes::*"),
+                    glob_import("scope:tests", "proptest::prelude::*"),
                 ],
                 "scope:tests:t:body",
                 "now",
+                Some("symbol:now"),
+            ),
+            (
+                "beside another glob, an item the file only imports may come from either glob",
+                vec![
+                    glob_import("scope:tests", "super::*"),
+                    glob_import("scope:tests", "proptest::prelude::*"),
+                    import_binding(
+                        "scope:file",
+                        "tick",
+                        "crate::clock::now",
+                        Some("symbol:clock:now"),
+                    ),
+                ],
+                "scope:tests:t:body",
+                "tick",
                 None,
+            ),
+            (
+                "a glob in a function body may shadow the module's item",
+                vec![glob_import("scope:tests:t:body", "crate::fakes::*")],
+                "scope:tests:t:body",
+                "helper",
+                None,
+            ),
+            (
+                "`use self::helper;` in a block names the module's own item",
+                vec![import_binding(
+                    "scope:tests:t:body",
+                    "helper",
+                    "self::helper",
+                    None,
+                )],
+                "scope:tests:t:body",
+                "helper",
+                Some("symbol:tests:helper"),
             ),
             (
                 "`use super::now;` names the file's item",
@@ -1272,6 +1316,42 @@ mod tests {
                 "{layout}"
             );
         }
+    }
+
+    #[test]
+    fn rust_same_file_fallback_skips_items_rust_scoping_rules_out() {
+        let candidates = |imports: Vec<ImportBinding>, scope_id: &str| {
+            with_resolution_context(
+                mod_block_symbols(),
+                Vec::new(),
+                imports,
+                mod_block_layout(),
+                |ctx| match resolve_bare_call_outcome(&call_in(scope_id, "now"), ctx) {
+                    ResolutionOutcome::Proven { candidate } => {
+                        panic!("unexpected proven edge {candidate:?}")
+                    }
+                    ResolutionOutcome::Unresolved { candidates, .. }
+                    | ResolutionOutcome::Ambiguous { candidates, .. } => candidates
+                        .into_iter()
+                        .map(|candidate| candidate.target_symbol_id.0)
+                        .collect::<Vec<_>>(),
+                    other => panic!("unexpected outcome {other:?}"),
+                },
+            )
+        };
+        // `mod tests { use mock_clock::now; }`: the file's `now` is not even a candidate.
+        assert!(candidates(
+            vec![import_binding(
+                "scope:tests",
+                "now",
+                "mock_clock::now",
+                None
+            )],
+            "scope:tests:t:body"
+        )
+        .is_empty());
+        // A sibling `mod other` without imports cannot name the file's `now` either.
+        assert!(candidates(Vec::new(), "scope:other:t").is_empty());
     }
 
     #[test]

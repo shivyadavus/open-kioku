@@ -482,6 +482,73 @@
       "notes": "Regression case: `mod tests { use super::target_fn; }` names the file's own `target_fn`, so the call inside the block binds to it."
     },
     {
+      "id": "ci-rust-calls-25-mod_block_super_glob_beside_other_glob",
+      "fixture_id": "ci/ri3/rust/calls/mod_block_super_glob_beside_other_glob",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:mod_block_super_glob_beside_other_glob:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "mod_block_super_glob_beside_other_glob",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:mod_block_super_glob_beside_other_glob:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "same_scope_definition"
+      ],
+      "notes": "Regression case: `mod tests { use super::*; use proptest::prelude::*; }` still binds the call to the file's own `target_fn`; a second glob supplying the name too would make the call ambiguous and fail to compile."
+    },
+    {
+      "id": "ci-rust-calls-26-impl_associated_fn_not_in_scope",
+      "fixture_id": "ci/ri3/rust/calls/impl_associated_fn_not_in_scope",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:impl_associated_fn_not_in_scope:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "impl_associated_fn_not_in_scope",
+      "notes": "Regression case: a bare `target_fn()` inside a method of `impl Session` does not name the associated `Session::target_fn`; with the name imported from a crate the index does not hold, the call gets no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-27-impl_associated_fn_beside_free_fn",
+      "fixture_id": "ci/ri3/rust/calls/impl_associated_fn_beside_free_fn",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:impl_associated_fn_beside_free_fn:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "impl_associated_fn_beside_free_fn",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::clock::target_fn",
+        "identity": "symbol:rust:calls:impl_associated_fn_beside_free_fn:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case: a bare `target_fn()` inside a method binds through `use crate::clock::target_fn;`, not to the associated `Session::target_fn` of the enclosing `impl`."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
