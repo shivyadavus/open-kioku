@@ -38,7 +38,20 @@ pub(crate) fn ignored_among(
     if !inside_work_tree(root)? {
         return Ok(None);
     }
-    check_ignored_candidates(root, candidates).map(Some)
+    // `git check-ignore` rejects a path outside the work tree (`../x`, `/x`) with a fatal
+    // error that answers nothing for the whole batch, so only plain relative paths are sent;
+    // no rule of Git's can ignore a path it cannot name anyway.
+    let candidates = candidates
+        .iter()
+        .filter(|path| {
+            !path.as_os_str().is_empty()
+                && path
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    check_ignored_candidates(root, &candidates).map(Some)
 }
 
 fn inside_work_tree(root: &Path) -> Result<bool> {

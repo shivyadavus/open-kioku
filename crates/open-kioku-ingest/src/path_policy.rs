@@ -73,20 +73,31 @@ impl IndexPathPolicy {
         })
     }
 
+    /// The security rules alone — secret-like paths and `[paths] deny` — with no Git call.
+    /// For a value that may not be a repository path at all (a graph node's label: an import
+    /// specifier such as `../utils/foo`, a route such as `/api/users`), which Git would reject
+    /// and which the other rules do not govern.
+    pub fn security_exclusion(&self, value: &Path) -> Option<PolicyExclusion> {
+        let secret_policy = open_kioku_core::is_secret_like_path(value);
+        if !secret_policy && !self.denied.is_match(value) {
+            return None;
+        }
+        Some(PolicyExclusion {
+            reason: if secret_policy {
+                SkipReason::SecretPolicy
+            } else {
+                SkipReason::Denied
+            },
+            source: SkipSource::SecurityPolicy,
+            safe_to_show: !secret_policy || !self.redact_secrets,
+        })
+    }
+
     /// The first rule that excludes `rel` (relative to the root), in discovery's order, or
     /// `None` when the policy admits it.
     pub fn exclusion(&self, rel: &Path) -> Option<PolicyExclusion> {
-        let secret_policy = open_kioku_core::is_secret_like_path(rel);
-        if secret_policy || self.denied.is_match(rel) {
-            return Some(PolicyExclusion {
-                reason: if secret_policy {
-                    SkipReason::SecretPolicy
-                } else {
-                    SkipReason::Denied
-                },
-                source: SkipSource::SecurityPolicy,
-                safe_to_show: !secret_policy || !self.redact_secrets,
-            });
+        if let Some(exclusion) = self.security_exclusion(rel) {
+            return Some(exclusion);
         }
         let visible = |reason, source| {
             Some(PolicyExclusion {
@@ -118,6 +129,14 @@ impl IndexPathPolicy {
         }
         None
     }
+}
+
+/// Whether discovery never reaches `rel` because a directory on its way is pruned by name
+/// (`.git`, `.ok`, `target`, `node_modules`, `dist`, `build`, `.venv`).
+pub fn is_pruned_by_discovery(rel: &Path) -> bool {
+    rel.ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .any(crate::is_heavy_discovery_dir)
 }
 
 /// Record in `quality` that `file`, which an index counted as indexed, is excluded by
@@ -186,6 +205,41 @@ mod tests {
     fn policy_for(root: &Path, config: &OkConfig, paths: &[&str]) -> IndexPathPolicy {
         let paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
         IndexPathPolicy::for_paths(root, config, &paths).unwrap()
+    }
+
+    #[test]
+    fn values_that_are_not_repository_paths_get_the_security_rules_without_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let policy = policy_for(root, &OkConfig::default(), &["src/lib.rs"]);
+        for value in ["../utils/foo", "/api/users", "HTTP https://example.com/x"] {
+            assert_eq!(policy.security_exclusion(Path::new(value)), None, "{value}");
+        }
+        assert_eq!(
+            policy
+                .security_exclusion(Path::new("../deploy/id_rsa"))
+                .map(|exclusion| exclusion.source),
+            Some(SkipSource::SecurityPolicy)
+        );
+        // Git itself is never asked about a value outside the work tree.
+        let paths = ["../utils/foo", "/api", "src/lib.rs"].map(PathBuf::from);
+        assert!(IndexPathPolicy::for_paths(root, &OkConfig::default(), &paths).is_ok());
+    }
+
+    #[test]
+    fn pruned_directories_are_recognised_at_any_depth() {
+        assert!(is_pruned_by_discovery(Path::new(".ok/index.sqlite")));
+        assert!(is_pruned_by_discovery(Path::new(
+            "web/node_modules/x/index.js"
+        )));
+        assert!(!is_pruned_by_discovery(Path::new("src/build.rs")));
     }
 
     #[test]

@@ -2937,11 +2937,17 @@ const CONSISTENCY_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "rows that belong to no indexed file",
-        "SELECT (SELECT COUNT(*) FROM symbols WHERE file_id NOT IN (SELECT id FROM files) \
+        // Symbols and occurrences imported from a SCIP index are stored for every document
+        // the index covers, including files discovery skipped, so theirs may name no indexed
+        // file. They carry only a `file_id`, and every reader resolves a path through the
+        // files table, so such a row serves no path.
+        "SELECT (SELECT COUNT(*) FROM symbols WHERE (file_id NOT IN (SELECT id FROM files) \
+                 AND json_extract(json, '$.provenance') IS NOT 'scip') \
                  OR json_extract(json, '$.file_id') IS NOT file_id) \
               + (SELECT COUNT(*) FROM chunks WHERE file_id NOT IN (SELECT id FROM files) \
                  OR json_extract(json, '$.file_id') IS NOT file_id) \
-              + (SELECT COUNT(*) FROM occurrences WHERE file_id NOT IN (SELECT id FROM files) \
+              + (SELECT COUNT(*) FROM occurrences WHERE (file_id NOT IN (SELECT id FROM files) \
+                 AND json_extract(json, '$.provenance') IS NOT 'scip') \
                  OR json_extract(json, '$.file_id') IS NOT file_id) \
               + (SELECT COUNT(*) FROM tests WHERE file_id NOT IN (SELECT id FROM files) \
                  OR json_extract(json, '$.file_id') IS NOT file_id) \
@@ -2976,6 +2982,11 @@ const CONSISTENCY_CHECKS: &[(&str, &str)] = &[
         "SELECT COUNT(*) FROM graph_nodes n LEFT JOIN files f ON f.id = n.file_id \
          WHERE n.node_type = 'File' AND (f.id IS NULL OR n.id IS NOT 'file:' || f.path \
          OR n.label IS NOT f.path)",
+    ),
+    (
+        "graph dictionary file references that name no indexed file",
+        "SELECT COUNT(*) FROM graph_strings WHERE substr(value, 1, 5) = 'file:' \
+         AND substr(value, 6) NOT IN (SELECT path FROM files)",
     ),
     (
         "graph edges whose evidence names a path that is not an indexed file",
