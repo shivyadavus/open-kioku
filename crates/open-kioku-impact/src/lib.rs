@@ -132,6 +132,7 @@ impl<'a> ImpactEngine<'a> {
         let mut exact_reference_files = 0;
         let mut exact_reference_sources = Vec::new();
         let mut omitted_direct = 0;
+        let mut omitted_direct_exact = 0;
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
             exact_reference_count = direct.len();
@@ -167,6 +168,13 @@ impl<'a> ImpactEngine<'a> {
             }
             direct = group_direct_impacts(dedupe_results(direct));
             direct.sort_by(compare_impact_results);
+            // Exact references rank first, so any cut here is one only when they alone
+            // overflow the cap; that is counted separately so it cannot pass unnoticed.
+            omitted_direct_exact = direct
+                .iter()
+                .skip(MAX_DIRECT_IMPACTS)
+                .filter(|result| result.is_exact_reference())
+                .count();
             omitted_direct = cap_impacts(&mut direct, MAX_DIRECT_IMPACTS);
             direct
         } else {
@@ -213,7 +221,7 @@ impl<'a> ImpactEngine<'a> {
         // were cut so a short list is not read as the whole blast radius.
         if omitted_direct > 0 {
             reasons.push(format!(
-                "{omitted_direct} further direct impact(s) omitted beyond the {MAX_DIRECT_IMPACTS}-entry cap; lower scores, then weaker evidence at an equal score, are cut first"
+                "{omitted_direct} further direct impact(s) omitted beyond the {MAX_DIRECT_IMPACTS}-entry cap, {omitted_direct_exact} of them exact-reference entries; heuristic entries are cut before any exact reference"
             ));
         }
         if omitted_indirect > 0 {
@@ -1204,6 +1212,11 @@ const GIT_COCHANGE_MATCH_REASON: &str = "historical git co-change with target fi
 /// The edge a direct impact was reached through. Grouping is per path per kind: several
 /// chunks of one file found the same way are one impact, while an exact reference and a
 /// lexical hit on that file stay separate entries so neither hides the other's authority.
+///
+/// The derived order is the ranking's authority order: `compare_impact_results` uses it to
+/// break an equal score, so the capped lists keep the earlier kind. Reordering the variants or
+/// inserting one changes which impacts a report keeps; the test pinning this order must change
+/// with it, deliberately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DirectImpactKind {
     ExactReference,
@@ -1211,6 +1224,19 @@ enum DirectImpactKind {
     Runtime,
     ServiceBoundary,
     Lexical,
+}
+
+/// Which tier an impact ranks in before its score is read. Only an exact reference is
+/// repository truth. Co-change is statistical history, and runtime and service-boundary
+/// impacts are lexical hits corroborated by a runtime fact or a matching static route or
+/// channel string: evidence that a dependency is likely, not that one exists. All four rank
+/// together, by score.
+fn impact_authority_tier(result: &SearchResult) -> u8 {
+    if result.is_exact_reference() {
+        0
+    } else {
+        1
+    }
 }
 
 fn direct_impact_kind(result: &SearchResult) -> DirectImpactKind {
@@ -1490,11 +1516,16 @@ fn cap_impacts(results: &mut Vec<SearchResult>, cap: usize) -> usize {
     omitted
 }
 
-/// Descending score, then the authority of the edge the impact was reached through, then
-/// repository position: path, line range, and the evidence ids the result was published with.
-/// Impacts are truncated after this sort, so at an equal score the stronger evidence must be
-/// what survives the cap: ordering ties by path alone kept an alphabetically early lexical hit
-/// over an exact reference. Position stays last so the order is total and reproducible.
+/// Authority first, then descending score, then the edge kind, then repository position: path,
+/// line range, and the evidence ids the result was published with.
+///
+/// Impacts are truncated after this sort, and consumers take prefixes of it (indirect impacts
+/// are seeded from the first five), so the order itself must carry "exact facts outrank
+/// heuristics". Scores cannot: an exact reference scores `1.25 + occurrence confidence` while a
+/// lexical hit carries raw BM25 plus boosts, commonly above 5, so ordering by score first let
+/// keyword matches fill the 25-entry cap and cut proven references. An exact reference is
+/// therefore never ranked below a heuristic entry, and within a tier the score decides.
+/// `DirectImpactKind` breaks an equal score; position stays last so the order is total.
 fn compare_impact_results(left: &SearchResult, right: &SearchResult) -> std::cmp::Ordering {
     let bounds = |result: &SearchResult| {
         result
@@ -1502,10 +1533,14 @@ fn compare_impact_results(left: &SearchResult, right: &SearchResult) -> std::cmp
             .as_ref()
             .map(|range| (range.start, range.end))
     };
-    right
-        .score
-        .partial_cmp(&left.score)
-        .unwrap_or(std::cmp::Ordering::Equal)
+    impact_authority_tier(left)
+        .cmp(&impact_authority_tier(right))
+        .then_with(|| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .then_with(|| direct_impact_kind(left).cmp(&direct_impact_kind(right)))
         .then_with(|| left.path.cmp(&right.path))
         .then_with(|| bounds(left).cmp(&bounds(right)))
@@ -3245,60 +3280,208 @@ mod tests {
         store
     }
 
-    #[test]
-    fn capped_direct_impacts_keep_stronger_evidence_at_a_tied_score_and_count_the_rest() {
-        let store = store_with_target("src/rates.rs");
-        // Twenty lexical hits whose paths all sort before twelve exact references, every one at
-        // the same score. Ordering the tie by path kept all twenty lexical hits and cut seven
-        // exact references without saying so.
-        let mut hits = (0..20)
-            .map(|index| chunk_hit(&format!("a/lexical_{index:02}.rs"), 1, 1.0, "lexical"))
-            .collect::<Vec<_>>();
-        hits.extend((0..12).map(|index| {
-            let mut hit = exact_hit(
-                &format!("z/exact_{index:02}.rs"),
-                1,
-                EvidenceSourceType::Scip,
-            );
-            hit.score = 1.0;
-            hit
+    /// `src/rates.rs` defining `rates::RateValidator`, referenced once from each of
+    /// `callers` files through a tree-sitter occurrence: the path `exact_reference_impacts`
+    /// reads in production, at production scores.
+    fn store_with_exact_callers(callers: usize) -> SqliteStore {
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let file = |id: &str, path: String| File {
+            id: FileId::new(id),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: id.into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let mut files = vec![file("source", "src/rates.rs".into())];
+        files.extend((0..callers).map(|index| {
+            file(
+                &format!("caller-{index:02}"),
+                format!("src/callers/caller_{index:02}.rs"),
+            )
         }));
-        let mut reversed = hits.clone();
-        reversed.reverse();
-        let mut kept_orders = Vec::new();
-        for arrival in [hits, reversed] {
-            let index = FixedSearchIndex(arrival);
-            let report = ImpactEngine::new(&store)
-                .with_search_index(Some(&index))
-                .for_file(Path::new("src/rates.rs"))
-                .unwrap();
+        let symbol = Symbol {
+            id: SymbolId::new("symbol:rate_validator"),
+            name: "RateValidator".into(),
+            qualified_name: "rates::RateValidator".into(),
+            kind: SymbolKind::Class,
+            file_id: FileId::new("source"),
+            range: Some(LineRange { start: 1, end: 5 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        };
+        let occurrences = files[1..]
+            .iter()
+            .map(|caller| SymbolOccurrence {
+                symbol_id: symbol.id.clone(),
+                file_id: caller.id.clone(),
+                range: Some(LineRange { start: 10, end: 10 }),
+                source_range: None,
+                is_definition: false,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::TreeSitter,
+            })
+            .collect::<Vec<_>>();
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: repo_id.clone(),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: files.len(),
+            symbol_count: 1,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &files,
+                symbols: &[symbol],
+                occurrences: &occurrences,
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        store
+    }
 
-            assert_eq!(report.direct_impacts.len(), MAX_DIRECT_IMPACTS);
-            assert_eq!(
-                report
-                    .direct_impacts
-                    .iter()
-                    .filter(|result| result.is_exact_reference())
-                    .count(),
-                12,
-                "every exact reference outlives a lexical hit at the same score"
-            );
-            assert_eq!(report.direct_impacts_omitted, 32 - MAX_DIRECT_IMPACTS);
-            assert!(
-                report.risk_report.reasons.iter().any(|reason| reason
-                    .starts_with("7 further direct impact(s) omitted beyond the 25-entry cap")),
-                "{:?}",
-                report.risk_report.reasons
-            );
-            kept_orders.push(
-                report
-                    .direct_impacts
-                    .iter()
-                    .map(|result| result.path.clone())
-                    .collect::<Vec<_>>(),
-            );
+    /// Lexical hits at a BM25-scale score, on paths that are not callers.
+    fn keyword_hits(count: usize) -> FixedSearchIndex {
+        FixedSearchIndex(
+            (0..count)
+                .map(|index| {
+                    chunk_hit(
+                        &format!("src/lexical/mention_{index:02}.rs"),
+                        1,
+                        6.4,
+                        "matched `RateValidator` in a comment",
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn keyword_matches_that_outscore_exact_references_do_not_push_them_past_the_cap() {
+        let store = store_with_exact_callers(3);
+        let index = keyword_hits(MAX_DIRECT_IMPACTS);
+        let report = ImpactEngine::new(&store)
+            .with_search_index(Some(&index))
+            .for_file(Path::new("src/rates.rs"))
+            .unwrap();
+
+        let exact = report
+            .direct_impacts
+            .iter()
+            .filter(|result| result.is_exact_reference())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            exact.len(),
+            3,
+            "every exact reference survives the cap: {:#?}",
+            report.direct_impacts
+        );
+        // The inversion this guards is score-driven, not a tie: the exact references score
+        // below every keyword match they must still outrank.
+        assert!(exact.iter().all(|result| result.score < 6.4));
+        assert!(report.direct_impacts[..3]
+            .iter()
+            .all(SearchResult::is_exact_reference));
+        assert_eq!(report.direct_impacts.len(), MAX_DIRECT_IMPACTS);
+        assert_eq!(report.direct_impacts_omitted, 3);
+        assert!(
+            report.risk_report.reasons.iter().any(|reason| reason.starts_with(
+                "3 further direct impact(s) omitted beyond the 25-entry cap, 0 of them exact-reference entries"
+            )),
+            "{:?}",
+            report.risk_report.reasons
+        );
+    }
+
+    #[test]
+    fn exact_references_that_alone_overflow_the_cap_are_counted_as_cut() {
+        let store = store_with_exact_callers(MAX_DIRECT_IMPACTS + 2);
+        let index = keyword_hits(5);
+        let report = ImpactEngine::new(&store)
+            .with_search_index(Some(&index))
+            .for_file(Path::new("src/rates.rs"))
+            .unwrap();
+
+        assert!(report
+            .direct_impacts
+            .iter()
+            .all(SearchResult::is_exact_reference));
+        assert_eq!(report.direct_impacts_omitted, 7);
+        assert!(
+            report.risk_report.reasons.iter().any(|reason| reason.starts_with(
+                "7 further direct impact(s) omitted beyond the 25-entry cap, 2 of them exact-reference entries"
+            )),
+            "{:?}",
+            report.risk_report.reasons
+        );
+    }
+
+    #[test]
+    fn heuristic_impacts_at_an_equal_score_break_the_tie_by_kind_then_path() {
+        let mut cochange = chunk_hit("z/history.rs", 1, 0.2, "co-changed");
+        cochange.match_reason = GIT_COCHANGE_MATCH_REASON.into();
+        let lexical = chunk_hit("a/mention.rs", 1, 0.2, "lexical");
+        for mut results in [
+            vec![lexical.clone(), cochange.clone()],
+            vec![cochange.clone(), lexical.clone()],
+        ] {
+            results.sort_by(compare_impact_results);
+            assert_eq!(results[0].path, PathBuf::from("z/history.rs"));
         }
-        assert_eq!(kept_orders[0], kept_orders[1]);
+    }
+
+    #[test]
+    fn direct_impact_kinds_keep_their_authority_order() {
+        // Exhaustive, so a new variant does not compile until it is placed here on purpose.
+        fn rank(kind: DirectImpactKind) -> usize {
+            match kind {
+                DirectImpactKind::ExactReference => 0,
+                DirectImpactKind::CoChange => 1,
+                DirectImpactKind::Runtime => 2,
+                DirectImpactKind::ServiceBoundary => 3,
+                DirectImpactKind::Lexical => 4,
+            }
+        }
+        let mut kinds = [
+            DirectImpactKind::Lexical,
+            DirectImpactKind::ServiceBoundary,
+            DirectImpactKind::Runtime,
+            DirectImpactKind::CoChange,
+            DirectImpactKind::ExactReference,
+        ];
+        kinds.sort();
+        assert_eq!(
+            kinds.iter().copied().map(rank).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
     }
 
     #[test]
