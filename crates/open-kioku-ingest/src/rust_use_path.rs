@@ -8,47 +8,128 @@
 //! file path alone, so `self::` and `super::` are wrong for a `use` nested in an inline `mod`
 //! block, and a mapped path is only a candidate until the caller checks the `mod` declarations.
 
+use open_kioku_semantic_model::ProjectRoot;
 use std::path::Path;
+
+/// Where a Rust package keeps the module tree of its library and default binary crates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RustPackageLayout {
+    /// Repository-relative directory holding the module tree (`src`, `crates/app/src`).
+    pub(crate) src_root: String,
+    /// The library crate root's file name in `src_root`, without `.rs`: `lib`, or the file that
+    /// `[lib] path` names there. `None` when `[lib] path` puts the root outside `src_root`, whose
+    /// modules this layout cannot follow.
+    library: Option<String>,
+}
+
+impl RustPackageLayout {
+    /// The layout of the package at `root`, or of a top-level `src/` when no manifest is above.
+    pub(crate) fn of(root: Option<&ProjectRoot>) -> Self {
+        match root {
+            Some(root) => Self::new(&root.path, root.library_root.as_deref()),
+            None => Self::new(Path::new(""), None),
+        }
+    }
+
+    /// The package at `crate_dir`, whose manifest may set its library root with `[lib] path`.
+    pub(crate) fn new(crate_dir: &Path, library_root: Option<&Path>) -> Self {
+        let src_root = src_root_of(crate_dir);
+        let library = match library_root {
+            None => Some("lib".to_string()),
+            Some(file) => {
+                let file = file.to_string_lossy().replace('\\', "/");
+                file.strip_prefix(src_root.as_str())
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .and_then(|rest| rest.strip_suffix(".rs"))
+                    .filter(|name| !name.is_empty() && !name.contains('/') && *name != "main")
+                    .map(str::to_string)
+            }
+        };
+        Self { src_root, library }
+    }
+
+    /// Whether the library crate root, when the package has one, is in the module tree.
+    pub(crate) fn places_library(&self) -> bool {
+        self.library.is_some()
+    }
+
+    /// Extension-less path of the file holding `root`, when this layout can place it.
+    pub(crate) fn root_stem(&self, root: RustCrateRoot) -> Option<String> {
+        let name = match root {
+            RustCrateRoot::Library => self.library.as_deref()?,
+            RustCrateRoot::Binary => "main",
+        };
+        Some(format!("{}/{name}", self.src_root))
+    }
+
+    /// Extension-less paths of the crate root files this layout places.
+    pub(crate) fn root_stems(&self) -> Vec<String> {
+        [RustCrateRoot::Library, RustCrateRoot::Binary]
+            .into_iter()
+            .filter_map(|root| self.root_stem(root))
+            .collect()
+    }
+}
+
+/// A crate root file of a package's module tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RustCrateRoot {
+    /// `lib.rs`, or the file `[lib] path` names.
+    Library,
+    /// `main.rs`.
+    Binary,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RustUsePath {
-    /// Repository-relative directory holding the crate's module tree (`src`, `crates/app/src`).
-    pub(crate) src_root: String,
+    /// The package whose module tree holds the importer.
+    pub(crate) package: RustPackageLayout,
     /// Path below the crate root with the `crate`/`self`/`super` prefix applied. A glob import
-    /// keeps its trailing `*`.
+    /// keeps its trailing `*`, and a raw identifier keeps its `r#`.
     pub(crate) segments: Vec<String>,
     /// The importing file's module as its path implies (`["auth", "keys"]` for `auth/keys.rs`).
     pub(crate) importer_module: Vec<String>,
     /// The path is `self::`/`super::`, so it is only as sound as `importer_module`, which a
     /// `#[path]` declaration or a missing `mod` declaration makes wrong.
     pub(crate) relative: bool,
-    /// `lib` or `main` when the importer is that crate root file itself.
-    pub(crate) importer_root: Option<&'static str>,
+    /// The crate root the importer is, when it is that crate root file itself.
+    pub(crate) importer_root: Option<RustCrateRoot>,
 }
 
 impl RustUsePath {
     /// Extension-less paths of the files that can hold `module`: `<dir>.rs` and `<dir>/mod.rs`,
-    /// or `lib.rs` and `main.rs` for the crate root.
-    pub(crate) fn module_file_stems(&self, module: &[String]) -> [String; 2] {
+    /// or the crate root files for the crate root.
+    pub(crate) fn module_file_stems(&self, module: &[String]) -> Vec<String> {
         if module.is_empty() {
-            [
-                format!("{}/lib", self.src_root),
-                format!("{}/main", self.src_root),
-            ]
+            self.package.root_stems()
         } else {
-            let dir = format!("{}/{}", self.src_root, module.join("/"));
-            [format!("{dir}/mod"), dir]
+            let dir = format!(
+                "{}/{}",
+                self.package.src_root,
+                module
+                    .iter()
+                    .map(|segment| module_name(segment))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            );
+            vec![format!("{dir}/mod"), dir]
         }
     }
 }
 
-/// Maps `use_path` from `importer`, both repository-relative, in the package at `crate_dir`.
+/// The name a module path segment or `mod` declaration gives a module's file: `r#type` is the
+/// module `type`, in `type.rs`.
+pub(crate) fn module_name(segment: &str) -> &str {
+    segment.strip_prefix("r#").unwrap_or(segment)
+}
+
+/// Maps `use_path` from `importer`, both repository-relative, in `package`.
 pub(crate) fn map_rust_use_path(
-    crate_dir: &Path,
+    package: &RustPackageLayout,
     importer: &Path,
     use_path: &str,
 ) -> Option<RustUsePath> {
-    let file = map_rust_module_file(crate_dir, importer)?;
+    let file = map_rust_module_file(package, importer)?;
     let mut importer_module = file
         .importer_module
         .iter()
@@ -88,13 +169,17 @@ pub(crate) fn map_rust_use_path(
     })
 }
 
-/// The module that `file`, repository-relative, holds in the package at `crate_dir` as its path
-/// implies, as a path with no segments: `src/auth/keys.rs` is `["auth", "keys"]` and `src/lib.rs`
-/// the crate root. `None` outside `src/` and under `src/bin/`, as for [`map_rust_use_path`].
-pub(crate) fn map_rust_module_file(crate_dir: &Path, file: &Path) -> Option<RustUsePath> {
-    let src_root = src_root_of(crate_dir);
+/// The module that `file`, repository-relative, holds in `package` as its path implies, as a
+/// path with no segments: `src/auth/keys.rs` is `["auth", "keys"]` and `src/lib.rs` the crate
+/// root. `None` outside `src/` and under `src/bin/`, as for [`map_rust_use_path`].
+pub(crate) fn map_rust_module_file(
+    package: &RustPackageLayout,
+    file: &Path,
+) -> Option<RustUsePath> {
     let file = file.to_string_lossy().replace('\\', "/");
-    let module_file = file.strip_prefix(src_root.as_str())?.strip_prefix('/')?;
+    let module_file = file
+        .strip_prefix(package.src_root.as_str())?
+        .strip_prefix('/')?;
     let mut module = module_file
         .strip_suffix(".rs")?
         .split('/')
@@ -104,8 +189,8 @@ pub(crate) fn map_rust_module_file(crate_dir: &Path, file: &Path) -> Option<Rust
         return None;
     }
     let importer_root = match module.as_slice() {
-        ["lib"] => Some("lib"),
-        ["main"] => Some("main"),
+        [name] if package.library.as_deref() == Some(*name) => Some(RustCrateRoot::Library),
+        ["main"] => Some(RustCrateRoot::Binary),
         _ => None,
     };
     if importer_root.is_some() {
@@ -114,7 +199,7 @@ pub(crate) fn map_rust_module_file(crate_dir: &Path, file: &Path) -> Option<Rust
         module.pop();
     }
     Some(RustUsePath {
-        src_root,
+        package: package.clone(),
         segments: Vec::new(),
         importer_module: module.into_iter().map(str::to_string).collect(),
         relative: false,
@@ -129,10 +214,12 @@ pub(crate) fn map_rust_module_file(crate_dir: &Path, file: &Path) -> Option<Rust
 /// integration test under `tests/`, an example, a binary — so the importer's own path says nothing
 /// and the path is followed from `lib.rs` alone.
 pub(crate) fn map_rust_crate_name_path(
-    crate_dir: &Path,
+    package: &RustPackageLayout,
     package_name: &str,
     use_path: &str,
 ) -> Option<RustUsePath> {
+    // A library root outside the module tree has modules this layout cannot follow.
+    package.library.as_ref()?;
     let mut parts = use_path.split("::");
     if parts.next()? != package_name.replace('-', "_") {
         return None;
@@ -145,12 +232,12 @@ pub(crate) fn map_rust_crate_name_path(
         }
     }
     Some(RustUsePath {
-        src_root: src_root_of(crate_dir),
+        package: package.clone(),
         segments: rest.into_iter().map(str::to_string).collect(),
         importer_module: Vec::new(),
         relative: false,
         // A crate name names the library crate, whichever file writes the path.
-        importer_root: Some("lib"),
+        importer_root: Some(RustCrateRoot::Library),
     })
 }
 
@@ -175,8 +262,12 @@ mod tests {
     use super::*;
 
     fn mapped(crate_dir: &str, importer: &str, use_path: &str) -> Option<(String, Vec<String>)> {
-        map_rust_use_path(Path::new(crate_dir), Path::new(importer), use_path)
-            .map(|path| (path.src_root, path.segments))
+        map_rust_use_path(&layout(crate_dir), Path::new(importer), use_path)
+            .map(|path| (path.package.src_root, path.segments))
+    }
+
+    fn layout(crate_dir: &str) -> RustPackageLayout {
+        RustPackageLayout::new(Path::new(crate_dir), None)
     }
 
     fn segments(root: &str, parts: &[&str]) -> Option<(String, Vec<String>)> {
@@ -189,7 +280,7 @@ mod tests {
     #[test]
     fn mapped_paths_record_the_importer_module_and_whether_they_are_relative() {
         let relative = map_rust_use_path(
-            Path::new(""),
+            &layout(""),
             Path::new("src/auth/keys.rs"),
             "super::issue_token",
         )
@@ -198,7 +289,7 @@ mod tests {
         assert_eq!(relative.importer_module, vec!["auth", "keys"]);
 
         let absolute = map_rust_use_path(
-            Path::new(""),
+            &layout(""),
             Path::new("src/auth/mod.rs"),
             "crate::session::open",
         )
@@ -276,17 +367,17 @@ mod tests {
     #[test]
     fn crate_name_paths_map_from_the_packages_library_root() {
         let path =
-            map_rust_crate_name_path(Path::new(""), "demo-crate", "demo_crate::auth::issue_token")
+            map_rust_crate_name_path(&layout(""), "demo-crate", "demo_crate::auth::issue_token")
                 .expect("a package's own crate name maps");
-        assert_eq!(path.src_root, "src");
+        assert_eq!(path.package.src_root, "src");
         assert_eq!(path.segments, vec!["auth", "issue_token"]);
-        assert_eq!(path.importer_root, Some("lib"));
+        assert_eq!(path.importer_root, Some(RustCrateRoot::Library));
         assert!(!path.relative);
         assert!(path.importer_module.is_empty());
 
-        let member = map_rust_crate_name_path(Path::new("crates/app"), "app", "app::auth::*")
+        let member = map_rust_crate_name_path(&layout("crates/app"), "app", "app::auth::*")
             .expect("a workspace member's crate name maps");
-        assert_eq!(member.src_root, "crates/app/src");
+        assert_eq!(member.package.src_root, "crates/app/src");
         assert_eq!(member.segments, vec!["auth", "*"]);
     }
 
@@ -294,10 +385,55 @@ mod tests {
     fn crate_name_paths_of_another_package_or_without_a_tail_are_not_mapped() {
         for path in ["other_crate::auth", "demo_crate", "demo_crate::*::x"] {
             assert_eq!(
-                map_rust_crate_name_path(Path::new(""), "demo-crate", path),
+                map_rust_crate_name_path(&layout(""), "demo-crate", path),
                 None,
                 "`{path}`"
             );
         }
+    }
+
+    #[test]
+    fn a_library_root_set_in_src_is_the_crate_root_and_one_elsewhere_is_not_placed() {
+        let moved = RustPackageLayout::new(
+            Path::new("crates/app"),
+            Some(Path::new("crates/app/src/app_lib.rs")),
+        );
+        assert_eq!(
+            moved.root_stems(),
+            vec!["crates/app/src/app_lib", "crates/app/src/main"]
+        );
+        let root = map_rust_module_file(&moved, Path::new("crates/app/src/app_lib.rs"))
+            .expect("the library root maps");
+        assert_eq!(root.importer_root, Some(RustCrateRoot::Library));
+        // With the root moved, a `lib.rs` beside it is an ordinary module file.
+        let lib = map_rust_module_file(&moved, Path::new("crates/app/src/lib.rs"))
+            .expect("lib.rs maps as a module");
+        assert_eq!(lib.importer_root, None);
+        assert_eq!(lib.importer_module, vec!["lib"]);
+
+        for outside in ["crates/app/lib.rs", "crates/app/src/nested/lib.rs"] {
+            let layout = RustPackageLayout::new(Path::new("crates/app"), Some(Path::new(outside)));
+            assert_eq!(
+                layout.root_stems(),
+                vec!["crates/app/src/main"],
+                "{outside}"
+            );
+            assert_eq!(
+                map_rust_crate_name_path(&layout, "app", "app::auth::issue_token"),
+                None,
+                "{outside}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_identifier_segments_name_the_module_file_without_the_prefix() {
+        let path = map_rust_use_path(&layout(""), Path::new("src/lib.rs"), "crate::r#type::ty")
+            .expect("a raw identifier is a path identifier");
+        assert_eq!(path.segments, vec!["r#type", "ty"]);
+        assert_eq!(
+            path.module_file_stems(&path.segments[..1]),
+            vec!["src/type/mod", "src/type"]
+        );
     }
 }

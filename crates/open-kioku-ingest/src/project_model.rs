@@ -147,6 +147,40 @@ fn cargo_package_name(content: &str) -> Option<String> {
     lib.or(package)
 }
 
+/// The `path` a Cargo manifest's `[lib]` table sets for the library crate root, relative to the
+/// manifest's directory. `None` when the manifest keeps the default `src/lib.rs`.
+fn cargo_library_path(content: &str) -> Option<String> {
+    let mut in_lib = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(table) = line.strip_prefix('[') {
+            in_lib = table.starts_with("lib]");
+            continue;
+        }
+        if !in_lib {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "path" {
+            continue;
+        }
+        let quoted = value.trim();
+        let Some(quote) = quoted.chars().next().filter(|ch| matches!(ch, '"' | '\'')) else {
+            continue;
+        };
+        let Some((path, _)) = quoted[1..].split_once(quote) else {
+            continue;
+        };
+        let path = path.trim_start_matches("./");
+        if !path.is_empty() {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
 fn repo_relative_path(path: &Path, repo_root: &Path) -> PathBuf {
     path.strip_prefix(repo_root).unwrap_or(path).to_path_buf()
 }
@@ -167,6 +201,7 @@ fn push_project_root(
             .map(|root| repo_relative_path(&root, repo_root))
             .collect(),
         package_name,
+        library_root: None,
     });
 }
 
@@ -192,16 +227,21 @@ fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 match file_name {
                     "Cargo.toml" => {
+                        let content = fs::read_to_string(&path).ok();
                         push_project_root(
                             model,
                             repo_root,
                             current,
                             Language::Rust,
                             vec![current.join("src")],
-                            fs::read_to_string(&path)
-                                .ok()
-                                .and_then(|content| cargo_package_name(&content)),
+                            content.as_deref().and_then(cargo_package_name),
                         );
+                        if let Some(root) = model.roots.last_mut() {
+                            root.library_root = content
+                                .as_deref()
+                                .and_then(cargo_library_path)
+                                .map(|library| root.path.join(library));
+                        }
                     }
                     "go.mod" => {
                         let mut pkg_name = None;
@@ -395,5 +435,32 @@ mod tests {
             .nearest_root_for(Path::new("Cargo.toml"), Language::Rust)
             .expect("the workspace root is a Rust project root");
         assert_eq!(workspace.package_name, None);
+        assert_eq!(workspace.library_root, None);
+        assert_eq!(member.library_root, None);
+    }
+
+    #[test]
+    fn rust_roots_carry_the_library_root_a_manifest_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/app/src")).unwrap();
+        std::fs::write(
+            dir.path().join("crates/app/Cargo.toml"),
+            "[package]\nname = \"app\"\npath = \"not/the/lib.rs\"\n\n[lib]\nname = \"app\"\npath = \"./src/app_lib.rs\" # moved\n\n[[bin]]\npath = \"src/cli.rs\"\n",
+        )
+        .unwrap();
+
+        let model = ProjectModel::discover(dir.path());
+        let app = model
+            .nearest_root_for(Path::new("crates/app/src/app_lib.rs"), Language::Rust)
+            .expect("the package is a Rust project root");
+        assert_eq!(
+            app.library_root.as_deref(),
+            Some(Path::new("crates/app/src/app_lib.rs"))
+        );
+        assert_eq!(
+            cargo_library_path("[lib]\npath = 'lib.rs'\n").as_deref(),
+            Some("lib.rs")
+        );
+        assert_eq!(cargo_library_path("[[bin]]\npath = \"src/cli.rs\"\n"), None);
     }
 }

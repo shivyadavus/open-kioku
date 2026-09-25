@@ -1,5 +1,6 @@
 use crate::context::{ResolutionContext, RustRelativeModule, ScopedImport};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
+use crate::index::RustModulePlacement;
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
 use open_kioku_core::{
     Binding, CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, Language,
@@ -165,17 +166,19 @@ pub(crate) fn resolve_module_member_outcome(
 /// innermost module around the call, an inline `mod` block included: `super::f()` in
 /// `mod tests` of `src/worker.rs` names the `f` that file declares, not one in the crate root. A
 /// path ending in a module of this file names an item that module declares or brings in from
-/// another module of the file; one ending outside the file's scopes names items by the qualified
-/// names its module path spells, unless the declared module tree shows the file holding them, or
-/// this file, is not the module its path spells.
+/// another module of the file. One ending outside the file's scopes names items by the qualified
+/// names its module path spells in the caller's own crate, read from the declared module tree: it
+/// starts only in a file the tree records, `crate::` from that crate's root and `self`/`super`
+/// only from a file the tree places at its path, and ends only in a file placed in that crate.
 fn resolve_rust_qualified_module_outcome(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
     receiver: &str,
 ) -> Option<ResolutionOutcome> {
     let receiver = receiver.trim();
+    let placement = ctx.scopes.rust_module_placement(ctx.file_id);
     let (mut targets, strategy) = if receiver == "crate" || receiver.starts_with("crate::") {
-        let names = rust_crate_path_member_names(ctx.file_path, receiver, &call.callee_name)?;
+        let names = rust_crate_path_member_names(placement?, receiver, &call.callee_name)?;
         (
             rust_qualified_targets(ctx, &names),
             RustModulePathStrategy::CrateQualified,
@@ -190,12 +193,9 @@ fn resolve_rust_qualified_module_outcome(
                 RustModulePathStrategy::ModuleScope,
             ),
             RustRelativeModule::Outside { climbs, path } => {
-                // The path is read off this file's own path, which a `#[path]` mount makes wrong.
-                if !ctx.scopes.may_be_module_at_its_path(ctx.file_id) {
-                    return None;
-                }
+                // The path is read off this file's module, which only a placed file has.
                 let names =
-                    rust_outside_member_names(ctx.file_path, climbs, &path, &call.callee_name)?;
+                    rust_outside_member_names(placement?, climbs, &path, &call.callee_name)?;
                 (
                     rust_qualified_targets(ctx, &names),
                     RustModulePathStrategy::CrateQualified,
@@ -204,12 +204,14 @@ fn resolve_rust_qualified_module_outcome(
         }
     };
     if matches!(strategy, RustModulePathStrategy::CrateQualified) {
-        // A file the module tree does not declare where its path says, such as the default
-        // location of a `#[path]` module, is not the module its qualified name spells.
+        // A file the module tree does not place where its path says, such as the default
+        // location of a `#[path]` module, or one of another crate, is not the module the path
+        // spells.
+        let placement = placement?;
         targets.retain(|target| {
             ctx.symbols
                 .get(target)
-                .is_some_and(|symbol| ctx.scopes.may_be_module_at_its_path(&symbol.file_id))
+                .is_some_and(|symbol| ctx.scopes.is_placed_in_crate_of(&symbol.file_id, placement))
         });
     }
     normalize_symbol_ids(&mut targets);
@@ -304,94 +306,77 @@ fn rust_relative_path(receiver: &str) -> Option<(usize, Vec<&str>)> {
     Some((depth, rest))
 }
 
+/// Qualified names of `callee` in the module a `crate::` path names in the caller's crate.
 fn rust_crate_path_member_names(
-    file_path: &std::path::Path,
+    placement: &RustModulePlacement,
     receiver: &str,
     callee: &str,
 ) -> Option<Vec<String>> {
-    let stem = rust_file_stem(file_path);
-    let mut names = if receiver == "crate" {
-        rust_crate_root_member_names(&stem, callee)
-    } else {
-        let module = receiver.strip_prefix("crate::")?;
-        rust_module_member_names(&format!("src::{module}"), callee)
+    let module = match receiver.strip_prefix("crate::") {
+        None if receiver == "crate" => Vec::new(),
+        None => return None,
+        Some(path) => {
+            let mut module = Vec::new();
+            for segment in path.split("::").map(str::trim) {
+                if matches!(segment, "" | "self" | "super" | "crate") {
+                    return None;
+                }
+                module.push(rust_module_name(segment).to_string());
+            }
+            module
+        }
     };
-    names.sort();
-    names.dedup();
-    Some(names)
+    Some(rust_module_member_names(placement, &module, callee))
 }
 
-/// Qualified names of `callee` in the module `climbs` modules above this file's own module and
-/// then down `path`, as tree-sitter spells them from module file paths.
+/// Qualified names of `callee` in the module `climbs` modules above the caller's own module and
+/// then down `path`, in the caller's crate. `None` when the caller is not placed at its path or
+/// the climb leaves the crate.
 fn rust_outside_member_names(
-    file_path: &std::path::Path,
+    placement: &RustModulePlacement,
     climbs: usize,
     path: &[String],
     callee: &str,
 ) -> Option<Vec<String>> {
-    let mut module = rust_logical_module_prefix(&rust_file_stem(file_path));
-    for _ in 0..climbs {
-        module = rust_parent_module_prefix(&module)?;
-    }
-    let mut names = if path.is_empty() {
-        if module.contains("::") {
-            rust_module_member_names(&module, callee)
-        } else {
-            vec![
-                format!("{module}::lib::{callee}"),
-                format!("{module}::main::{callee}"),
-            ]
-        }
+    let own = placement.module.as_ref()?;
+    let kept = own.len().checked_sub(climbs)?;
+    let module = own[..kept]
+        .iter()
+        .map(String::as_str)
+        .chain(path.iter().map(|segment| rust_module_name(segment)))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Some(rust_module_member_names(placement, &module, callee))
+}
+
+/// Qualified names of `callee` in `module` of the crate, as tree-sitter spells them from module
+/// file paths: `<dir>/<module>.rs` or `<dir>/<module>/mod.rs`, or the crate root files.
+fn rust_module_member_names(
+    placement: &RustModulePlacement,
+    module: &[String],
+    callee: &str,
+) -> Vec<String> {
+    let mut names = if module.is_empty() {
+        placement
+            .crate_roots
+            .iter()
+            .map(|root| format!("{root}::{callee}"))
+            .collect()
     } else {
-        rust_module_member_names(&format!("{module}::{}", path.join("::")), callee)
+        let module = format!("{}::{}", placement.crate_dir, module.join("::"));
+        vec![
+            format!("{module}::{callee}"),
+            format!("{module}::mod::{callee}"),
+        ]
     };
     names.sort();
     names.dedup();
-    Some(names)
+    names
 }
 
-fn rust_file_stem(file_path: &std::path::Path) -> String {
-    file_path
-        .with_extension("")
-        .to_string_lossy()
-        .replace(['/', '\\'], "::")
-}
-
-fn rust_logical_module_prefix(stem: &str) -> String {
-    if let Some(prefix) = stem.strip_suffix("::mod") {
-        prefix.to_string()
-    } else if let Some(prefix) = stem.strip_suffix("::lib") {
-        prefix.to_string()
-    } else if let Some(prefix) = stem.strip_suffix("::main") {
-        prefix.to_string()
-    } else {
-        stem.to_string()
-    }
-}
-
-fn rust_parent_module_prefix(module: &str) -> Option<String> {
-    module
-        .rsplit_once("::")
-        .map(|(parent, _)| parent.to_string())
-}
-
-fn rust_crate_root_member_names(stem: &str, callee: &str) -> Vec<String> {
-    if stem.ends_with("::lib") || stem.ends_with("::main") {
-        vec![format!("{stem}::{callee}")]
-    } else {
-        let root = stem.split("::").next().unwrap_or("src");
-        vec![
-            format!("{root}::lib::{callee}"),
-            format!("{root}::main::{callee}"),
-        ]
-    }
-}
-
-fn rust_module_member_names(module: &str, callee: &str) -> Vec<String> {
-    vec![
-        format!("{module}::{callee}"),
-        format!("{module}::mod::{callee}"),
-    ]
+/// The module name a path segment spells: `r#type` is the module `type`, in `type.rs`.
+fn rust_module_name(segment: &str) -> &str {
+    segment.strip_prefix("r#").unwrap_or(segment)
 }
 
 pub(crate) fn resolve_named_type_member_outcome(
@@ -852,36 +837,43 @@ mod tests {
         Scope, ScopeKind, SourceRange, Symbol, Visibility,
     };
 
+    fn placement(crate_dir: &str, roots: &[&str], module: Option<&[&str]>) -> RustModulePlacement {
+        RustModulePlacement {
+            crate_dir: crate_dir.into(),
+            crate_roots: roots.iter().map(|root| root.to_string()).collect(),
+            module: module.map(|module| module.iter().map(|name| name.to_string()).collect()),
+        }
+    }
+
     #[test]
     fn rust_module_symbol_names_match_tree_sitter_qualified_names() {
+        let root = placement("src", &["src::lib"], Some(&[]));
         assert_eq!(
-            rust_crate_path_member_names(
-                std::path::Path::new("src/lib.rs"),
-                "crate::storage",
-                "persist"
-            )
-            .unwrap(),
+            rust_crate_path_member_names(&root, "crate::storage", "persist").unwrap(),
             vec![
                 "src::storage::mod::persist".to_string(),
                 "src::storage::persist".to_string(),
             ]
         );
         assert_eq!(
-            rust_outside_member_names(
-                std::path::Path::new("src/storage/service.rs"),
-                1,
-                &[],
-                "persist"
-            )
-            .unwrap(),
+            rust_crate_path_member_names(&root, "crate", "persist").unwrap(),
+            vec!["src::lib::persist".to_string()]
+        );
+        assert_eq!(
+            rust_crate_path_member_names(&root, "crate::super", "p"),
+            None
+        );
+        let service = placement("src", &["src::lib"], Some(&["storage", "service"]));
+        assert_eq!(
+            rust_outside_member_names(&service, 1, &[], "persist").unwrap(),
             vec![
                 "src::storage::mod::persist".to_string(),
                 "src::storage::persist".to_string(),
             ]
         );
+        let worker = placement("src", &["src::lib", "src::main"], Some(&["worker"]));
         assert_eq!(
-            rust_outside_member_names(std::path::Path::new("src/worker.rs"), 1, &[], "persist")
-                .unwrap(),
+            rust_outside_member_names(&worker, 1, &[], "persist").unwrap(),
             vec![
                 "src::lib::persist".to_string(),
                 "src::main::persist".to_string(),
@@ -889,7 +881,7 @@ mod tests {
         );
         assert_eq!(
             rust_outside_member_names(
-                std::path::Path::new("src/worker.rs"),
+                &worker,
                 0,
                 &["tests".to_string(), "helpers".to_string()],
                 "persist"
@@ -900,9 +892,47 @@ mod tests {
                 "src::worker::tests::helpers::persist".to_string(),
             ]
         );
+        // A climb past the crate root leaves the crate.
+        assert_eq!(rust_outside_member_names(&root, 1, &[], "persist"), None);
+        // A file the tree does not place has no module to climb from.
+        let unplaced = placement("src", &["src::lib"], None);
         assert_eq!(
-            rust_outside_member_names(std::path::Path::new("src/lib.rs"), 1, &[], "persist"),
+            rust_outside_member_names(&unplaced, 1, &[], "persist"),
             None
+        );
+    }
+
+    #[test]
+    fn rust_crate_paths_are_spelled_from_the_callers_own_crate() {
+        // A workspace member's `crate::util` is its own `crates/a/src/util.rs`, never the root
+        // package's `src/util.rs`.
+        let member = placement("crates::a::src", &["crates::a::src::lib"], Some(&[]));
+        assert_eq!(
+            rust_crate_path_member_names(&member, "crate::util", "f").unwrap(),
+            vec![
+                "crates::a::src::util::f".to_string(),
+                "crates::a::src::util::mod::f".to_string(),
+            ]
+        );
+        assert_eq!(
+            rust_crate_path_member_names(&member, "crate", "f").unwrap(),
+            vec!["crates::a::src::lib::f".to_string()]
+        );
+        // `pub mod r#type;` is the file `type.rs`.
+        assert_eq!(
+            rust_crate_path_member_names(&member, "crate::r#type", "ty").unwrap(),
+            vec![
+                "crates::a::src::type::mod::ty".to_string(),
+                "crates::a::src::type::ty".to_string(),
+            ]
+        );
+        let nested = placement("crates::a::src", &["crates::a::src::lib"], Some(&["type"]));
+        assert_eq!(
+            rust_outside_member_names(&nested, 1, &["r#match".to_string()], "m").unwrap(),
+            vec![
+                "crates::a::src::match::m".to_string(),
+                "crates::a::src::match::mod::m".to_string(),
+            ]
         );
     }
 
@@ -1246,8 +1276,9 @@ mod tests {
         with_misplaced_module_files(extra, declarations, &[], test)
     }
 
-    /// [`with_inline_mod_context`], with `misplaced` recorded as the files the declared module
-    /// tree shows are not the module their path spells.
+    /// [`with_inline_mod_context`], with the crate root `src/lib.rs`, `src/worker.rs`,
+    /// `src/worker/child.rs` and `src/worker/outer/helpers.rs` recorded as placed at their paths
+    /// in the library crate, except `misplaced`, which the declared module tree does not place.
     fn with_misplaced_module_files<T>(
         extra: Vec<Symbol>,
         declarations: bool,
@@ -1309,11 +1340,25 @@ mod tests {
                 declaration("scope:outer", "inner", true, 5),
             ]);
         }
-        scopes.record_misplaced_rust_module_files(
-            misplaced
-                .iter()
-                .map(|path| FileId::new(format!("file:{path}")))
-                .collect(),
+        scopes.record_rust_module_placements(
+            [
+                ("src/lib.rs", &[][..]),
+                ("src/worker.rs", &["worker"][..]),
+                ("src/worker/child.rs", &["worker", "child"][..]),
+                (
+                    "src/worker/outer/helpers.rs",
+                    &["worker", "outer", "helpers"][..],
+                ),
+            ]
+            .into_iter()
+            .map(|(path, module)| {
+                let module = (!misplaced.contains(&path)).then_some(module);
+                (
+                    FileId::new(format!("file:{path}")),
+                    placement("src", &["src::lib"], module),
+                )
+            })
+            .collect(),
         );
         let item = |id: &str, name: &str, kind: SymbolKind, file: &str, scope: &str| Symbol {
             id: SymbolId::new(id),
@@ -1437,6 +1482,153 @@ mod tests {
             ResolutionOutcome::Unresolved { candidates, .. } if candidates.is_empty() => None,
             other => panic!("expected a proven edge or none, got {other:?}"),
         }
+    }
+
+    /// A context calling from the crate root file `caller`, with one function per
+    /// `(qualified name, file)` in `items` and `placements` recorded. Each symbol's id is its
+    /// qualified name.
+    fn with_rust_files<T>(
+        caller: &str,
+        items: &[(&str, &str)],
+        placements: Vec<(&str, RustModulePlacement)>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
+        let caller_id = FileId::new(format!("file:{caller}"));
+        let mut scopes = ScopeIndex::build(vec![Scope {
+            id: ScopeId::new("scope:worker"),
+            file_id: caller_id.clone(),
+            parent_id: None,
+            owner_symbol_id: None,
+            kind: ScopeKind::File,
+            range: SourceRange {
+                start_line: 1,
+                start_column: 1,
+                end_line: 40,
+                end_column: 1,
+            },
+        }]);
+        scopes.record_rust_module_placements(
+            placements
+                .into_iter()
+                .map(|(path, placement)| (FileId::new(format!("file:{path}")), placement))
+                .collect(),
+        );
+        let symbols = items
+            .iter()
+            .map(|(qualified, file)| Symbol {
+                id: SymbolId::new(*qualified),
+                name: qualified.rsplit("::").next().unwrap_or_default().into(),
+                qualified_name: (*qualified).into(),
+                kind: SymbolKind::Function,
+                file_id: FileId::new(format!("file:{file}")),
+                range: None,
+                language: Language::Rust,
+                confidence: Confidence::Exact,
+                provenance: EvidenceSourceType::TreeSitter,
+                module_id: None,
+                parent_symbol_id: None,
+                scope_id: None,
+                signature: None,
+                visibility: Visibility::Public,
+            })
+            .collect();
+        let symbol_index = SymbolIndex::build(symbols);
+        let bindings = BindingIndex::build(Vec::new());
+        let inheritance = InheritanceIndex::build(Vec::new());
+        let repository = open_kioku_semantic_model::SemanticRepository::new();
+        let semantics = open_kioku_languages::semantics_for(&Language::Rust).unwrap();
+        let context = ResolutionContext::new(
+            &caller_id,
+            std::path::Path::new(caller),
+            None,
+            Language::Rust,
+            &repository,
+            &symbol_index,
+            &scopes,
+            &bindings,
+            &inheritance,
+            semantics,
+        );
+        test(&context)
+    }
+
+    #[test]
+    fn rust_crate_paths_in_a_workspace_member_resolve_within_that_member() {
+        // A root package `src/` beside member `crates/a`, both declaring `util`; only the root
+        // package declares `only_root`.
+        let root_pkg = |module: &[&str]| placement("src", &["src::lib"], Some(module));
+        let member =
+            |module: &[&str]| placement("crates::a::src", &["crates::a::src::lib"], Some(module));
+        let items = [
+            ("src::util::f", "src/util.rs"),
+            ("src::only_root::z", "src/only_root.rs"),
+            ("crates::a::src::util::f", "crates/a/src/util.rs"),
+        ];
+        let placements = vec![
+            ("src/lib.rs", root_pkg(&[])),
+            ("src/util.rs", root_pkg(&["util"])),
+            ("src/only_root.rs", root_pkg(&["only_root"])),
+            ("crates/a/src/lib.rs", member(&[])),
+            ("crates/a/src/util.rs", member(&["util"])),
+        ];
+        with_rust_files("crates/a/src/lib.rs", &items, placements.clone(), |ctx| {
+            let at = |receiver: &str, callee: &str| {
+                proven_target(ctx, &module_path_call("scope:worker", receiver, callee))
+            };
+            assert_eq!(
+                at("crate::util", "f").as_deref(),
+                Some("crates::a::src::util::f")
+            );
+            assert_eq!(at("crate::only_root", "z"), None);
+        });
+        // A file outside every recorded module tree, such as an integration test, has no crate
+        // the path could be read against.
+        with_rust_files("crates/a/tests/it.rs", &items, placements, |ctx| {
+            let call = module_path_call("scope:worker", "crate::util", "f");
+            assert_eq!(proven_target(ctx, &call), None);
+        });
+    }
+
+    #[test]
+    fn rust_crate_paths_stay_in_the_crate_root_whose_tree_holds_the_caller() {
+        // `main.rs` declares `cli`, `lib.rs` declares `core`: two crates in one `src/`.
+        let bin = |module: &[&str]| placement("src", &["src::main"], Some(module));
+        let lib = |module: &[&str]| placement("src", &["src::lib"], Some(module));
+        let items = [
+            ("src::main::helper", "src/main.rs"),
+            ("src::lib::helper", "src/lib.rs"),
+            ("src::core::k", "src/core.rs"),
+            ("src::cli::run", "src/cli.rs"),
+        ];
+        let placements = vec![
+            ("src/main.rs", bin(&[])),
+            ("src/cli.rs", bin(&["cli"])),
+            ("src/lib.rs", lib(&[])),
+            ("src/core.rs", lib(&["core"])),
+        ];
+        with_rust_files("src/cli.rs", &items, placements.clone(), |ctx| {
+            let at = |receiver: &str, callee: &str| {
+                proven_target(ctx, &module_path_call("scope:worker", receiver, callee))
+            };
+            assert_eq!(at("crate", "helper").as_deref(), Some("src::main::helper"));
+            assert_eq!(at("super", "helper").as_deref(), Some("src::main::helper"));
+            assert_eq!(at("crate::core", "k"), None);
+        });
+        with_rust_files("src/main.rs", &items, placements, |ctx| {
+            let call = module_path_call("scope:worker", "crate::cli", "run");
+            assert_eq!(proven_target(ctx, &call).as_deref(), Some("src::cli::run"));
+        });
+    }
+
+    #[test]
+    fn rust_raw_identifier_module_paths_reach_the_module_file() {
+        let lib = |module: &[&str]| placement("src", &["src::lib"], Some(module));
+        let items = [("src::type::ty", "src/type.rs")];
+        let placements = vec![("src/lib.rs", lib(&[])), ("src/type.rs", lib(&["type"]))];
+        with_rust_files("src/lib.rs", &items, placements, |ctx| {
+            let call = module_path_call("scope:worker", "crate::r#type", "ty");
+            assert_eq!(proven_target(ctx, &call).as_deref(), Some("src::type::ty"));
+        });
     }
 
     #[test]

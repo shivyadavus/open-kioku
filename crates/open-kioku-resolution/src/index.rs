@@ -133,8 +133,26 @@ pub struct ScopeIndex {
     module_has_body: HashMap<ScopeId, bool>,
     /// `mod` scopes that enclose another scope, which only a block can.
     modules_with_children: HashSet<ScopeId>,
-    /// Rust files that the declared module tree shows are not the module their path spells.
-    misplaced_rust_module_files: HashSet<FileId>,
+    /// Where the declared module tree places each Rust file of a crate's module tree.
+    rust_module_placements: HashMap<FileId, RustModulePlacement>,
+}
+
+/// Where a Rust file of a package's module tree sits, for paths the resolver spells from file
+/// paths as tree-sitter spells qualified names (`crates/app/src/auth.rs` is `crates::app::src::auth`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustModulePlacement {
+    /// Qualified-name prefix of the directory holding the crate's module tree: `crates::app::src`.
+    pub crate_dir: String,
+    /// Qualified-name prefixes of the crate root files whose module tree holds the file, such as
+    /// `crates::app::src::lib`. A package with both `lib.rs` and `main.rs` is two crates, and a
+    /// module either declares belongs to that one only.
+    pub crate_roots: Vec<String>,
+    /// The file's module below the crate root (`["auth", "keys"]`, empty for a crate root) when
+    /// every module from the root down is declared as a file by the module above it. `None` for a
+    /// file the tree does not place there, such as the default location of a `#[path]` module, a
+    /// file a `#[path]` mounts, or one declared inside an inline `mod` or a macro: its `self::`
+    /// and `super::` paths cannot be read off its path, and a path must not end in it.
+    pub module: Option<Vec<String>>,
 }
 
 /// What the `mod` item a module symbol names turned out to be.
@@ -198,18 +216,35 @@ impl ScopeIndex {
         self.module_has_body.extend(has_body);
     }
 
-    /// Records the Rust files that the declared module tree shows are not the module their path
-    /// spells: the default location of a `#[path]` module, a file a `#[path]` mounts, and any other
-    /// file of a crate's source tree that is not declared as a file by the module above it. A Rust
-    /// path whose target the resolver spells from file paths neither starts nor ends in one.
-    pub fn record_misplaced_rust_module_files(&mut self, files: HashSet<FileId>) {
-        self.misplaced_rust_module_files.extend(files);
+    /// Records where the declared module tree places Rust files. A Rust `crate::`, `self::` or
+    /// `super::` path whose target the resolver spells from file paths starts only in a recorded
+    /// file, is read against that file's own crate, and ends only in a file placed in that crate.
+    pub fn record_rust_module_placements(
+        &mut self,
+        placements: HashMap<FileId, RustModulePlacement>,
+    ) {
+        self.rust_module_placements.extend(placements);
     }
 
-    /// Whether `file` may be the module its path spells: nothing recorded says otherwise. A file
-    /// the module tree cannot place either way keeps that reading.
-    pub(crate) fn may_be_module_at_its_path(&self, file: &FileId) -> bool {
-        !self.misplaced_rust_module_files.contains(file)
+    /// Where `file` sits in its crate's module tree, when it is recorded.
+    pub(crate) fn rust_module_placement(&self, file: &FileId) -> Option<&RustModulePlacement> {
+        self.rust_module_placements.get(file)
+    }
+
+    /// Whether the declared module tree places `file` at its path in a crate of `placement`.
+    pub(crate) fn is_placed_in_crate_of(
+        &self,
+        file: &FileId,
+        placement: &RustModulePlacement,
+    ) -> bool {
+        self.rust_module_placement(file).is_some_and(|target| {
+            target.module.is_some()
+                && target.crate_dir == placement.crate_dir
+                && target
+                    .crate_roots
+                    .iter()
+                    .any(|root| placement.crate_roots.contains(root))
+        })
     }
 
     pub fn get(&self, id: &ScopeId) -> Option<&Scope> {
