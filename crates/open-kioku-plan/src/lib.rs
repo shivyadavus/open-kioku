@@ -495,6 +495,15 @@ impl<'a> PlanEngine<'a> {
         if let Some(reason) = validation_cap_reason(validation_omitted_ids.len()) {
             risk.reasons.push(reason);
         }
+        if let Some(caveat) = manifest
+            .as_ref()
+            .and_then(|manifest| manifest.snapshot.as_ref())
+            .and_then(open_kioku_core::SnapshotProvenance::caveat)
+        {
+            if !risk.reasons.contains(&caveat) {
+                risk.reasons.push(caveat);
+            }
+        }
         let relevant_symbols = context
             .primary_symbols
             .iter()

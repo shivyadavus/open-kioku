@@ -1827,26 +1827,397 @@ fn init_index_search_and_doctor_work_together() {
     assert!(!setup_markdown.contains("0 BSP descriptor"));
 }
 
+/// Commit everything in `repo` except Open Kioku's local state, creating the repository on
+/// first use. A snapshot import relates the artifact's commit to `HEAD`, so a repository whose
+/// snapshot is imported has to be one.
+fn commit_all(repo: &std::path::Path, message: &str) {
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "-c",
+                "user.email=cli@example.com",
+                "-c",
+                "user.name=CLI Test",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    if !repo.join(".git").exists() {
+        git(&["init", "--quiet"]);
+        fs::write(repo.join(".gitignore"), ".ok/\n").unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", message]);
+}
+
 fn snapshot_fixture_repo() -> tempfile::TempDir {
+    snapshot_fixture_repo_with(&[(
+        "src/lib.rs",
+        "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n",
+    )])
+}
+
+fn snapshot_fixture_repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
-    fs::create_dir_all(repo.join("src")).unwrap();
-    fs::write(
-        repo.join("src/lib.rs"),
-        "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n",
-    )
-    .unwrap();
+    for (path, content) in files {
+        let path = repo.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
     run({
         let mut command = ok();
         command.arg("init").arg(repo);
         command
     });
+    commit_all(repo, "initial");
     run({
         let mut command = ok();
         command.arg("index").arg(repo);
         command
     });
     temp
+}
+
+fn export_snapshot(repo: &std::path::Path) {
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["snapshot", "export", "--quality", "fast"]);
+        command
+    });
+}
+
+fn import_snapshot_json(repo: &std::path::Path, extra: &[&str]) -> serde_json::Value {
+    let output = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "snapshot", "import"])
+            .args(extra);
+        command
+    });
+    serde_json::from_str(&output).unwrap()
+}
+
+fn status_json(repo: &std::path::Path) -> serde_json::Value {
+    let output = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args(["--json", "status"]);
+        command
+    });
+    serde_json::from_str(&output).unwrap()
+}
+
+#[test]
+fn snapshot_import_of_the_checked_out_commit_is_fresh() {
+    let temp = snapshot_fixture_repo();
+    let repo = temp.path();
+    export_snapshot(repo);
+
+    let imported = import_snapshot_json(repo, &[]);
+    let snapshot = &imported["snapshot"];
+    assert_eq!(snapshot["relation"], "same_commit", "{imported}");
+    assert_eq!(snapshot["commits_behind"], 0);
+    assert_eq!(snapshot["changed_files"], 0, "{imported}");
+    assert_eq!(snapshot["policy_filtered"], 0, "{imported}");
+    assert_eq!(imported["caveats"], serde_json::json!([]), "{imported}");
+
+    let status = status_json(repo);
+    assert_eq!(status["snapshot"]["relation"], "same_commit", "{status}");
+
+    // `ok index` rebuilds from source and publishes a manifest with no snapshot record.
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    assert!(status_json(repo).get("snapshot").is_none());
+}
+
+#[test]
+fn snapshot_import_of_an_ancestor_commit_is_stale_and_every_surface_says_so() {
+    let temp = snapshot_fixture_repo();
+    let repo = temp.path();
+    export_snapshot(repo);
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub struct Worker;\nimpl Worker { pub fn run(&self) {} pub fn stop(&self) {} }\n",
+    )
+    .unwrap();
+    commit_all(repo, "add stop");
+
+    let imported = import_snapshot_json(repo, &[]);
+    let snapshot = &imported["snapshot"];
+    assert_eq!(snapshot["relation"], "related", "{imported}");
+    assert_eq!(snapshot["commits_behind"], 1);
+    assert_eq!(snapshot["commits_ahead"], 0);
+    assert_eq!(snapshot["changed_files"], 1);
+    let caveat = imported["caveats"][0].as_str().unwrap().to_string();
+    assert!(caveat.contains("1 commit(s) behind"), "{caveat}");
+
+    let status = status_json(repo);
+    assert_eq!(status["snapshot"]["commits_behind"], 1, "{status}");
+    let repo_status = mcp_repo_status(repo);
+    assert_eq!(
+        repo_status["result"]["structuredContent"]["snapshot"]["commits_behind"], 1,
+        "{repo_status}"
+    );
+
+    let doctor: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command.arg("--json").arg("doctor").arg(repo);
+        command
+    }))
+    .unwrap();
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "snapshot")
+        .unwrap_or_else(|| panic!("no snapshot check: {doctor}"));
+    assert_eq!(check["status"], "warn", "{check}");
+
+    let pack: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "context", "Worker run"]);
+        command
+    }))
+    .unwrap();
+    assert!(
+        pack["retrieval_diagnostics"]["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some(caveat.as_str())),
+        "{pack}"
+    );
+}
+
+#[test]
+fn snapshot_import_refuses_an_artifact_this_repository_cannot_relate_to_head() {
+    let exporter = snapshot_fixture_repo();
+    export_snapshot(exporter.path());
+    let importer = snapshot_fixture_repo_with(&[("src/lib.rs", "pub struct Other;\n")]);
+    let repo = importer.path();
+    fs::create_dir_all(repo.join(".ok/artifacts")).unwrap();
+    for name in ["index.snapshot.zst", "index.snapshot.json"] {
+        fs::copy(
+            exporter.path().join(".ok/artifacts").join(name),
+            repo.join(".ok/artifacts").join(name),
+        )
+        .unwrap();
+    }
+    let original_index = fs::read(repo.join(".ok/index.sqlite")).unwrap();
+    let import_failure = || {
+        run_failure({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).args(["snapshot", "import"]);
+            command
+        })
+        .1
+    };
+
+    // The artifact's commit is not an object here.
+    let stderr = import_failure();
+    assert!(stderr.contains("is not in this repository"), "{stderr}");
+    assert!(stderr.contains("--allow-foreign"), "{stderr}");
+    assert_eq!(
+        fs::read(repo.join(".ok/index.sqlite")).unwrap(),
+        original_index
+    );
+
+    // Fetched, it is an object here with no history in common with HEAD.
+    let fetched = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["fetch", "--quiet"])
+        .arg(exporter.path())
+        .arg("HEAD")
+        .status()
+        .unwrap();
+    assert!(fetched.success());
+    let stderr = import_failure();
+    assert!(stderr.contains("shares no history with HEAD"), "{stderr}");
+    assert_eq!(
+        fs::read(repo.join(".ok/index.sqlite")).unwrap(),
+        original_index
+    );
+
+    // `--from-snapshot auto` applies the same refusal and indexes from source instead.
+    let (stdout, stderr) = run_ok_with_stderr({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "index", "--from-snapshot", "auto"]);
+        command
+    });
+    assert!(stderr.contains("falling back to full index"), "{stderr}");
+    let manifest: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(manifest.get("imported").is_none(), "{manifest}");
+    assert!(manifest.get("snapshot").is_none(), "{manifest}");
+
+    let imported = import_snapshot_json(repo, &["--allow-foreign"]);
+    assert_eq!(imported["snapshot"]["relation"], "foreign", "{imported}");
+    assert!(imported["caveats"][0]
+        .as_str()
+        .unwrap()
+        .contains("--allow-foreign"));
+    assert_eq!(status_json(repo)["snapshot"]["relation"], "foreign");
+}
+
+#[test]
+fn snapshot_import_serves_no_path_the_local_policy_excludes() {
+    let temp = snapshot_fixture_repo_with(&[
+        ("src/lib.rs", "pub struct Worker;\n"),
+        ("src/vault.rs", "pub struct VaultWidget;\n"),
+        ("legacy/old.rs", "pub struct LegacyWidget;\n"),
+    ]);
+    let repo = temp.path();
+    // An exporter that indexed a secret-like path: an older release, another policy, or a
+    // crafted artifact. Every stored mention of `src/vault.rs` becomes `deploy/vault.key`,
+    // except in the graph dictionary, whose rows are found by a hash of their value: the
+    // graph keeps the file's own name and goes with the file's nodes.
+    {
+        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+        let tables = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        for table in tables {
+            if table.starts_with("graph_") {
+                continue;
+            }
+            let columns = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|(_, kind)| kind.eq_ignore_ascii_case("TEXT"))
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            for column in columns {
+                conn.execute(
+                    &format!(
+                        "UPDATE {table} SET {column} = replace({column}, 'src/vault.rs', \
+                         'deploy/vault.key') WHERE {column} LIKE '%src/vault.rs%'"
+                    ),
+                    [],
+                )
+                .unwrap();
+            }
+        }
+    }
+    export_snapshot(repo);
+    // The importing checkout excludes `legacy/`; the exporter did not.
+    let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    assert!(config.contains("exclude = [\n"));
+    fs::write(
+        repo.join("ok.toml"),
+        config.replacen("exclude = [\n", "exclude = [\n    \"legacy/**\",\n", 1),
+    )
+    .unwrap();
+
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(imported["snapshot"]["policy_filtered"], 2, "{imported}");
+    assert_eq!(
+        imported["policy_filtered_by_source"],
+        serde_json::json!({"security_policy": 1, "config_exclude": 1}),
+        "{imported}"
+    );
+    assert_eq!(status_json(repo)["snapshot"]["policy_filtered"], 2);
+
+    for (query, path) in [
+        ("VaultWidget", "vault.key"),
+        ("LegacyWidget", "legacy/old.rs"),
+    ] {
+        let search = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", query]);
+            command
+        });
+        assert!(!search.contains(path), "{query}: {search}");
+    }
+    // No row of the published database names either path.
+    let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+    for table in [
+        "files",
+        "chunks",
+        "symbols",
+        "graph_nodes",
+        "document_sections",
+    ] {
+        let json_column = if table == "document_sections" {
+            "path"
+        } else {
+            "json"
+        };
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE {json_column} LIKE '%vault.key%' \
+                     OR {json_column} LIKE '%legacy/old.rs%'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} still names an excluded path");
+    }
+    for (table, column) in [
+        ("graph_strings", "value"),
+        ("graph_nodes", "id"),
+        ("analysis_facts", "target"),
+        ("git_symbol_touches", "file_path"),
+    ] {
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE {column} LIKE '%vault%' \
+                     OR {column} LIKE '%legacy/old.rs%'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} still names an excluded path");
+    }
+    // Git history names a secret-like path nowhere. File-level history of a merely excluded
+    // path is kept, as `ok index` records history for every path a commit touched.
+    let history_rows = |pattern: &str| -> i64 {
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM git_file_touches WHERE path LIKE ?1) \
+                  + (SELECT COUNT(*) FROM git_cochange_edges \
+                     WHERE path LIKE ?1 OR cochanged_path LIKE ?1)",
+            [pattern],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(history_rows("%vault%"), 0);
+    assert!(history_rows("legacy/old.rs") > 0);
 }
 
 #[test]
@@ -6242,6 +6613,8 @@ fn index_run_that_fails_after_the_rows_publishes_no_manifest() {
 #[test]
 fn snapshot_import_waits_for_a_live_index_writer_and_leaves_the_index_untouched() {
     let (_temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     run({
         let mut command = ok();
         command
@@ -6313,6 +6686,8 @@ fn snapshot_import_waits_for_a_live_index_writer_and_leaves_the_index_untouched(
 #[test]
 fn snapshot_import_that_fails_at_the_search_stage_publishes_no_manifest() {
     let (_temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     let import = |repo: &std::path::Path| {
         let mut command = ok();
         command
@@ -6421,6 +6796,8 @@ fn snapshot_import_that_fails_at_the_search_stage_publishes_no_manifest() {
 #[test]
 fn snapshot_import_aborts_when_the_replaced_index_cannot_be_read() {
     let (_temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     run({
         let mut command = ok();
         command
@@ -6536,6 +6913,8 @@ fn snapshot_export_refuses_an_unpublished_index() {
 #[test]
 fn snapshot_import_moves_a_running_mcp_session_to_the_imported_index() {
     let (_temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     run({
         let mut command = ok();
         command
@@ -6709,6 +7088,8 @@ fn snapshot_export_fast_copies_one_committed_state_while_a_writer_commits() {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     let (temp, repo) = init_and_index_worker_repo();
+    // Imports relate the artifact's commit to HEAD, so the repository is under Git.
+    commit_all(&repo, "initial");
     let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
     let stop = Arc::new(AtomicBool::new(false));
     let committed = Arc::new(AtomicU64::new(0));

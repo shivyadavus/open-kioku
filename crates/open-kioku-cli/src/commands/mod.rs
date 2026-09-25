@@ -81,7 +81,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 return Ok(());
             }
             if from_snapshot.as_deref() == Some("auto") {
-                match snapshot_import(&repo) {
+                // The same checks as `ok snapshot import`, without `--allow-foreign`: an
+                // artifact whose revision cannot be verified here is refused, and the
+                // repository is indexed from source instead.
+                match snapshot_import(&repo, false) {
                     Ok(report) => {
                         if cli.json {
                             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -90,9 +93,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                                 "Imported snapshot from {} and rebuilt search index",
                                 report.artifact_path.display()
                             );
-                            for warning in &report.warnings {
-                                println!("warning: {warning}");
-                            }
+                            print_snapshot_import_outcome(&report);
                         }
                         return Ok(());
                     }
@@ -166,8 +167,8 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     );
                 }
             }
-            SnapshotCommand::Import => {
-                let report = snapshot_import(&repo)?;
+            SnapshotCommand::Import { allow_foreign } => {
+                let report = snapshot_import(&repo, allow_foreign)?;
                 if cli.json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
@@ -175,9 +176,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     if report.rebuilt_search {
                         println!("Rebuilt Tantivy search index from imported SQLite index");
                     }
-                    for warning in &report.warnings {
-                        println!("warning: {warning}");
-                    }
+                    print_snapshot_import_outcome(&report);
                 }
             }
             SnapshotCommand::Doctor => {
@@ -297,6 +296,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     "Redaction: {}",
                     redaction_summary(&manifest.quality)
                 );
+                if let Some(snapshot) = &manifest.snapshot {
+                    println!("Snapshot: {}", snapshot_provenance_summary(snapshot));
+                }
                 let semantics = analysis_semantics_compatibility_for_manifest(Some(&manifest));
                 println!(
                     "Analysis semantics: {:?}; stored={}, current={}",
