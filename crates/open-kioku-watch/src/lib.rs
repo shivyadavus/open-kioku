@@ -1,9 +1,10 @@
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use open_kioku_config::OkConfig;
+use open_kioku_core::GraphNode;
 use open_kioku_errors::{OkError, Result};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_ingest::Indexer;
-use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index};
+use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index_with_graph};
 use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_storage::generations::IndexWriteLock;
 use open_kioku_storage::{
@@ -144,9 +145,13 @@ pub fn reindex_repo_after_changes<'a>(
     snapshot.manifest.quality.pending_pre_redaction_compaction = previous_manifest
         .as_ref()
         .is_some_and(|previous| previous.needs_pre_redaction_compaction());
+    // A graph whose edges were discarded on open stays marked for a rebuild until
+    // `replace_graph` clears the mark, which only a full rebuild calls. A partial update would
+    // leave every graph read refusing for as long as the repository keeps changing.
     let can_partial = config.index.incremental
         && !changed_paths.is_empty()
-        && partial_index_supported(previous_manifest.as_ref(), &snapshot.manifest);
+        && partial_index_supported(previous_manifest.as_ref(), &snapshot.manifest)
+        && !store.graph_rebuild_required()?;
 
     let mut partial = false;
     // Set once the partial update has committed: from then on the previous manifest
@@ -154,6 +159,9 @@ pub fn reindex_repo_after_changes<'a>(
     let mut staged_partial = false;
     let mut changed_file_count = 0;
     let mut deleted_file_count = 0;
+    // The graph nodes the partial update staged, kept for the search index: the stored graph
+    // now holds exactly these, so the rebuild below need not read them back.
+    let mut staged_graph_nodes = Vec::<GraphNode>::new();
     if can_partial {
         let changes = classify_file_changes(
             previous_manifest.as_ref(),
@@ -257,6 +265,7 @@ pub fn reindex_repo_after_changes<'a>(
                 Ok(_) => {
                     partial = true;
                     staged_partial = true;
+                    staged_graph_nodes = nodes;
                 }
                 Err(err) => {
                     eprintln!("watch partial update failed, rebuilding the index: {err}");
@@ -284,20 +293,23 @@ pub fn reindex_repo_after_changes<'a>(
         }
         store.put_history_snapshot(&history)?;
 
-        if !partial {
-            let graph = graph_from_snapshot(&snapshot);
-            let mut nodes = graph.nodes.values().cloned().collect::<Vec<_>>();
-            nodes.sort_unstable_by(|left, right| left.id.0.cmp(&right.id.0));
-            store.replace_graph(&nodes, &graph.edges)?;
-        }
+        let rebuilt_graph_nodes;
+        let graph_nodes = if partial {
+            staged_graph_nodes.as_slice()
+        } else {
+            rebuilt_graph_nodes = replace_graph_from_snapshot(&store, &snapshot)?;
+            rebuilt_graph_nodes.as_slice()
+        };
         if !partial || changed_file_count > 0 || deleted_file_count > 0 {
             // Rebuilt in place: the directory is removed first, so a failure here leaves no
-            // search index at all.
-            rebuild_disk_index(
+            // search index at all. Graph-node documents are written with the code chunks, as
+            // `ok index` writes them; without them graph search answers empty.
+            rebuild_disk_index_with_graph(
                 default_index_dir(root),
                 &snapshot.chunks,
                 &snapshot.files,
                 &snapshot.symbols,
+                graph_nodes,
             )?;
         }
         // Published last: every component the manifest describes is in place by now.
@@ -384,15 +396,13 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     snapshot.manifest.quality.pending_pre_redaction_compaction = compact_after_publish;
     persist_full_snapshot(&store, &snapshot)?;
     store.put_history_snapshot(&history)?;
-    let graph = graph_from_snapshot(&snapshot);
-    let mut nodes = graph.nodes.values().cloned().collect::<Vec<_>>();
-    nodes.sort_unstable_by(|left, right| left.id.0.cmp(&right.id.0));
-    store.replace_graph(&nodes, &graph.edges)?;
-    rebuild_disk_index(
+    let graph_nodes = replace_graph_from_snapshot(&store, &snapshot)?;
+    rebuild_disk_index_with_graph(
         default_index_dir(root),
         &snapshot.chunks,
         &snapshot.files,
         &snapshot.symbols,
+        &graph_nodes,
     )?;
     // Published last: every component the manifest describes is in place by now.
     store.put_manifest(&snapshot.manifest)?;
@@ -471,6 +481,19 @@ fn persist_full_snapshot(
         },
         &snapshot.document_sections,
     )
+}
+
+/// Replace the stored graph with the snapshot's and return its nodes in id order, the order
+/// the search index adds their documents in.
+fn replace_graph_from_snapshot(
+    store: &SqliteStore,
+    snapshot: &open_kioku_ingest::IndexSnapshot,
+) -> Result<Vec<GraphNode>> {
+    let graph = graph_from_snapshot(snapshot);
+    let mut nodes = graph.nodes.into_values().collect::<Vec<_>>();
+    nodes.sort_unstable_by(|left, right| left.id.0.cmp(&right.id.0));
+    store.replace_graph(&nodes, &graph.edges)?;
+    Ok(nodes)
 }
 
 fn graph_from_snapshot(snapshot: &open_kioku_ingest::IndexSnapshot) -> InMemoryGraph {

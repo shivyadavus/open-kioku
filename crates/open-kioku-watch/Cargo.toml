@@ -12,6 +12,7 @@ categories.workspace = true
 
 [dependencies]
 notify.workspace = true
+open-kioku-core = { version = "4.0.0", path = "../open-kioku-core" }
 open-kioku-config = { version = "4.0.0", path = "../open-kioku-config" }
 open-kioku-graph = { version = "4.0.0", path = "../open-kioku-graph" }
 open-kioku-ingest = { version = "4.0.0", path = "../open-kioku-ingest" }
@@ -22,7 +23,6 @@ open-kioku-storage-sqlite = { version = "4.0.0", path = "../open-kioku-storage-s
 open-kioku-errors = { version = "4.0.0", path = "../open-kioku-errors" }
 
 [dev-dependencies]
-open-kioku-core = { version = "4.0.0", path = "../open-kioku-core" }
 rusqlite.workspace = true
 tempfile.workspace = true
 toml.workspace = true
