@@ -107,18 +107,18 @@ Retrieval is measured on the production path (`ok context`, the same builder beh
 
 | Corpus | Holdout cases | R@5 | R@20 | MRR |
 |---|---:|---:|---:|---:|
-| Java, about 10k files | 113 | 0.566 | 0.699 | 0.504 |
-| Go application, ~800 files | 84 | 0.679 | 0.809 | 0.535 |
-| TypeScript, ~900 files | 166 | 0.825 | 0.874 | 0.658 |
-| Python library, ~4k files | 199 | 0.663 | 0.759 | 0.545 |
+| Java, about 10k files | 113 | 0.566 | 0.708 | 0.516 |
+| Go application, ~800 files | 84 | 0.690 | 0.821 | 0.539 |
+| TypeScript, ~900 files | 167 | 0.826 | 0.880 | 0.683 |
+| Python library, ~4k files | 199 | 0.663 | 0.754 | 0.543 |
 
 - **R@5** — the share of tasks for which at least one file the commit changed is in the first five results.
 - **R@20** — the same within the first twenty results, roughly the whole context pack.
 - **MRR** — the average of 1 / rank of the first correct file; 1.0 means it was always first, 0.5 is what you get if the first correct file were always second, or first half the time and never found the rest.
 
-Read it plainly. On a Java repository of about ten thousand files, the right file is in the top five about half the time and in the pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack nearly nine in ten and in the top five about four in five. That is the floor the agent starts from before it has looked at anything, and it is the number to watch. Exact lookups (definitions, references, dependency paths) and the plan → edit → verify loop sit on top of it.
+Read it plainly. On a Java repository of about ten thousand files, the right file is in the top five about half the time and in the pack about seven times in ten; on a TypeScript repository of about nine hundred files, in the pack nearly nine in ten and in the top five about four in five. That is the floor the agent starts from before it has looked at anything, and it is the number to watch. Exact lookups (definitions, references, dependency paths) and the plan → edit → verify loop sit on top of it.
 
-These baselines were frozen from a hosted Linux runner matrix on 2026-09-08 and are re-derived nightly by `.github/workflows/commit-derived-bench.yml`; the job fails when a watched metric falls more than 0.03 below its frozen baseline. Queries are commit subjects, not issue text, so the numbers are not comparable with published benchmarks that use issue text. Corpus descriptions, both splits, the scripts, and the regression policy: [`docs/retrieval-benchmark.md`](docs/retrieval-benchmark.md); frozen baselines: [`benchmarks/commit-derived/`](benchmarks/commit-derived/).
+These baselines were frozen on 2026-09-25 from one hosted Linux runner matrix run of commit `bd5d06ab`, and a second run of the same commit produced identical scores (timings aside). `.github/workflows/commit-derived-bench.yml` re-derives them nightly; the job fails when a watched metric falls more than 0.03 below its frozen baseline, or when a routed task family of 34 or more cases whose case membership is unchanged falls more than `max(0.03, 2/n)` below its own. Queries are commit subjects, not issue text, so the numbers are not comparable with published benchmarks that use issue text. Corpus descriptions, both splits, the scripts, and the regression policy: [`docs/retrieval-benchmark.md`](docs/retrieval-benchmark.md); frozen baselines: [`benchmarks/commit-derived/`](benchmarks/commit-derived/).
 
 Two more measured facts:
 

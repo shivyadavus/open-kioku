@@ -167,21 +167,23 @@ language (the Java baseline is `java-a-holdout.json`, the Go one `go-a-holdout.j
 The workflow reads each repository URL, base commit, and indexed subtree list from repository secrets
 (`BENCH_<CODE>_URL`, `BENCH_<CODE>_BASE`, and `BENCH_<CODE>_PATHS` for a corpus indexed as subtrees) and
 masks them in the log. It keeps `ok index` output out of the log and uploads aggregate results only, never
-the cases or per-case rows, so corpus identity stays out of public logs and artifacts. The baselines were frozen from a hosted-runner matrix run on
-2026-09-08, after generated files began to be indexed and ranked below hand-written source and a
-commit scope's directory entry file became a candidate (each file records its run and commit under
-`provenance`); earlier freezes are in each file's git history:
+the cases or per-case rows, so corpus identity stays out of public logs and artifacts. The baselines were frozen on
+2026-09-25 from hosted-runner matrix run 36130905144 of Open Kioku commit `bd5d06ab`, after two fresh
+indexes of the same tree began to give bit-identical lexical scores (#527); run 36130915229 of the same
+commit produced identical aggregate and per-family scores and membership fingerprints (timings aside)
+in both splits of all four corpora (each file records its run and commit under `provenance`); earlier freezes are in each
+file's git history:
 
 | Corpus | Split | Cases | R@5 | R@20 | MRR |
 |---|---|---|---|---|---|
-| Java (10k files) | dev | 262 | 0.599 | 0.759 | 0.478 |
-| Java (10k files) | holdout | 113 | 0.566 | 0.699 | 0.504 |
-| Go (~800 files) | dev | 196 | 0.561 | 0.765 | 0.396 |
-| Go (~800 files) | holdout | 84 | 0.679 | 0.809 | 0.535 |
-| TypeScript (~900 files) | dev | 385 | 0.810 | 0.946 | 0.645 |
-| TypeScript (~900 files) | holdout | 166 | 0.825 | 0.874 | 0.658 |
-| Python (~4k files) | dev | 462 | 0.600 | 0.725 | 0.490 |
-| Python (~4k files) | holdout | 199 | 0.663 | 0.759 | 0.545 |
+| Java (10k files) | dev | 262 | 0.599 | 0.752 | 0.478 |
+| Java (10k files) | holdout | 113 | 0.566 | 0.708 | 0.516 |
+| Go (~800 files) | dev | 196 | 0.566 | 0.765 | 0.398 |
+| Go (~800 files) | holdout | 84 | 0.690 | 0.821 | 0.539 |
+| TypeScript (~900 files) | dev | 388 | 0.820 | 0.956 | 0.656 |
+| TypeScript (~900 files) | holdout | 167 | 0.826 | 0.880 | 0.683 |
+| Python (~4k files) | dev | 462 | 0.600 | 0.721 | 0.491 |
+| Python (~4k files) | holdout | 199 | 0.663 | 0.754 | 0.543 |
 
 The Go corpus was the hardest of the four while a third of its holdout was one repeated release-bump
 commit; with one case per repeated subject it sits between the others. 21% of its gold files
@@ -307,10 +309,42 @@ status the gate applies. A second table lists every watched metric of every gate
 the baseline interval, delta, tolerance, and result. A 34-case family's interval is several
 times wider than its tolerance; read it before reading a delta.
 
-**No per-family baseline is frozen yet.** The baselines under `benchmarks/commit-derived/`
-were frozen from reports scored before the section existed and store no rows, so per-family
-numbers cannot be derived from them. Until a baseline carries `by_task_family`, every family
-is `informational` and only the aggregate gates.
+**Frozen per-family baselines.** Every baseline under `benchmarks/commit-derived/` carries
+`by_task_family`, frozen with the aggregate from the same run (run 36130905144, commit
+`bd5d06ab`, confirmed identical by run 36130915229; see the aggregate table above). Across the
+eight splits the router assigned every scored case to a family (`unassigned_cases` is 0
+everywhere). Of the 46 family entries, 19 have at least 34 cases and are gated; the other 27 are
+`insufficient`, are printed, and do not change the exit status. The gated families, with their
+tolerance `max(0.03, 2/n)`:
+
+| Corpus | Split | Routed family | Cases | R@5 | R@20 | MRR | gold_recall@20 | Tolerance |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| Java (10k files) | dev | `issue_to_code` | 51 | 0.647 | 0.843 | 0.537 | 0.655 | 0.0392 |
+| Java (10k files) | dev | `code_to_test` | 39 | 0.538 | 0.667 | 0.468 | 0.645 | 0.0513 |
+| Java (10k files) | dev | `general` | 161 | 0.615 | 0.739 | 0.474 | 0.586 | 0.0300 |
+| Java (10k files) | holdout | `general` | 75 | 0.587 | 0.720 | 0.530 | 0.582 | 0.0300 |
+| Go (~800 files) | dev | `issue_to_code` | 60 | 0.483 | 0.800 | 0.335 | 0.523 | 0.0333 |
+| Go (~800 files) | dev | `general` | 100 | 0.690 | 0.810 | 0.468 | 0.647 | 0.0300 |
+| Go (~800 files) | holdout | `general` | 48 | 0.812 | 0.854 | 0.658 | 0.627 | 0.0417 |
+| TypeScript (~900 files) | dev | `issue_to_code` | 77 | 0.922 | 0.974 | 0.752 | 0.834 | 0.0300 |
+| TypeScript (~900 files) | dev | `code_to_test` | 77 | 0.740 | 0.974 | 0.478 | 0.939 | 0.0300 |
+| TypeScript (~900 files) | dev | `documentation` | 59 | 0.847 | 0.932 | 0.668 | 0.911 | 0.0339 |
+| TypeScript (~900 files) | dev | `general` | 162 | 0.802 | 0.957 | 0.693 | 0.876 | 0.0300 |
+| TypeScript (~900 files) | holdout | `issue_to_code` | 57 | 0.877 | 0.912 | 0.769 | 0.727 | 0.0351 |
+| TypeScript (~900 files) | holdout | `general` | 61 | 0.803 | 0.869 | 0.704 | 0.844 | 0.0328 |
+| Python (~4k files) | dev | `issue_to_code` | 195 | 0.656 | 0.759 | 0.558 | 0.638 | 0.0300 |
+| Python (~4k files) | dev | `code_to_test` | 63 | 0.556 | 0.746 | 0.460 | 0.714 | 0.0317 |
+| Python (~4k files) | dev | `general` | 180 | 0.556 | 0.683 | 0.433 | 0.600 | 0.0300 |
+| Python (~4k files) | holdout | `issue_to_code` | 70 | 0.714 | 0.814 | 0.585 | 0.716 | 0.0300 |
+| Python (~4k files) | holdout | `code_to_test` | 45 | 0.622 | 0.689 | 0.511 | 0.726 | 0.0444 |
+| Python (~4k files) | holdout | `general` | 73 | 0.671 | 0.753 | 0.540 | 0.641 | 0.0300 |
+
+Families are the router's labels, so these numbers measure the retrieval policy on the cases
+routed to each family, not whether routing chose the right family. Only `general`,
+`issue_to_code`, `code_to_test`, and (TypeScript dev) `documentation` reach 34 cases in any
+split; `trace_to_code`, `edit_to_ripple`, `comment_to_context`, and `mixed_code_docs` are gated
+nowhere, so a regression confined to one of them can still pass the nightly job. Each family's
+interval and every insufficient family are in the baseline files.
 
 **Freezing per-family baselines.** A baseline's aggregate and per-family numbers must come from
 the same run, so the section is frozen together with a re-freeze of the aggregate:
@@ -394,7 +428,7 @@ when:
 
 The unit tests also run the freeze against synthetic reports and job listings, including a failed
 run, a missing report, a rename that fails partway, an accepted regression, a failed non-compare
-step under the flag, and an empty reason. Update the frozen-baseline table and freeze date above
+step under the flag, and an empty reason. Update the aggregate and per-family frozen-baseline tables and the freeze date above
 in the same change.
 
 ### Benchmarking a repository against its own history
