@@ -196,8 +196,13 @@ pub(crate) fn nearest_lexical_items(
 }
 
 /// Whether Rust scoping rules out `candidate`, an item of this file, as the target of `name` used
-/// at `scope_id`: an explicit import of the name is in scope there, or the item belongs to
-/// another module than the use site. Unknown scopes rule nothing out.
+/// at `scope_id`.
+///
+/// The nearest explicit import of the name in the use site's module decides when it has one: it
+/// rules the item out when it names another path, and keeps it when it names this item or a
+/// path of this crate the index could not place. Without one, the item is ruled out when its
+/// module is neither the use site's nor one the use site reaches through `use super::*` globs.
+/// Unknown scopes rule nothing out.
 pub(crate) fn rust_rules_out_same_file_item(
     ctx: &ResolutionContext<'_>,
     scope_id: &ScopeId,
@@ -213,8 +218,15 @@ pub(crate) fn rust_rules_out_same_file_item(
         let Some(scope) = current else {
             break;
         };
-        if named.iter().any(|binding| binding.scope_id == scope.id) {
-            return true;
+        let here = named
+            .iter()
+            .copied()
+            .filter(|binding| binding.scope_id == scope.id)
+            .collect::<Vec<_>>();
+        if !here.is_empty() {
+            return here
+                .iter()
+                .any(|binding| rust_import_names_another_item(ctx.scopes, binding, candidate));
         }
         if matches!(scope.kind, ScopeKind::Module | ScopeKind::File) {
             break;
@@ -224,12 +236,79 @@ pub(crate) fn rust_rules_out_same_file_item(
             .as_ref()
             .and_then(|parent| ctx.scopes.get(parent));
     }
-    let use_module = enclosing_module_scope(ctx.scopes, scope_id);
-    let item_module = candidate
+    let Some(item_module) = candidate
         .scope_id
         .as_ref()
-        .and_then(|item_scope| enclosing_module_scope(ctx.scopes, item_scope));
-    matches!((use_module, item_module), (Some(used), Some(item)) if used.id != item.id)
+        .and_then(|item_scope| enclosing_module_scope(ctx.scopes, item_scope))
+    else {
+        return false;
+    };
+    let Some(use_module) = enclosing_module_scope(ctx.scopes, scope_id) else {
+        return false;
+    };
+    !rust_module_reaches_through_super_globs(ctx, use_module, &item_module.id)
+}
+
+/// Whether `binding`, an explicit import of the candidate's name, names something other than
+/// `candidate`. An in-crate path the index could not bind may be the candidate itself, so it
+/// does not rule the candidate out.
+fn rust_import_names_another_item(
+    scopes: &ScopeIndex,
+    binding: &ImportBinding,
+    candidate: &Symbol,
+) -> bool {
+    if let Some(target) = &binding.target_symbol {
+        return *target != candidate.id;
+    }
+    if let Some(target_file) = &binding.target_file {
+        return *target_file != candidate.file_id;
+    }
+    let source = binding.source_module.as_str();
+    if source.starts_with("self::") || source.starts_with("super::") {
+        let item_module = candidate
+            .scope_id
+            .as_ref()
+            .and_then(|item_scope| enclosing_module_scope(scopes, item_scope));
+        return match (
+            rust_relative_item_target(scopes, &binding.scope_id, &[binding]),
+            item_module,
+        ) {
+            (Some((module, item)), Some(item_module)) => {
+                *module != item_module.id || item != candidate.name
+            }
+            // A relative path climbing out of the file names another module.
+            _ => true,
+        };
+    }
+    !source.starts_with("crate::")
+}
+
+/// Whether `from` is `target`, or reaches it through a chain of `use super::*` globs, each
+/// declared by the module it leaves.
+fn rust_module_reaches_through_super_globs(
+    ctx: &ResolutionContext<'_>,
+    from: &Scope,
+    target: &ScopeId,
+) -> bool {
+    let globs = file_imports(ctx.repository, ctx.file_id, GLOB_IMPORT_LOCAL_NAME);
+    let mut pending = vec![&from.id];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(module) = pending.pop() {
+        if module == target {
+            return true;
+        }
+        if !seen.insert(module) {
+            continue;
+        }
+        for glob in globs.iter().filter(|glob| &glob.scope_id == module) {
+            if rust_super_glob_depth(&glob.source_module).is_some() {
+                if let Some(parent) = rust_super_glob_target(ctx.scopes, module, &[glob]) {
+                    pending.push(parent);
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Items of this file named `name` that `scope_id` itself declares and `accept` admits.

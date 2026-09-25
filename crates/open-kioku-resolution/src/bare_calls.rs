@@ -1352,6 +1352,41 @@ mod tests {
         .is_empty());
         // A sibling `mod other` without imports cannot name the file's `now` either.
         assert!(candidates(Vec::new(), "scope:other:t").is_empty());
+        // `mod tests { use super::*; fn t() { use Kind::*; now() } }`: the block glob leaves the
+        // call unproven, but the file's `now` stays a candidate through `use super::*`.
+        assert_eq!(
+            candidates(
+                vec![
+                    glob_import("scope:tests", "super::*"),
+                    glob_import("scope:tests:t:body", "Kind::*"),
+                ],
+                "scope:tests:t:body"
+            ),
+            vec!["symbol:now".to_string()]
+        );
+        // An explicit import of another path beats the glob, so the file's `now` is not one.
+        assert!(candidates(
+            vec![
+                glob_import("scope:tests", "super::*"),
+                glob_import("scope:tests:t:body", "Kind::*"),
+                import_binding("scope:tests", "now", "mock_clock::now", None),
+            ],
+            "scope:tests:t:body"
+        )
+        .is_empty());
+        // An in-crate path the index could not place may name the file's `now`.
+        assert_eq!(
+            candidates(
+                vec![import_binding(
+                    "scope:tests",
+                    "now",
+                    "crate::worker::now",
+                    None
+                )],
+                "scope:tests:t:body"
+            ),
+            vec!["symbol:now".to_string()]
+        );
     }
 
     #[test]
