@@ -105,7 +105,14 @@ fn defines(file: &str, symbol: &str) -> GraphEdge {
 
 fn rows_of(store: &SqliteStore, query: &str) -> Vec<String> {
     let ast = parse_graph_query(query).unwrap_or_else(|error| panic!("{query}: {error}"));
-    let result = execute_graph_query(store, &ast, GraphQueryOptions::default())
+    // These tests check filter and batching correctness, not latency: the product default's
+    // 500 ms deadline is a wall-clock limit that a loaded CI runner can exceed on the
+    // 950-symbol batching fixture, so give them a deadline that only a hang would reach.
+    let options = GraphQueryOptions {
+        deadline_ms: 60_000,
+        ..GraphQueryOptions::default()
+    };
+    let result = execute_graph_query(store, &ast, options)
         .unwrap_or_else(|error| panic!("{query}: {error}"));
     let mut ids = result
         .rows
