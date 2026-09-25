@@ -1175,6 +1175,7 @@ impl Indexer {
         resolver_quality_notes.extend(registry_report.quality_notes);
         let mut mode_notes = mode_quality_notes(mode);
         mode_notes.extend(resolver_quality_notes);
+        mode_notes.extend(git_history.quality_notes.iter().cloned());
         let mut quality = index_quality(IndexQualityInput {
             root: &root,
             config,
@@ -2107,6 +2108,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
 struct GitHistoryIngest {
     snapshot: HistorySnapshot,
     analysis_facts: Vec<AnalysisFact>,
+    quality_notes: Vec<QualityNote>,
 }
 
 impl GitHistoryIngest {
@@ -2114,8 +2116,27 @@ impl GitHistoryIngest {
         Self {
             snapshot: HistorySnapshot::empty(),
             analysis_facts: Vec::new(),
+            quality_notes: Vec::new(),
         }
     }
+}
+
+/// A commit whose patch could not be read still counts in history and co-change, which come
+/// from `--name-status`; only its per-symbol touches are missing, and the index says so.
+fn skipped_patch_notes(skipped: &[open_kioku_git::SkippedCommitPatch]) -> Vec<QualityNote> {
+    let Some(first) = skipped.first() else {
+        return Vec::new();
+    };
+    vec![QualityNote::new(
+        QualityNoteKind::GitHistory,
+        format!(
+            "git history: the patches of {} commit(s) could not be read and were skipped, so \
+             their symbol-level history touches are missing (first: {}: {})",
+            skipped.len(),
+            first.commit_id.0,
+            first.reason
+        ),
+    )]
 }
 
 fn collect_git_history(
@@ -2126,8 +2147,25 @@ fn collect_git_history(
     max_files_per_commit: usize,
 ) -> Result<GitHistoryIngest> {
     let history = open_kioku_git::commit_history(root, max_commits)?;
-    let patches = open_kioku_git::commit_patches(root, max_commits)?;
-    let symbol_touches = map_symbol_touches(files, symbols, &history, &patches);
+    let patch_scan = open_kioku_git::commit_patches(root, max_commits)?;
+    Ok(git_history_ingest(
+        files,
+        symbols,
+        history,
+        patch_scan,
+        max_files_per_commit,
+    ))
+}
+
+fn git_history_ingest(
+    files: &[File],
+    symbols: &[Symbol],
+    history: open_kioku_git::CommitHistory,
+    patch_scan: open_kioku_git::CommitPatchScan,
+    max_files_per_commit: usize,
+) -> GitHistoryIngest {
+    let quality_notes = skipped_patch_notes(&patch_scan.skipped);
+    let symbol_touches = map_symbol_touches(files, symbols, &history, &patch_scan.commits);
     let cochange_records =
         open_kioku_git::cochange_records_from_history(&history, max_files_per_commit);
     let cochange_edges = cochange_records
@@ -2162,7 +2200,7 @@ fn collect_git_history(
         })
         .collect::<Vec<_>>();
     let analysis_facts = git_history_facts(files, &cochange_records);
-    Ok(GitHistoryIngest {
+    GitHistoryIngest {
         snapshot: HistorySnapshot {
             schema_version: HISTORY_SCHEMA_VERSION,
             commits: history.commits,
@@ -2172,7 +2210,8 @@ fn collect_git_history(
             reviewer_evidence: Vec::new(),
         },
         analysis_facts,
-    })
+        quality_notes,
+    }
 }
 
 fn map_symbol_touches(
@@ -3175,7 +3214,10 @@ fn collect_architecture_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_resolution_quality, derive_occurrences, map_symbol_touches, Indexer};
+    use super::{
+        attach_resolution_quality, derive_occurrences, git_history_ingest, map_symbol_touches,
+        Indexer,
+    };
     use chrono::{TimeZone, Utc};
     use open_kioku_config::OkConfig;
     use open_kioku_core::{
@@ -3661,6 +3703,44 @@ class Util {
             .any(|fact| fact.source_type == EvidenceSourceType::GitHistory));
         assert!(history.commits.is_empty());
         assert!(history.file_touches.is_empty());
+    }
+
+    #[test]
+    fn a_skipped_commit_patch_is_reported_as_a_history_quality_note() {
+        let skipped = |id: &str| open_kioku_git::SkippedCommitPatch {
+            commit_id: GitCommitId::new(id),
+            reason: "git diff output is malformed in the entry for `a.rs` at line 7".into(),
+        };
+        let clean = git_history_ingest(
+            &[],
+            &[],
+            open_kioku_git::CommitHistory::empty(),
+            open_kioku_git::CommitPatchScan::default(),
+            10,
+        );
+        assert!(clean.quality_notes.is_empty());
+
+        let ingest = git_history_ingest(
+            &[],
+            &[],
+            open_kioku_git::CommitHistory::empty(),
+            open_kioku_git::CommitPatchScan {
+                commits: Vec::new(),
+                skipped: vec![skipped("aaaa"), skipped("bbbb")],
+            },
+            10,
+        );
+
+        assert_eq!(ingest.quality_notes.len(), 1);
+        let note = &ingest.quality_notes[0];
+        assert_eq!(note.kind, QualityNoteKind::GitHistory);
+        assert!(note.message.contains("2 commit(s)"), "{}", note.message);
+        assert!(note.message.contains("first: aaaa:"), "{}", note.message);
+        assert!(
+            note.message.contains("entry for `a.rs`"),
+            "{}",
+            note.message
+        );
     }
 
     #[test]

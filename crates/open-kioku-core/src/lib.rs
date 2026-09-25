@@ -4299,6 +4299,8 @@ pub enum QualityNoteKind {
     SymbolRegistryUnresolved,
     /// Relationship resolution hit its candidate cap and suppressed emission.
     RelationshipResolution,
+    /// The git history scan skipped commits whose patch it could not read.
+    GitHistory,
     /// A note from a manifest written before notes carried a kind.
     Unclassified,
 }

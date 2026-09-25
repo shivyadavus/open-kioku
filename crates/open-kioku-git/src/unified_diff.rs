@@ -78,7 +78,10 @@ impl HunkScanner {
                     self.new = new;
                     self.after_hunk = old == 0 && new == 0;
                 }
-                None => self.flag(format!("hunk header `@@ {header}` does not parse")),
+                None => self.flag(format!(
+                    "hunk header `@@ {} @@` does not parse",
+                    header_ranges(header)
+                )),
             }
             return DiffLine::HunkHeader(header);
         }
@@ -156,6 +159,27 @@ impl HunkScanner {
     }
 }
 
+/// The name a `--- ` or `+++ ` file header gives, still quoted if git quoted it. Git appends a
+/// tab to an unquoted name that holds a space, and `diff -u` a tab and a timestamp, so an
+/// unquoted name ends at the first tab.
+pub fn file_header_name(value: &str) -> &str {
+    // `str::lines` keeps the `\r` of a CRLF diff's last line when it has no final newline.
+    let value = value.trim_end_matches('\r');
+    if value.starts_with('"') {
+        return value.trim_end_matches('\t');
+    }
+    value.split('\t').next().unwrap_or(value)
+}
+
+/// The hunk header as far as its closing `@@`, leaving out the function-context source line
+/// git appends, so a message quoting it does not echo repository content.
+fn header_ranges(header: &str) -> &str {
+    match header.find("@@") {
+        Some(end) => header[..end].trim_end(),
+        None => header,
+    }
+}
+
 /// The old and new line counts of `-a[,b] +c[,d] @@...`; `None` unless both sides parse.
 fn hunk_counts(header: &str) -> Option<(u32, u32)> {
     let mut parts = header.split_whitespace();
@@ -175,7 +199,7 @@ fn side_count(side: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiffLine, HunkScanner, MalformedDiff};
+    use super::{file_header_name, DiffLine, HunkScanner, MalformedDiff};
 
     fn scan(diff: &str) -> (Vec<DiffLine<'_>>, Result<(), MalformedDiff>) {
         let mut scanner = HunkScanner::new();
@@ -266,6 +290,28 @@ mod tests {
             let (_, result) = scan(&diff);
             assert_eq!(result.unwrap_err().line, 3, "{header}");
         }
+    }
+
+    #[test]
+    fn an_unparsed_hunk_header_is_quoted_without_its_source_context() {
+        let (_, result) = scan("--- a/x\n+++ b/x\n@@ -1,x +1 @@ let secret = token();\n");
+        let malformed = result.unwrap_err();
+        assert!(malformed.reason.contains("`@@ -1,x +1 @@`"), "{malformed}");
+        assert!(!malformed.reason.contains("secret"), "{malformed}");
+    }
+
+    #[test]
+    fn file_header_names_end_at_the_tab_git_or_diff_appends() {
+        assert_eq!(file_header_name("b/sp ace.txt\t"), "b/sp ace.txt");
+        assert_eq!(
+            file_header_name("src/a.rs\t2026-09-25 01:00:00.000000000 +0000"),
+            "src/a.rs"
+        );
+        assert_eq!(file_header_name("b/plain.rs\r"), "b/plain.rs");
+        assert_eq!(
+            file_header_name("\"b/tab\\there.rs\""),
+            "\"b/tab\\there.rs\""
+        );
     }
 
     #[test]

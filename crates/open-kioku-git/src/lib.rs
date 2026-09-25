@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use unified_diff::{DiffLine, HunkScanner, MalformedDiff};
+use unified_diff::{file_header_name, DiffLine, HunkScanner, MalformedDiff};
 
 const COMMIT_RECORD_SEPARATOR: u8 = 0x1e;
 const GIT_COMMIT_FORMAT: &str =
@@ -50,6 +50,20 @@ pub struct CochangeRecord {
 pub struct CommitPatch {
     pub commit_id: GitCommitId,
     pub files: Vec<FilePatch>,
+}
+
+/// The patches of a history scan, and the commits whose patch could not be read. A skipped
+/// commit contributes no line ranges, so its per-symbol touches are missing rather than wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommitPatchScan {
+    pub commits: Vec<CommitPatch>,
+    pub skipped: Vec<SkippedCommitPatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedCommitPatch {
+    pub commit_id: GitCommitId,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,10 +209,10 @@ pub fn commit_history(root: impl AsRef<Path>, max_commits: usize) -> Result<Comm
     parse_commit_history(&output.stdout)
 }
 
-pub fn commit_patches(root: impl AsRef<Path>, max_commits: usize) -> Result<Vec<CommitPatch>> {
+pub fn commit_patches(root: impl AsRef<Path>, max_commits: usize) -> Result<CommitPatchScan> {
     let root = root.as_ref();
     if !root.join(".git").exists() || max_commits == 0 {
-        return Ok(Vec::new());
+        return Ok(CommitPatchScan::default());
     }
     let head = Command::new("git")
         .arg("-C")
@@ -207,7 +221,7 @@ pub fn commit_patches(root: impl AsRef<Path>, max_commits: usize) -> Result<Vec<
         .output()
         .map_err(|err| OkError::Repository(format!("git patch scan failed: {err}")))?;
     if !head.status.success() {
-        return Ok(Vec::new());
+        return Ok(CommitPatchScan::default());
     }
     let output = Command::new("git")
         .arg("-C")
@@ -457,8 +471,8 @@ fn parse_commit_history(raw: &[u8]) -> Result<CommitHistory> {
     Ok(history)
 }
 
-fn parse_commit_patches(raw: &[u8]) -> Result<Vec<CommitPatch>> {
-    let mut commits = Vec::new();
+fn parse_commit_patches(raw: &[u8]) -> Result<CommitPatchScan> {
+    let mut scan = CommitPatchScan::default();
     let starts = patch_record_starts(raw);
     if starts.is_empty() && !raw.is_empty() {
         return Err(OkError::Repository(
@@ -475,19 +489,26 @@ fn parse_commit_patches(raw: &[u8]) -> Result<Vec<CommitPatch>> {
         };
         let commit_id = GitCommitId::new(git_text(&record[..metadata_end], "commit id")?);
         let patch = String::from_utf8_lossy(&record[metadata_end + 1..]).into_owned();
-        commits.push(CommitPatch {
-            commit_id,
-            files: parse_file_patches(&patch)?,
-        });
+        // One commit whose patch cannot be read costs that commit's line ranges, not the scan.
+        match parse_file_patches(&patch) {
+            Ok(files) => scan.commits.push(CommitPatch { commit_id, files }),
+            Err(err) => scan.skipped.push(SkippedCommitPatch {
+                commit_id,
+                reason: err.to_string(),
+            }),
+        }
     }
-    Ok(commits)
+    Ok(scan)
 }
 
 fn patch_record_starts(raw: &[u8]) -> Vec<usize> {
     raw.iter()
         .enumerate()
         .filter_map(|(index, byte)| {
-            if *byte != COMMIT_RECORD_SEPARATOR {
+            // A record starts a line: every patch line inside one begins with a header word
+            // or a `+`, `-`, space or `\` marker, so a separator byte mid-line is content.
+            if *byte != COMMIT_RECORD_SEPARATOR || (index > 0 && raw.get(index - 1) != Some(&b'\n'))
+            {
                 return None;
             }
             let commit_start = index + 1;
@@ -548,7 +569,7 @@ fn parse_file_patches(patch: &str) -> Result<Vec<FilePatch>> {
                     pending.path = Some(parse_patch_path(value, None)?);
                 } else if let Some(value) = line.strip_prefix("+++ ") {
                     if value != "/dev/null" {
-                        pending.path = Some(parse_patch_path(value, Some("b/"))?);
+                        pending.path = Some(parse_marker_path(value, "b/")?);
                     }
                 }
             }
@@ -700,11 +721,11 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
                 } else if let Some(value) = line.strip_prefix("--- ") {
                     // `rename from`/`copy from` already name the pre-edit path exactly.
                     if value != "/dev/null" && pending.old_path.is_none() {
-                        pending.old_path = Some(parse_patch_path(value, Some("a/"))?);
+                        pending.old_path = Some(parse_marker_path(value, "a/")?);
                     }
                 } else if let Some(value) = line.strip_prefix("+++ ") {
                     if value != "/dev/null" && pending.new_path.is_none() {
-                        pending.new_path = Some(parse_patch_path(value, Some("b/"))?);
+                        pending.new_path = Some(parse_marker_path(value, "b/")?);
                     }
                 }
             }
@@ -770,6 +791,12 @@ fn parse_new_hunk_range(header: &str) -> Result<Option<LineRange>> {
         start,
         end: start.saturating_add(count - 1),
     }))
+}
+
+/// The path of a `--- ` or `+++ ` header, without the tab git appends to a name holding a
+/// space or the prefix pinned on the git invocation.
+fn parse_marker_path(value: &str, prefix: &str) -> Result<PathBuf> {
+    parse_patch_path(file_header_name(value), Some(prefix))
 }
 
 fn parse_patch_path(value: &str, prefix: Option<&str>) -> Result<PathBuf> {
@@ -1103,7 +1130,7 @@ mod tests {
         );
         commit_all(dir.path(), "rename and modify");
 
-        let patches = commit_patches(dir.path(), 1).unwrap();
+        let patches = commit_patches(dir.path(), 1).unwrap().commits;
 
         assert_eq!(patches.len(), 1);
         assert_eq!(patches[0].files.len(), 1);
@@ -1131,7 +1158,7 @@ mod tests {
         );
         commit_all(dir.path(), "header-like content");
 
-        let patches = commit_patches(dir.path(), 1).unwrap();
+        let patches = commit_patches(dir.path(), 1).unwrap().commits;
 
         assert_eq!(patches.len(), 1);
         let files = patches[0]
@@ -1160,7 +1187,7 @@ mod tests {
         write(dir.path(), "b/lib.rs", "fn one() {}\nfn two() {}\n");
         commit_all(dir.path(), "two");
 
-        let patches = commit_patches(dir.path(), 1).unwrap();
+        let patches = commit_patches(dir.path(), 1).unwrap().commits;
 
         let paths = patches[0]
             .files
@@ -1168,6 +1195,87 @@ mod tests {
             .map(|file| file.path.clone())
             .collect::<Vec<_>>();
         assert_eq!(paths, vec![Path::new("b/lib.rs").to_path_buf()]);
+    }
+
+    #[test]
+    fn a_record_separator_inside_a_text_diff_does_not_split_the_commit() {
+        let dir = initialized_repo();
+        write(dir.path(), ".gitattributes", "*.dat diff\n");
+        write(dir.path(), "src/lib.rs", "fn one() {}\n");
+        commit_all(dir.path(), "one");
+        write(
+            dir.path(),
+            "blob.dat",
+            "head\n\u{1e}0123456789abcdef0123456789abcdef01234567\0tail\nmore\n",
+        );
+        write(dir.path(), "src/lib.rs", "fn one() {}\nfn two() {}\n");
+        commit_all(dir.path(), "two");
+
+        let scan = commit_patches(dir.path(), 1).unwrap();
+
+        assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
+        assert_eq!(scan.commits.len(), 1);
+        let paths = scan.commits[0]
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                Path::new("blob.dat").to_path_buf(),
+                Path::new("src/lib.rs").to_path_buf()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_commit_patch_is_skipped_and_the_rest_are_kept() {
+        let raw = b"\x1e1111111111111111111111111111111111111111\x00\n\
+              diff --git a/a.rs b/a.rs\n\
+              --- a/a.rs\n\
+              +++ b/a.rs\n\
+              @@ -1 +1,3 @@\n\
+              -a\n\
+              +b\n\
+              \x1e2222222222222222222222222222222222222222\x00\n\
+              diff --git a/b.rs b/b.rs\n\
+              --- a/b.rs\n\
+              +++ b/b.rs\n\
+              @@ -1 +1 @@\n\
+              -a\n\
+              +b\n";
+
+        let scan = parse_commit_patches(raw).unwrap();
+
+        assert_eq!(scan.commits.len(), 1);
+        assert_eq!(scan.commits[0].commit_id.0, "2".repeat(40));
+        assert_eq!(scan.skipped.len(), 1);
+        assert_eq!(scan.skipped[0].commit_id.0, "1".repeat(40));
+        assert!(
+            scan.skipped[0].reason.contains("entry for `a.rs`"),
+            "{}",
+            scan.skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn patch_paths_holding_a_space_drop_the_tab_git_appends() {
+        let dir = initialized_repo();
+        write(dir.path(), "src/sp ace.rs", "fn one() {}\n");
+        commit_all(dir.path(), "one");
+        write(dir.path(), "src/sp ace.rs", "fn one() {}\nfn two() {}\n");
+        commit_all(dir.path(), "two");
+
+        let patches = commit_patches(dir.path(), 1).unwrap().commits;
+        assert_eq!(patches[0].files[0].path, Path::new("src/sp ace.rs"));
+
+        write(dir.path(), "src/sp ace.rs", "fn one() {}\n");
+        let changed = diff_unified_zero_since(dir.path(), "HEAD").unwrap();
+        assert_eq!(
+            changed[0].changed_paths(),
+            vec![std::path::PathBuf::from("src/sp ace.rs")]
+        );
     }
 
     #[test]
@@ -1497,7 +1605,7 @@ mod tests {
         raw.push(0x1e);
         raw.extend_from_slice(b" byte\n");
 
-        let patches = parse_commit_patches(&raw).unwrap();
+        let patches = parse_commit_patches(&raw).unwrap().commits;
 
         assert_eq!(patches.len(), 1);
         assert_eq!(patches[0].files.len(), 1);
