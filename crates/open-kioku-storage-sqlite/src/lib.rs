@@ -2940,7 +2940,7 @@ const CONSISTENCY_CHECKS: &[(&str, &str)] = &[
         // Symbols and occurrences imported from a SCIP index are stored for every document
         // the index covers, including files discovery skipped, so theirs may name no indexed
         // file. They carry only a `file_id`, and every reader resolves a path through the
-        // files table, so such a row serves no path.
+        // files table, so such a row serves no file path or content.
         "SELECT (SELECT COUNT(*) FROM symbols WHERE (file_id NOT IN (SELECT id FROM files) \
                  AND json_extract(json, '$.provenance') IS NOT 'scip') \
                  OR json_extract(json, '$.file_id') IS NOT file_id) \
@@ -3153,6 +3153,12 @@ fn replace_files_rows(
         .iter()
         .map(|file| file.path.to_string_lossy().to_string())
         .collect::<BTreeSet<_>>();
+    let changed_ids = update
+        .changed_files
+        .iter()
+        .map(|file| &file.id)
+        .collect::<HashSet<_>>();
+    let mut deleted_file_paths = Vec::new();
     for file_id in &affected_file_ids {
         let path: Option<String> = tx
             .query_row(
@@ -3163,6 +3169,9 @@ fn replace_files_rows(
             .optional()
             .map_err(storage_err)?;
         if let Some(path) = path {
+            if !changed_ids.contains(file_id) {
+                deleted_file_paths.push(path.clone());
+            }
             affected_file_paths.insert(path);
         }
     }
@@ -3379,6 +3388,16 @@ fn replace_files_rows(
             tx.execute("DELETE FROM call_sites WHERE file_sid = ?1", params![sid])
                 .map_err(storage_err)?;
         }
+    }
+    // Facts other files hold about a deleted file (a co-change with it) describe a file the
+    // index no longer has. A full index records facts between indexed files only, so they go
+    // with it; otherwise the partial writer would keep serving evidence about a deleted path.
+    for path in &deleted_file_paths {
+        tx.execute(
+            "DELETE FROM analysis_facts WHERE target = ?1",
+            params![path],
+        )
+        .map_err(storage_err)?;
     }
 
     let mut call_site_strings = compact::StringWriter::incremental(tx, compact::CALL_SITE_STRINGS)?;

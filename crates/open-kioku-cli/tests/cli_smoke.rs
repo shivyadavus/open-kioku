@@ -2270,6 +2270,51 @@ fn snapshot_import_serves_no_path_the_local_policy_excludes() {
     assert!(!status.to_string().contains("vault.key"), "{status}");
 }
 
+/// `ok watch` replaces the rows of the files that changed. A deleted file's co-change facts
+/// held by an unchanged file used to survive it, so the next export carried a fact about a
+/// file the index no longer had, and the import refused it as inconsistent.
+#[test]
+fn snapshot_of_a_watched_index_after_a_co_changed_file_is_deleted_imports() {
+    let temp = snapshot_fixture_repo_with(&[
+        ("src/lib.rs", "pub mod a;\n"),
+        ("src/a.rs", "pub fn ledger_alpha() {}\n"),
+        ("src/d.rs", "pub fn ledger_delta() {}\n"),
+    ]);
+    let repo = temp.path();
+    let facts_about_deleted = || -> i64 {
+        rusqlite::Connection::open(repo.join(".ok/index.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM analysis_facts WHERE target = 'src/d.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(
+        facts_about_deleted() > 0,
+        "the fixture must record a co-change fact about src/d.rs"
+    );
+
+    fs::remove_file(repo.join("src/d.rs")).unwrap();
+    let status =
+        open_kioku_watch::reindex_repo_after_changes(repo, [std::path::Path::new("src/d.rs")])
+            .unwrap();
+    assert!(
+        status.partial && status.deleted_files == 1 && status.changed_files == 0,
+        "the watch update must be the partial one: {status:?}"
+    );
+    assert_eq!(
+        facts_about_deleted(),
+        0,
+        "facts about a deleted file must go with it"
+    );
+
+    export_snapshot(repo);
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(imported["imported"], true, "{imported}");
+}
+
 /// A protobuf length-delimited field.
 fn protobuf_field(number: u32, bytes: &[u8]) -> Vec<u8> {
     fn varint(mut value: u64, out: &mut Vec<u8>) {

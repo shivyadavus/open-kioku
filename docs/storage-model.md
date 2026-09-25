@@ -160,9 +160,12 @@ copy of the artifact:
   history facts name indexed files; and every graph dictionary entry is keyed by its value's
   hash. SCIP symbols and occurrences are the one exception to belonging to an indexed file:
   `ok index` stores them for every document a SCIP index covers, including files discovery
-  skipped, and since readers resolve a path only through the files table, such a row serves
-  no path. An artifact that breaks any of them is
-  refused, `--allow-foreign` or not, because no writer produces one.
+  skipped, and since readers resolve a file through the files table, such a row serves no
+  file path or content. Its qualified name is the full SCIP symbol string, which usually
+  spells the module path, so a symbol search can still return that fragment. An artifact
+  that breaks any of the others is refused, `--allow-foreign` or not, because no writer
+  produces one: `ok watch` removes the facts other files hold about a file it deletes, as a
+  full index never records them.
 - **Local index policy.** Every indexed file and document the importing repository's policy
   excludes — secret-like and `[paths] deny` paths, hidden files, `[index] exclude`,
   `.gitignore`, `.okignore`, judged by `open-kioku-ingest`'s `IndexPathPolicy`, the checks
