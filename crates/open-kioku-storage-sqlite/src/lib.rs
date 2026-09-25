@@ -7587,8 +7587,8 @@ mod tests {
     #[test]
     fn test_indexed_graph_anchor_lookups() {
         let store = make_store();
-        let file = make_file("f1", "src/DispatcherServlet.java");
-        let symbol = make_symbol("s1", "DispatcherServlet", "f1");
+        let file = make_file("f1", "src/RouterRegistry.java");
+        let symbol = make_symbol("s1", "RouterRegistry", "f1");
         let manifest = make_manifest();
         let files = vec![file];
         let symbols = vec![symbol];
@@ -7609,16 +7609,16 @@ mod tests {
             .unwrap();
 
         let file_node = GraphNode {
-            id: NodeId::new("file:src/DispatcherServlet.java"),
+            id: NodeId::new("file:src/RouterRegistry.java"),
             node_type: GraphNodeType::File,
-            label: "src/DispatcherServlet.java".into(),
+            label: "src/RouterRegistry.java".into(),
             file_id: Some(FileId::new("f1")),
             ..Default::default()
         };
         let symbol_node = GraphNode {
             id: NodeId::new("symbol:s1"),
             node_type: GraphNodeType::Function,
-            label: "org.springframework.web.DispatcherServlet".into(),
+            label: "com.acme.web.RouterRegistry".into(),
             file_id: Some(FileId::new("f1")),
             symbol_id: Some(SymbolId::new("s1")),
             ..Default::default()
@@ -7636,7 +7636,7 @@ mod tests {
             .unwrap();
 
         let nodes = store
-            .nodes_by_label("DispatcherServlet", Some(GraphNodeType::Function), 10, 0)
+            .nodes_by_label("RouterRegistry", Some(GraphNodeType::Function), 10, 0)
             .unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id.0, "symbol:s1");
@@ -7644,7 +7644,7 @@ mod tests {
         let outgoing = store
             .edges_by_type_for_node(
                 GraphEdgeType::Defines,
-                "file:src/DispatcherServlet.java",
+                "file:src/RouterRegistry.java",
                 true,
                 10,
                 0,
