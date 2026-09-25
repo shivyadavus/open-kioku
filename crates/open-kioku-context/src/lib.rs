@@ -10,7 +10,7 @@ use open_kioku_core::{
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
-use open_kioku_ranking::{rerank_with_options, RankingOptions};
+use open_kioku_ranking::RankingOptions;
 use open_kioku_search_regex::search_chunks;
 use open_kioku_storage::{HistoryStore, OkStore, SearchIndex};
 use open_kioku_tests::TestSelector;
@@ -704,42 +704,16 @@ impl<'a> ContextPackBuilder<'a> {
         // that are already in the pack, and the primary bound must not cut a lower-ranked
         // file's unit to make room for them.
         let primary_limit = limit.max(primary.len());
-        self.build_from_primary_with_impact(task, primary_limit, primary, true, false, diagnostics)
+        self.build_from_primary(task, primary_limit, primary, diagnostics)
     }
 
-    pub fn build_from_primary(
+    fn build_from_primary(
         &self,
         task: &str,
         limit: usize,
         primary: Vec<SearchResult>,
-    ) -> Result<ContextPack> {
-        self.build_from_primary_with_impact(
-            task,
-            limit,
-            rerank_with_options(primary, &self.ranking_options),
-            false,
-            true,
-            {
-                let mut diagnostics = open_kioku_core::RetrievalDiagnostics::default();
-                diagnostics.routing = routing::classify_task(task).diagnostics();
-                diagnostics
-            },
-        )
-    }
-
-    fn build_from_primary_with_impact(
-        &self,
-        task: &str,
-        limit: usize,
-        primary: Vec<SearchResult>,
-        expand_impact: bool,
-        augment_runtime_candidates: bool,
         mut retrieval_diagnostics: open_kioku_core::RetrievalDiagnostics,
     ) -> Result<ContextPack> {
-        let mut primary = primary;
-        if augment_runtime_candidates {
-            augment_primary_with_runtime(self.store, task, &mut primary, limit)?;
-        }
         // Materialize the caller-visible primary selection once. Downstream authority must be
         // derived only from evidence that survived the primary limit; hidden retrieval candidates
         // cannot widen symbols, dependency seeds, or the allowed edit boundary.
@@ -749,20 +723,14 @@ impl<'a> ContextPackBuilder<'a> {
             .filter_map(|result| result.symbol.clone())
             .take(10)
             .collect::<Vec<_>>();
-        let impact = if expand_impact {
-            if let Some(first) = primary_files.first() {
-                ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
-                    .with_search_index(self.search_index)
-                    .with_history_store(self.history_store)
-                    .with_graph_store(Some(self.store as &dyn open_kioku_storage::GraphStore))
-                    .for_file(&first.path)?
-            } else {
-                empty_impact(task)
-            }
-        } else if primary_files.is_empty() {
-            empty_impact(task)
+        let impact = if let Some(first) = primary_files.first() {
+            ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
+                .with_search_index(self.search_index)
+                .with_history_store(self.history_store)
+                .with_graph_store(Some(self.store as &dyn open_kioku_storage::GraphStore))
+                .for_file(&first.path)?
         } else {
-            bounded_impact(task)
+            empty_impact(task)
         };
 
         let mut dependency_edges: Vec<GraphEdge> = Vec::new();
@@ -1936,100 +1904,6 @@ fn runtime_signals_for_context(
     Ok(signals)
 }
 
-fn augment_primary_with_runtime(
-    store: &dyn OkStore,
-    task: &str,
-    primary: &mut Vec<SearchResult>,
-    limit: usize,
-) -> Result<()> {
-    let facts = store.analysis_facts(Some(EvidenceSourceType::Runtime), 500)?;
-    if facts.is_empty() {
-        return Ok(());
-    }
-    let task = task.to_ascii_lowercase();
-    let files = store.list_files(usize::MAX, 0)?;
-    let files_by_id = files
-        .into_iter()
-        .map(|file| (file.id.clone(), file))
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut existing_paths = primary
-        .iter()
-        .map(|result| normalize_path(&result.path))
-        .collect::<std::collections::HashSet<_>>();
-    let mut additions = Vec::new();
-    for fact in facts
-        .into_iter()
-        .filter(|fact| runtime_fact_matches_query(fact, &task))
-    {
-        let Some(file) = files_by_id.get(&fact.file_id) else {
-            continue;
-        };
-        let normalized_path = normalize_path(&file.path);
-        if !existing_paths.insert(normalized_path) {
-            continue;
-        }
-        if let Some(result) = runtime_seed_result(store, file, &fact)? {
-            additions.push(result);
-        }
-        if additions.len() >= limit {
-            break;
-        }
-    }
-    primary.extend(additions);
-    primary.sort_by(compare_scored_results);
-    primary.truncate(limit.max(1));
-    Ok(())
-}
-
-/// Descending score, then repository position.
-fn compare_scored_results(a: &SearchResult, b: &SearchResult) -> std::cmp::Ordering {
-    b.score
-        .partial_cmp(&a.score)
-        .unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| candidates::compare_result_position(a, b))
-}
-
-fn runtime_seed_result(
-    store: &dyn OkStore,
-    file: &File,
-    fact: &AnalysisFact,
-) -> Result<Option<SearchResult>> {
-    let chunks = store.chunks_for_file(&file.id)?;
-    let snippet = chunks
-        .iter()
-        .find(|chunk| {
-            fact.range
-                .as_ref()
-                .map(|range| chunk.range.start <= range.start && range.start <= chunk.range.end)
-                .unwrap_or(false)
-        })
-        .or_else(|| chunks.first())
-        .map(|chunk| chunk.text.clone())
-        .unwrap_or_else(|| fact.target.clone());
-    let evidence = vec![format!(
-        "runtime corroboration from local artifact `{}` targeting `{}`",
-        fact.source, fact.target
-    )];
-    Ok(Some(SearchResult {
-        path: file.path.clone(),
-        line_range: fact.range.clone(),
-        snippet,
-        symbol: None,
-        score: 1.35,
-        match_reason: "runtime artifact matched task intent".into(),
-        evidence,
-        evidence_refs: vec![fact.id.clone()],
-        confidence: fact.confidence.score(),
-        score_breakdown: vec![ScoreComponent::single(
-            "runtime_corroboration",
-            1.35,
-            vec![fact.id.clone()],
-            "local runtime trace/log/incident artifact matched the task",
-        )],
-        exact_reference_provenance: None,
-    }))
-}
-
 fn annotate_results_with_runtime(results: &mut [SearchResult], signals: &[RuntimeSignal]) {
     if signals.is_empty() {
         return;
@@ -2735,7 +2609,7 @@ fn rerank_for_task(
     intent: &TaskSearchIntent,
     ranking_options: &RankingOptions,
 ) -> Vec<SearchResult> {
-    let ranked = rerank_with_options(results, ranking_options);
+    let ranked = open_kioku_ranking::rerank_with_options(results, ranking_options);
     rerank_fused_for_task(ranked, intent, &RetrievalDiagnostics::default())
 }
 
@@ -3874,43 +3748,6 @@ fn empty_impact(task: &str) -> open_kioku_core::ImpactReport {
     }
 }
 
-fn bounded_impact(task: &str) -> open_kioku_core::ImpactReport {
-    open_kioku_core::ImpactReport {
-        direct_impacts_omitted: 0,
-        indirect_impacts_omitted: 0,
-        proven_impact: Vec::new(),
-        possible_impact: Vec::new(),
-        target: task.into(),
-        direct_impacts: Vec::new(),
-        indirect_impacts: Vec::new(),
-        risk_report: RiskReport {
-            level: "low".into(),
-            score: 0.1,
-            reasons: vec!["bounded context built from persisted search results".into()],
-        },
-        evidence: vec![Evidence {
-            id: EvidenceId::new("context:bounded-search"),
-            source: "open-kioku-context".into(),
-            source_type: EvidenceSourceType::Lexical,
-            file_range: None,
-            symbol_id: None,
-            confidence: Confidence::Medium,
-            message:
-                "context pack used persisted search results without full-table impact expansion"
-                    .into(),
-            indexed_at: Utc::now(),
-            ..Default::default()
-        }],
-        architecture_policy: None,
-        score_breakdown: vec![ScoreComponent::single(
-            "bounded_context_risk",
-            0.1,
-            vec!["context:bounded-search".into()],
-            "bounded context used persisted search results without full impact expansion",
-        )],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4617,48 +4454,6 @@ mod tests {
                 ]
             );
         }
-    }
-
-    #[test]
-    fn scored_results_break_equal_scores_on_path_then_line_range() {
-        let result = |path: &str, start: u32, score: f32| SearchResult {
-            path: path.into(),
-            line_range: Some(LineRange::single(start)),
-            snippet: String::new(),
-            symbol: None,
-            score,
-            match_reason: String::new(),
-            evidence: Vec::new(),
-            evidence_refs: Vec::new(),
-            confidence: 0.5,
-            score_breakdown: Vec::new(),
-            exact_reference_provenance: None,
-        };
-        let mut results = [
-            result("src/b.rs", 7, 0.5),
-            result("src/c.rs", 1, 0.9),
-            result("src/b.rs", 3, 0.5),
-            result("src/a.rs", 9, 0.5),
-        ];
-        results.sort_by(compare_scored_results);
-        let order = results
-            .iter()
-            .map(|result| {
-                (
-                    result.path.to_string_lossy().into_owned(),
-                    result.line_range.as_ref().map(|range| range.start),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            order,
-            vec![
-                ("src/c.rs".to_string(), Some(1)),
-                ("src/a.rs".to_string(), Some(9)),
-                ("src/b.rs".to_string(), Some(3)),
-                ("src/b.rs".to_string(), Some(7)),
-            ]
-        );
     }
 
     #[test]
