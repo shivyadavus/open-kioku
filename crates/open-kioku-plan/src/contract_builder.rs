@@ -848,6 +848,8 @@ mod tests {
             confidence_breakdown: ConfidenceBreakdown::default(),
             score_breakdown: vec![],
             evidence_quality: Default::default(),
+            validation_omitted: 0,
+            validation_omitted_ids: Vec::new(),
         };
 
         let err = ContractBuilder::from_plan(&plan).expect_err("empty plans are not authoritative");
@@ -977,6 +979,8 @@ mod tests {
                 "bounded similar-change overlap from persisted local history",
             )],
             evidence_quality: Default::default(),
+            validation_omitted: 0,
+            validation_omitted_ids: Vec::new(),
         };
 
         let contract = ContractBuilder::from_plan(&plan).expect("builds contract");

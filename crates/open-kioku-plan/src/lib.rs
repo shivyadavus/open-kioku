@@ -422,7 +422,14 @@ impl<'a> PlanEngine<'a> {
             impact.architecture_policy = context.architecture_policy.clone();
         }
         impact.reconcile_score_breakdown();
-        let mut validation = self.validation_for_context(&primary_context, &context)?;
+        let ValidationSelection {
+            selected: mut validation,
+            omitted_by_cap,
+        } = self.validation_for_context(&primary_context, &context)?;
+        let validation_omitted_ids = omitted_by_cap
+            .into_iter()
+            .map(|test| test.id)
+            .collect::<Vec<_>>();
         for test in &mut validation {
             test.reconcile_score_breakdown();
         }
@@ -546,6 +553,9 @@ impl<'a> PlanEngine<'a> {
             &evidence_quality,
             exact_reference_count,
         );
+        if let Some(caveat) = validation_cap_caveat(validation_omitted_ids.len()) {
+            confidence_breakdown.add_caveats([caveat], exact_reference_count);
+        }
         let mut confidence_summary = confidence_summary(&confidence_breakdown);
         // RI3.7: the plan states its relationship claims with their authority split rather
         // than presenting heuristic dependents as certainty.
@@ -586,6 +596,8 @@ impl<'a> PlanEngine<'a> {
             confidence_breakdown,
             score_breakdown,
             evidence_quality,
+            validation_omitted: validation_omitted_ids.len(),
+            validation_omitted_ids,
         };
         report.reconcile_score_breakdown();
         Ok(report)
@@ -661,7 +673,7 @@ impl<'a> PlanEngine<'a> {
         &self,
         primary_context: &[SearchResult],
         context: &ContextPack,
-    ) -> Result<Vec<TestTarget>> {
+    ) -> Result<ValidationSelection> {
         let mut candidates = context.validation_plan.tests.clone();
         let selector = TestSelector::new(self.store as &dyn MetadataStore);
         for result in validation_source_results(primary_context)
@@ -708,12 +720,24 @@ fn tier_rank(test: &TestTarget) -> u8 {
     }
 }
 
+/// The plan's validation after its bound, and the targets that bound alone dropped.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationSelection {
+    pub selected: Vec<TestTarget>,
+    /// Targets that passed the predicate and the per-file suite preference but fell past
+    /// `MAX_VALIDATION`. Targets those earlier steps removed are different decisions and are not
+    /// here: a reader matching the plan's disclosed count against `ok verify` findings must see
+    /// only what the cap cut.
+    pub omitted_by_cap: Vec<TestTarget>,
+}
+
 /// The validation a plan records: plausible targets, the per-file preference for a suite name,
 /// ordered by selection tier before confidence so the cap keeps the best-evidenced targets, and
 /// the plan's bound. This narrowing is the plan's alone. `ok verify` shares the predicate through
 /// [`plausible_validation_targets`] but never these bounds: a capped recommendation would let
-/// exit 0 mean "the first few recommendations were planned".
-pub fn select_validation_targets(tests: Vec<TestTarget>) -> Vec<TestTarget> {
+/// exit 0 mean "the first few recommendations were planned". What the bound drops is returned,
+/// not discarded, so the plan can disclose it.
+pub fn select_validation_targets(tests: Vec<TestTarget>) -> ValidationSelection {
     let mut by_file: BTreeMap<FileId, Vec<TestTarget>> = BTreeMap::new();
     for test in plausible_validation_targets(tests) {
         by_file.entry(test.file_id.clone()).or_default().push(test);
@@ -740,8 +764,29 @@ pub fn select_validation_targets(tests: Vec<TestTarget>) -> Vec<TestTarget> {
                 .then_with(|| left.name.cmp(&right.name))
         })
     });
-    selected.truncate(MAX_VALIDATION);
-    selected
+    let omitted_by_cap = if selected.len() > MAX_VALIDATION {
+        selected.split_off(MAX_VALIDATION)
+    } else {
+        Vec::new()
+    };
+    ValidationSelection {
+        selected,
+        omitted_by_cap,
+    }
+}
+
+/// The caveat a plan carries when its validation bound dropped plausible targets. Absent under
+/// the cap, so its presence is itself the signal.
+fn validation_cap_caveat(omitted: usize) -> Option<String> {
+    match omitted {
+        0 => None,
+        1 => Some(format!(
+            "validation selection capped at {MAX_VALIDATION} targets; 1 further plausible target was not planned"
+        )),
+        _ => Some(format!(
+            "validation selection capped at {MAX_VALIDATION} targets; {omitted} further plausible targets were not planned"
+        )),
+    }
 }
 
 pub fn is_plausible_test(test: &TestTarget) -> bool {
@@ -4525,7 +4570,7 @@ mod tests {
         let first = registration_test_target("renders the label", "src/Button.test.tsx", false);
         let second = registration_test_target("fires on click", "src/Button.test.tsx", false);
 
-        let selected = select_validation_targets(vec![helper, first, second]);
+        let selected = select_validation_targets(vec![helper, first, second]).selected;
         let names = selected
             .iter()
             .map(|test| test.name.as_str())
@@ -4546,12 +4591,240 @@ mod tests {
             origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
             ..registration_test_target("rounds", "src/test/java/LedgerTest.java", false)
         };
-        let selected = select_validation_targets(vec![suite, method]);
+        let selected = select_validation_targets(vec![suite, method]).selected;
         let names = selected
             .iter()
             .map(|test| test.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["LedgerServiceTests"], "{names:?}");
+    }
+
+    /// Only the cap's drops are disclosed. A target the predicate rejects and a method the
+    /// per-file suite preference displaces were never eligible for the cap, so counting them
+    /// would leave the plan's disclosed number unmatched by `ok verify`'s findings.
+    #[test]
+    fn the_cap_discloses_only_the_targets_it_dropped() {
+        let eligible = (0..11)
+            .map(|index| {
+                registration_test_target(&format!("case {index:02}"), "test/cases_test.ts", false)
+            })
+            .collect::<Vec<_>>();
+        let disabled = registration_test_target("skips stale rows", "test/cases_test.ts", true);
+        let suite = TestTarget {
+            origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+            ..registration_test_target("LedgerServiceTests", "src/test/java/LedgerTest.java", false)
+        };
+        let method = TestTarget {
+            origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+            ..registration_test_target("rounds", "src/test/java/LedgerTest.java", false)
+        };
+        let mut candidates = eligible;
+        candidates.extend([disabled, suite, method]);
+
+        // Twelve survive the predicate and the suite preference: eleven cases and the suite.
+        let selection = select_validation_targets(candidates);
+        assert_eq!(selection.selected.len(), MAX_VALIDATION);
+        assert_eq!(selection.omitted_by_cap.len(), 12 - MAX_VALIDATION);
+        let omitted = selection
+            .omitted_by_cap
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(!omitted.contains(&"skips stale rows"), "{omitted:?}");
+        assert!(!omitted.contains(&"rounds"), "{omitted:?}");
+        assert_eq!(
+            validation_cap_caveat(selection.omitted_by_cap.len()).as_deref(),
+            Some("validation selection capped at 8 targets; 4 further plausible targets were not planned")
+        );
+    }
+
+    #[test]
+    fn a_selection_under_the_cap_omits_nothing_and_carries_no_caveat() {
+        let candidates = (0..MAX_VALIDATION)
+            .map(|index| {
+                registration_test_target(&format!("case {index:02}"), "test/cases_test.ts", false)
+            })
+            .collect::<Vec<_>>();
+        let selection = select_validation_targets(candidates);
+        assert_eq!(selection.selected.len(), MAX_VALIDATION);
+        assert!(selection.omitted_by_cap.is_empty());
+        assert_eq!(validation_cap_caveat(0), None);
+        assert_eq!(
+            validation_cap_caveat(1).as_deref(),
+            Some("validation selection capped at 8 targets; 1 further plausible target was not planned")
+        );
+    }
+
+    /// End to end: a repository with more plausible targets than the cap plans exactly the cap,
+    /// and the plan's typed count, ids and caveat all name the same omission.
+    #[test]
+    fn a_plan_over_the_cap_discloses_its_omitted_targets() {
+        let store = two_suite_store();
+        let plan = PlanEngine::new(&store)
+            .plan("fix rounding in convertCurrency and convertLedger", 10)
+            .unwrap();
+        assert_eq!(plan.validation.len(), MAX_VALIDATION);
+        assert_eq!(plan.validation_omitted, 4);
+        assert_eq!(plan.validation_omitted_ids.len(), plan.validation_omitted);
+        // An omitted id is not also planned, so verify's two wordings cannot both apply.
+        for id in &plan.validation_omitted_ids {
+            assert!(!plan.validation.iter().any(|test| &test.id == id), "{id}");
+        }
+        assert!(
+            plan.confidence_breakdown.caveats.iter().any(|caveat| caveat
+                == "validation selection capped at 8 targets; 4 further plausible targets were not planned"),
+            "{:?}",
+            plan.confidence_breakdown.caveats
+        );
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["validation_omitted"], 4);
+        let restored: PlanReport = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.validation_omitted_ids, plan.validation_omitted_ids);
+    }
+
+    /// Two source files, each with its own test file of six declared-symbol targets: twelve
+    /// plausible targets, more than the plan's cap, with no one file's selector bound hiding any.
+    fn two_suite_store() -> SqliteStore {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let repo_id = RepositoryId::new("repo");
+        let file = |id: &str, path: &str| File {
+            id: FileId::new(id),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(path),
+            language: Language::Java,
+            size_bytes: 120,
+            content_hash: id.into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let files = [
+            file("rates", "src/main/java/com/acme/Rates.java"),
+            file("rates-test", "src/test/java/com/acme/RatesTest.java"),
+            file("ledger", "src/main/java/com/acme/Ledger.java"),
+            file("ledger-test", "src/test/java/com/acme/LedgerTest.java"),
+        ];
+        let symbol = |id: &str, name: &str, file_id: &str| Symbol {
+            id: SymbolId::new(id),
+            name: name.into(),
+            qualified_name: name.into(),
+            kind: SymbolKind::Function,
+            file_id: FileId::new(file_id),
+            range: Some(LineRange { start: 1, end: 3 }),
+            language: Language::Java,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        };
+        let symbols = [
+            symbol("convert-currency", "convertCurrency", "rates"),
+            symbol("convert-ledger", "convertLedger", "ledger"),
+        ];
+        let chunk = |id: &str, file_id: &str, symbol_id: &str, text: &str| CodeChunk {
+            id: id.into(),
+            file_id: FileId::new(file_id),
+            range: LineRange { start: 1, end: 3 },
+            language: Language::Java,
+            text: text.into(),
+            symbol_id: Some(SymbolId::new(symbol_id)),
+        };
+        let chunks = vec![
+            chunk(
+                "rates-chunk",
+                "rates",
+                "convert-currency",
+                "public final class Rates { public static int convertCurrency(int amount, double rate) { return Math.round(amount * rate); } }",
+            ),
+            chunk(
+                "ledger-chunk",
+                "ledger",
+                "convert-ledger",
+                "public final class Ledger { public static int convertLedger(int amount, double rate) { return Math.round(amount * rate); } }",
+            ),
+        ];
+        let tests = [("rates-test", "rates"), ("ledger-test", "ledger")]
+            .into_iter()
+            .flat_map(|(file_id, stem)| {
+                (0..6).map(move |index| TestTarget {
+                    selection_tier: open_kioku_core::TestSelectionTier::default(),
+                    tier_justification: Vec::new(),
+                    id: format!("test-file-symbol:{stem}:{index}"),
+                    name: format!("{stem}RoundsCase{index}"),
+                    file_id: FileId::new(file_id),
+                    range: Some(LineRange {
+                        start: 2 + index,
+                        end: 4 + index,
+                    }),
+                    command: None,
+                    confidence: Confidence::High,
+                    reason: "test-like path, annotation, or naming convention".into(),
+                    evidence_refs: Vec::new(),
+                    score_breakdown: Vec::new(),
+                    origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+                })
+            })
+            .collect::<Vec<_>>();
+        let quality = open_kioku_core::IndexQuality::default();
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: repo_id.clone(),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: files.len(),
+            symbol_count: symbols.len(),
+            chunk_count: chunks.len(),
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: quality.index_mode,
+            phase_reports: Vec::new(),
+            quality,
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &files,
+                symbols: &symbols,
+                chunks: &chunks,
+                tests: &tests,
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        store
+    }
+
+    /// A plan under the cap serializes no omission fields and no truncation caveat, so their
+    /// presence is itself the signal.
+    #[test]
+    fn a_plan_under_the_cap_serializes_no_omission() {
+        let store = test_store();
+        let plan = PlanEngine::new(&store).plan("token", 10).unwrap();
+        assert!(plan.validation.len() <= MAX_VALIDATION);
+        assert_eq!(plan.validation_omitted, 0);
+        let json = serde_json::to_value(&plan).unwrap();
+        assert!(json.get("validation_omitted").is_none(), "{json}");
+        assert!(json.get("validation_omitted_ids").is_none(), "{json}");
+        assert!(
+            !plan
+                .confidence_breakdown
+                .caveats
+                .iter()
+                .any(|caveat| caveat.starts_with("validation selection capped")),
+            "{:?}",
+            plan.confidence_breakdown.caveats
+        );
     }
 
     /// A registered test is named by a sentence, which every name heuristic here rejects. Its

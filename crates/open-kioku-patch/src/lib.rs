@@ -1064,6 +1064,8 @@ fn contract_to_plan_report(contract: &ChangeContractV1) -> PlanReport {
         },
         score_breakdown: Vec::new(),
         evidence_quality: contract_evidence_quality(contract),
+        validation_omitted: 0,
+        validation_omitted_ids: Vec::new(),
     }
 }
 
@@ -3516,19 +3518,30 @@ fn recommended_tests(store: &dyn OkStore, changed_files: &[PathBuf]) -> Result<V
     Ok(open_kioku_plan::plausible_validation_targets(tests))
 }
 
+/// Every recommendation the plan does not list stays a finding, including those the plan's
+/// validation bound left out: the plan chose not to run them, and verify cannot call that
+/// covered. The reason says which case it is, so a disclosed omission does not read as a miss.
 fn missing_tests(plan: &PlanReport, recommended_tests: &[TestTarget]) -> Vec<VerificationFinding> {
     let planned = plan
         .validation
         .iter()
         .flat_map(|test| [test.id.clone(), test.name.clone()])
         .collect::<BTreeSet<_>>();
+    let omitted_by_cap = plan.validation_omitted_ids.iter().collect::<BTreeSet<_>>();
     recommended_tests
         .iter()
         .filter(|test| !planned.contains(&test.id) && !planned.contains(&test.name))
         .map(|test| VerificationFinding {
             path: Some(PathBuf::from(test.file_id.0.clone())),
             kind: "missing_test".into(),
-            reason: format!("recommended test `{}` is not in the saved plan", test.name),
+            reason: if omitted_by_cap.contains(&test.id) {
+                format!(
+                    "recommended test `{}` is not in the saved plan: the plan's validation cap omitted it",
+                    test.name
+                )
+            } else {
+                format!("recommended test `{}` is not in the saved plan", test.name)
+            },
             evidence_refs: test.evidence_refs.clone(),
         })
         .collect()
@@ -3946,6 +3959,82 @@ mod tests {
     /// eight recommendations were planned".
     #[test]
     fn verify_recommends_past_the_plans_cap_so_the_verdict_cannot_hide_unplanned_tests() {
+        let (store, planned, unplanned) = store_with_more_tests_than_the_plan_cap();
+
+        let recommended = recommended_tests(
+            &store,
+            &[PathBuf::from("src/alpha.rs"), PathBuf::from("src/beta.rs")],
+        )
+        .unwrap();
+        let names = recommended
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for target in planned.iter().chain(unplanned.iter()) {
+            assert!(names.contains(target.name.as_str()), "{}", target.name);
+        }
+        // Exactly the fourteen, so the assertion cannot pass because the stem match pulled every
+        // target in for both paths and the count merely looked large enough.
+        assert_eq!(names.len(), 14, "{names:?}");
+        assert_eq!(recommended.len(), 14, "{recommended:?}");
+
+        let mut plan = plan_with_validation_command("cargo test");
+        plan.validation = planned;
+        let missing = missing_tests(&plan, &recommended);
+        assert_eq!(missing.len(), 6, "{missing:?}");
+    }
+
+    /// The plan and verify reconcile by construction: the plan's own selection over the same
+    /// recommendations discloses how many targets its cap left out, verify reports exactly those
+    /// as unplanned, and each finding says the cap omitted it rather than implying a planning miss.
+    #[test]
+    fn verify_findings_match_the_omissions_the_plan_disclosed() {
+        let (store, _, _) = store_with_more_tests_than_the_plan_cap();
+        let recommended = recommended_tests(
+            &store,
+            &[PathBuf::from("src/alpha.rs"), PathBuf::from("src/beta.rs")],
+        )
+        .unwrap();
+        let selection = open_kioku_plan::select_validation_targets(recommended.clone());
+
+        let mut plan = plan_with_validation_command("cargo test");
+        plan.validation = selection.selected;
+        plan.validation_omitted = selection.omitted_by_cap.len();
+        plan.validation_omitted_ids = selection
+            .omitted_by_cap
+            .iter()
+            .map(|test| test.id.clone())
+            .collect();
+        let missing = missing_tests(&plan, &recommended);
+
+        assert_eq!(plan.validation_omitted, 6);
+        assert_eq!(missing.len(), plan.validation_omitted, "{missing:?}");
+        for finding in &missing {
+            assert!(
+                finding
+                    .reason
+                    .ends_with("the plan's validation cap omitted it"),
+                "{}",
+                finding.reason
+            );
+        }
+
+        // A plan that never disclosed the omission keeps the plain wording.
+        plan.validation_omitted = 0;
+        plan.validation_omitted_ids.clear();
+        for finding in missing_tests(&plan, &recommended) {
+            assert!(
+                finding.reason.ends_with("is not in the saved plan"),
+                "{}",
+                finding.reason
+            );
+        }
+    }
+
+    /// Fourteen plausible targets across two test files, eight planned and six not: more than
+    /// the plan's cap of eight.
+    fn store_with_more_tests_than_the_plan_cap() -> (RuntimeStore, Vec<TestTarget>, Vec<TestTarget>)
+    {
         let mut store = RuntimeStore::new()
             .with_file_text("tests/alpha_test.rs", "fn alpha_one() {}")
             .with_file_text("tests/beta_test.rs", "fn beta_one() {}");
@@ -3970,28 +4059,7 @@ mod tests {
         for target in planned.iter().chain(unplanned.iter()) {
             store = store.with_test_target(target.clone());
         }
-
-        let recommended = recommended_tests(
-            &store,
-            &[PathBuf::from("src/alpha.rs"), PathBuf::from("src/beta.rs")],
-        )
-        .unwrap();
-        let names = recommended
-            .iter()
-            .map(|test| test.name.as_str())
-            .collect::<BTreeSet<_>>();
-        for target in planned.iter().chain(unplanned.iter()) {
-            assert!(names.contains(target.name.as_str()), "{}", target.name);
-        }
-        // Exactly the fourteen, so the assertion cannot pass because the stem match pulled every
-        // target in for both paths and the count merely looked large enough.
-        assert_eq!(names.len(), 14, "{names:?}");
-        assert_eq!(recommended.len(), 14, "{recommended:?}");
-
-        let mut plan = plan_with_validation_command("cargo test");
-        plan.validation = planned;
-        let missing = missing_tests(&plan, &recommended);
-        assert_eq!(missing.len(), 6, "{missing:?}");
+        (store, planned, unplanned)
     }
 
     /// `ok verify` recommends what the plan would have planned. A test registered by a runner
@@ -6033,6 +6101,8 @@ rename to src/menu.rs
             },
             score_breakdown: vec![],
             evidence_quality: Default::default(),
+            validation_omitted: 0,
+            validation_omitted_ids: Vec::new(),
         }
     }
 

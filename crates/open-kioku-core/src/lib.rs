@@ -5458,6 +5458,15 @@ pub struct PlanReport {
     pub relevant_symbols: Vec<Symbol>,
     pub impact: ImpactReport,
     pub validation: Vec<TestTarget>,
+    /// Plausible validation targets the plan's bound on `validation` left out. Only the bound's
+    /// drops are counted, not targets the plausibility predicate or the per-file suite preference
+    /// removed; a caveat on `confidence_breakdown` states the same count.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub validation_omitted: usize,
+    /// The ids behind `validation_omitted`, so `ok verify` can say a recommendation was left out
+    /// by the plan's bound rather than implying the plan never considered it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_omitted_ids: Vec<String>,
     pub risk: RiskReport,
     pub recommended_change_boundary: ChangeBoundary,
     pub recommended_next_steps: Vec<String>,
