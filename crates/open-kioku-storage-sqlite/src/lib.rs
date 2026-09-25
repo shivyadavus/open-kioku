@@ -2867,12 +2867,18 @@ const HISTORY_PATH_QUERIES: &[&str] = &[
 /// indexed files only), and its symbols' history. See [`SqliteStore::purge_paths`].
 const INDEXED_PATH_PURGE_STATEMENTS: &[&str] = &[
     "DELETE FROM document_sections WHERE path = ?1",
-    "DELETE FROM analysis_facts WHERE target = ?1",
+    FACTS_ABOUT_FILE_DELETE,
     "DELETE FROM git_symbol_touches WHERE file_path = ?1",
     "DELETE FROM history_hotspots WHERE path = ?1 AND entity_kind = 'symbol'",
 ];
 
-/// Every history row that names a path. See [`SqliteStore::purge_paths`].
+/// The facts other files hold about the file at `?1`: those whose target is that file (a
+/// co-change with it, or with it as a test), not every fact whose target string matches.
+const FACTS_ABOUT_FILE_DELETE: &str = "DELETE FROM analysis_facts WHERE target = ?1 \
+     AND json_extract(json, '$.target_kind') IN ('file', 'test')";
+
+/// Every history row that names a path, and every fact naming it, whatever its kind: a
+/// secret-like or denied path must not be named anywhere. See [`SqliteStore::purge_paths`].
 const HISTORY_PATH_PURGE_STATEMENTS: &[&str] = &[
     "DELETE FROM git_file_touches WHERE path = ?1 OR previous_path = ?1",
     "DELETE FROM git_symbol_touches WHERE file_path = ?1",
@@ -3392,12 +3398,11 @@ fn replace_files_rows(
     // Facts other files hold about a deleted file (a co-change with it) describe a file the
     // index no longer has. A full index records facts between indexed files only, so they go
     // with it; otherwise the partial writer would keep serving evidence about a deleted path.
+    // Only facts whose target is a file: an unresolved import whose specifier happens to
+    // spell the same string (`#include "src/foo.h"`) is about the importing file, not this one.
     for path in &deleted_file_paths {
-        tx.execute(
-            "DELETE FROM analysis_facts WHERE target = ?1",
-            params![path],
-        )
-        .map_err(storage_err)?;
+        tx.execute(FACTS_ABOUT_FILE_DELETE, params![path])
+            .map_err(storage_err)?;
     }
 
     let mut call_site_strings = compact::StringWriter::incremental(tx, compact::CALL_SITE_STRINGS)?;

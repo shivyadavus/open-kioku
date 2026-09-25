@@ -2285,7 +2285,8 @@ fn snapshot_of_a_watched_index_after_a_co_changed_file_is_deleted_imports() {
         rusqlite::Connection::open(repo.join(".ok/index.sqlite"))
             .unwrap()
             .query_row(
-                "SELECT COUNT(*) FROM analysis_facts WHERE target = 'src/d.rs'",
+                "SELECT COUNT(*) FROM analysis_facts WHERE target = 'src/d.rs' \
+                 AND json_extract(json, '$.target_kind') IN ('file', 'test')",
                 [],
                 |row| row.get(0),
             )
@@ -2295,6 +2296,34 @@ fn snapshot_of_a_watched_index_after_a_co_changed_file_is_deleted_imports() {
         facts_about_deleted() > 0,
         "the fixture must record a co-change fact about src/d.rs"
     );
+    // A fact that is not about the file but spells the same target, as an unresolved
+    // `#include "src/d.rs"` would: it belongs to src/a.rs and must outlive src/d.rs.
+    {
+        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+        let inserted = conn
+            .execute(
+                "INSERT INTO analysis_facts(id, file_id, source_type, target, json) \
+                 SELECT 'unresolved-include', a.file_id, 'static_analysis', a.target, \
+                        json_set(a.json, '$.id', 'unresolved-include', \
+                                 '$.target_kind', 'module', \
+                                 '$.source_type', 'static_analysis') \
+                 FROM analysis_facts a JOIN files f ON f.id = a.file_id \
+                 WHERE f.path = 'src/a.rs' AND a.target = 'src/d.rs' LIMIT 1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1);
+    }
+    let unresolved_include = || -> i64 {
+        rusqlite::Connection::open(repo.join(".ok/index.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM analysis_facts WHERE id = 'unresolved-include'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
 
     fs::remove_file(repo.join("src/d.rs")).unwrap();
     let status =
@@ -2308,6 +2337,12 @@ fn snapshot_of_a_watched_index_after_a_co_changed_file_is_deleted_imports() {
         facts_about_deleted(),
         0,
         "facts about a deleted file must go with it"
+    );
+
+    assert_eq!(
+        unresolved_include(),
+        1,
+        "a fact that only spells the deleted path is not about it"
     );
 
     export_snapshot(repo);
