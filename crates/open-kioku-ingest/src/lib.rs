@@ -2109,22 +2109,17 @@ fn collect_git_history(
 ) -> Result<GitHistoryIngest> {
     let history = open_kioku_git::commit_history(root, config.history.max_commits)?;
     let patch_scan = open_kioku_git::commit_patches(root, config.history.max_commits)?;
-    let denied = compile_globs(&config.paths.deny)?;
+    // History names every path a commit touched, including files discovery never reads, so it
+    // applies the security rules discovery applies first (#525).
+    let security = path_policy::SecurityPathPolicy::new(config)?;
     Ok(git_history_ingest(
         files,
         symbols,
         history,
         patch_scan,
         config.history.max_files_per_commit,
-        &|path| security_policy_excludes(&denied, path),
+        &|path| security.exclusion(path).is_some(),
     ))
-}
-
-/// The security rules discovery applies before it reads a file: secret-like paths and
-/// `[paths] deny`. History names every path a commit touched, including files discovery never
-/// reads, so it applies the same rules (#525).
-fn security_policy_excludes(denied: &GlobSet, path: &Path) -> bool {
-    open_kioku_core::is_secret_like_path(path) || denied.is_match(path)
 }
 
 /// What history ingestion left out because the security policy excludes the path it names.

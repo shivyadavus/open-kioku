@@ -478,9 +478,9 @@ struct SnapshotPolicyFilter {
 ///   `[index] exclude`, `.gitignore`, `.okignore`) is removed with every row derived from it,
 ///   and recorded in the manifest's coverage and skipped paths as discovery records a skip;
 /// - every Git history row, and every graph node no file owns, naming a secret-like or
-///   denied path is removed too. `ok index` records history for every touched path, so this
-///   is stricter than a local index, and it is what keeps an artifact from serving a path
-///   the security policy denies;
+///   denied path is removed too, as `ok index` withholds such history when it reads it: an
+///   artifact from an older release or another policy must not serve a path the security
+///   policy here denies;
 /// - secret-like paths the exporter recorded as skipped are withheld under this repository's
 ///   `redact_secrets`.
 ///

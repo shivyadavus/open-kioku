@@ -24,13 +24,49 @@ pub struct PolicyExclusion {
     pub safe_to_show: bool,
 }
 
+/// The security rules alone — secret-like paths and `[paths] deny` — which need no filesystem
+/// and no Git. Discovery applies them first, and anything that names paths discovery never
+/// reads (Git history, graph labels, an imported index) applies the same ones, from here.
+#[derive(Debug)]
+pub struct SecurityPathPolicy {
+    denied: GlobSet,
+    redact_secrets: bool,
+}
+
+impl SecurityPathPolicy {
+    pub fn new(config: &OkConfig) -> Result<Self> {
+        Ok(Self {
+            denied: compile_globs(&config.paths.deny)?,
+            redact_secrets: config.security.redact_secrets,
+        })
+    }
+
+    /// Why the security rules exclude `value`, or `None`. `value` need not be a repository
+    /// path at all (a graph node's label: an import specifier such as `../utils/foo`, a route
+    /// such as `/api/users`).
+    pub fn exclusion(&self, value: &Path) -> Option<PolicyExclusion> {
+        let secret_policy = open_kioku_core::is_secret_like_path(value);
+        if !secret_policy && !self.denied.is_match(value) {
+            return None;
+        }
+        Some(PolicyExclusion {
+            reason: if secret_policy {
+                SkipReason::SecretPolicy
+            } else {
+                SkipReason::Denied
+            },
+            source: SkipSource::SecurityPolicy,
+            safe_to_show: !secret_policy || !self.redact_secrets,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct IndexPathPolicy {
     root: PathBuf,
     excludes: GlobSet,
-    denied: GlobSet,
+    security: SecurityPathPolicy,
     allow_hidden_files: bool,
-    redact_secrets: bool,
     /// Git's own verdict when `root` is in a work tree; `None` falls back to `git_ignores`.
     git_ignored: Option<HashSet<PathBuf>>,
     git_ignores: Option<ScopedIgnoreMatcher>,
@@ -64,33 +100,18 @@ impl IndexPathPolicy {
         Ok(Self {
             root: root.to_path_buf(),
             excludes: compile_globs(&config.index.exclude)?,
-            denied: compile_globs(&config.paths.deny)?,
+            security: SecurityPathPolicy::new(config)?,
             allow_hidden_files: config.security.allow_hidden_files,
-            redact_secrets: config.security.redact_secrets,
             git_ignored,
             git_ignores,
             ok_ignores: build_ignore_matcher(root, ".okignore")?,
         })
     }
 
-    /// The security rules alone — secret-like paths and `[paths] deny` — with no Git call.
-    /// For a value that may not be a repository path at all (a graph node's label: an import
-    /// specifier such as `../utils/foo`, a route such as `/api/users`), which Git would reject
-    /// and which the other rules do not govern.
+    /// [`SecurityPathPolicy::exclusion`], with no Git call: for a value that may not be a
+    /// repository path, which Git would reject and which the other rules do not govern.
     pub fn security_exclusion(&self, value: &Path) -> Option<PolicyExclusion> {
-        let secret_policy = open_kioku_core::is_secret_like_path(value);
-        if !secret_policy && !self.denied.is_match(value) {
-            return None;
-        }
-        Some(PolicyExclusion {
-            reason: if secret_policy {
-                SkipReason::SecretPolicy
-            } else {
-                SkipReason::Denied
-            },
-            source: SkipSource::SecurityPolicy,
-            safe_to_show: !secret_policy || !self.redact_secrets,
-        })
+        self.security.exclusion(value)
     }
 
     /// The first rule that excludes `rel` (relative to the root), in discovery's order, or

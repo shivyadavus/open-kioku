@@ -173,11 +173,12 @@ copy of the artifact:
   occurrences, graph nodes and the edges anchored at them or evidenced in the file, vector
   targets, document sections, facts other files hold about it, and its symbols' history), and
   is recorded in the manifest's coverage and skipped paths as discovery records a skip. Git
-  history rows that name a secret-like or denied path are removed too, and so are graph
-  nodes no file owns whose label is one. Such labels are often not repository paths at all
-  (an import specifier like `../utils/foo`, a route like `/api/users`), so they are judged by
-  the security rules alone and never sent to Git. File-level history of a path excluded for any other reason is kept, as
-  `ok index` records history for every path a commit touched. Secret-like paths the exporter
+  history rows that name a secret-like or denied path are removed too, as `ok index`
+  withholds them when it reads history, and so are graph nodes no file owns whose label is
+  one. Such labels are often not repository paths at all (an import specifier like
+  `../utils/foo`, a route like `/api/users`), so they are judged by the security rules alone
+  (`SecurityPathPolicy`, the rules history ingestion uses) and never sent to Git. File-level
+  history of a path excluded for any other reason is kept, as `ok index` keeps it. Secret-like paths the exporter
   listed as skipped are withheld under the importing repository's `redact_secrets`. Rules
   that do not depend on local configuration — vendor detection, pruning of build and
   dependency directories, the size limit, symlinks — are not applied again. The search index
