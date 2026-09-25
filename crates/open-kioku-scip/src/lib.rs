@@ -382,12 +382,9 @@ fn convert_index(
     let mut occurrences = Vec::new();
     let mut withheld_documents = 0;
     for document in index.documents {
-        // Judged as discovery spells the path, without the `./` some generators prefix.
-        let judged = Path::new(&document.relative_path)
-            .components()
-            .filter(|component| !matches!(component, Component::CurDir))
-            .collect::<PathBuf>();
-        if withhold(&judged) {
+        let admitted =
+            repository_relative(&document.relative_path).is_some_and(|judged| !withhold(&judged));
+        if !admitted {
             withheld_documents += 1;
             continue;
         }
@@ -436,6 +433,28 @@ fn convert_index(
         occurrences,
         withheld_documents,
     }
+}
+
+/// `relative_path` as discovery spells a repository path (`/`-separated, no `./`), or `None`
+/// when it is not one: absolute (`/…`, `C:/…`) or with a `..` segment. Such a document cannot
+/// name an indexed file, and the path policy, whose globs are anchored at the repository root,
+/// cannot judge it, so it is withheld rather than trusted. Case is kept as written: discovery
+/// matches `[paths] deny` globs case-sensitively too, and the secret-like rules ignore case.
+fn repository_relative(relative_path: &str) -> Option<PathBuf> {
+    let slashed = relative_path.replace('\\', "/");
+    let bytes = slashed.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return None;
+    }
+    let mut judged = PathBuf::new();
+    for component in Path::new(&slashed).components() {
+        match component {
+            Component::Normal(part) => judged.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(judged)
 }
 
 fn dedup_import(symbols: &mut Vec<Symbol>, occurrences: &mut Vec<SymbolOccurrence>) {
@@ -691,6 +710,28 @@ mod tests {
         index
             .documents
             .push(document("./vault/keys.rs", hidden, shared));
+        // Spellings that are not plain repository paths are withheld too: judged as written,
+        // each would slip past a policy anchored at the repository root.
+        for (position, path) in [
+            "vault\\win.rs",
+            "src\\..\\vault\\up.rs",
+            "x/../vault/up.rs",
+            "/abs/repo/vault/abs.rs",
+            "C:\\repo\\vault\\drive.rs",
+            "../outside/vault.rs",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let symbol = format!("scip rust test spelled/{position}/ Spelled#");
+            index.documents.push(document(path, &symbol, shared));
+        }
+        // Discovery matches deny globs case-sensitively, so a differently cased directory is
+        // not the denied one there either: the filter sees the case as written.
+        let cased = "scip rust test Vault/case.rs/ Cased#";
+        index
+            .documents
+            .push(document("Vault/case.rs", cased, shared));
         scip::write_message_to_file(temp.path().join("index.scip"), index).unwrap();
 
         let report = import_configured_scip_files(
@@ -701,22 +742,24 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.withheld_documents, 1);
-        assert!(
-            report
-                .symbols
-                .iter()
-                .all(|symbol| symbol.qualified_name == shared),
-            "{:?}",
-            report.symbols
-        );
-        // The withheld document's reference to an admitted symbol goes with it.
-        let admitted = super::stable_id("src/lib.rs");
-        assert_eq!(report.occurrences.len(), 2, "{:?}", report.occurrences);
+        assert_eq!(report.withheld_documents, 7);
+        let mut names = report
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, vec![cased, shared]);
+        // A withheld document's reference to an admitted symbol goes with it.
+        let admitted = [
+            super::stable_id("src/lib.rs"),
+            super::stable_id("Vault/case.rs"),
+        ];
+        assert_eq!(report.occurrences.len(), 4, "{:?}", report.occurrences);
         assert!(report
             .occurrences
             .iter()
-            .all(|occurrence| occurrence.file_id.0 == admitted));
+            .all(|occurrence| admitted.contains(&occurrence.file_id.0)));
     }
 
     #[test]

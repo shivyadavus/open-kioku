@@ -22,9 +22,17 @@ Default posture:
   index built before this rule keeps such rows until the next `ok index`. An imported SCIP
   index is held to the same two rules: a document for such a path contributes no symbol and
   no occurrence, because a SCIP symbol string spells the module path and its display name is
-  the file's content. Only the count of withheld documents is recorded, as a `scip` quality
-  note. A document discovery skipped for another reason (generated or ignored code) is
-  imported, so references into it resolve
+  the file's content. A document whose path is absolute or has a `..` segment is withheld as
+  well, since the policy cannot judge it; `\` separators are read as `/`, and case is kept as
+  written, as discovery matches `[paths] deny` globs case-sensitively. Only the count of
+  withheld documents is recorded, as a `scip` quality note. A document discovery skipped for
+  another reason (generated or ignored code) is imported, so references into it resolve. The
+  importer ignores the SCIP index's `project_root`: an index generated in a subdirectory
+  names its documents relative to that subdirectory, and they are judged as written, so a
+  `[paths] deny` glob anchored at the repository root (`internal/vault/**`) does not match
+  them, while an unanchored one (`**/vault/**`) and the secret-like rules do. An index built
+  before this rule keeps such SCIP rows, and still reports itself compatible, until it is
+  rebuilt: `ok watch` does not re-import SCIP, so re-run `ok index` to remove them
 - redact-capable output boundary
 - source edits occur in the user's normal editor
 

@@ -2442,6 +2442,8 @@ fn index_imports_no_scip_symbol_for_a_denied_or_secret_like_path() {
     let generated = format!("{SCIP_PACKAGE}generated/api/GeneratedApi#");
     let denied = format!("{SCIP_PACKAGE}src/secrets/vault/VaultKey#");
     let secret_like = format!("{SCIP_PACKAGE}certs/tls/TlsSigner#");
+    let denied_windows = format!("{SCIP_PACKAGE}src/secrets/win/VaultKeyWindows#");
+    let denied_parent = format!("{SCIP_PACKAGE}src/secrets/up/VaultKeyParent#");
     for (path, content) in [
         (
             "src/lib.rs",
@@ -2465,6 +2467,9 @@ fn index_imports_no_scip_symbol_for_a_denied_or_secret_like_path() {
             ("generated/api.rs", &generated, &[]),
             ("src/secrets/vault.rs", &denied, &[&generated]),
             ("./certs/tls.pem", &secret_like, &[]),
+            // Not plain repository paths: judged as written, each would pass the deny glob.
+            ("src\\secrets\\win.rs", &denied_windows, &[]),
+            ("x/../src/secrets/up.rs", &denied_parent, &[]),
         ]),
     )
     .unwrap();
@@ -2523,7 +2528,7 @@ fn index_imports_no_scip_symbol_for_a_denied_or_secret_like_path() {
     let status = status_json(repo);
     let notes = status["quality"]["quality_notes"].to_string();
     assert!(
-        notes.contains("2 SCIP document(s) for paths the security policy excludes"),
+        notes.contains("4 SCIP document(s) for paths the security policy excludes"),
         "{notes}"
     );
     assert!(

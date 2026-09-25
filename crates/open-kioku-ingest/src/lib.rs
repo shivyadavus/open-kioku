@@ -1151,8 +1151,9 @@ impl Indexer {
         let mut scip_report = None;
         if config.scip.enabled {
             // SCIP covers every document it was generated for, discovery's skips included. A
-            // document the security policy excludes contributes nothing: its symbol strings spell
-            // its path and its names are its content. Other unindexed documents (gitignored or
+            // document the security policy excludes, or whose path is absolute or leaves the
+            // repository, contributes nothing: its symbol strings spell its path and its names
+            // are its content. Other unindexed documents (gitignored or
             // generated code) are kept, so references into them still resolve to a symbol.
             let security = path_policy::SecurityPathPolicy::new(config)?;
             let (imported, report) =
@@ -1979,8 +1980,8 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
                 QualityNoteKind::Scip,
                 format!(
                     "{} SCIP document(s) for paths the security policy excludes (secret-like or \
-                     `[paths] deny`) were not imported; their symbols and references are not \
-                     in the index",
+                     `[paths] deny`), or whose path is not repository-relative, were not \
+                     imported; their symbols and references are not in the index",
                     report.withheld_documents
                 ),
             ));
