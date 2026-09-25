@@ -985,28 +985,8 @@ async fn dispatch(
                 return format_verification_explanation(&explanation, format_arg(&params, "json"));
             }
             let plan = plan_from_params(&params)?;
-            let mut changed_files = params
-                .get("changed_files")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(PathBuf::from)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let evidence_refs = params
-                .get("evidence_refs")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let mut changed_files = changed_files_arg(&params);
+            let evidence_refs = string_array_arg(&params, "evidence_refs").unwrap_or_default();
             let mut unified_diff = params
                 .get("diff")
                 .and_then(Value::as_str)
@@ -1019,26 +999,11 @@ async fn dispatch(
                     unified_diff = git_diff_since(repo, since)?;
                 }
             }
-            let run_commands = params
-                .get("run_commands")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let traceability_strict = params
-                .get("traceability_strict")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let check_api_surface = params
-                .get("check_api_surface")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let check_dependency_delta = params
-                .get("check_dependency_delta")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let write_attestation = params
-                .get("write_attestation")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            let run_commands = bool_arg(&params, "run_commands");
+            let traceability_strict = bool_arg(&params, "traceability_strict");
+            let check_api_surface = bool_arg(&params, "check_api_surface");
+            let check_dependency_delta = dependency_delta_requested(&params);
+            let write_attestation = bool_arg(&params, "write_attestation");
             let architecture_policy = load_architecture_policy(repo)?;
             let check_dependency_delta = check_dependency_delta || architecture_policy.is_some();
             let index_dir = default_index_dir(repo);
@@ -2301,9 +2266,7 @@ fn verify_change_contract_tool(
         ));
     }
 
-    let mut changed_files = path_array_arg(params, "changed_files")
-        .or_else(|| path_array_arg(params, "changed"))
-        .unwrap_or_default();
+    let mut changed_files = changed_files_arg(params);
     let mut unified_diff = params
         .get("diff")
         .and_then(Value::as_str)
@@ -2318,9 +2281,8 @@ fn verify_change_contract_tool(
     }
 
     let architecture_policy = load_architecture_policy(repo)?;
-    let check_dependency_delta = bool_arg(params, "check_dependency_delta")
-        || bool_arg(params, "check_deps")
-        || architecture_policy.is_some();
+    let check_dependency_delta =
+        dependency_delta_requested(params) || architecture_policy.is_some();
     let validation_attestations = params
         .get("validation_attestations")
         .map(|value| caller_json_value("validation_attestations", value))
@@ -2502,6 +2464,19 @@ fn format_arg<'a>(params: &'a Value, default: &'a str) -> &'a str {
         .get("format")
         .and_then(Value::as_str)
         .unwrap_or(default)
+}
+
+/// `verify_change` reads its arguments the same way whether a plan or a contract is the
+/// boundary, so a spelling one path accepts is never silently dropped by the other.
+fn changed_files_arg(params: &Value) -> Vec<PathBuf> {
+    path_array_arg(params, "changed_files")
+        .or_else(|| path_array_arg(params, "changed"))
+        .unwrap_or_default()
+}
+
+/// `check_deps` is the CLI's `--check-deps` spelling of `check_dependency_delta`.
+fn dependency_delta_requested(params: &Value) -> bool {
+    bool_arg(params, "check_dependency_delta") || bool_arg(params, "check_deps")
 }
 
 fn bool_arg(params: &Value, key: &str) -> bool {
@@ -3299,6 +3274,57 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("invalid input: verify requires at least one changed file"));
+    }
+
+    #[tokio::test]
+    async fn verify_change_with_a_plan_accepts_the_contract_paths_argument_spellings() {
+        let fixture = McpSnapshotFixture::new();
+        let plan = call_fixture_tool(
+            &fixture,
+            "plan_change",
+            json!({"task": "publish invoice", "format": "json"}),
+        )
+        .await
+        .result
+        .expect("plan_change should succeed")["structuredContent"]
+            .clone();
+        let dependency_deltas = |arguments: Value| {
+            let fixture = &fixture;
+            async move {
+                let report = call_fixture_tool(fixture, "verify_change", arguments)
+                    .await
+                    .result
+                    .expect("verify_change should succeed")["structuredContent"]
+                    .clone();
+                assert_eq!(
+                    report["changed_files"],
+                    json!(["src/billing.rs"]),
+                    "{report}"
+                );
+                report["dependency_deltas"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            }
+        };
+
+        let unrequested =
+            dependency_deltas(json!({"plan": plan, "changed_files": ["src/billing.rs"]})).await;
+        assert!(unrequested.is_empty(), "{unrequested:?}");
+        let long = dependency_deltas(json!({
+            "plan": plan,
+            "changed_files": ["src/billing.rs"],
+            "check_dependency_delta": true,
+        }))
+        .await;
+        assert!(!long.is_empty(), "the dependency check did not run");
+        let short = dependency_deltas(json!({
+            "plan": plan,
+            "changed": ["src/billing.rs"],
+            "check_deps": true,
+        }))
+        .await;
+        assert_eq!(short, long);
     }
 
     #[tokio::test]
