@@ -10,12 +10,17 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tantivy::collector::TopDocs;
+use tantivy::index::SegmentId;
+use tantivy::indexer::NoMergePolicy;
 use tantivy::query::{Query, QueryParser};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TantivyDocument, TextFieldIndexing, TextOptions, Value, FAST,
 };
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
-use tantivy::{doc, DocAddress, DocId, Index, Score, Searcher, SegmentReader};
+use tantivy::{doc, DocAddress, DocId, Index, IndexWriter, Score, Searcher, SegmentReader};
+
+/// Indexing memory ceiling, the same total the multi-threaded writer was given.
+const WRITER_MEMORY_BUDGET: usize = 50_000_000;
 
 pub struct TantivySearchIndex {
     index: Index,
@@ -74,7 +79,35 @@ impl TantivySearchIndex {
         symbols: &[Symbol],
         graph_nodes: &[GraphNode],
     ) -> Result<()> {
-        let mut writer = self.index.writer(50_000_000).map_err(search_err)?;
+        self.write_documents(chunks, files, symbols, graph_nodes, WRITER_MEMORY_BUDGET)?;
+        Ok(())
+    }
+
+    /// Writes every document into one segment, in repository order, from one indexing thread,
+    /// and returns how many segments the thread flushed before they were merged. A document's
+    /// address in that segment is its repository-order rank.
+    ///
+    /// BM25 statistics are summed across segments, but a document's score is summed across the
+    /// query's terms in an order that follows how the pruning scorer walked that segment's
+    /// postings, so it depends on which documents share the segment and in what order. With
+    /// Tantivy's default writer that layout came from how its indexing threads split the input,
+    /// and two indexes of one tree scored the same document a few ULP apart (#491), enough for
+    /// near-tied candidates to compare unequal and bypass the tie-breaks. A single thread fed in
+    /// repository order, with no background merges and one deterministic final merge, fixes the
+    /// layout: document ids follow repository order whatever order the caller passed.
+    fn write_documents(
+        &mut self,
+        chunks: &[CodeChunk],
+        files: &[File],
+        symbols: &[Symbol],
+        graph_nodes: &[GraphNode],
+        memory_budget: usize,
+    ) -> Result<usize> {
+        let mut writer: IndexWriter = self
+            .index
+            .writer_with_num_threads(1, memory_budget)
+            .map_err(search_err)?;
+        writer.set_merge_policy(Box::new(NoMergePolicy));
         writer.delete_all_documents().map_err(search_err)?;
         let files_by_id = files
             .iter()
@@ -84,67 +117,99 @@ impl TantivySearchIndex {
             .iter()
             .map(|symbol| (symbol.id.0.as_str(), symbol))
             .collect::<HashMap<_, _>>();
-        let order_ranks = document_order_ranks(chunks, graph_nodes, &files_by_id, &symbols_by_id);
-        for (index, chunk) in chunks.iter().enumerate() {
-            let Some(file) = files_by_id.get(chunk.file_id.0.as_str()) else {
-                continue;
+        let order = document_order(chunks, graph_nodes, &files_by_id, &symbols_by_id);
+        for (rank, &entry) in order.iter().enumerate() {
+            let mut document = match entry {
+                DocumentEntry::Chunk(index) => {
+                    let chunk = &chunks[index];
+                    let Some(file) = files_by_id.get(chunk.file_id.0.as_str()) else {
+                        continue;
+                    };
+                    let symbol = chunk
+                        .symbol_id
+                        .as_ref()
+                        .and_then(|id| symbols_by_id.get(id.0.as_str()).copied());
+                    let symbol_json = symbol
+                        .map(serde_json::to_string)
+                        .transpose()?
+                        .unwrap_or_default();
+                    doc!(
+                        self.fields.path => file.path.to_string_lossy().to_string(),
+                        self.fields.content => format!("{}\n{}", file.path.display(), chunk.text),
+                        self.fields.chunk_json => serde_json::to_string(chunk)?,
+                        self.fields.file_json => serde_json::to_string(file)?,
+                        self.fields.symbol_json => symbol_json,
+                    )
+                }
+                DocumentEntry::GraphNode(index) => {
+                    let node = &graph_nodes[index];
+                    let Some(file) = graph_node_file(node, &files_by_id, &symbols_by_id) else {
+                        continue;
+                    };
+                    let symbol = node
+                        .symbol_id
+                        .as_ref()
+                        .and_then(|id| symbols_by_id.get(id.0.as_str()).copied());
+                    let symbol_json = symbol
+                        .map(serde_json::to_string)
+                        .transpose()?
+                        .unwrap_or_default();
+                    let graph_chunk = CodeChunk {
+                        id: graph_chunk_id(node),
+                        file_id: file.id.clone(),
+                        range: symbol
+                            .and_then(|symbol| symbol.range.clone())
+                            .unwrap_or_else(|| LineRange::single(1)),
+                        language: file.language.clone(),
+                        text: graph_node_text(node, file, symbol),
+                        symbol_id: node.symbol_id.clone(),
+                    };
+                    doc!(
+                        self.fields.path => file.path.to_string_lossy().to_string(),
+                        self.fields.content => graph_chunk.text.clone(),
+                        self.fields.chunk_json => serde_json::to_string(&graph_chunk)?,
+                        self.fields.file_json => serde_json::to_string(file)?,
+                        self.fields.symbol_json => symbol_json,
+                    )
+                }
             };
-            let symbol = chunk
-                .symbol_id
-                .as_ref()
-                .and_then(|id| symbols_by_id.get(id.0.as_str()).copied());
-            let symbol_json = symbol
-                .map(serde_json::to_string)
-                .transpose()?
-                .unwrap_or_default();
-            let mut document = doc!(
-                self.fields.path => file.path.to_string_lossy().to_string(),
-                self.fields.content => format!("{}\n{}", file.path.display(), chunk.text),
-                self.fields.chunk_json => serde_json::to_string(chunk)?,
-                self.fields.file_json => serde_json::to_string(file)?,
-                self.fields.symbol_json => symbol_json,
-            );
             if let Some(order_key) = self.fields.order_key {
-                document.add_u64(order_key, order_ranks[index]);
-            }
-            writer.add_document(document).map_err(search_err)?;
-        }
-        for (index, node) in graph_nodes.iter().enumerate() {
-            let Some(file) = graph_node_file(node, &files_by_id, &symbols_by_id) else {
-                continue;
-            };
-            let symbol = node
-                .symbol_id
-                .as_ref()
-                .and_then(|id| symbols_by_id.get(id.0.as_str()).copied());
-            let symbol_json = symbol
-                .map(serde_json::to_string)
-                .transpose()?
-                .unwrap_or_default();
-            let graph_chunk = CodeChunk {
-                id: graph_chunk_id(node),
-                file_id: file.id.clone(),
-                range: symbol
-                    .and_then(|symbol| symbol.range.clone())
-                    .unwrap_or_else(|| LineRange::single(1)),
-                language: file.language.clone(),
-                text: graph_node_text(node, file, symbol),
-                symbol_id: node.symbol_id.clone(),
-            };
-            let mut document = doc!(
-                self.fields.path => file.path.to_string_lossy().to_string(),
-                self.fields.content => graph_chunk.text.clone(),
-                self.fields.chunk_json => serde_json::to_string(&graph_chunk)?,
-                self.fields.file_json => serde_json::to_string(file)?,
-                self.fields.symbol_json => symbol_json,
-            );
-            if let Some(order_key) = self.fields.order_key {
-                document.add_u64(order_key, order_ranks[chunks.len() + index]);
+                document.add_u64(order_key, rank as u64);
             }
             writer.add_document(document).map_err(search_err)?;
         }
         writer.commit().map_err(search_err)?;
-        Ok(())
+        // Past the memory budget the one thread flushes more than one segment; each holds a
+        // contiguous run of the repository order, so stacking them by their first document's
+        // rank reproduces it exactly. Tantivy lists segments in no particular order.
+        let segments = self.segments_in_repository_order()?;
+        if segments.len() > 1 {
+            writer.merge(&segments).wait().map_err(search_err)?;
+        }
+        writer.wait_merging_threads().map_err(search_err)?;
+        Ok(segments.len())
+    }
+
+    fn segments_in_repository_order(&self) -> Result<Vec<SegmentId>> {
+        let reader = self.index.reader().map_err(search_err)?;
+        let searcher = reader.searcher();
+        let mut segments = searcher
+            .segment_readers()
+            .iter()
+            .map(|segment_reader| {
+                // An index written before the order key existed has nothing to order segments
+                // by; it is rebuilt with the current schema by the next `ok index`.
+                let first_rank = segment_reader
+                    .fast_fields()
+                    .u64(ORDER_KEY_FIELD)
+                    .ok()
+                    .and_then(|column| column.first(0))
+                    .unwrap_or(u64::MAX);
+                (first_rank, segment_reader.segment_id())
+            })
+            .collect::<Vec<_>>();
+        segments.sort_unstable();
+        Ok(segments.into_iter().map(|(_, id)| id).collect())
     }
 
     pub fn search_all(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
@@ -340,20 +405,20 @@ fn line_range_bounds(result: &SearchResult) -> Option<(u32, u32)> {
         .map(|range| (range.start, range.end))
 }
 
-/// Each document's rank in repository order: code chunks, then graph nodes, each by path, line
-/// range and id. Indexed as a fast field, it is what the collector breaks equal scores on when
-/// the result limit falls between them.
+/// Index-writing order: code chunks, then graph nodes, each by path, line range and id. A
+/// document's position in it is its rank, indexed as a fast field that the collector breaks
+/// equal scores on when the result limit falls between them.
 ///
-/// Tantivy itself breaks them by document address, which follows how its indexing threads
+/// Tantivy itself breaks them by document address, which followed how its indexing threads
 /// split documents into segments rather than anything in the repository. Re-indexing one tree
 /// could therefore reorder tied search results, and through rank fusion the context paths
-/// built from them (#468). Documents that are skipped for want of a file keep `u64::MAX`.
-fn document_order_ranks(
+/// built from them (#468). Documents without a file are left out.
+fn document_order(
     chunks: &[CodeChunk],
     graph_nodes: &[GraphNode],
     files_by_id: &HashMap<&str, &File>,
     symbols_by_id: &HashMap<&str, &Symbol>,
-) -> Vec<u64> {
+) -> Vec<DocumentEntry> {
     let mut order = Vec::with_capacity(chunks.len() + graph_nodes.len());
     for (index, chunk) in chunks.iter().enumerate() {
         if let Some(file) = files_by_id.get(chunk.file_id.0.as_str()) {
@@ -363,7 +428,7 @@ fn document_order_ranks(
                 chunk.range.start,
                 chunk.range.end,
                 chunk.id.as_str(),
-                index,
+                DocumentEntry::Chunk(index),
             ));
         }
     }
@@ -380,16 +445,19 @@ fn document_order_ranks(
                 range.map_or(1, |range| range.start),
                 range.map_or(1, |range| range.end),
                 node.id.0.as_str(),
-                chunks.len() + index,
+                DocumentEntry::GraphNode(index),
             ));
         }
     }
     order.sort_unstable();
-    let mut ranks = vec![u64::MAX; chunks.len() + graph_nodes.len()];
-    for (rank, entry) in order.iter().enumerate() {
-        ranks[entry.5] = rank as u64;
-    }
-    ranks
+    order.into_iter().map(|entry| entry.5).collect()
+}
+
+/// A document to index, by its position in the caller's chunk or graph-node slice.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DocumentEntry {
+    Chunk(usize),
+    GraphNode(usize),
 }
 
 /// The file a graph node is indexed under: its own, or else its symbol's.
@@ -487,7 +555,7 @@ fn schema() -> Schema {
     builder.build()
 }
 
-/// Fast field holding each document's rank in repository order; see `document_order_ranks`.
+/// Fast field holding each document's rank in repository order; see `document_order`.
 const ORDER_KEY_FIELD: &str = "order_key";
 
 /// Name of the identifier-aware tokenizer used by code text fields.
@@ -1236,4 +1304,200 @@ mod tests {
     }
 
     use std::path::PathBuf;
+}
+
+#[cfg(test)]
+mod determinism_tests {
+    use super::{rebuild_disk_index_with_graph, TantivySearchIndex};
+    use open_kioku_core::{
+        CodeChunk, File, FileId, GraphNode, GraphNodeType, Language, LineRange, NodeId,
+        RepositoryId,
+    };
+
+    /// Tantivy's per-thread floor (`MEMORY_BUDGET_NUM_BYTES_MIN`, which it does not export).
+    const SMALLEST_MEMORY_BUDGET: usize = 15_000_000;
+
+    const VOCABULARY: &str = "cache render frame token retry import graph node edge path slot \
+        planner buffer queue worker index segment score query symbol reference module crate parser \
+        writer reader commit merge policy budget thread evidence boundary context ranking fusion";
+
+    /// Queries of three to five terms, so a document's score sums several per-term
+    /// contributions and the order of that summation shows up in the low bits.
+    const QUERIES: &[&str] = &[
+        "cache render frame",
+        "retry import token queue",
+        "graph node edge path segment",
+        "slot planner buffer",
+        "worker index segment score query",
+        "symbol reference module crate",
+        "parser writer reader commit merge",
+        "policy budget thread evidence",
+        "boundary context ranking fusion cache",
+    ];
+
+    /// A few hundred chunks of pseudo-random identifiers, generated from a fixed seed so the
+    /// corpus is the same on every platform.
+    fn corpus(
+        file_count: usize,
+        max_words: usize,
+        rare_words: usize,
+    ) -> (Vec<File>, Vec<CodeChunk>) {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let vocabulary = VOCABULARY.split_whitespace().collect::<Vec<_>>();
+        let mut next = move |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as usize) % bound
+        };
+        let mut files = Vec::new();
+        let mut chunks = Vec::new();
+        for file_index in 0..file_count {
+            let file = File {
+                id: FileId::new(format!("file-{file_index:03}")),
+                repository_id: RepositoryId::new("repo"),
+                path: format!("src/module_{file_index:03}.rs").into(),
+                language: Language::Rust,
+                size_bytes: 512,
+                content_hash: format!("hash-{file_index:03}"),
+                is_generated: false,
+                is_vendor: false,
+            };
+            for chunk_index in 0..6u32 {
+                let words = 8 + next(max_words);
+                let mut text = (0..words)
+                    .map(|_| vocabulary[next(vocabulary.len())].to_string())
+                    .collect::<Vec<_>>();
+                // Words no query asks for, which fill the indexing arena quickly.
+                text.extend((0..rare_words).map(|_| format!("w{}", next(1_000_000))));
+                let text = text.join(" ");
+                chunks.push(CodeChunk {
+                    id: format!("chunk-{file_index:03}-{chunk_index}"),
+                    file_id: file.id.clone(),
+                    range: LineRange {
+                        start: chunk_index * 10 + 1,
+                        end: chunk_index * 10 + 9,
+                    },
+                    language: Language::Rust,
+                    text,
+                    symbol_id: None,
+                });
+            }
+            files.push(file);
+        }
+        (files, chunks)
+    }
+
+    /// One graph node per file, each labelled with one of the queries so graph-node documents
+    /// rank among the chunks.
+    fn graph_nodes(files: &[File]) -> Vec<GraphNode> {
+        files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| GraphNode {
+                id: NodeId::new(format!("node-{index:03}")),
+                node_type: GraphNodeType::Function,
+                label: QUERIES[index % QUERIES.len()].to_string(),
+                file_id: Some(file.id.clone()),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// Every result's identity and the raw bits of the scores it carries, per query.
+    fn fingerprint(index: &TantivySearchIndex) -> Vec<Vec<(String, u32, u32, u32)>> {
+        QUERIES
+            .iter()
+            .map(|query| {
+                index
+                    .search_all(query, 40)
+                    .unwrap()
+                    .into_iter()
+                    .map(|result| {
+                        let bm25 = result
+                            .score_breakdown
+                            .iter()
+                            .find(|component| component.signal == "bm25_relevance")
+                            .map(|component| component.raw_value)
+                            .unwrap();
+                        (
+                            result.path.to_string_lossy().into_owned(),
+                            result.line_range.map_or(0, |range| range.start),
+                            bm25.to_bits(),
+                            result.score.to_bits(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Each document's repository-order rank, by document address. Ranks equal to addresses
+    /// mean the merged segment stacked the flushed ones in the order they were written.
+    fn document_ranks(index: &TantivySearchIndex) -> Vec<Vec<Option<u64>>> {
+        let searcher = index.index.reader().unwrap().searcher();
+        searcher
+            .segment_readers()
+            .iter()
+            .map(|segment| {
+                let column = segment.fast_fields().u64(super::ORDER_KEY_FIELD).unwrap();
+                (0..segment.max_doc())
+                    .map(|doc| column.first(doc))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scores_are_bit_identical_whatever_the_indexing_order() {
+        let (files, chunks) = corpus(60, 40, 0);
+        let nodes = graph_nodes(&files);
+        let mut reversed_chunks = chunks.clone();
+        reversed_chunks.reverse();
+        let mut reversed_nodes = nodes.clone();
+        reversed_nodes.reverse();
+        let forward_dir = tempfile::tempdir().unwrap();
+        let reversed_dir = tempfile::tempdir().unwrap();
+        let forward =
+            rebuild_disk_index_with_graph(forward_dir.path(), &chunks, &files, &[], &nodes)
+                .unwrap();
+        let reversed = rebuild_disk_index_with_graph(
+            reversed_dir.path(),
+            &reversed_chunks,
+            &files,
+            &[],
+            &reversed_nodes,
+        )
+        .unwrap();
+        let forward = fingerprint(&forward);
+        assert!(forward.iter().all(|results| results.len() > 10));
+        // Graph-node documents carry no line range; some must rank for the order to be pinned.
+        assert!(forward.iter().flatten().any(|(_, line, _, _)| *line == 0));
+        // Before #491 was fixed, reversing the input moved some scores by one or two ULP and
+        // reordered the results of some of these queries.
+        assert_eq!(forward, fingerprint(&reversed));
+    }
+
+    #[test]
+    fn scores_do_not_depend_on_how_many_segments_the_writer_flushed() {
+        // Enough text to overflow the smallest indexing budget Tantivy accepts, so one index is
+        // flushed as several segments and merged while the other is written as one.
+        let (files, chunks) = corpus(40, 20, 150);
+        let write = |memory_budget: usize| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut index = TantivySearchIndex::open_or_create(dir.path()).unwrap();
+            let flushed = index
+                .write_documents(&chunks, &files, &[], &[], memory_budget)
+                .unwrap();
+            let segments = index.index.searchable_segment_ids().unwrap().len();
+            (dir, index, flushed, segments)
+        };
+        let (_split_dir, split, split_flushed, split_segments) = write(SMALLEST_MEMORY_BUDGET);
+        let (_whole_dir, whole, whole_flushed, whole_segments) = write(super::WRITER_MEMORY_BUDGET);
+        assert!(split_flushed > 1, "flushed {split_flushed} segment(s)");
+        assert_eq!(whole_flushed, 1);
+        assert_eq!((split_segments, whole_segments), (1, 1));
+        assert_eq!(document_ranks(&split), document_ranks(&whole));
+        assert_eq!(fingerprint(&split), fingerprint(&whole));
+    }
 }
