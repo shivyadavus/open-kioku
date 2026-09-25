@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# .githooks/commit-msg
+# Rejects a commit message carrying material that must not become public.
+# Install once with: git config core.hooksPath .githooks
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+exec "$ROOT/scripts/check-public-surface.py" --commit-msg "$1"

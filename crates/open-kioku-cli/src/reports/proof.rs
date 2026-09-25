@@ -599,7 +599,6 @@ fn render_proof_markdown(report: &ProofReport) -> String {
         report.privacy.local_root_included
     ));
     out.push_str(&format!("- Path mode: `{}`\n", report.privacy.path_mode));
-    out.push_str("\n---\n\nIf Open Kioku helps your AI coding workflow, please consider starring the repository:\nhttps://github.com/shivyadavus/open-kioku\n");
     out
 }
 

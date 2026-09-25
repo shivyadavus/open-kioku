@@ -204,6 +204,13 @@ jobs:
       - name: cargo deny check
         run: cargo deny check
 
+  public-surface:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: public surface
+        run: scripts/check-public-surface.py
+
   manifest-versions:
     runs-on: ubuntu-latest
     steps:
