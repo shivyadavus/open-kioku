@@ -555,7 +555,7 @@ fn schema() -> Schema {
     builder.build()
 }
 
-/// Fast field holding each document's rank in repository order; see `document_order_ranks`.
+/// Fast field holding each document's rank in repository order; see `document_order`.
 const ORDER_KEY_FIELD: &str = "order_key";
 
 /// Name of the identifier-aware tokenizer used by code text fields.
@@ -1308,8 +1308,11 @@ mod tests {
 
 #[cfg(test)]
 mod determinism_tests {
-    use super::{rebuild_disk_index, TantivySearchIndex};
-    use open_kioku_core::{CodeChunk, File, FileId, Language, LineRange, RepositoryId};
+    use super::{rebuild_disk_index_with_graph, TantivySearchIndex};
+    use open_kioku_core::{
+        CodeChunk, File, FileId, GraphNode, GraphNodeType, Language, LineRange, NodeId,
+        RepositoryId,
+    };
 
     /// Tantivy's per-thread floor (`MEMORY_BUDGET_NUM_BYTES_MIN`, which it does not export).
     const SMALLEST_MEMORY_BUDGET: usize = 15_000_000;
@@ -1385,6 +1388,22 @@ mod determinism_tests {
         (files, chunks)
     }
 
+    /// One graph node per file, each labelled with one of the queries so graph-node documents
+    /// rank among the chunks.
+    fn graph_nodes(files: &[File]) -> Vec<GraphNode> {
+        files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| GraphNode {
+                id: NodeId::new(format!("node-{index:03}")),
+                node_type: GraphNodeType::Function,
+                label: QUERIES[index % QUERIES.len()].to_string(),
+                file_id: Some(file.id.clone()),
+                ..Default::default()
+            })
+            .collect()
+    }
+
     /// Every result's identity and the raw bits of the scores it carries, per query.
     fn fingerprint(index: &TantivySearchIndex) -> Vec<Vec<(String, u32, u32, u32)>> {
         QUERIES
@@ -1432,16 +1451,30 @@ mod determinism_tests {
     #[test]
     fn scores_are_bit_identical_whatever_the_indexing_order() {
         let (files, chunks) = corpus(60, 40, 0);
-        let mut reversed = chunks.clone();
-        reversed.reverse();
+        let nodes = graph_nodes(&files);
+        let mut reversed_chunks = chunks.clone();
+        reversed_chunks.reverse();
+        let mut reversed_nodes = nodes.clone();
+        reversed_nodes.reverse();
         let forward_dir = tempfile::tempdir().unwrap();
         let reversed_dir = tempfile::tempdir().unwrap();
-        let forward = rebuild_disk_index(forward_dir.path(), &chunks, &files, &[]).unwrap();
-        let reversed = rebuild_disk_index(reversed_dir.path(), &reversed, &files, &[]).unwrap();
+        let forward =
+            rebuild_disk_index_with_graph(forward_dir.path(), &chunks, &files, &[], &nodes)
+                .unwrap();
+        let reversed = rebuild_disk_index_with_graph(
+            reversed_dir.path(),
+            &reversed_chunks,
+            &files,
+            &[],
+            &reversed_nodes,
+        )
+        .unwrap();
         let forward = fingerprint(&forward);
         assert!(forward.iter().all(|results| results.len() > 10));
+        // Graph-node documents carry no line range; some must rank for the order to be pinned.
+        assert!(forward.iter().flatten().any(|(_, line, _, _)| *line == 0));
         // Before #491 was fixed, reversing the input moved some scores by one or two ULP and
-        // reordered the results of two of these queries.
+        // reordered the results of some of these queries.
         assert_eq!(forward, fingerprint(&reversed));
     }
 
