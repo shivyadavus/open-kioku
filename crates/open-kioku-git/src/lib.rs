@@ -279,42 +279,54 @@ pub fn compare_with_head(
     }))
 }
 
-/// Tracked paths whose content in the working tree differs from `commit`: committed changes
-/// since it and uncommitted ones alike. Untracked files are not listed.
+/// Paths whose working-tree content differs from `commit`: tracked files changed since it,
+/// committed or not, and untracked files Git does not ignore. Together they are every file
+/// an index built here now would read differently from one built at `commit`, ignored files
+/// aside, which indexing skips anyway.
 pub fn changed_paths_since_commit(root: impl AsRef<Path>, commit: &str) -> Result<Vec<PathBuf>> {
     let root = root.as_ref();
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "core.quotePath=false",
+    let run = |args: &[&str], what: &str| -> Result<Vec<PathBuf>> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "core.quotePath=false"])
+            .args(args)
+            .output()
+            .map_err(|err| OkError::Repository(format!("git {what} failed: {err}")))?;
+        if !output.status.success() {
+            return Err(OkError::Repository(format!(
+                "git {what} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| PathBuf::from(String::from_utf8_lossy(raw).into_owned()))
+            .collect())
+    };
+    let mut paths = run(
+        &[
             "diff",
             "--name-only",
             "-z",
             "--no-renames",
-        ])
-        .args([
             "--no-ext-diff",
             "--no-textconv",
             "--end-of-options",
             commit,
             "--",
-        ])
-        .output()
-        .map_err(|err| OkError::Repository(format!("git diff --name-only failed: {err}")))?;
-    if !output.status.success() {
-        return Err(OkError::Repository(format!(
-            "git diff --name-only failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|raw| !raw.is_empty())
-        .map(|raw| PathBuf::from(String::from_utf8_lossy(raw).into_owned()))
-        .collect())
+        ],
+        "diff --name-only",
+    )?;
+    paths.extend(run(
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        "ls-files --others",
+    )?);
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 pub fn require_repo(root: impl AsRef<Path>) -> Result<PathBuf> {
@@ -1893,12 +1905,16 @@ mod tests {
             2
         );
         write(dir.path(), "src/three.rs", "fn three() { }\n");
+        write(dir.path(), "src/four.rs", "fn four() {}\n");
+        write(dir.path(), ".gitignore", "*.log\n");
+        write(dir.path(), "debug.log", "ignored\n");
+        let changed = changed_paths_since_commit(dir.path(), &head(dir.path())).unwrap();
         assert_eq!(
-            changed_paths_since_commit(dir.path(), &head(dir.path()))
-                .unwrap()
-                .len(),
-            1,
-            "uncommitted changes count"
+            changed,
+            [".gitignore", "src/four.rs", "src/three.rs"]
+                .map(std::path::PathBuf::from)
+                .to_vec(),
+            "uncommitted and untracked changes count; ignored files do not"
         );
     }
 
