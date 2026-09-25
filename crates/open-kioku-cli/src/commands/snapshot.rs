@@ -389,10 +389,19 @@ fn assess_snapshot_revision(
         .map(|comparison| comparison.commit.clone())
         .or_else(|| artifact_commit.clone())
         .unwrap_or_else(|| "unknown".into());
+    // Paths discovery never reaches (`.ok` itself, `.git`, build and dependency directories)
+    // do not make the index differ from the checkout.
     let changed_files = |commit: &str| {
         open_kioku_git::changed_paths_since_commit(repo, commit)
             .ok()
-            .map(|paths| paths.len())
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter(|path| {
+                        !open_kioku_ingest::path_policy::is_pruned_by_discovery(path)
+                    })
+                    .count()
+            })
     };
     let refusal = match (artifact_commit, &comparison) {
         (None, _) => "the snapshot does not record the commit it was built from".to_string(),
@@ -498,14 +507,14 @@ fn apply_local_policy_to_snapshot(
         );
     }
     let stored = store.stored_paths()?;
-    let mut candidates = stored.indexed.union(&stored.history).cloned().collect::<BTreeSet<_>>();
-    candidates.extend(
-        stored
-            .unanchored_nodes
-            .iter()
-            .map(|(_, label)| PathBuf::from(label)),
-    );
-    let candidates = candidates.into_iter().collect::<Vec<_>>();
+    // Indexed and history paths are repository paths, and Git is asked about them. Graph node
+    // labels are not all paths (import specifiers, routes), so they get the security rules
+    // alone, below, and never reach Git.
+    let candidates = stored
+        .indexed
+        .union(&stored.history)
+        .cloned()
+        .collect::<Vec<_>>();
     let policy = open_kioku_ingest::path_policy::IndexPathPolicy::for_paths(
         repo,
         &config,
@@ -538,12 +547,21 @@ fn apply_local_policy_to_snapshot(
             history.insert(path.clone());
         }
     }
-    let nodes = stored
-        .unanchored_nodes
-        .iter()
-        .filter(|(_, label)| history.contains(Path::new(label)))
-        .map(|(id, _)| id.clone())
-        .collect::<BTreeSet<_>>();
+    let mut nodes = BTreeSet::new();
+    let mut node_labels = BTreeSet::new();
+    for (id, label) in &stored.unanchored_nodes {
+        let Some(exclusion) = policy.security_exclusion(Path::new(label)) else {
+            continue;
+        };
+        nodes.insert(id.clone());
+        // A label that is also an indexed or history path was counted above.
+        if !history.contains(Path::new(label)) && node_labels.insert(label.clone()) {
+            *filter
+                .by_source
+                .entry(skip_source_key(exclusion.source))
+                .or_default() += 1;
+        }
+    }
     filter.paths_removed = filter.by_source.values().sum();
     let purge = store.purge_paths(&indexed, &history, &nodes, manifest)?;
     drop(store);

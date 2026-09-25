@@ -1923,6 +1923,14 @@ fn snapshot_import_of_the_checked_out_commit_is_fresh() {
     let temp = snapshot_fixture_repo();
     let repo = temp.path();
     export_snapshot(repo);
+    // Untracked and not ignored, but under a directory discovery prunes: not a difference
+    // between the index and the checkout.
+    fs::create_dir_all(repo.join("node_modules/dep")).unwrap();
+    fs::write(
+        repo.join("node_modules/dep/index.js"),
+        "module.exports = 1;\n",
+    )
+    .unwrap();
 
     let imported = import_snapshot_json(repo, &[]);
     let snapshot = &imported["snapshot"];
@@ -2262,6 +2270,103 @@ fn snapshot_import_serves_no_path_the_local_policy_excludes() {
     assert!(!status.to_string().contains("vault.key"), "{status}");
 }
 
+/// A protobuf length-delimited field.
+fn protobuf_field(number: u32, bytes: &[u8]) -> Vec<u8> {
+    fn varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+    let mut out = Vec::new();
+    varint(u64::from(number << 3 | 2), &mut out);
+    varint(bytes.len() as u64, &mut out);
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// A SCIP index with one document, for a file discovery skips, holding one symbol and its
+/// definition. Written by hand so the test needs no SCIP generator.
+fn scip_index_for(relative_path: &str, symbol: &str) -> Vec<u8> {
+    let mut information = protobuf_field(1, symbol.as_bytes());
+    information.extend(protobuf_field(6, b"GeneratedApi"));
+    let mut occurrence = protobuf_field(1, &[0, 11, 23]);
+    occurrence.extend(protobuf_field(2, symbol.as_bytes()));
+    occurrence.extend([3 << 3, 1]); // symbol_roles: Definition
+    let mut document = protobuf_field(1, relative_path.as_bytes());
+    document.extend(protobuf_field(2, &occurrence));
+    document.extend(protobuf_field(3, &information));
+    document.extend(protobuf_field(4, b"rust"));
+    protobuf_field(2, &document)
+}
+
+/// SCIP covers every document it was generated for, including files discovery skipped, and
+/// `ok index` stores those symbols with a `file_id` no file row has. That is a state the
+/// writer produces, so the import's consistency check accepts it, and the rows serve no path.
+#[test]
+fn snapshot_import_accepts_scip_symbols_for_a_file_discovery_skipped() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub struct Worker;\n").unwrap();
+    fs::write(
+        repo.join("index.scip"),
+        scip_index_for(
+            "generated/api.rs",
+            "rust-analyzer cargo fixture 0.1.0 generated/api/GeneratedApi#",
+        ),
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    commit_all(repo, "initial");
+    // Generated after the first commit and ignored, so discovery skips it and it is untracked.
+    fs::write(repo.join(".gitignore"), ".ok/\ngenerated/\n").unwrap();
+    commit_all(repo, "ignore generated sources");
+    fs::create_dir_all(repo.join("generated")).unwrap();
+    fs::write(repo.join("generated/api.rs"), "pub struct GeneratedApi;\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    {
+        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+        let orphaned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols WHERE file_id NOT IN (SELECT id FROM files) \
+                 AND json_extract(json, '$.provenance') = 'scip'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            orphaned > 0,
+            "the fixture must store a SCIP symbol for an unindexed file"
+        );
+    }
+    export_snapshot(repo);
+
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(
+        imported["snapshot"]["relation"], "same_commit",
+        "{imported}"
+    );
+    let search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "GeneratedApi"]);
+        command
+    });
+    assert!(!search.contains("generated/api.rs"), "{search}");
+}
+
 /// The policy is decided on each row's path column, and readers serve the path in its JSON.
 /// An artifact whose two disagree, or whose graph dictionary is keyed wrongly, is refused
 /// before anything is replaced: judged by one path and served under another, a secret-like
@@ -2550,8 +2655,45 @@ fn snapshot_export_import_round_trip_rebuilds_search_and_bootstraps_index() {
 }
 
 fn assert_snapshot_round_trip(quality: &str, compression_level: i64) {
-    let temp = snapshot_fixture_repo();
+    // A relative TypeScript import and an HTTP route give the graph nodes no file owns whose
+    // labels are not repository paths (`../utils/foo`, `/api/users`); Git rejects both, so
+    // the import must judge them without asking it.
+    let temp = snapshot_fixture_repo_with(&[
+        (
+            "src/lib.rs",
+            "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n",
+        ),
+        (
+            "web/src/app/main.ts",
+            "import express from \"express\";\nimport { foo } from \"../utils/foo\";\n\
+             const app = express();\napp.get(\"/api/users\", (req, res) => res.json(foo()));\n",
+        ),
+        (
+            "web/src/utils/foo.ts",
+            "export function foo() { return []; }\n",
+        ),
+    ]);
     let repo = temp.path();
+    {
+        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+        let unowned_labels = conn
+            .prepare("SELECT label FROM graph_nodes WHERE file_id IS NULL OR file_id = ''")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        assert!(
+            unowned_labels.iter().any(|label| label.starts_with("../")),
+            "the fixture must produce a relative import node: {unowned_labels:?}"
+        );
+        assert!(
+            unowned_labels
+                .iter()
+                .any(|label| label.contains("/api/users")),
+            "the fixture must produce a route node: {unowned_labels:?}"
+        );
+    }
     let artifact_path = repo.join(".ok/artifacts/index.snapshot.zst");
     let metadata_path = repo.join(".ok/artifacts/index.snapshot.json");
     let gitattributes_path = repo.join(".ok/artifacts/.gitattributes");
