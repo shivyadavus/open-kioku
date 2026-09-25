@@ -7447,3 +7447,206 @@ fn search_text_rendering_prints_the_redaction_caveat() {
     );
     assert!(!text.contains(value.as_str()), "{text}");
 }
+
+/// A TypeScript repository with `src/rates.ts` and, when given, `src/rates.test.ts`.
+fn rates_repo(test_file: Option<&str>) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("package.json"),
+        "{\"name\":\"rates\",\"version\":\"0.1.0\",\"scripts\":{\"test\":\"vitest\"}}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/rates.ts"),
+        "export function convertCurrency(amount: number, rate: number): number {\n  return Math.round(amount * rate);\n}\n",
+    )
+    .unwrap();
+    if let Some(body) = test_file {
+        fs::write(repo.join("src/rates.test.ts"), body).unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    temp
+}
+
+/// `ok --json tests` and MCP `find_tests_for_change` for one path, which must be one answer.
+fn test_selection_on_both_surfaces(repo: &std::path::Path, path: &str) -> serde_json::Value {
+    let cli = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("tests")
+            .arg("--changed")
+            .arg(path);
+        command
+    });
+    let cli: serde_json::Value = serde_json::from_str(&cli).unwrap();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "find_tests_for_change", "arguments": {"path": path}},
+    });
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        &request.to_string(),
+    );
+    let mcp: serde_json::Value = serde_json::from_str(mcp.trim()).unwrap();
+    let mcp = &mcp["result"]["structuredContent"];
+    for field in ["excluded", "excluded_sample", "caveats"] {
+        assert_eq!(mcp[field], cli[field], "{field}: cli {cli} mcp {mcp}");
+    }
+    let names = |value: &serde_json::Value| {
+        value["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|test| test["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(mcp), names(&cli));
+    cli
+}
+
+fn setup_audit_provider(repo: &std::path::Path, name: &str) -> serde_json::Value {
+    let audit = run({
+        let mut command = ok();
+        command.arg("--json").arg("setup").arg("audit").arg(repo);
+        command
+    });
+    let audit: serde_json::Value = serde_json::from_str(&audit).unwrap();
+    audit["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["name"] == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("no `{name}` provider in {audit}"))
+}
+
+/// #494: a file whose tests are all skipped is not a file with no tests. `ok tests`,
+/// `find_tests_for_change` and the setup audit say so in the words the context pack uses, and
+/// none of them advises indexing test files that are already indexed.
+#[test]
+fn every_surface_tells_skipped_tests_from_absent_ones() {
+    let temp = rates_repo(Some(
+        "test.skip(\"rounds half up\", () => {});\n\ntest.todo(\"handles negative rates\");\n",
+    ));
+    let repo = temp.path();
+    const PACK_CAVEAT: &str = "every indexed test target is a disabled test the runner skips";
+
+    let selection = test_selection_on_both_surfaces(repo, "src/rates.ts");
+    assert_eq!(selection["tests"], serde_json::json!([]), "{selection}");
+    assert_eq!(selection["excluded"]["disabled"], 2, "{selection}");
+    assert_eq!(
+        selection["excluded_sample"].as_array().map(Vec::len),
+        Some(2),
+        "{selection}"
+    );
+    let caveat = selection["caveats"][0].as_str().unwrap();
+    assert!(
+        caveat.starts_with("2 indexed test target(s) found for `src/rates.ts`, all excluded"),
+        "{caveat}"
+    );
+    assert!(
+        caveat.contains("disabled test the runner skips"),
+        "{caveat}"
+    );
+
+    let tests = setup_audit_provider(repo, "tests");
+    let evidence = tests["evidence"].as_str().unwrap();
+    assert!(
+        evidence.contains("excluded: 2 disabled test the runner skips"),
+        "{tests}"
+    );
+    let next_step = tests["next_step"].as_str().unwrap();
+    assert!(!next_step.contains("Index test files"), "{tests}");
+    assert!(next_step.starts_with("Enable the skipped tests"), "{tests}");
+    let validation = setup_audit_provider(repo, "validation");
+    assert!(
+        validation["evidence"]
+            .as_str()
+            .unwrap()
+            .ends_with(PACK_CAVEAT),
+        "{validation}"
+    );
+
+    // The pack over the same index carries the same sentence.
+    let pack = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("context")
+            .arg("add tests for convertCurrency rounding");
+        command
+    });
+    assert!(pack.contains(PACK_CAVEAT), "{pack}");
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["quality"]["test_count"], 0);
+    assert_eq!(status["quality"]["excluded_test_targets"]["disabled"], 2);
+}
+
+#[test]
+fn a_file_with_no_tests_reads_as_none_found() {
+    let temp = rates_repo(None);
+    let repo = temp.path();
+
+    let selection = test_selection_on_both_surfaces(repo, "src/rates.ts");
+    assert_eq!(selection["tests"], serde_json::json!([]), "{selection}");
+    assert!(selection.get("excluded").is_none(), "{selection}");
+    assert_eq!(
+        selection["caveats"],
+        serde_json::json!(["no indexed test target was found for `src/rates.ts`"])
+    );
+    let tests = setup_audit_provider(repo, "tests");
+    assert_eq!(tests["evidence"], "0 indexed test target(s)");
+    assert_eq!(
+        tests["next_step"],
+        "Index test files before relying on validation recommendations."
+    );
+}
+
+#[test]
+fn a_file_with_runnable_and_skipped_tests_recommends_one_and_counts_the_other() {
+    let temp = rates_repo(Some(
+        "import { convertCurrency } from \"./rates\";\n\ntest(\"rounds half up\", () => {\n  expect(convertCurrency(2, 1.5)).toBe(3);\n});\n\ntest.skip(\"handles negative rates\", () => {});\n",
+    ));
+    let repo = temp.path();
+
+    let selection = test_selection_on_both_surfaces(repo, "src/rates.ts");
+    let names = selection["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| test["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"rounds half up"), "{selection}");
+    assert!(!names.contains(&"handles negative rates"), "{selection}");
+    assert_eq!(selection["excluded"]["disabled"], 1, "{selection}");
+    assert_eq!(
+        selection["excluded_sample"][0]["name"], "handles negative rates",
+        "{selection}"
+    );
+    assert!(selection.get("caveats").is_none(), "{selection}");
+    let tests = setup_audit_provider(repo, "tests");
+    assert!(tests["next_step"].is_null(), "{tests}");
+}
