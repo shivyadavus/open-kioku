@@ -141,26 +141,43 @@ copy of the artifact:
   manifest's, else the metadata's `repo_commit`; the two must agree). That commit is related
   to the local `HEAD` with Git: the same commit is fresh, and a commit that shares history
   with `HEAD` (an ancestor, a descendant, or a diverged branch) is imported with the number
-  of commits behind and ahead and the number of tracked files whose working-tree content
-  differs from it. An artifact whose relation cannot be established — its commit is not in
+  of commits behind and ahead and the number of files whose working-tree content differs
+  from it (tracked files changed since it, committed or not, and untracked files Git does
+  not ignore). An artifact whose relation cannot be established — its commit is not in
   this repository, shares no history with `HEAD`, or was never recorded, or the directory has
   no `HEAD` — is refused, and the current index stays published; `--allow-foreign` imports it
   marked `foreign`. `ok index --from-snapshot auto` applies the same refusal and indexes from
   source instead. `source_root_hash` in the metadata hashes the exporter's absolute path and
   is not compared.
+- **Consistency.** The policy below is decided on the path columns, while readers serve the
+  path inside each row's JSON, resolve content through `file_id`, and find graph strings by
+  their hash. Before it runs, the staged database must keep every invariant the writers
+  keep: each path column (files, document sections, every history table) equals the path in
+  the row's JSON; every symbol, chunk, occurrence, test, import, fact, scope, binding, call
+  site, vector target and file-owned graph node belongs to an indexed file; file nodes are
+  named for their file; edge evidence and history facts name indexed files; and every graph
+  dictionary entry is keyed by its value's hash. An artifact that breaks any of them is
+  refused, `--allow-foreign` or not, because no writer produces one.
 - **Local index policy.** Every indexed file and document the importing repository's policy
   excludes — secret-like and `[paths] deny` paths, hidden files, `[index] exclude`,
-  `.gitignore`, `.okignore`, judged by the same `open-kioku-ingest` rules `ok index` applies
-  — is removed with every row derived from it (symbols, chunks, occurrences, graph nodes and
-  the edges anchored at them or evidenced in the file, vector targets, document sections,
-  facts other files hold about it, and its symbols' history). Git history rows naming a
-  secret-like or denied path are removed too. File-level history of a path excluded for any
-  other reason is kept, as `ok index` records history for every path a commit touched. The
-  search index is rebuilt from what remains.
+  `.gitignore`, `.okignore`, judged by `open-kioku-ingest`'s `IndexPathPolicy`, the checks
+  `ok index` applies — is removed with every row derived from it (symbols, chunks,
+  occurrences, graph nodes and the edges anchored at them or evidenced in the file, vector
+  targets, document sections, facts other files hold about it, and its symbols' history), and
+  is recorded in the manifest's coverage and skipped paths as discovery records a skip. Git
+  history rows, and graph nodes no file owns, that name a secret-like or denied path are
+  removed too. File-level history of a path excluded for any other reason is kept, as
+  `ok index` records history for every path a commit touched. Secret-like paths the exporter
+  listed as skipped are withheld under the importing repository's `redact_secrets`. Rules
+  that do not depend on local configuration — vendor detection, pruning of build and
+  dependency directories, the size limit, symlinks — are not applied again. The search index
+  is rebuilt from what remains.
 
 The published manifest carries the result as `snapshot`: `imported_from_commit`,
 `local_commit`, `relation` (`same_commit`, `related` or `foreign`), `commits_behind`,
-`commits_ahead`, `changed_files`, and `policy_filtered`, the number of paths removed. The
+`commits_ahead`, `changed_files`, and `policy_filtered`, the number of paths removed (indexed
+files and documents, plus secret-like or denied paths named only by history or an unowned
+graph node). The
 counts describe the checkout at import time. `ok status`, `ok doctor` (the `snapshot` check)
 and MCP `repo_status` report it; unless the import was of the checked-out commit with no
 changed files, `build_context_pack`/`ok context` carry a caveat in
