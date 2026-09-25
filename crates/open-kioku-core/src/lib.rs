@@ -3215,6 +3215,75 @@ pub struct IndexManifest {
     pub phase_reports: Vec<IndexPhaseReport>,
     #[serde(default)]
     pub quality: IndexQuality,
+    /// Present only on an index published by `ok snapshot import`: which revision the
+    /// imported rows describe relative to this checkout, and what the local policy removed.
+    /// `ok index` publishes a manifest without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotProvenance>,
+}
+
+/// Where an imported index came from. Recorded when the snapshot is imported; the counts
+/// describe the checkout at that moment, not a later one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotProvenance {
+    /// The commit the exporting index was built from, as the artifact records it.
+    pub imported_from_commit: String,
+    /// The local `HEAD` at import time; null outside a Git work tree.
+    pub local_commit: Option<String>,
+    pub relation: SnapshotRevisionRelation,
+    /// Commits the local `HEAD` has that the artifact's commit does not: null when the two
+    /// share no verifiable history.
+    pub commits_behind: Option<usize>,
+    /// Commits the artifact's commit has that the local `HEAD` does not.
+    pub commits_ahead: Option<usize>,
+    /// Tracked files whose working-tree content differs from the artifact's commit, committed
+    /// and uncommitted changes alike; null when that could not be determined.
+    pub changed_files: Option<usize>,
+    /// Imported files removed because the local index policy excludes them (secret-like and
+    /// denied paths, hidden files, `[index] exclude`, `.gitignore`, `.okignore`).
+    pub policy_filtered: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotRevisionRelation {
+    /// The artifact was built from the local `HEAD`.
+    SameCommit,
+    /// The artifact's commit shares history with the local `HEAD` but is not it.
+    Related,
+    /// Imported with `--allow-foreign`: the artifact's commit is absent from this repository,
+    /// shares no history with `HEAD`, was not recorded, or there is no local `HEAD`.
+    Foreign,
+}
+
+impl SnapshotProvenance {
+    /// The caveat every answer from this index carries, or `None` when the imported rows
+    /// describe exactly the local checkout's committed and working-tree content.
+    pub fn caveat(&self) -> Option<String> {
+        let short = |commit: &str| commit.chars().take(12).collect::<String>();
+        let from = short(&self.imported_from_commit);
+        let changed = match self.changed_files {
+            Some(count) => format!("{count} tracked file(s) differ from it"),
+            None => "the files that differ from it are unknown".into(),
+        };
+        let revision = match self.relation {
+            SnapshotRevisionRelation::SameCommit if self.changed_files == Some(0) => return None,
+            SnapshotRevisionRelation::SameCommit => {
+                format!("the index was imported from a snapshot of the checked-out commit {from}, but {changed} in the working tree")
+            }
+            SnapshotRevisionRelation::Related => format!(
+                "the index was imported from a snapshot of commit {from}, {} commit(s) behind and {} ahead of the local HEAD; {changed}",
+                self.commits_behind.map_or_else(|| "an unknown number of".into(), |n| n.to_string()),
+                self.commits_ahead.map_or_else(|| "an unknown number".into(), |n| n.to_string()),
+            ),
+            SnapshotRevisionRelation::Foreign => format!(
+                "the index was imported with --allow-foreign from a snapshot of commit {from}, whose relation to this checkout could not be verified"
+            ),
+        };
+        Some(format!(
+            "{revision}; results may describe code that is not in this checkout until `ok index` rebuilds it"
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -5950,6 +6019,7 @@ mod tests {
             index_mode: IndexMode::Full,
             phase_reports: Vec::new(),
             quality,
+            snapshot: None,
         };
         let summary = manifest.status_value(StatusDetail::Summary).unwrap();
         assert_eq!(summary["quality"]["quality_notes"]["total"], 1_001);

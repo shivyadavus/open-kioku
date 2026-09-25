@@ -31,6 +31,7 @@ fn auto_backend_persists_hnsw_and_reports_resolved_backend_after_restart() {
         index_mode: Default::default(),
         phase_reports: Vec::new(),
         quality: Default::default(),
+        snapshot: None,
     };
     let files = vec![File {
         id: FileId("file_auth".into()),

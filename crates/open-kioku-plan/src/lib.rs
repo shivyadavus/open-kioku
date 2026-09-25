@@ -3227,6 +3227,7 @@ mod tests {
             index_mode: quality.index_mode,
             phase_reports: Vec::new(),
             quality,
+            snapshot: None,
         };
         store
             .replace_index(IndexData {
@@ -4982,6 +4983,7 @@ mod tests {
             index_mode: quality.index_mode,
             phase_reports: Vec::new(),
             quality,
+            snapshot: None,
         };
         store
             .replace_index(IndexData {
@@ -5221,6 +5223,7 @@ mod tests {
             index_mode: quality.index_mode,
             phase_reports: Vec::new(),
             quality,
+            snapshot: None,
         };
         store
             .replace_index(IndexData {
@@ -5316,6 +5319,7 @@ mod tests {
             index_mode: quality.index_mode,
             phase_reports: Vec::new(),
             quality,
+            snapshot: None,
         };
         store
             .replace_index(IndexData {

@@ -484,6 +484,7 @@ impl Indexer {
                 index_mode: mode,
                 phase_reports: phase_reports.clone(),
                 quality,
+                snapshot: None,
             };
             return Ok((
                 IndexSnapshot {
@@ -1235,6 +1236,7 @@ impl Indexer {
             index_mode: mode,
             phase_reports: phase_reports.clone(),
             quality,
+            snapshot: None,
         };
         Ok((
             IndexSnapshot {

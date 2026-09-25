@@ -33,6 +33,13 @@ pub trait MetadataStore: Send + Sync {
             .manifest()?
             .and_then(|manifest| manifest.quality.coverage))
     }
+
+    /// The provenance of an index published by `ok snapshot import`, without decoding the
+    /// rest of the manifest; `None` for an index `ok index` built. Read on every context pack
+    /// and plan for the same reason as [`index_coverage`](Self::index_coverage).
+    fn snapshot_provenance(&self) -> Result<Option<open_kioku_core::SnapshotProvenance>> {
+        Ok(self.manifest()?.and_then(|manifest| manifest.snapshot))
+    }
     fn replace_index(&self, data: IndexData<'_>) -> Result<()>;
     fn replace_index_with_documents(
         &self,
@@ -603,6 +610,7 @@ mod tests {
                 redacted_files: Some(0),
                 ..IndexQuality::default()
             },
+            snapshot: None,
         }
     }
 

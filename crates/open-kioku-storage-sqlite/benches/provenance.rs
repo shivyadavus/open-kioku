@@ -56,6 +56,7 @@ fn provenance_lookup(c: &mut Criterion) {
         index_mode: Default::default(),
         phase_reports: Vec::new(),
         quality: IndexQuality::default(),
+        snapshot: None,
     };
     store
         .replace_index(IndexData {

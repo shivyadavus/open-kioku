@@ -442,6 +442,124 @@ impl SqliteStore {
         Ok(report)
     }
 
+    /// Every repository-relative path the store's rows name, split by what governs them:
+    /// indexed content (files and document sections), which the scan policy decides, and Git
+    /// history, which is recorded for every path a commit touched whatever that policy says.
+    pub fn stored_paths(&self) -> Result<StoredPaths> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let read = |queries: &[&str]| -> Result<BTreeSet<PathBuf>> {
+            let mut paths = BTreeSet::new();
+            for sql in queries {
+                let mut stmt = conn.prepare(sql).map_err(storage_err)?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, Option<String>>(0))
+                    .map_err(storage_err)?;
+                for row in rows {
+                    if let Some(path) = row.map_err(storage_err)? {
+                        paths.insert(PathBuf::from(path));
+                    }
+                }
+            }
+            Ok(paths)
+        };
+        Ok(StoredPaths {
+            indexed: read(INDEXED_PATH_QUERIES)?,
+            history: read(HISTORY_PATH_QUERIES)?,
+        })
+    }
+
+    /// Remove, in one transaction, every row derived from indexing one of `indexed`: each
+    /// file's rows and graph nodes, the edges anchored at them or evidenced in the file, its
+    /// vector targets and document sections, the facts other files hold about it, and the
+    /// symbol-level history derived from its symbols. Its file-level Git history is kept, as
+    /// `ok index` keeps it for a path the scan policy excludes. Every history row naming one
+    /// of `history` is removed as well. The manifest is not written; `manifest` only
+    /// satisfies the shared row writer, as in
+    /// [`stage_files_index_with_graph`](Self::stage_files_index_with_graph).
+    pub fn purge_paths(
+        &self,
+        indexed: &BTreeSet<PathBuf>,
+        history: &BTreeSet<PathBuf>,
+        manifest: &IndexManifest,
+    ) -> Result<PathPurge> {
+        let mut report = PathPurge::default();
+        if indexed.is_empty() && history.is_empty() {
+            return Ok(report);
+        }
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        let mut file_ids = Vec::new();
+        for path in indexed {
+            let path = path.to_string_lossy();
+            let id: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM files WHERE path = ?1",
+                    params![path],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_err)?;
+            if let Some(id) = id {
+                file_ids.push(FileId::new(id));
+            }
+        }
+        let count_for = |sql: &str, id: &FileId| -> Result<usize> {
+            tx.query_row(sql, params![&id.0], |row| row.get::<_, i64>(0))
+                .map(|count| count as usize)
+                .map_err(storage_err)
+        };
+        for id in &file_ids {
+            report.symbols_removed +=
+                count_for("SELECT COUNT(*) FROM symbols WHERE file_id = ?1", id)?;
+            report.chunks_removed +=
+                count_for("SELECT COUNT(*) FROM chunks WHERE file_id = ?1", id)?;
+            tx.execute(
+                "DELETE FROM vector_targets WHERE file_id = ?1",
+                params![&id.0],
+            )
+            .map_err(storage_err)?;
+        }
+        report.files_removed = file_ids.len();
+        let update = PartialIndexUpdate {
+            manifest,
+            changed_files: &[],
+            deleted_file_ids: &file_ids,
+            symbols: &[],
+            chunks: &[],
+            tests: &[],
+            imports: &[],
+            occurrences: &[],
+            analysis_facts: &[],
+            graph_nodes: &[],
+            graph_edges: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
+        };
+        replace_files_rows(&tx, &update, ManifestWrite::Withhold, None)?;
+        for (paths, statements) in [
+            (indexed, INDEXED_PATH_PURGE_STATEMENTS),
+            (history, HISTORY_PATH_PURGE_STATEMENTS),
+        ] {
+            for path in paths {
+                let path = path.to_string_lossy();
+                for sql in statements {
+                    report.other_rows_removed +=
+                        tx.execute(sql, params![path]).map_err(storage_err)?;
+                }
+            }
+        }
+        tx.commit().map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
+        Ok(report)
+    }
+
     fn replace_index_with_documents_and_manifest(
         &self,
         data: IndexData<'_>,
@@ -855,6 +973,25 @@ impl MetadataStore for SqliteStore {
         let raw: Option<Option<String>> = conn
             .query_row(
                 "SELECT json_extract(json, '$.quality.coverage') FROM manifests WHERE id = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(storage_err)?;
+        match raw.flatten() {
+            Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn snapshot_provenance(&self) -> Result<Option<open_kioku_core::SnapshotProvenance>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let raw: Option<Option<String>> = conn
+            .query_row(
+                "SELECT json_extract(json, '$.snapshot') FROM manifests WHERE id = 1",
                 [],
                 |row| row.get::<_, Option<String>>(0),
             )
@@ -2632,6 +2769,60 @@ struct IndexRows<'a> {
 enum ManifestWrite {
     Publish,
     Withhold,
+}
+
+/// The indexed-content path columns [`SqliteStore::stored_paths`] reads.
+const INDEXED_PATH_QUERIES: &[&str] = &[
+    "SELECT path FROM files",
+    "SELECT DISTINCT path FROM document_sections",
+];
+
+/// The Git history path columns [`SqliteStore::stored_paths`] reads.
+const HISTORY_PATH_QUERIES: &[&str] = &[
+    "SELECT DISTINCT path FROM git_file_touches",
+    "SELECT DISTINCT previous_path FROM git_file_touches",
+    "SELECT DISTINCT file_path FROM git_symbol_touches",
+    "SELECT DISTINCT path FROM git_cochange_edges",
+    "SELECT DISTINCT cochanged_path FROM git_cochange_edges",
+    "SELECT DISTINCT path FROM git_review_events",
+    "SELECT DISTINCT path FROM history_hotspots",
+];
+
+/// Rows outside the file tables that exist only because a file was indexed: its document
+/// sections, the facts other indexed files hold about it (co-change is recorded between
+/// indexed files only), and its symbols' history. See [`SqliteStore::purge_paths`].
+const INDEXED_PATH_PURGE_STATEMENTS: &[&str] = &[
+    "DELETE FROM document_sections WHERE path = ?1",
+    "DELETE FROM analysis_facts WHERE target = ?1",
+    "DELETE FROM git_symbol_touches WHERE file_path = ?1",
+    "DELETE FROM history_hotspots WHERE path = ?1 AND entity_kind = 'symbol'",
+];
+
+/// Every history row that names a path. See [`SqliteStore::purge_paths`].
+const HISTORY_PATH_PURGE_STATEMENTS: &[&str] = &[
+    "DELETE FROM git_file_touches WHERE path = ?1 OR previous_path = ?1",
+    "DELETE FROM git_symbol_touches WHERE file_path = ?1",
+    "DELETE FROM git_cochange_edges WHERE path = ?1 OR cochanged_path = ?1",
+    "DELETE FROM git_review_events WHERE path = ?1",
+    "DELETE FROM history_hotspots WHERE path = ?1",
+    "DELETE FROM analysis_facts WHERE target = ?1",
+];
+
+/// What [`SqliteStore::stored_paths`] found.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StoredPaths {
+    pub indexed: BTreeSet<PathBuf>,
+    pub history: BTreeSet<PathBuf>,
+}
+
+/// What [`SqliteStore::purge_paths`] removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PathPurge {
+    pub files_removed: usize,
+    pub symbols_removed: usize,
+    pub chunks_removed: usize,
+    /// Document sections, facts about removed files, and history rows.
+    pub other_rows_removed: usize,
 }
 
 /// What reconciling the stored graph with a snapshot's graph changed; see
@@ -4978,6 +5169,7 @@ mod tests {
             index_mode: Default::default(),
             phase_reports: Vec::new(),
             quality: IndexQuality::default(),
+            snapshot: None,
         }
     }
 

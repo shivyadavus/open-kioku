@@ -95,6 +95,7 @@ fn persist(repo: &Path, store: &SqliteStore, sources: &[Source]) {
         index_mode: Default::default(),
         phase_reports: Vec::new(),
         quality: Default::default(),
+        snapshot: None,
     };
     store
         .replace_index(IndexData {
