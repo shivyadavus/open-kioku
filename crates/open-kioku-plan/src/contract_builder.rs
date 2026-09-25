@@ -17,6 +17,9 @@ use uuid::Uuid;
 
 pub struct ContractBuilder;
 
+/// How many plan refs a contract item with no refs of its own cites.
+const MAX_FALLBACK_EVIDENCE_REFS: usize = 3;
+
 /// Where the plan a contract is built from came from, which decides whose failure a plan the
 /// builder rejects is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +65,7 @@ impl ContractBuilder {
                 "contract generation requires at least one plan evidence reference".into(),
             ));
         }
-        let fallback_refs = limited_refs(&evidence_refs, 3);
+        let fallback_refs = fallback_evidence_refs(plan, &evidence_refs);
         let boundary_refs = boundary_evidence_refs(plan, &fallback_refs);
         let primary_refs = primary_context_evidence_refs(plan, &fallback_refs);
         let test_refs = validation_evidence_refs(plan, &fallback_refs);
@@ -365,8 +368,25 @@ fn push_refs(refs: &mut BTreeSet<String>, values: &[String]) {
     }
 }
 
-fn limited_refs(refs: &[EvidenceRef], limit: usize) -> Vec<EvidenceRef> {
-    refs.iter().take(limit).cloned().collect()
+/// The refs a contract item with none of its own cites: three of the plan's, chosen by the
+/// same authority order as the plan's own ref caps ([`crate::authority_capped_refs`]). The
+/// first three in string order put `edge:` ahead of `search:` and `symbol:`, so a graph edge
+/// displaced an exact reference (#537).
+fn fallback_evidence_refs(plan: &PlanReport, refs: &[EvidenceRef]) -> Vec<EvidenceRef> {
+    let exact = crate::exact_evidence_refs(
+        plan.primary_context
+            .iter()
+            .chain(plan.impact.direct_impacts.iter())
+            .chain(plan.impact.indirect_impacts.iter()),
+    );
+    let refs = refs
+        .iter()
+        .map(|evidence_ref| evidence_ref.0.clone())
+        .collect();
+    crate::authority_capped_refs(refs, MAX_FALLBACK_EVIDENCE_REFS, &exact)
+        .into_iter()
+        .map(EvidenceRef::new)
+        .collect()
 }
 
 fn merged_evidence_refs(left: &[EvidenceRef], right: &[EvidenceRef]) -> Vec<EvidenceRef> {
@@ -805,9 +825,9 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    #[test]
-    fn from_plan_rejects_plans_without_evidence() {
-        let plan = PlanReport {
+    /// A plan with no evidence at all, for tests to fill in.
+    fn empty_plan() -> PlanReport {
+        PlanReport {
             task: "test task".into(),
             summary: "summary".into(),
             primary_context: vec![],
@@ -850,7 +870,12 @@ mod tests {
             evidence_quality: Default::default(),
             validation_omitted: 0,
             validation_omitted_ids: Vec::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn from_plan_rejects_plans_without_evidence() {
+        let plan = empty_plan();
 
         let err = ContractBuilder::from_plan(&plan).expect_err("empty plans are not authoritative");
         assert!(err
@@ -868,6 +893,47 @@ mod tests {
             Err(OkError::InvalidInput(message))
                 if message.contains("requires at least one plan evidence reference")
         ));
+    }
+
+    #[test]
+    fn an_item_without_refs_cites_the_plans_most_authoritative_refs() {
+        // Three graph edges sort ahead of the exact reference and the symbol anchor in string
+        // order; the first three refs that way were all edges (#537).
+        let mut plan = empty_plan();
+        plan.primary_context = vec![SearchResult {
+            path: PathBuf::from("src/lib.rs"),
+            line_range: Some(open_kioku_core::LineRange { start: 3, end: 5 }),
+            snippet: "fn handler() {}".into(),
+            symbol: None,
+            score: 0.9,
+            match_reason: "exact reference".into(),
+            evidence: vec!["tree-sitter reference to `handler`".into()],
+            evidence_refs: vec!["search:src/lib.rs:3-5:0".into()],
+            confidence: 0.9,
+            score_breakdown: vec![],
+            exact_reference_provenance: Some(open_kioku_core::EvidenceSourceType::TreeSitter),
+        }];
+        plan.evidence_by_section.insert(
+            "impact".into(),
+            vec!["edge:a".into(), "edge:b".into(), "edge:c".into()],
+        );
+        plan.evidence_by_section
+            .insert("symbols".into(), vec!["symbol:crate::handler".into()]);
+
+        let contract = ContractBuilder::from_plan(&plan).expect("builds contract");
+        let manual = contract
+            .required_tests
+            .iter()
+            .find(|test| test.target == "manual-validation")
+            .expect("a plan without validation requires manual validation");
+        assert_eq!(
+            manual.evidence_refs,
+            vec![
+                EvidenceRef::new("edge:a"),
+                EvidenceRef::new("search:src/lib.rs:3-5:0"),
+                EvidenceRef::new("symbol:crate::handler"),
+            ]
+        );
     }
 
     #[test]

@@ -47,6 +47,17 @@ stable `architecture-policy:*` evidence refs that are also present in the
 contract's top-level `evidence_refs`. Verification uses configured repository
 policy to classify dependency deltas as allowed, violating, or unknown.
 
+A generated contract item cites the source plan's refs for it. An item the plan
+gives no refs of its own - a required test with no evidence, the
+`manual-validation` entry of a plan with no validation targets, and the primary,
+validation, boundary, risk and confidence traceability entries when their plan
+section is empty - cites three of the plan's refs instead, chosen the way the
+plan's own ref caps choose (`docs/context-pack-spec.md`): refs of the plan's
+exact-reference results first, then exact `symbol:` anchors, then direct graph
+edges (`edge:`), then the rest, listed in file order. Those three are a sample of
+the plan's evidence, not evidence found for that item; the whole set is the
+contract's top-level `evidence_refs`.
+
 Generated contracts also preserve bounded history intelligence when the source
 plan carries it. The builder writes a `history_signal_summary` extension and a
 `history_signals` traceability entry for `history_churn`, `ownership_risk`,
