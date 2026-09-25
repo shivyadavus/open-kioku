@@ -13,7 +13,10 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// v4: a Rust bare name resolves to an item of this file only from the module declaring it, and
 /// a nearer import or glob stops the lexical lookup; v3 let a call or receiver type inside a `mod`
 /// block, or under a block-level import, prove an edge to an item in another module of the file.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v4";
+/// v5: a Rust `self::` or `super::` path starts from the innermost module around the use site, an
+/// inline `mod` block included; v4 climbed from the file's module path, so `super::f()` in
+/// `mod tests` proved an edge to the parent module's `f` instead of the file's own.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v5";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

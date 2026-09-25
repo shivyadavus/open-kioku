@@ -1,6 +1,9 @@
-use open_kioku_core::{Binding, FileId, ModuleId, Scope, ScopeId, SourceRange, Symbol, SymbolId};
+use open_kioku_core::{
+    Binding, FileId, ModuleDeclarationSite, ModuleId, Scope, ScopeId, ScopeKind, SourceRange,
+    Symbol, SymbolId,
+};
 use smallvec::SmallVec;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Default)]
 pub struct SymbolIndex {
@@ -123,20 +126,106 @@ impl SymbolIndex {
 #[derive(Debug, Clone, Default)]
 pub struct ScopeIndex {
     pub scopes: HashMap<ScopeId, Scope>,
+    /// The scope of each Rust `mod` item, by the module symbol that owns it. The parser gives a
+    /// bodiless `mod name;` a scope too, so only [`ScopeIndex::module_body`] says which is a block.
+    modules_by_owner: HashMap<SymbolId, ScopeId>,
+    /// Whether each `mod` scope has a body, from the declarations the parser recorded.
+    module_has_body: HashMap<ScopeId, bool>,
+    /// `mod` scopes that enclose another scope, which only a block can.
+    modules_with_children: HashSet<ScopeId>,
+}
+
+/// What the `mod` item a module symbol names turned out to be.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ModuleBody<'s> {
+    /// An inline `mod name { .. }` block, and its scope.
+    Inline(&'s Scope),
+    /// `mod name;`, whose items live in another file.
+    OutOfLine,
+    /// The index cannot tell.
+    Unknown,
 }
 
 impl ScopeIndex {
     pub fn build(scopes: Vec<Scope>) -> Self {
         let mut index = Self::default();
+        for scope in &scopes {
+            if scope.kind == ScopeKind::Module {
+                if let Some(owner) = &scope.owner_symbol_id {
+                    index
+                        .modules_by_owner
+                        .insert(owner.clone(), scope.id.clone());
+                }
+            }
+        }
+        let module_scopes = index.modules_by_owner.values().collect::<HashSet<_>>();
+        let modules_with_children = scopes
+            .iter()
+            .filter_map(|scope| scope.parent_id.as_ref())
+            .filter(|parent| module_scopes.contains(parent))
+            .cloned()
+            .collect();
+        index.modules_with_children = modules_with_children;
         for scope in scopes {
             index.scopes.insert(scope.id.clone(), scope);
         }
         index
     }
 
+    /// Records which `mod` scopes have a body. A declaration and the scope of its item share
+    /// the enclosing scope and the item's range.
+    pub fn record_module_declarations(&mut self, declarations: &[ModuleDeclarationSite]) {
+        let by_site = self
+            .modules_by_owner
+            .values()
+            .filter_map(|id| self.scopes.get(id))
+            .map(|scope| {
+                (
+                    (scope.parent_id.as_ref(), range_key(&scope.range)),
+                    &scope.id,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut has_body = HashMap::new();
+        for declaration in declarations {
+            let key = (declaration.scope_id.as_ref(), range_key(&declaration.range));
+            if let Some(scope_id) = by_site.get(&key) {
+                has_body.insert((*scope_id).clone(), declaration.has_body);
+            }
+        }
+        self.module_has_body.extend(has_body);
+    }
+
     pub fn get(&self, id: &ScopeId) -> Option<&Scope> {
         self.scopes.get(id)
     }
+
+    /// What the `mod` item of `module` is. Without its declaration, a `mod` scope enclosing
+    /// another scope is a block, and an empty one is either.
+    pub(crate) fn module_body(&self, module: &SymbolId) -> ModuleBody<'_> {
+        let Some(scope) = self
+            .modules_by_owner
+            .get(module)
+            .and_then(|id| self.scopes.get(id))
+        else {
+            return ModuleBody::Unknown;
+        };
+        match self.module_has_body.get(&scope.id) {
+            Some(true) => ModuleBody::Inline(scope),
+            Some(false) => ModuleBody::OutOfLine,
+            None if self.modules_with_children.contains(&scope.id) => ModuleBody::Inline(scope),
+            None => ModuleBody::Unknown,
+        }
+    }
+}
+
+fn range_key(range: &SourceRange) -> (u32, u32, u32, u32) {
+    (
+        range.start_line,
+        range.start_column,
+        range.end_line,
+        range.end_column,
+    )
 }
 
 #[derive(Debug, Clone, Default)]
