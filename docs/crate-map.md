@@ -87,6 +87,7 @@ graph TD
     Impact --> Symbols
     Tests --> Graph
     Patch --> Plan
+    Patch --> Git
     Plan --> Evidence
     Actions --> Memory
     Actions --> Format
@@ -161,7 +162,7 @@ graph TD
 | `open-kioku-symbols` | Symbol table: definitions, references, and occurrence tracking. |
 | `open-kioku-graph` | Builds and queries the code dependency / call graph. |
 | `open-kioku-architecture` | High-level architectural analysis (module boundaries, layering). |
-| `open-kioku-git` | Bounded local Git commit/file-touch ingest, zero-context patch ranges, rename parsing, co-change derivation, and ownership resolution. |
+| `open-kioku-git` | Bounded local Git commit/file-touch ingest, zero-context patch ranges, rename parsing, co-change derivation, ownership resolution, and the unified-diff hunk scanner verification shares. |
 | `open-kioku-watch` | File-system watcher for incremental re-indexing. |
 
 ### Storage Layer
