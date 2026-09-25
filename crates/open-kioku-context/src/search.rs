@@ -8,6 +8,7 @@
 //! here reaches both surfaces at once. A surface chooses only where the `[ranking]` weights and
 //! the semantic index come from, and how the page is rendered.
 
+use crate::evidence_pairs::{merge_evidence, pair_evidence_refs, push_evidence};
 use open_kioku_config::RankingConfig;
 use open_kioku_core::{AnalysisFact, EvidenceSourceType, FileId, ScoreComponent, SearchResult};
 use open_kioku_errors::{OkError, Result};
@@ -333,19 +334,16 @@ pub fn annotate_candidates_with_git_history(
             .map(|fact| fact.target.as_str())
             .collect::<Vec<_>>()
             .join(", ");
+        // Each line goes in beside the fact it states. Appending the lines and the ids as two
+        // deduplicated lists left a ref beside a line it did not name whenever one list
+        // skipped an entry the other kept (#537).
+        pair_evidence_refs(result);
         for fact in &displayed {
             let evidence = format!(
                 "git co-change from local history: `{}` ({})",
                 fact.target, fact.message
             );
-            if !result.evidence.contains(&evidence) {
-                result.evidence.push(evidence);
-            }
-        }
-        for id in &evidence_ids {
-            if !result.evidence_refs.contains(id) {
-                result.evidence_refs.push(id.clone());
-            }
+            push_evidence(result, evidence, Some(fact.id.clone()));
         }
         result.score_breakdown.push(ScoreComponent::adjustment(
             "similar_change_overlap",
@@ -430,16 +428,13 @@ pub fn top_unique_paths_merging(results: Vec<SearchResult>, limit: usize) -> Vec
                 continue;
             }
             let existing = &mut unique[index];
-            for evidence in result.evidence {
-                if !existing.evidence.contains(&evidence) {
-                    existing.evidence.push(evidence);
-                }
-            }
-            for evidence_ref in result.evidence_refs {
-                if !existing.evidence_refs.contains(&evidence_ref) {
-                    existing.evidence_refs.push(evidence_ref);
-                }
-            }
+            // Lines and refs merge as pairs, as they do in a context pack (#537): two hits on
+            // one chunk number their lines from zero, so merged as separate lists the second
+            // hit's line was kept and its colliding ref dropped.
+            pair_evidence_refs(existing);
+            let mut result = result;
+            pair_evidence_refs(&mut result);
+            merge_evidence(existing, &result);
             for component in result.score_breakdown {
                 if !existing
                     .score_breakdown
@@ -547,6 +542,15 @@ mod tests {
 
     /// An in-memory index of `count` Rust files, each one chunk that mentions `term`.
     fn store_with_matching_files(count: usize, term: &str) -> SqliteStore {
+        store_with_matching_files_and_facts(count, term, &[])
+    }
+
+    /// As [`store_with_matching_files`], with `facts` as the index's analysis facts.
+    fn store_with_matching_files_and_facts(
+        count: usize,
+        term: &str,
+        facts: &[AnalysisFact],
+    ) -> SqliteStore {
         let store = SqliteStore::open(":memory:").unwrap();
         let manifest: IndexManifest = serde_json::from_value(serde_json::json!({
             "repository": {
@@ -598,13 +602,114 @@ mod tests {
                 tests: &[],
                 imports: &[],
                 occurrences: &[],
-                analysis_facts: &[],
+                analysis_facts: facts,
                 scopes: &[],
                 bindings: &[],
                 call_sites: &[],
             })
             .unwrap();
         store
+    }
+
+    /// A hit as the index and the semantic source produce it: one positional ref per line,
+    /// numbered from zero under the chunk's range.
+    fn chunk_hit(path: &str, lines: &[&str], signal: &str) -> SearchResult {
+        let range = Some(LineRange { start: 1, end: 4 });
+        let refs =
+            open_kioku_core::search_result_evidence_ids(Path::new(path), &range, lines.len());
+        SearchResult {
+            path: PathBuf::from(path),
+            line_range: range,
+            snippet: String::new(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "fixture hit".into(),
+            evidence: lines.iter().map(|line| line.to_string()).collect(),
+            evidence_refs: refs.clone(),
+            confidence: 0.5,
+            score_breakdown: vec![ScoreComponent::single(signal, 1.0, refs, "fixture")],
+            exact_reference_provenance: None,
+        }
+    }
+
+    fn assert_paired(result: &SearchResult) {
+        assert_eq!(
+            crate::evidence_pairs::pairing_violation(result),
+            None,
+            "{:?} / {:?}",
+            result.evidence,
+            result.evidence_refs
+        );
+    }
+
+    #[test]
+    fn a_merged_semantic_hit_keeps_each_ref_beside_its_line() {
+        // Both hits name their first line `search:src/auth.rs:1-4:0`. Merged as two lists, the
+        // semantic line was kept and its ref dropped as a duplicate, so the refs stopped
+        // pairing with the lines (#537).
+        let merged = top_unique_paths_merging(
+            vec![
+                chunk_hit("src/auth.rs", &["BM25 lexical match"], "bm25_relevance"),
+                chunk_hit(
+                    "src/auth.rs",
+                    &["semantic vector similarity"],
+                    "semantic_similarity",
+                ),
+            ],
+            10,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].evidence,
+            ["BM25 lexical match", "semantic vector similarity"]
+        );
+        assert_paired(&merged[0]);
+        assert_eq!(merged[0].evidence_refs[0], "search:src/auth.rs:1-4:0");
+    }
+
+    #[test]
+    fn co_change_lines_are_added_beside_the_facts_they_state() {
+        let fact = |id: &str| AnalysisFact {
+            id: id.into(),
+            file_id: FileId::new("file-000"),
+            symbol_id: None,
+            target: "src/other.rs".into(),
+            target_kind: open_kioku_core::GraphNodeType::File,
+            edge_type: open_kioku_core::GraphEdgeType::ChangedBy,
+            range: None,
+            confidence: open_kioku_core::Confidence::Medium,
+            source: "git-history:abc".into(),
+            source_type: EvidenceSourceType::GitHistory,
+            message: "co-changed in 2 commits".into(),
+        };
+        // Two facts that state the same line. Appended as two lists, the line was added once
+        // and both ids twice, so the second id sat beside no line at all.
+        let store = store_with_matching_files_and_facts(
+            1,
+            "ledger",
+            &[fact("history-cochange:1"), fact("history-cochange:2")],
+        );
+        let mut results = vec![chunk_hit(
+            "src/unit_000.rs",
+            &["BM25 lexical match"],
+            "bm25_relevance",
+        )];
+        annotate_candidates_with_git_history(&store, &mut results).unwrap();
+
+        assert_paired(&results[0]);
+        assert_eq!(
+            results[0].evidence_refs,
+            ["search:src/unit_000.rs:1-4:0", "history-cochange:1"]
+        );
+        let history = results[0]
+            .score_breakdown
+            .iter()
+            .find(|component| component.signal == "similar_change_overlap")
+            .expect("the co-change adjustment");
+        assert_eq!(
+            history.evidence_ids,
+            ["history-cochange:1", "history-cochange:2"]
+        );
     }
 
     #[test]
