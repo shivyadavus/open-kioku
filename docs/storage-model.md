@@ -132,6 +132,43 @@ The MCP session survives the failed probe, and a session that already holds a st
 for the manifest before each request and probes again when it is gone, so it gives the same
 answer.
 
+### Snapshot import: revision and local policy
+
+Before the current index is touched, `ok snapshot import` checks two things on the staged
+copy of the artifact:
+
+- **Revision.** The artifact records the commit its index was built from (the embedded
+  manifest's, else the metadata's `repo_commit`; the two must agree). That commit is related
+  to the local `HEAD` with Git: the same commit is fresh, and a commit that shares history
+  with `HEAD` (an ancestor, a descendant, or a diverged branch) is imported with the number
+  of commits behind and ahead and the number of tracked files whose working-tree content
+  differs from it. An artifact whose relation cannot be established — its commit is not in
+  this repository, shares no history with `HEAD`, or was never recorded, or the directory has
+  no `HEAD` — is refused, and the current index stays published; `--allow-foreign` imports it
+  marked `foreign`. `ok index --from-snapshot auto` applies the same refusal and indexes from
+  source instead. `source_root_hash` in the metadata hashes the exporter's absolute path and
+  is not compared.
+- **Local index policy.** Every indexed file and document the importing repository's policy
+  excludes — secret-like and `[paths] deny` paths, hidden files, `[index] exclude`,
+  `.gitignore`, `.okignore`, judged by the same `open-kioku-ingest` rules `ok index` applies
+  — is removed with every row derived from it (symbols, chunks, occurrences, graph nodes and
+  the edges anchored at them or evidenced in the file, vector targets, document sections,
+  facts other files hold about it, and its symbols' history). Git history rows naming a
+  secret-like or denied path are removed too. File-level history of a path excluded for any
+  other reason is kept, as `ok index` records history for every path a commit touched. The
+  search index is rebuilt from what remains.
+
+The published manifest carries the result as `snapshot`: `imported_from_commit`,
+`local_commit`, `relation` (`same_commit`, `related` or `foreign`), `commits_behind`,
+`commits_ahead`, `changed_files`, and `policy_filtered`, the number of paths removed. The
+counts describe the checkout at import time. `ok status`, `ok doctor` (the `snapshot` check)
+and MCP `repo_status` report it; unless the import was of the checked-out commit with no
+changed files, `build_context_pack`/`ok context` carry a caveat in
+`retrieval_diagnostics.caveats` and `confidence_breakdown.caveats`, and `plan_change`/`ok plan`
+a risk reason, until `ok index` publishes a manifest without it. An exporter's uncommitted
+changes are not recorded, so an artifact exported from a dirty tree is indistinguishable here
+from one exported from its commit.
+
 ### Snapshot export
 
 `ok snapshot export` is a reader. It takes no writer lock and does not checkpoint the index,
