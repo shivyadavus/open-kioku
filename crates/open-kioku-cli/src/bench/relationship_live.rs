@@ -668,6 +668,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
     const WORKSPACE: &str = "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\nresolver = \"2\"\n";
     const PACKAGE_A: &str = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
     const PACKAGE_B: &str = "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    const ROOT_WORKSPACE_PACKAGE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"crates/a\"]\n";
     const SESSION_B: &str = "use crate::auth::issue_token;\n\npub fn caller_fn() {\n    issue_token();\n}\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
         "cross_module_item_import" => (
@@ -877,6 +878,77 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                 ),
             ],
             false,
+        ),
+        // A root package that is also a workspace: `crate::` in member `crates/a` names `a`'s
+        // own modules, and only the root package declares `only_root` (#542).
+        "workspace_root_package_crate_path" => (
+            vec![
+                ("Cargo.toml", ROOT_WORKSPACE_PACKAGE),
+                ("src/lib.rs", "pub mod only_root;\n"),
+                ("src/only_root.rs", "pub fn target_fn() {}\n"),
+                ("crates/a/Cargo.toml", PACKAGE_A),
+                (
+                    "crates/a/src/lib.rs",
+                    "pub fn caller_fn() {\n    crate::only_root::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // The member's `crate::util` is its own `util.rs`, beside the root package's (#542).
+        "workspace_member_crate_path" => (
+            vec![
+                ("Cargo.toml", ROOT_WORKSPACE_PACKAGE),
+                ("src/lib.rs", "pub mod util;\n"),
+                ("src/util.rs", "pub fn target_fn() {}\n"),
+                ("crates/a/Cargo.toml", PACKAGE_A),
+                (
+                    "crates/a/src/lib.rs",
+                    "pub mod util;\n\npub fn caller_fn() {\n    crate::util::target_fn();\n}\n",
+                ),
+                ("crates/a/src/util.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // `src/bin/tool.rs` is a crate root of its own: its `crate::x` is not the library's
+        // `x`, although `lib.rs` declares one.
+        "bin_crate_path_into_library" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod x;\n"),
+                ("src/x.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/bin/tool.rs",
+                    "mod x;\n\npub fn caller_fn() {\n    crate::x::target_fn();\n}\n\nfn main() {}\n",
+                ),
+            ],
+            false,
+        ),
+        // `pub mod r#type;` is the file `type.rs` (#543).
+        "raw_identifier_module_crate_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod r#type;\n\npub fn caller_fn() {\n    crate::r#type::target_fn();\n}\n",
+                ),
+                ("src/type.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // `[lib] path = "src/app_lib.rs"` is the crate root whose `mod a;` places `src/a.rs` (#543).
+        "library_path_crate_path" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/app_lib.rs\"\n",
+                ),
+                (
+                    "src/app_lib.rs",
+                    "pub mod a;\n\npub fn caller_fn() {\n    crate::a::target_fn();\n}\n",
+                ),
+                ("src/a.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
         ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
