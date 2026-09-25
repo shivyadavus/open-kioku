@@ -596,7 +596,18 @@ pub(crate) fn collect_type_candidate_origins(
             .1 |= via_import;
     };
 
-    if let Some(file_symbols) = ctx.symbols.by_file.get(ctx.file_id) {
+    if ctx.language == Language::Rust {
+        // A Rust type of this file is nameable only from its own module, or through an import
+        // the scoped lookup below reads. A type in a nearer scope shadows every import further
+        // out, and one in a sibling `mod` block is never a candidate.
+        if let Some(types) =
+            crate::context::nearest_lexical_items(ctx, scope_id, type_name, |symbol| {
+                is_type_symbol(&symbol.kind)
+            })
+        {
+            return types.into_iter().map(|target| (target, false)).collect();
+        }
+    } else if let Some(file_symbols) = ctx.symbols.by_file.get(ctx.file_id) {
         for id in file_symbols {
             if ctx
                 .symbols
