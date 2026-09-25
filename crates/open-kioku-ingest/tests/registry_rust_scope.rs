@@ -337,3 +337,31 @@ fn rust_module_declaration_names_keep_their_registry_references() {
             && fact.target == m2.qualified_name
     }));
 }
+
+#[test]
+fn rust_super_import_of_a_parent_import_keeps_the_registry_edge() {
+    // `super::target_fn` binds to the parent's `use inner::target_fn;`, the item in `inner`.
+    assert_unplaced_import_keeps_edge(
+        "mod inner {\n    pub fn target_fn() {}\n}\nuse inner::target_fn;\n\n#[cfg(test)]\nmod tests {\n    use super::target_fn;\n    fn t() {\n        target_fn();\n    }\n}\n",
+        "t",
+        "target_fn",
+    );
+}
+
+#[test]
+fn rust_super_import_of_a_parent_glob_keeps_the_registry_edge() {
+    assert_unplaced_import_keeps_edge(
+        "mod inner {\n    pub fn target_fn() {}\n}\npub use inner::*;\n\n#[cfg(test)]\nmod tests {\n    use super::target_fn;\n    fn t() {\n        target_fn();\n    }\n}\n",
+        "t",
+        "target_fn",
+    );
+}
+
+#[test]
+fn rust_grouped_super_import_of_a_parent_import_keeps_the_registry_edge() {
+    assert_unplaced_import_keeps_edge(
+        "mod inner {\n    pub fn target_fn() {}\n}\nuse inner::target_fn;\n\nmod tests {\n    use super::{self as parent, target_fn};\n    fn t() {\n        target_fn();\n    }\n}\n",
+        "t",
+        "target_fn",
+    );
+}

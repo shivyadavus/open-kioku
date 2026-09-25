@@ -210,13 +210,60 @@ impl<'a> RegistryScopeModel<'a> {
         let Some((path, _item)) = source.rsplit_once("::") else {
             return false;
         };
-        let mut segments = path.split("::");
-        match segments.next() {
-            Some("crate") => true,
-            Some("self") => path == "self",
-            Some("super") => segments.all(|segment| segment == "super"),
+        let first = path.split("::").next().unwrap_or_default();
+        match first {
+            "crate" => true,
+            "self" if path == "self" => self.relative_item_is_declared(binding, 0),
+            "super" if path.split("::").all(|segment| segment == "super") => {
+                self.relative_item_is_declared(binding, path.split("::").count())
+            }
+            "self" | "super" => false,
             _ => !self.may_name_this_crate(source),
         }
+    }
+
+    /// Whether the module a one-item `self::x` or `super::x` path names declares `x` itself, with
+    /// no import there that could bind it instead. The resolver maps such a path to the item the
+    /// module declares; rustc binds it to whatever the module's scope holds, which may be a `use`
+    /// of another module's item (`use a::x;` or `pub use a::*;` in the parent).
+    fn relative_item_is_declared(&self, binding: &ImportBinding, depth: usize) -> bool {
+        let Some((_, item)) = binding.source_module.rsplit_once("::") else {
+            return false;
+        };
+        let Some(start) = self.enclosing_module(&binding.scope_id) else {
+            return false;
+        };
+        let Some(module) = self.module_above(start, depth) else {
+            return false;
+        };
+        let declares = !self
+            .symbols
+            .lookup_file_scope_name(&binding.file_id, &module.id, item)
+            .is_empty();
+        let imported = self
+            .file_imports(&binding.file_id, item)
+            .iter()
+            .any(|other| !other.is_glob && other.scope_id == module.id);
+        let globbed = self
+            .file_imports(&binding.file_id, GLOB_IMPORT_LOCAL_NAME)
+            .iter()
+            .any(|glob| {
+                glob.scope_id == module.id && self.may_name_this_crate(&glob.source_module)
+            });
+        declares && !imported && !globbed
+    }
+
+    /// The nearest module or file scope at or above `scope_id`.
+    fn enclosing_module(&self, scope_id: &ScopeId) -> Option<&'a Scope> {
+        let mut current = self.scopes.get(scope_id);
+        for _ in 0..=self.scopes.scopes.len() {
+            let scope = current?;
+            if matches!(scope.kind, ScopeKind::Module | ScopeKind::File) {
+                return Some(scope);
+            }
+            current = scope.parent_id.as_ref().and_then(|id| self.scopes.get(id));
+        }
+        None
     }
 
     /// Whether `source` may be a path into this crate rather than into an external one.
