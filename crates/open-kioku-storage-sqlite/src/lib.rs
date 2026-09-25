@@ -537,7 +537,16 @@ impl SqliteStore {
     /// vector targets and document sections, the facts other files hold about it, and the
     /// symbol-level history derived from its symbols. Its file-level Git history is kept, as
     /// `ok index` keeps it for a path the scan policy excludes. Every history row naming one
-    /// of `history` is removed as well. The manifest is not written; `manifest` only
+    /// of `history` is removed as well.
+    ///
+    /// What the rows left behind would still say about the removed ones goes too: the facts
+    /// other files hold about a removed symbol, found by its qualified name unless an indexed
+    /// file still defines that name, with the graph nodes labelled by it; every node no file
+    /// owns that the removal leaves with no edge; every call-site dictionary entry no remaining
+    /// call site uses (a call site's id spells its file's path); and every history hotspot,
+    /// recomputed from
+    /// the touches that remain, so no directory hotspot names a directory only removed paths
+    /// were in. The manifest is not written; `manifest` only
     /// satisfies the shared row writer, as in
     /// [`stage_files_index_with_graph`](Self::stage_files_index_with_graph).
     pub fn purge_paths(
@@ -588,6 +597,22 @@ impl SqliteStore {
             .map_err(storage_err)?;
         }
         report.files_removed = file_ids.len();
+        // What other files say about the removed symbols is spelled with their qualified
+        // names (`internal::vault::keys::KeyAnchored`, `vault.keys.seal`), which no path rule
+        // matches; the names are taken from the symbols themselves, as the resolvers wrote them.
+        let mut removed_names = BTreeSet::new();
+        for id in &file_ids {
+            let mut stmt = tx
+                .prepare_cached("SELECT qualified_name FROM symbols WHERE file_id = ?1")
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(params![&id.0], |row| row.get::<_, String>(0))
+                .map_err(storage_err)?;
+            for row in rows {
+                removed_names.insert(row.map_err(storage_err)?);
+            }
+        }
+        let edgeless_before = edgeless_unanchored_nodes(&tx)?;
         let update = PartialIndexUpdate {
             manifest,
             changed_files: &[],
@@ -605,9 +630,58 @@ impl SqliteStore {
             call_sites: &[],
         };
         replace_files_rows(&tx, &update, ManifestWrite::Withhold, None)?;
+        // The call-site dictionary is not pruned when a file's call sites are replaced, and a
+        // call site's id spells its file's path: the entries only removed call sites used go.
+        if !file_ids.is_empty() {
+            report.other_rows_removed += tx
+                .execute(ORPHAN_CALL_SITE_STRINGS_DELETE, [])
+                .map_err(storage_err)?;
+        }
+        // A name another indexed file still defines is that file's, and stays.
+        let mut still_defined = Vec::new();
+        for name in &removed_names {
+            let defined = tx
+                .prepare_cached("SELECT 1 FROM symbols WHERE qualified_name = ?1 LIMIT 1")
+                .map_err(storage_err)?
+                .exists(params![name])
+                .map_err(storage_err)?;
+            if defined {
+                still_defined.push(name.clone());
+            }
+        }
+        for name in still_defined {
+            removed_names.remove(&name);
+        }
+        // The facts other files hold about a removed symbol (a registry resolution, a
+        // similarity), and the nodes those facts are drawn to, labelled with its name.
+        for name in &removed_names {
+            report.other_rows_removed += tx
+                .execute(
+                    "DELETE FROM analysis_facts WHERE target = ?1",
+                    params![name],
+                )
+                .map_err(storage_err)?;
+        }
+        let mut graph_nodes = graph_nodes.clone();
+        if !removed_names.is_empty() {
+            let mut stmt = tx
+                .prepare("SELECT id, label FROM graph_nodes WHERE file_id IS NULL OR file_id = ''")
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(storage_err)?;
+            for row in rows {
+                let (id, label) = row.map_err(storage_err)?;
+                if removed_names.contains(&label) {
+                    graph_nodes.insert(id);
+                }
+            }
+        }
         // Nodes no file owns (a test named by history, a resource) go with every edge at them.
         let mut orphan_candidates = HashSet::new();
-        for node_id in graph_nodes {
+        for node_id in &graph_nodes {
             if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, node_id)? {
                 delete_edges_at_node(&tx, sid, &mut orphan_candidates)?;
                 orphan_candidates.insert(sid);
@@ -617,6 +691,13 @@ impl SqliteStore {
                 .map_err(storage_err)?;
         }
         remove_orphan_graph_strings(&tx, orphan_candidates)?;
+        // A node no file owns exists because an edge reaches it: one the removal left with no
+        // edge (a removed symbol's complexity resource) was drawn only for the removed rows.
+        for node_id in edgeless_unanchored_nodes(&tx)?.difference(&edgeless_before) {
+            report.graph_nodes_removed += tx
+                .execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])
+                .map_err(storage_err)?;
+        }
         for (paths, statements) in [
             (indexed, INDEXED_PATH_PURGE_STATEMENTS),
             (history, HISTORY_PATH_PURGE_STATEMENTS),
@@ -628,6 +709,9 @@ impl SqliteStore {
                         tx.execute(sql, params![path]).map_err(storage_err)?;
                 }
             }
+        }
+        if !file_ids.is_empty() || !history.is_empty() {
+            rematerialize_history_hotspots(&tx)?;
         }
         tx.commit().map_err(storage_err)?;
         self.invalidate_semantics_verdict();
@@ -1731,24 +1815,7 @@ impl HistoryStore for SqliteStore {
             )
             .map_err(storage_err)?;
         }
-        for summary in materialize_churn_summaries(snapshot)? {
-            tx.execute(
-                "INSERT INTO history_hotspots(entity_kind, entity_key, path, symbol_id, qualified_name, hotspot_score, touch_count, generated_at, json)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    churn_entity_kind_key(summary.entity_kind),
-                    &summary.key,
-                    summary.path.as_deref().map(history_path).transpose()?,
-                    summary.symbol_id.as_ref().map(|id| id.0.as_str()),
-                    summary.qualified_name.as_deref(),
-                    summary.stats.hotspot_score,
-                    usize_to_i64(summary.stats.touch_count, "history hotspot touch count")?,
-                    summary.generated_at.to_rfc3339(),
-                    serde_json::to_string(&summary)?,
-                ],
-            )
-            .map_err(storage_err)?;
-        }
+        insert_history_hotspots(&tx, snapshot)?;
 
         tx.commit().map_err(storage_err)?;
         self.invalidate_similarity_statics();
@@ -2934,6 +3001,15 @@ const INDEXED_PATH_PURGE_STATEMENTS: &[&str] = &[
     "DELETE FROM history_hotspots WHERE path = ?1 AND entity_kind = 'symbol'",
 ];
 
+/// Every call-site dictionary entry no call site references. See [`SqliteStore::purge_paths`].
+const ORPHAN_CALL_SITE_STRINGS_DELETE: &str = "DELETE FROM call_site_strings WHERE sid NOT IN (\
+     SELECT id_sid FROM call_sites \
+     UNION SELECT file_sid FROM call_sites \
+     UNION SELECT scope_sid FROM call_sites \
+     UNION SELECT caller_sid FROM call_sites WHERE caller_sid IS NOT NULL \
+     UNION SELECT callee_sid FROM call_sites \
+     UNION SELECT receiver_sid FROM call_sites WHERE receiver_sid IS NOT NULL)";
+
 /// The facts other files hold about the file at `?1`: those whose target is that file (a
 /// co-change with it, or with it as a test), not every fact whose target string matches.
 const FACTS_ABOUT_FILE_DELETE: &str = "DELETE FROM analysis_facts WHERE target = ?1 \
@@ -3571,6 +3647,35 @@ fn delete_edges_at_node(
         params![node_sid],
     )
     .map_err(storage_err)
+}
+
+/// The ids of the graph nodes no file owns that no edge reaches.
+fn edgeless_unanchored_nodes(tx: &Transaction<'_>) -> Result<BTreeSet<String>> {
+    let mut endpoints = HashSet::new();
+    {
+        let mut stmt = tx
+            .prepare("SELECT from_sid, to_sid FROM graph_edges")
+            .map_err(storage_err)?;
+        let mut rows = stmt.query([]).map_err(storage_err)?;
+        while let Some(row) = rows.next().map_err(storage_err)? {
+            endpoints.insert(row.get::<_, i64>(0).map_err(storage_err)?);
+            endpoints.insert(row.get::<_, i64>(1).map_err(storage_err)?);
+        }
+    }
+    let mut stmt = tx
+        .prepare("SELECT id FROM graph_nodes WHERE file_id IS NULL OR file_id = ''")
+        .map_err(storage_err)?;
+    let mut rows = stmt.query([]).map_err(storage_err)?;
+    let mut edgeless = BTreeSet::new();
+    while let Some(row) = rows.next().map_err(storage_err)? {
+        let id: String = row.get(0).map_err(storage_err)?;
+        let reached = compact::lookup_sid(tx, compact::GRAPH_STRINGS, &id)?
+            .is_some_and(|sid| endpoints.contains(&sid));
+        if !reached {
+            edgeless.insert(id);
+        }
+    }
+    Ok(edgeless)
 }
 
 /// Drop the `candidates` no edge references any more. One pass over the surviving rows
@@ -4950,6 +5055,56 @@ struct ChurnTouchSample {
     deletions: u32,
     confidence: Confidence,
     uncertainty: Vec<String>,
+}
+
+/// Write the file, directory and symbol hotspots `snapshot`'s touches aggregate to. The table
+/// is expected to be empty.
+fn insert_history_hotspots(tx: &Transaction<'_>, snapshot: &HistorySnapshot) -> Result<()> {
+    for summary in materialize_churn_summaries(snapshot)? {
+        tx.execute(
+            "INSERT INTO history_hotspots(entity_kind, entity_key, path, symbol_id, qualified_name, hotspot_score, touch_count, generated_at, json)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                churn_entity_kind_key(summary.entity_kind),
+                &summary.key,
+                summary.path.as_deref().map(history_path).transpose()?,
+                summary.symbol_id.as_ref().map(|id| id.0.as_str()),
+                summary.qualified_name.as_deref(),
+                summary.stats.hotspot_score,
+                usize_to_i64(summary.stats.touch_count, "history hotspot touch count")?,
+                summary.generated_at.to_rfc3339(),
+                serde_json::to_string(&summary)?,
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    Ok(())
+}
+
+/// Recompute every hotspot from the touches the store still holds. A directory's hotspot
+/// aggregates the touches of every file beneath it, so removing one file's rows by path leaves
+/// the directory named, and its counts including the removed touches; recomputed, the
+/// hotspots are the ones `ok index` writes for the same touches.
+fn rematerialize_history_hotspots(tx: &Transaction<'_>) -> Result<()> {
+    let read = |sql: &str| -> Result<Vec<String>> {
+        let mut stmt = tx.prepare(sql).map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_err)
+    };
+    let mut snapshot = HistorySnapshot::empty();
+    // Insertion order, as `put_history_snapshot` wrote them.
+    for json in read("SELECT json FROM git_file_touches ORDER BY rowid")? {
+        snapshot.file_touches.push(serde_json::from_str(&json)?);
+    }
+    for json in read("SELECT json FROM git_symbol_touches ORDER BY rowid")? {
+        snapshot.symbol_touches.push(serde_json::from_str(&json)?);
+    }
+    tx.execute("DELETE FROM history_hotspots", [])
+        .map_err(storage_err)?;
+    insert_history_hotspots(tx, &snapshot)
 }
 
 fn materialize_churn_summaries(snapshot: &HistorySnapshot) -> Result<Vec<ChurnSummary>> {
