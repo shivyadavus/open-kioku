@@ -832,6 +832,52 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // `#[path = "elsewhere.rs"] mod pathed;` in `w.rs` is `elsewhere.rs`, not the
+        // `w/pathed.rs` at the default location (#535).
+        "path_attribute_default_location_self_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod w;\n"),
+                (
+                    "src/w.rs",
+                    "#[path = \"elsewhere.rs\"]\nmod pathed;\n\npub fn caller_fn() {\n    self::pathed::target_fn();\n}\n",
+                ),
+                ("src/elsewhere.rs", "pub fn target_fn() {}\n"),
+                ("src/w/pathed.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // The same decoy reached through `crate::` from the crate root (#535).
+        "path_attribute_default_location_crate_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod w;\n\npub fn caller_fn() {\n    crate::w::pathed::target_fn();\n}\n",
+                ),
+                ("src/w.rs", "#[path = \"elsewhere.rs\"]\npub mod pathed;\n"),
+                ("src/elsewhere.rs", "pub fn target_fn() {}\n"),
+                ("src/w/pathed.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // `legacy/session.rs` is mounted as `crate::session`, so `super::target_fn()` there names
+        // the crate root's `target_fn`, not the `legacy` module's that its file path suggests.
+        "path_attribute_mounted_super_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod legacy;\n#[path = \"legacy/session.rs\"]\npub mod session;\n\npub fn target_fn() {}\n",
+                ),
+                ("src/legacy/mod.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/legacy/session.rs",
+                    "pub fn caller_fn() {\n    super::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![
