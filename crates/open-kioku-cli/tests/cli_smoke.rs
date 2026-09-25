@@ -7649,4 +7649,32 @@ fn a_file_with_runnable_and_skipped_tests_recommends_one_and_counts_the_other() 
     assert!(selection.get("caveats").is_none(), "{selection}");
     let tests = setup_audit_provider(repo, "tests");
     assert!(tests["next_step"].is_null(), "{tests}");
+
+    // An empty page is not an empty match: `limit: 0` must not claim the file has no
+    // runnable test.
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "find_tests_for_change",
+            "arguments": {"path": "src/rates.ts", "limit": 0},
+        },
+    });
+    let page = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        &request.to_string(),
+    );
+    let page: serde_json::Value = serde_json::from_str(page.trim()).unwrap();
+    let page = &page["result"]["structuredContent"];
+    assert_eq!(page["tests"], serde_json::json!([]), "{page}");
+    let caveat = page["caveats"][0].as_str().unwrap();
+    assert!(
+        caveat.starts_with("1 runnable test target(s) matched `src/rates.ts`"),
+        "{caveat}"
+    );
 }

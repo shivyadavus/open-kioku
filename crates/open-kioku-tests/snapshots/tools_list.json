@@ -931,7 +931,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Identify the test files that should be run to validate a change, ranked by relevance from naming conventions, import relationships, and co-change history. With a `path` the ranking is for that changed file; without one it reports the repository-wide stored test evidence. Matched test targets that cannot validate the change, such as tests the runner skips, are counted by reason in `excluded` and sampled in `excluded_sample`, never listed in `tests`; an empty `tests` carries a caveat saying whether no test was found or every one found was excluded. Use after identifying a changed file to select the test files that should be run to validate the change. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history; omit `path` for the repository-wide test evidence. Do NOT use for a full evidence-backed pre-edit plan (use plan_change) and do NOT read it as proof a test exercises the change. This is read-only and executes nothing.",
+        "description": "Identify the test files that should be run to validate a change, ranked by relevance from naming conventions, import relationships, and co-change history. A `path` is required to select tests: the ranking is for that changed file, and without one no test is selected and a caveat says so. Matched test targets that cannot validate the change, such as tests the runner skips, are counted by reason in `excluded` and sampled in `excluded_sample`, never listed in `tests`; an empty `tests` carries a caveat saying whether no test was found or every one found was excluded. Use after identifying a changed file to select the test files that should be run to validate the change. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history; pass the changed file as `path`, without which no test is selected. Do NOT use for a full evidence-backed pre-edit plan (use plan_change) and do NOT read it as proof a test exercises the change. This is read-only and executes nothing.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -940,7 +940,7 @@
               "type": "integer"
             },
             "path": {
-              "description": "Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs'). Omit for the repository-wide test evidence.",
+              "description": "Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs'). Required to select tests; without it the response selects none and says so in `caveats`.",
               "type": "string"
             }
           },
