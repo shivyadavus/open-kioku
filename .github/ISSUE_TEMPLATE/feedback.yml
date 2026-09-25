@@ -1,0 +1,41 @@
+name: Feedback & ideas
+description: Share how Open Kioku worked for you, or what you would like to see next.
+title: "[Feedback]: "
+labels: ["integration", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For reproducible defects please use the bug report template instead, and for a
+        specific capability use the feature request. This one is for setup experience
+        and open-ended suggestions that do not fit either.
+
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Experience
+      description: How was setting up and using Open Kioku? What worked, and what did not?
+      placeholder: |
+        I installed Open Kioku via npm, configured my client, and indexing my repo took...
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggest
+    attributes:
+      label: Suggestions or ideas
+      description: What would you like to see next? (for example: a specific language, client integration, or filtering behaviour)
+      placeholder: |
+        It would help if there were first-class support for...
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Which client are you using (Cursor, Claude Code, Windsurf, Zed, ...) and which OS?
+      placeholder: |
+        Cursor, macOS (M3)
+    validations:
+      required: false
