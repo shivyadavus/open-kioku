@@ -29,6 +29,7 @@ use std::time::Instant;
 
 pub mod derived;
 mod git_ignore;
+pub mod path_policy;
 
 /// Trim a freshly formatted evidence message to its exact length.
 ///
@@ -1270,16 +1271,8 @@ impl Indexer {
         progress: &mut ProgressRecorder<'_>,
     ) -> Result<ScanResult> {
         let max_size = config.max_file_size_bytes()?;
-        let excludes = compile_globs(&config.index.exclude)?;
-        let denied = compile_globs(&config.paths.deny)?;
+        let policy = path_policy::IndexPathPolicy::for_scan(root, config)?;
         let document_plain_text = compile_globs(&config.documents.plain_text)?;
-        let git_ignored_paths = git_ignore::ignored_paths(root)?;
-        let git_ignores = if git_ignored_paths.is_none() {
-            Some(build_ignore_matcher(root, ".gitignore")?)
-        } else {
-            None
-        };
-        let ok_ignores = build_ignore_matcher(root, ".okignore")?;
         let mut builder = WalkBuilder::new(root);
         builder.hidden(false);
         builder.git_ignore(false).git_exclude(false).parents(false);
@@ -1341,23 +1334,18 @@ impl Indexer {
                 source_like_files += 1;
             }
             ledger.discovered(&language);
-            let secret_policy = open_kioku_core::is_secret_like_path(&rel);
-            if secret_policy || denied.is_match(&rel) {
-                let safe_to_show = !secret_policy || !config.security.redact_secrets;
-                let reason = if secret_policy {
-                    SkipReason::SecretPolicy
-                } else {
-                    SkipReason::Denied
-                };
+            if let Some(exclusion) = policy.exclusion(&rel) {
                 ledger.skip(
                     root,
                     path,
                     &language,
-                    reason,
-                    SkipSource::SecurityPolicy,
-                    safe_to_show,
+                    exclusion.reason,
+                    exclusion.source,
+                    exclusion.safe_to_show,
                 );
-                if should_emit_progress(scanned_files, 0) {
+                if exclusion.source == SkipSource::SecurityPolicy
+                    && should_emit_progress(scanned_files, 0)
+                {
                     progress.emit_transient(
                         ProgressEvent::new("scan")
                             .scanned(scanned_files)
@@ -1365,56 +1353,6 @@ impl Indexer {
                             .skipped(ledger.skipped_paths.len()),
                     );
                 }
-                continue;
-            }
-            if !config.security.allow_hidden_files && is_hidden_path(&rel) {
-                ledger.skip(
-                    root,
-                    path,
-                    &language,
-                    SkipReason::Hidden,
-                    SkipSource::HiddenPolicy,
-                    true,
-                );
-                continue;
-            }
-            if excludes.is_match(&rel) {
-                ledger.skip(
-                    root,
-                    path,
-                    &language,
-                    SkipReason::Ignored,
-                    SkipSource::ConfigExclude,
-                    true,
-                );
-                continue;
-            }
-            let git_ignored = git_ignored_paths
-                .as_ref()
-                .is_some_and(|paths| paths.contains(&rel))
-                || git_ignores
-                    .as_ref()
-                    .is_some_and(|matcher| matcher.is_ignored(path, false));
-            if git_ignored {
-                ledger.skip(
-                    root,
-                    path,
-                    &language,
-                    SkipReason::Ignored,
-                    SkipSource::GitIgnore,
-                    true,
-                );
-                continue;
-            }
-            if ok_ignores.is_ignored(path, false) {
-                ledger.skip(
-                    root,
-                    path,
-                    &language,
-                    SkipReason::Ignored,
-                    SkipSource::OkIgnore,
-                    true,
-                );
                 continue;
             }
             if entry.file_type().is_some_and(|kind| kind.is_symlink()) {
