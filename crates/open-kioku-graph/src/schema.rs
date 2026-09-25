@@ -197,8 +197,11 @@ pub(crate) const SYMBOL_NODE_TYPES: [GraphNodeType; 10] = [
 const FILE_FILTER_FIELDS: &[&str] = &["label", "id", "file_path"];
 const SYMBOL_FILTER_FIELDS: &[&str] = &["label", "id", "file_path", "qualified_name"];
 const OTHER_NODE_FILTER_FIELDS: &[&str] = &["label", "id"];
-/// Graph nodes carry no evidence; these are read from a bound edge's `Evidence`.
-pub(crate) const EDGE_FILTER_FIELDS: &[&str] = &["source", "source_type", "confidence"];
+/// Graph nodes carry no evidence; these are read from a bound edge's `Evidence`. The `evidence_`
+/// prefix is load-bearing: in Cypher an edge's "source" is the node it leaves, and a field named
+/// `source` read as that endpoint while filtering on the pass that recorded the evidence.
+pub(crate) const EDGE_FILTER_FIELDS: &[&str] =
+    &["evidence_source", "evidence_source_type", "confidence"];
 
 /// The WHERE fields a node variable takes. An untyped node may bind a File or a symbol node, so it
 /// takes every node field and each row resolves the field for the node it holds.
@@ -461,7 +464,7 @@ fn confidence_sentence() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "confidence = 'high' compares the edge evidence's band ({names}); a number compares the band's score ({scores}), so e.confidence >= 0.85 keeps high and exact edges. source_type = takes a name from evidence_source_types, and source names the pass that recorded the evidence, such as open-kioku-graph or open-kioku-resolution."
+        "confidence = 'high' compares the edge evidence's band ({names}); a number compares the band's score ({scores}), so e.confidence >= 0.85 keeps high and exact edges. evidence_source_type = takes a name from evidence_source_types, and evidence_source names the pass that recorded the evidence, such as open-kioku-graph or open-kioku-resolution; neither names the edge's source node, which is the node variable on its left."
     )
 }
 
@@ -496,8 +499,8 @@ fn query_examples() -> Vec<GraphQueryExample> {
             "Calls into functions defined in src/config.rs. On a symbol node file_path is the path of the File node that defines it, not the node's label.",
         ),
         (
-            "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 AND c.source_type = 'tree_sitter' RETURN a, b",
-            "Calls recorded from tree-sitter evidence at high or exact confidence. The edge variable c exists for WHERE only; source, source_type and confidence are read from the edge's evidence.",
+            "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 AND c.evidence_source_type = 'tree_sitter' RETURN a, b",
+            "Calls recorded from tree-sitter evidence at high or exact confidence. The edge variable c exists for WHERE only; evidence_source, evidence_source_type and confidence are read from the edge's evidence.",
         ),
     ]
     .into_iter()
@@ -598,7 +601,7 @@ fn unsupported_query_forms() -> Vec<UnsupportedGraphQueryForm> {
         unsupported(
             "evidence_field_on_a_node",
             "MATCH (a:Function)-[:CALLS]->(b:Function) WHERE b.confidence >= 0.85 RETURN a",
-            "Nodes carry no source, source_type or confidence; bind the edge and filter its evidence: MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 RETURN a.",
+            "Nodes carry no evidence_source, evidence_source_type or confidence; bind the edge and filter its evidence: MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 RETURN a.",
         ),
         unsupported(
             "inline_property_map",
@@ -1001,8 +1004,8 @@ mod tests {
         }
     }
 
-    // The parser validates `source_type =` by deserializing the value and lists these names when
-    // it fails, so the list must be exactly the serialized variants.
+    // The parser validates `evidence_source_type =` by deserializing the value and lists these
+    // names when it fails, so the list must be exactly the serialized variants.
     #[test]
     fn evidence_source_types_are_every_serialized_source_type() {
         let mut variants = std::collections::BTreeSet::new();

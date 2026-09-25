@@ -171,19 +171,19 @@ fn where_fields_resolve_against_a_sqlite_index() {
     assert_eq!(
         rows_of(
             &store,
-            &format!("{calls} c.confidence >= 0.9 AND c.source_type = 'scip' RETURN b"),
+            &format!("{calls} c.confidence >= 0.9 AND c.evidence_source_type = 'scip' RETURN b"),
         ),
         ["symbol:parse_config"]
     );
     assert!(rows_of(
         &store,
-        &format!("{calls} c.source = 'open-kioku-graph' RETURN b"),
+        &format!("{calls} c.evidence_source = 'open-kioku-graph' RETURN b"),
     )
     .is_empty());
     assert_eq!(
         rows_of(
             &store,
-            &format!("{calls} c.source = 'open-kioku-resolution' RETURN b"),
+            &format!("{calls} c.evidence_source = 'open-kioku-resolution' RETURN b"),
         ),
         ["symbol:parse_config"]
     );
