@@ -3,11 +3,15 @@
 //! imported index snapshot, whose rows were admitted under someone else's configuration — is
 //! judged by exactly the rules `ok index` would apply here, not by a re-implementation of them.
 
-use crate::{build_ignore_matcher, compile_globs, git_ignore, is_hidden_path, ScopedIgnoreMatcher};
+use crate::{
+    build_ignore_matcher, compile_globs, git_ignore, is_hidden_path, top_level_dir,
+    ScopedIgnoreMatcher,
+};
 use globset::GlobSet;
 use open_kioku_config::OkConfig;
-use open_kioku_core::{SkipReason, SkipSource};
+use open_kioku_core::{File, IndexQuality, SkipReason, SkipSource, SkippedPath};
 use open_kioku_errors::Result;
+use open_kioku_languages::is_supported_code;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -114,6 +118,64 @@ impl IndexPathPolicy {
         }
         None
     }
+}
+
+/// Record in `quality` that `file`, which an index counted as indexed, is excluded by
+/// `exclusion` after all: moved from `indexed` to the skip reason in the coverage record and
+/// listed among the skipped paths, as discovery records a file it skips, so the coverage an
+/// imported index reports agrees with the files it serves.
+pub fn record_excluded_indexed_file(
+    quality: &mut IndexQuality,
+    file: &File,
+    exclusion: PolicyExclusion,
+) {
+    quality.skipped_paths.push(SkippedPath {
+        path: if exclusion.safe_to_show {
+            file.path.clone()
+        } else {
+            PathBuf::from("[redacted]")
+        },
+        reason: exclusion.reason,
+        source: exclusion.source,
+        safe_to_show: exclusion.safe_to_show,
+    });
+    if !is_supported_code(&file.language) {
+        return;
+    }
+    if let Some(coverage) = quality.coverage.as_mut() {
+        coverage.record_indexed_dropped(&file.language, file.is_generated, exclusion.reason);
+        let top_dir = exclusion
+            .safe_to_show
+            .then(|| top_level_dir(&file.path))
+            .flatten();
+        coverage.record_policy_exclusion(&file.language, exclusion.source, top_dir.as_deref());
+    }
+}
+
+/// Withhold, under this repository's `[security] redact_secrets`, every secret-like path an
+/// index recorded as skipped: an index written elsewhere may have run with redaction off.
+/// A directory named in the coverage record that is itself secret-like (`.ssh`) is dropped
+/// from it for the same reason. Returns how many entries were withheld.
+pub fn redact_recorded_skips(quality: &mut IndexQuality, config: &OkConfig) -> usize {
+    if !config.security.redact_secrets {
+        return 0;
+    }
+    let mut withheld = 0;
+    for skipped in &mut quality.skipped_paths {
+        if skipped.safe_to_show && open_kioku_core::is_secret_like_path(&skipped.path) {
+            skipped.path = PathBuf::from("[redacted]");
+            skipped.safe_to_show = false;
+            withheld += 1;
+        }
+    }
+    if let Some(coverage) = quality.coverage.as_mut() {
+        let before = coverage.policy_excluded_dirs.len();
+        coverage
+            .policy_excluded_dirs
+            .retain(|dir, _| !open_kioku_core::is_secret_like_path(Path::new(dir)));
+        withheld += before - coverage.policy_excluded_dirs.len();
+    }
+    withheld
 }
 
 #[cfg(test)]
