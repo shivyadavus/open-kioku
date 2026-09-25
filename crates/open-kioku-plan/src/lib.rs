@@ -490,6 +490,11 @@ impl<'a> PlanEngine<'a> {
                 risk.reasons.push(reason);
             }
         }
+        // A disclosure, not a confidence input: the cap drops targets because the change has
+        // many tests, and nothing about the planned ones is less certain for it.
+        if let Some(reason) = validation_cap_reason(validation_omitted_ids.len()) {
+            risk.reasons.push(reason);
+        }
         let relevant_symbols = context
             .primary_symbols
             .iter()
@@ -502,8 +507,13 @@ impl<'a> PlanEngine<'a> {
             &impact,
             &context.recommended_change_boundary,
         );
-        let recommended_next_steps =
-            next_steps(&primary_context, &impact, &validation, &self.memory_facts);
+        let recommended_next_steps = next_steps(
+            &primary_context,
+            &impact,
+            &validation,
+            validation_omitted_ids.len(),
+            &self.memory_facts,
+        );
         let tool_calls = tool_calls(
             task,
             impact_target,
@@ -553,9 +563,6 @@ impl<'a> PlanEngine<'a> {
             &evidence_quality,
             exact_reference_count,
         );
-        if let Some(caveat) = validation_cap_caveat(validation_omitted_ids.len()) {
-            confidence_breakdown.add_caveats([caveat], exact_reference_count);
-        }
         let mut confidence_summary = confidence_summary(&confidence_breakdown);
         // RI3.7: the plan states its relationship claims with their authority split rather
         // than presenting heuristic dependents as certainty.
@@ -775,9 +782,9 @@ pub fn select_validation_targets(tests: Vec<TestTarget>) -> ValidationSelection 
     }
 }
 
-/// The caveat a plan carries when its validation bound dropped plausible targets. Absent under
-/// the cap, so its presence is itself the signal.
-fn validation_cap_caveat(omitted: usize) -> Option<String> {
+/// The risk reason a plan carries when its validation bound dropped plausible targets. Absent
+/// under the cap, so its presence is itself the signal.
+fn validation_cap_reason(omitted: usize) -> Option<String> {
     match omitted {
         0 => None,
         1 => Some(format!(
@@ -1901,6 +1908,7 @@ fn next_steps(
     primary_context: &[SearchResult],
     impact: &ImpactReport,
     validation: &[TestTarget],
+    validation_omitted: usize,
     memory_facts: &[MemorySearchResult],
 ) -> Vec<String> {
     let mut steps = Vec::new();
@@ -1920,6 +1928,11 @@ fn next_steps(
         steps.push("No indexed tests were found; choose a manual validation command.".into());
     } else {
         steps.push("Run the recommended validation commands after the change.".into());
+    }
+    if validation_omitted > 0 {
+        steps.push(format!(
+            "Decide whether to also run the {validation_omitted} plausible validation target(s) past the plan's cap; `ok verify` reports each one as a missing test."
+        ));
     }
     steps.push(
         "Keep edits within allowed files unless new evidence justifies expanding scope.".into(),
@@ -4633,7 +4646,7 @@ mod tests {
         assert!(!omitted.contains(&"skips stale rows"), "{omitted:?}");
         assert!(!omitted.contains(&"rounds"), "{omitted:?}");
         assert_eq!(
-            validation_cap_caveat(selection.omitted_by_cap.len()).as_deref(),
+            validation_cap_reason(selection.omitted_by_cap.len()).as_deref(),
             Some("validation selection capped at 8 targets; 4 further plausible targets were not planned")
         );
     }
@@ -4648,9 +4661,9 @@ mod tests {
         let selection = select_validation_targets(candidates);
         assert_eq!(selection.selected.len(), MAX_VALIDATION);
         assert!(selection.omitted_by_cap.is_empty());
-        assert_eq!(validation_cap_caveat(0), None);
+        assert_eq!(validation_cap_reason(0), None);
         assert_eq!(
-            validation_cap_caveat(1).as_deref(),
+            validation_cap_reason(1).as_deref(),
             Some("validation selection capped at 8 targets; 1 further plausible target was not planned")
         );
     }
@@ -4671,10 +4684,27 @@ mod tests {
             assert!(!plan.validation.iter().any(|test| &test.id == id), "{id}");
         }
         assert!(
-            plan.confidence_breakdown.caveats.iter().any(|caveat| caveat
+            plan.risk.reasons.iter().any(|reason| reason
                 == "validation selection capped at 8 targets; 4 further plausible targets were not planned"),
             "{:?}",
+            plan.risk.reasons
+        );
+        // Many tests is not missing evidence: the cap discloses, it never prices confidence.
+        assert!(
+            !plan
+                .confidence_breakdown
+                .caveats
+                .iter()
+                .any(|caveat| caveat.starts_with("validation selection capped")),
+            "{:?}",
             plan.confidence_breakdown.caveats
+        );
+        assert!(
+            plan.recommended_next_steps
+                .iter()
+                .any(|step| step.contains("4 plausible validation target(s) past the plan's cap")),
+            "{:?}",
+            plan.recommended_next_steps
         );
         let json = serde_json::to_value(&plan).unwrap();
         assert_eq!(json["validation_omitted"], 4);
@@ -4805,7 +4835,7 @@ mod tests {
         store
     }
 
-    /// A plan under the cap serializes no omission fields and no truncation caveat, so their
+    /// A plan under the cap serializes no omission fields and no truncation reason, so their
     /// presence is itself the signal.
     #[test]
     fn a_plan_under_the_cap_serializes_no_omission() {
@@ -4818,12 +4848,20 @@ mod tests {
         assert!(json.get("validation_omitted_ids").is_none(), "{json}");
         assert!(
             !plan
-                .confidence_breakdown
-                .caveats
+                .risk
+                .reasons
                 .iter()
-                .any(|caveat| caveat.starts_with("validation selection capped")),
+                .any(|reason| reason.starts_with("validation selection capped")),
             "{:?}",
-            plan.confidence_breakdown.caveats
+            plan.risk.reasons
+        );
+        assert!(
+            !plan
+                .recommended_next_steps
+                .iter()
+                .any(|step| step.contains("past the plan's cap")),
+            "{:?}",
+            plan.recommended_next_steps
         );
     }
 
