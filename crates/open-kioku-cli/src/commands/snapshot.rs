@@ -238,8 +238,8 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
     // The manifest is the publication marker and the artifact carries one. The database is
     // moved into place without it, and it is put back once the search index has been rebuilt
     // from the imported rows, as `ok index` publishes its own.
-    if let Err(err) = withhold_snapshot_manifest(&temp_db) {
-        let _ = fs::remove_file(&temp_db);
+    if let Err(err) = withhold_snapshot_manifest(&temp_db, filtered.rows_removed) {
+        remove_staged_db(&temp_db);
         return Err(err);
     }
     let index_path = index_sqlite_path(&repo);
@@ -465,6 +465,8 @@ struct SnapshotPolicyFilter {
     by_source: BTreeMap<String, usize>,
     /// Set when SCIP rows no indexed file owns were removed.
     scip_caveat: Option<String>,
+    /// Whether the policy step removed any row, so the database holds them in free pages.
+    rows_removed: bool,
 }
 
 fn unanchored_scip_caveat(symbols: usize, occurrences: usize) -> String {
@@ -580,6 +582,8 @@ fn apply_local_policy_to_snapshot(
     filter.paths_removed = filter.by_source.values().sum();
     let purge = store.purge_paths(&indexed, &history, &nodes, manifest)?;
     let scip = store.purge_unanchored_scip_rows()?;
+    filter.rows_removed = purge != open_kioku_storage_sqlite::PathPurge::default()
+        || scip != open_kioku_storage_sqlite::ScipPurge::default();
     drop(store);
 
     manifest.file_count = manifest.file_count.saturating_sub(purge.files_removed);
@@ -1870,11 +1874,21 @@ fn roll_back_to_previous_index(
 /// alone, so the delete is committed in rollback-journal mode, where it is in that file when
 /// the statement returns; a WAL frame left beside the file would be lost with the manifest
 /// still in it.
-fn withhold_snapshot_manifest(db: &Path) -> anyhow::Result<()> {
+///
+/// With `compact`, the database is then rewritten with `VACUUM`. SQLite keeps deleted rows in
+/// free pages until it reuses them, so after the local policy removed rows the file would
+/// still hold the names it withheld, and the artifact's manifest, which names them in its
+/// quality notes, though no query serves either. Compacting after the manifest is gone leaves
+/// no free page behind; the manifest published later is written into new pages.
+fn withhold_snapshot_manifest(db: &Path, compact: bool) -> anyhow::Result<()> {
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .with_context(|| format!("opening {} to withhold its manifest", db.display()))?;
     conn.execute_batch("PRAGMA journal_mode = DELETE; DELETE FROM manifests;")
         .with_context(|| format!("withholding the index manifest of {}", db.display()))?;
+    if compact {
+        conn.execute_batch("VACUUM;")
+            .with_context(|| format!("compacting staged snapshot {}", db.display()))?;
+    }
     Ok(())
 }
 
