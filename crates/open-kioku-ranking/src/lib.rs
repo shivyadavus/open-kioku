@@ -1294,11 +1294,11 @@ mod tests {
 
     #[test]
     fn exact_structured_identifier_outranks_a_higher_scoring_prefix_match() {
-        let mut exact = make_result("src/DispatcherServlet.java", 32.0);
+        let mut exact = make_result("src/RouterRegistry.java", 32.0);
         exact.symbol = Some(Symbol {
-            id: SymbolId::new("dispatcher-servlet"),
-            name: "DispatcherServlet".into(),
-            qualified_name: "org.springframework.web.DispatcherServlet".into(),
+            id: SymbolId::new("router-registry"),
+            name: "RouterRegistry".into(),
+            qualified_name: "com.acme.web.RouterRegistry".into(),
             kind: SymbolKind::Class,
             file_id: FileId::new("exact"),
             range: Some(LineRange::single(1)),
@@ -1311,11 +1311,11 @@ mod tests {
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
         });
-        let mut prefix = make_result("src/Dispatcher.java", 42.0);
+        let mut prefix = make_result("src/Router.java", 42.0);
         prefix.symbol = Some(Symbol {
-            id: SymbolId::new("dispatcher"),
-            name: "Dispatcher".into(),
-            qualified_name: "org.springframework.cglib.Dispatcher".into(),
+            id: SymbolId::new("router"),
+            name: "Router".into(),
+            qualified_name: "com.acme.proxy.Router".into(),
             kind: SymbolKind::Class,
             file_id: FileId::new("prefix"),
             range: Some(LineRange::single(1)),
@@ -1332,12 +1332,12 @@ mod tests {
         let results = rerank_with_options(
             vec![prefix, exact],
             &RankingOptions {
-                query: Some("DispatcherServlet".into()),
+                query: Some("RouterRegistry".into()),
                 ..RankingOptions::default()
             },
         );
 
-        assert_eq!(results[0].path, Path::new("src/DispatcherServlet.java"));
+        assert_eq!(results[0].path, Path::new("src/RouterRegistry.java"));
         assert!(results[0]
             .score_breakdown
             .iter()
