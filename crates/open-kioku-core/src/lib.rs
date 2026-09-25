@@ -3236,11 +3236,14 @@ pub struct SnapshotProvenance {
     pub commits_behind: Option<usize>,
     /// Commits the artifact's commit has that the local `HEAD` does not.
     pub commits_ahead: Option<usize>,
-    /// Tracked files whose working-tree content differs from the artifact's commit, committed
-    /// and uncommitted changes alike; null when that could not be determined.
+    /// Files whose working-tree content differs from the artifact's commit: tracked files
+    /// changed since it, committed or not, and untracked files Git does not ignore; null when
+    /// that could not be determined.
     pub changed_files: Option<usize>,
-    /// Imported files removed because the local index policy excludes them (secret-like and
-    /// denied paths, hidden files, `[index] exclude`, `.gitignore`, `.okignore`).
+    /// Paths removed from the imported index because the local index policy excludes them:
+    /// indexed files and documents excluded by any rule (secret-like and denied paths, hidden
+    /// files, `[index] exclude`, `.gitignore`, `.okignore`), and paths named only in Git
+    /// history or by a graph node no file owns that are secret-like or denied.
     pub policy_filtered: usize,
 }
 
@@ -3257,19 +3260,21 @@ pub enum SnapshotRevisionRelation {
 }
 
 impl SnapshotProvenance {
-    /// The caveat every answer from this index carries, or `None` when the imported rows
-    /// describe exactly the local checkout's committed and working-tree content.
+    /// The caveat every answer from this index carries, or `None` when the artifact was built
+    /// from the checked-out commit and no tracked or untracked, non-ignored file differs from
+    /// it. The exporter's own uncommitted changes are not recorded, so `None` rests on the
+    /// artifact having been exported from its commit's content.
     pub fn caveat(&self) -> Option<String> {
         let short = |commit: &str| commit.chars().take(12).collect::<String>();
         let from = short(&self.imported_from_commit);
         let changed = match self.changed_files {
-            Some(count) => format!("{count} tracked file(s) differ from it"),
+            Some(count) => format!("{count} file(s) in the working tree differ from it"),
             None => "the files that differ from it are unknown".into(),
         };
         let revision = match self.relation {
             SnapshotRevisionRelation::SameCommit if self.changed_files == Some(0) => return None,
             SnapshotRevisionRelation::SameCommit => {
-                format!("the index was imported from a snapshot of the checked-out commit {from}, but {changed} in the working tree")
+                format!("the index was imported from a snapshot of the checked-out commit {from}, but {changed}")
             }
             SnapshotRevisionRelation::Related => format!(
                 "the index was imported from a snapshot of commit {from}, {} commit(s) behind and {} ahead of the local HEAD; {changed}",

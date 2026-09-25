@@ -2079,6 +2079,71 @@ fn snapshot_import_refuses_an_artifact_this_repository_cannot_relate_to_head() {
     assert_eq!(status_json(repo)["snapshot"]["relation"], "foreign");
 }
 
+/// FNV-1a over `value`, as the graph dictionaries key their entries.
+fn graph_string_hash(value: &str) -> i64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash as i64
+}
+
+/// Replace `from` with `to` in every text column of every table, keeping column and JSON in
+/// step and re-keying the graph dictionaries, so the result is what a consistent writer that
+/// had indexed the file under `to` would have stored.
+fn rename_everywhere(db: &std::path::Path, from: &str, to: &str) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let tables = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    for table in tables {
+        let columns = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(_, kind)| kind.eq_ignore_ascii_case("TEXT"))
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        for column in columns {
+            conn.execute(
+                &format!(
+                    "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
+                     WHERE {column} LIKE '%' || ?1 || '%'"
+                ),
+                [from, to],
+            )
+            .unwrap();
+        }
+    }
+    for table in ["graph_strings", "call_site_strings"] {
+        let rows = conn
+            .prepare(&format!("SELECT sid, value FROM {table}"))
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        for (sid, value) in rows {
+            conn.execute(
+                &format!("UPDATE {table} SET vhash = ?1 WHERE sid = ?2"),
+                rusqlite::params![graph_string_hash(&value), sid],
+            )
+            .unwrap();
+        }
+    }
+}
+
 #[test]
 fn snapshot_import_serves_no_path_the_local_policy_excludes() {
     let temp = snapshot_fixture_repo_with(&[
@@ -2088,45 +2153,13 @@ fn snapshot_import_serves_no_path_the_local_policy_excludes() {
     ]);
     let repo = temp.path();
     // An exporter that indexed a secret-like path: an older release, another policy, or a
-    // crafted artifact. Every stored mention of `src/vault.rs` becomes `deploy/vault.key`,
-    // except in the graph dictionary, whose rows are found by a hash of their value: the
-    // graph keeps the file's own name and goes with the file's nodes.
-    {
-        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
-        let tables = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect::<Vec<_>>();
-        for table in tables {
-            if table.starts_with("graph_") {
-                continue;
-            }
-            let columns = conn
-                .prepare(&format!("PRAGMA table_info({table})"))
-                .unwrap()
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-                })
-                .unwrap()
-                .map(Result::unwrap)
-                .filter(|(_, kind)| kind.eq_ignore_ascii_case("TEXT"))
-                .map(|(name, _)| name)
-                .collect::<Vec<_>>();
-            for column in columns {
-                conn.execute(
-                    &format!(
-                        "UPDATE {table} SET {column} = replace({column}, 'src/vault.rs', \
-                         'deploy/vault.key') WHERE {column} LIKE '%src/vault.rs%'"
-                    ),
-                    [],
-                )
-                .unwrap();
-            }
-        }
-    }
+    // crafted artifact. Every stored mention of `src/vault.rs` becomes `deploy/vault.key`, in
+    // every table, graph included; the graph dictionary is re-keyed so it stays consistent.
+    rename_everywhere(
+        &repo.join(".ok/index.sqlite"),
+        "src/vault.rs",
+        "deploy/vault.key",
+    );
     export_snapshot(repo);
     // The importing checkout excludes `legacy/`; the exporter did not.
     let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
@@ -2218,6 +2251,89 @@ fn snapshot_import_serves_no_path_the_local_policy_excludes() {
     };
     assert_eq!(history_rows("%vault%"), 0);
     assert!(history_rows("legacy/old.rs") > 0);
+    drop(conn);
+
+    // The coverage the index reports agrees with what it serves: both files are counted as
+    // excluded by the rule that excluded them, and the secret-like one is not named.
+    let status = status_json(repo);
+    let excluded = &status["coverage"]["policy_excluded_by_source"];
+    assert_eq!(excluded["security_policy"], 1, "{status}");
+    assert_eq!(excluded["config_exclude"], 1, "{status}");
+    assert!(!status.to_string().contains("vault.key"), "{status}");
+}
+
+/// The policy is decided on each row's path column, and readers serve the path in its JSON.
+/// An artifact whose two disagree, or whose graph dictionary is keyed wrongly, is refused
+/// before anything is replaced: judged by one path and served under another, a secret-like
+/// path would pass the policy.
+#[test]
+fn snapshot_import_refuses_rows_whose_served_path_differs_from_their_column() {
+    let cases: [(&str, &str); 3] = [
+        (
+            "files",
+            "UPDATE files SET json = json_set(json, '$.path', '.env') WHERE path = 'src/lib.rs'",
+        ),
+        (
+            "file history",
+            "UPDATE git_file_touches SET json = json_set(json, '$.path', 'deploy/id_rsa') \
+             WHERE path = 'src/lib.rs'",
+        ),
+        (
+            "graph dictionary",
+            "UPDATE graph_strings SET value = 'deploy/id_rsa' WHERE value = 'src/lib.rs'",
+        ),
+    ];
+    for (name, tamper) in cases {
+        let temp = snapshot_fixture_repo();
+        let repo = temp.path();
+        export_snapshot(repo);
+        // Tamper with the artifact itself: expand it, change one row, compress it again and
+        // restate its sizes, so every structural check still passes.
+        let artifacts = repo.join(".ok/artifacts");
+        let db = artifacts.join("tampered.sqlite");
+        let compressed = fs::read(artifacts.join("index.snapshot.zst")).unwrap();
+        fs::write(&db, zstd::decode_all(compressed.as_slice()).unwrap()).unwrap();
+        let changed = rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(tamper, [])
+            .unwrap();
+        assert!(changed > 0, "{name}: the tamper must change a row");
+        let raw = fs::read(&db).unwrap();
+        let recompressed = zstd::encode_all(raw.as_slice(), 1).unwrap();
+        fs::write(artifacts.join("index.snapshot.zst"), &recompressed).unwrap();
+        let metadata_path = artifacts.join("index.snapshot.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
+        metadata["original_size_bytes"] = raw.len().into();
+        metadata["compressed_size_bytes"] = recompressed.len().into();
+        fs::write(&metadata_path, metadata.to_string()).unwrap();
+        fs::remove_file(&db).unwrap();
+
+        let original_index = fs::read(repo.join(".ok/index.sqlite")).unwrap();
+        let (_, stderr) = run_failure({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["snapshot", "import", "--allow-foreign"]);
+            command
+        });
+        assert!(stderr.contains("rows are inconsistent"), "{name}: {stderr}");
+        assert_eq!(
+            fs::read(repo.join(".ok/index.sqlite")).unwrap(),
+            original_index,
+            "{name}: the current index must be left in place"
+        );
+        let leftovers = fs::read_dir(&artifacts)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers.is_empty(),
+            "{name}: staged files left: {leftovers:?}"
+        );
+    }
 }
 
 #[test]

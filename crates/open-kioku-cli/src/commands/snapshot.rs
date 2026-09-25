@@ -224,23 +224,14 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
             return Err(err);
         }
     };
-    let filtered = match apply_local_policy_to_snapshot(&repo, &temp_db, &temp_manifest) {
+    let mut temp_manifest = temp_manifest;
+    let filtered = match apply_local_policy_to_snapshot(&repo, &temp_db, &mut temp_manifest) {
         Ok(filtered) => filtered,
         Err(err) => {
-            let _ = fs::remove_file(&temp_db);
+            remove_staged_db(&temp_db);
             return Err(err);
         }
     };
-    let mut temp_manifest = temp_manifest;
-    temp_manifest.file_count = temp_manifest
-        .file_count
-        .saturating_sub(filtered.purge.files_removed);
-    temp_manifest.symbol_count = temp_manifest
-        .symbol_count
-        .saturating_sub(filtered.purge.symbols_removed);
-    temp_manifest.chunk_count = temp_manifest
-        .chunk_count
-        .saturating_sub(filtered.purge.chunks_removed);
     let provenance = revision.into_provenance(filtered.paths_removed);
     temp_manifest.snapshot = Some(provenance.clone());
 
@@ -462,34 +453,59 @@ fn assess_snapshot_revision(
 struct SnapshotPolicyFilter {
     paths_removed: usize,
     by_source: BTreeMap<String, usize>,
-    purge: open_kioku_storage_sqlite::PathPurge,
 }
 
-/// Apply this repository's index policy to the staged database, with the ingest crate's own
-/// rules, so an imported index holds what `ok index` here would admit:
+/// Check the staged database and apply this repository's index policy to it, with the
+/// ingest crate's own rules, so an imported index holds what `ok index` here would admit.
 ///
+/// First, the rows must agree with each other where readers rely on it: the path a row's
+/// column holds is the one its JSON serves, every row belongs to an indexed file, and the
+/// graph dictionary is keyed by its values. The policy below is decided on columns, so a
+/// row that disagrees could carry a path past it; such an artifact is refused outright,
+/// whatever `--allow-foreign` says, because no writer produces one.
+///
+/// Then:
 /// - every indexed file and document the policy excludes (secret-like or denied, hidden,
-///   `[index] exclude`, `.gitignore`, `.okignore`) is removed with every row derived from it;
-/// - every Git history row naming a secret-like or denied path is removed too. `ok index`
-///   records history for every touched path, so this is stricter than a local index, and it
-///   is what makes it impossible for an artifact to serve a path the security policy denies.
+///   `[index] exclude`, `.gitignore`, `.okignore`) is removed with every row derived from it,
+///   and recorded in the manifest's coverage and skipped paths as discovery records a skip;
+/// - every Git history row, and every graph node no file owns, naming a secret-like or
+///   denied path is removed too. `ok index` records history for every touched path, so this
+///   is stricter than a local index, and it is what keeps an artifact from serving a path
+///   the security policy denies;
+/// - secret-like paths the exporter recorded as skipped are withheld under this repository's
+///   `redact_secrets`.
 ///
-/// The search index is rebuilt from the database afterwards, so it never sees them.
+/// Rules that do not depend on local configuration — vendor detection, pruning of build and
+/// dependency directories, the size limit, symlinks — are not applied again. The search index
+/// is rebuilt from the database afterwards, so it never sees what was removed.
 fn apply_local_policy_to_snapshot(
     repo: &Path,
     temp_db: &Path,
-    manifest: &IndexManifest,
+    manifest: &mut IndexManifest,
 ) -> anyhow::Result<SnapshotPolicyFilter> {
     let config = OkConfig::load_from_repo(repo)
         .with_context(|| format!("loading the index policy of {}", repo.display()))?;
     let store = SqliteStore::open(temp_db)
         .with_context(|| format!("opening staged snapshot {}", temp_db.display()))?;
+    let violations = store.consistency_violations()?;
+    if !violations.is_empty() {
+        anyhow::bail!(
+            "snapshot import refused: the artifact's rows are inconsistent in ways no Open \
+             Kioku writer produces, so the paths it would serve cannot be checked against \
+             this repository's index policy ({}). Re-export it with `ok snapshot export`, or \
+             run `ok index`.",
+            violations.join("; ")
+        );
+    }
     let stored = store.stored_paths()?;
-    let candidates = stored
-        .indexed
-        .union(&stored.history)
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut candidates = stored.indexed.union(&stored.history).cloned().collect::<BTreeSet<_>>();
+    candidates.extend(
+        stored
+            .unanchored_nodes
+            .iter()
+            .map(|(_, label)| PathBuf::from(label)),
+    );
+    let candidates = candidates.into_iter().collect::<Vec<_>>();
     let policy = open_kioku_ingest::path_policy::IndexPathPolicy::for_paths(
         repo,
         &config,
@@ -498,12 +514,13 @@ fn apply_local_policy_to_snapshot(
     let mut filter = SnapshotPolicyFilter::default();
     let mut indexed = BTreeSet::new();
     let mut history = BTreeSet::new();
-    for path in candidates {
-        let Some(exclusion) = policy.exclusion(&path) else {
+    let mut excluded_files = Vec::new();
+    for path in &candidates {
+        let Some(exclusion) = policy.exclusion(path) else {
             continue;
         };
         let security = exclusion.source == open_kioku_core::SkipSource::SecurityPolicy;
-        let in_index = stored.indexed.contains(&path);
+        let in_index = stored.indexed.contains(path);
         if !in_index && !security {
             continue;
         }
@@ -512,15 +529,47 @@ fn apply_local_policy_to_snapshot(
             .entry(skip_source_key(exclusion.source))
             .or_default() += 1;
         if in_index {
+            if let Some(file) = store.get_file_by_path(path)? {
+                excluded_files.push((file, exclusion));
+            }
             indexed.insert(path.clone());
         }
         if security {
-            history.insert(path);
+            history.insert(path.clone());
         }
     }
+    let nodes = stored
+        .unanchored_nodes
+        .iter()
+        .filter(|(_, label)| history.contains(Path::new(label)))
+        .map(|(id, _)| id.clone())
+        .collect::<BTreeSet<_>>();
     filter.paths_removed = filter.by_source.values().sum();
-    filter.purge = store.purge_paths(&indexed, &history, manifest)?;
+    let purge = store.purge_paths(&indexed, &history, &nodes, manifest)?;
+    drop(store);
+
+    manifest.file_count = manifest.file_count.saturating_sub(purge.files_removed);
+    manifest.symbol_count = manifest.symbol_count.saturating_sub(purge.symbols_removed);
+    manifest.chunk_count = manifest.chunk_count.saturating_sub(purge.chunks_removed);
+    for (file, exclusion) in &excluded_files {
+        open_kioku_ingest::path_policy::record_excluded_indexed_file(
+            &mut manifest.quality,
+            file,
+            *exclusion,
+        );
+    }
+    open_kioku_ingest::path_policy::redact_recorded_skips(&mut manifest.quality, &config);
     Ok(filter)
+}
+
+/// Remove a staged database and the sidecar files an open connection left beside it.
+fn remove_staged_db(temp_db: &Path) {
+    let _ = fs::remove_file(temp_db);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = temp_db.as_os_str().to_owned();
+        sidecar.push(suffix);
+        let _ = fs::remove_file(PathBuf::from(sidecar));
+    }
 }
 
 fn skip_source_key(source: open_kioku_core::SkipSource) -> String {
@@ -624,6 +673,20 @@ fn snapshot_doctor(repo: &Path) -> SnapshotDoctorReport {
                                     Err(err) => errors.push(err.to_string()),
                                 }
                             }
+                            // The import's consistency check, on this throwaway copy.
+                            match SqliteStore::open(&temp_db)
+                                .and_then(|store| store.consistency_violations())
+                            {
+                                Ok(violations) => errors.extend(violations.into_iter().map(
+                                    |violation| {
+                                        format!(
+                                            "snapshot rows are inconsistent and would be \
+                                             refused on import: {violation}"
+                                        )
+                                    },
+                                )),
+                                Err(err) => errors.push(err.to_string()),
+                            }
                         }
                         Ok(None) => errors.push("snapshot database has no index manifest".into()),
                         Err(err) => errors.push(err.to_string()),
@@ -631,7 +694,7 @@ fn snapshot_doctor(repo: &Path) -> SnapshotDoctorReport {
                 }
                 Err(err) => errors.push(err.to_string()),
             }
-            let _ = fs::remove_file(&temp_db);
+            remove_staged_db(&temp_db);
         }
     }
 

@@ -1661,7 +1661,7 @@ fn snapshot_provenance_summary(snapshot: &open_kioku_core::SnapshotProvenance) -
         Relation::Foreign => "a revision not verified against this checkout".to_string(),
     };
     format!(
-        "imported from {} ({revision}); {} changed tracked file(s) at import; {} path(s) removed by local index policy",
+        "imported from {} ({revision}); {} changed file(s) at import; {} path(s) removed by local index policy",
         snapshot.imported_from_commit,
         count(snapshot.changed_files),
         snapshot.policy_filtered
