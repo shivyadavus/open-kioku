@@ -5772,11 +5772,20 @@ fn path_and_dependency_path_resolve_the_same_nodes() {
     assert!(stderr.contains(unresolved), "{stderr}");
 }
 
+/// What the lock holder prints once it holds the lock.
+const INDEX_LOCK_HELD: &str = "ok-test: index lock held";
+/// The line that tells the lock holder to release the lock as a finishing writer does.
+const INDEX_LOCK_RELEASE: &str = "release";
+
 /// Holds the index writer lock from a separate process for the tests that need a live writer,
-/// which re-run this test binary through [`spawn_index_lock_holder`] with
+/// which re-run this test binary through [`IndexLockHolder::spawn`] with
 /// `OK_TEST_HOLD_INDEX_LOCK` naming the repository. Without the variable there is nothing to
-/// hold and it returns at once. It also returns when its stdin closes, so a parent that fails
-/// before releasing it does not leave it running.
+/// hold and it returns at once.
+///
+/// Only an explicit release line takes the normal release path, which removes the lock file.
+/// Stdin closing without one means the parent went away, and the holder exits with an error
+/// status and no destructors, so a holder that stops early is never mistaken for one that was
+/// released or killed on purpose (#478).
 #[test]
 fn hold_index_lock_for_a_parent_test() {
     let Some(repo) = std::env::var_os("OK_TEST_HOLD_INDEX_LOCK") else {
@@ -5787,38 +5796,146 @@ fn hold_index_lock_for_a_parent_test() {
         std::time::Duration::from_secs(10),
     )
     .expect("the parent test leaves the lock free");
-    let mut sink = Vec::new();
-    let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+    // Straight to the stdout handle: the harness captures `println!`, not this.
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{INDEX_LOCK_HELD}")
+        .and_then(|()| stdout.flush())
+        .expect("the parent reads the readiness line");
+    drop(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match std::io::stdin().read_line(&mut line) {
+            Ok(0) => {
+                eprintln!("ok-test: stdin closed before the parent released the index lock");
+                std::process::exit(3);
+            }
+            Ok(_) if line.trim_end() == INDEX_LOCK_RELEASE => return,
+            Ok(_) => eprintln!("ok-test: ignoring unexpected holder input {line:?}"),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                eprintln!("ok-test: reading the release line failed: {error}");
+                std::process::exit(3);
+            }
+        }
+    }
 }
 
-/// A separate process holding `repo`'s index writer lock, returned once it holds it. Closing
-/// its stdin releases the lock as a finishing writer does; killing it releases the lock as
-/// Ctrl-C or the OOM killer would.
-fn spawn_index_lock_holder(repo: &std::path::Path) -> std::process::Child {
-    let mut holder = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "hold_index_lock_for_a_parent_test",
-            "--exact",
-            "--test-threads=1",
-        ])
-        .env("OK_TEST_HOLD_INDEX_LOCK", repo)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the lock holder should spawn");
-    let waiting_since = std::time::Instant::now();
-    while !open_kioku_storage::generations::index_write_in_progress(repo) {
-        if let Some(status) = holder.try_wait().unwrap() {
-            panic!("the lock holder exited before taking the lock: {status}");
+/// A separate process holding a repository's index writer lock. [`Self::release`] releases it
+/// as a finishing writer does; [`Self::kill`] releases it as Ctrl-C or the OOM killer would.
+/// Both first prove the holder is still alive, and every failure carries its output.
+struct IndexLockHolder {
+    child: std::process::Child,
+    /// The holder's stdout and stderr, as files so nothing blocks on a pipe the holder fills.
+    output_dir: tempfile::TempDir,
+}
+
+impl IndexLockHolder {
+    /// Returns once the holder has said it holds the lock and the lock reads as held.
+    fn spawn(repo: &std::path::Path) -> Self {
+        let output_dir = tempfile::tempdir().unwrap();
+        let stdout = fs::File::create(output_dir.path().join("stdout")).unwrap();
+        let stderr = fs::File::create(output_dir.path().join("stderr")).unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "hold_index_lock_for_a_parent_test",
+                "--exact",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("OK_TEST_HOLD_INDEX_LOCK", repo)
+            .stdin(Stdio::piped())
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .expect("the lock holder should spawn");
+        let mut holder = Self { child, output_dir };
+        let waiting_since = std::time::Instant::now();
+        while !holder.stdout().contains(INDEX_LOCK_HELD) {
+            holder.assert_alive("before taking the lock");
+            assert!(
+                waiting_since.elapsed() < std::time::Duration::from_secs(60),
+                "the lock holder never took the lock\n{}",
+                holder.output()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(
-            waiting_since.elapsed() < std::time::Duration::from_secs(60),
-            "the lock holder never took the lock"
+            open_kioku_storage::generations::index_write_in_progress(repo),
+            "the holder says it holds the lock, but the lock reads as free\n{}",
+            holder.output()
         );
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        holder
     }
-    holder
+
+    fn stdout(&self) -> String {
+        fs::read_to_string(self.output_dir.path().join("stdout")).unwrap_or_default()
+    }
+
+    fn output(&self) -> String {
+        let stderr = fs::read_to_string(self.output_dir.path().join("stderr")).unwrap_or_default();
+        format!(
+            "holder stdout:\n{}\nholder stderr:\n{stderr}",
+            self.stdout()
+        )
+    }
+
+    fn assert_alive(&mut self, when: &str) {
+        if let Some(status) = self.child.try_wait().unwrap() {
+            panic!("the lock holder exited {when}: {status}\n{}", self.output());
+        }
+    }
+
+    /// Releases the lock the way a finishing `ok index` does: the holder drops it and exits.
+    fn release(&mut self) {
+        self.assert_alive("before it was released");
+        let mut stdin = self.child.stdin.take().expect("the holder's stdin is open");
+        writeln!(stdin, "{INDEX_LOCK_RELEASE}").unwrap();
+        drop(stdin);
+        let status = self.child.wait().unwrap();
+        assert!(
+            status.success(),
+            "the lock holder failed to release: {status}\n{}",
+            self.output()
+        );
+    }
+
+    /// Kills the holder, so no destructor runs, and proves the kill is what ended it.
+    fn kill(&mut self) {
+        self.assert_alive("before it was killed");
+        // `Child::wait` closes the child's stdin before waiting, and a closed stdin is the
+        // holder's cue to stop. SIGKILL is not instantaneous on macOS: a holder thread woken by
+        // that EOF could still run, and before this helper existed it took the normal release
+        // path and deleted the lock file the test then required (#478). Stdin stays open until
+        // the holder has been reaped, so the kill is the only thing that can end it.
+        let stdin = self.child.stdin.take();
+        self.child.kill().unwrap();
+        let status = self.child.wait().unwrap();
+        drop(stdin);
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(9),
+            "the lock holder must end by SIGKILL, not exit on its own: {status}\n{}",
+            self.output()
+        );
+        #[cfg(not(unix))]
+        assert!(
+            !status.success(),
+            "the lock holder must end by the kill, not exit on its own: {status}\n{}",
+            self.output()
+        );
+    }
+}
+
+impl Drop for IndexLockHolder {
+    /// A parent test that fails with the holder alive does not leave it running.
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 /// `.ok/index.lock` means "indexing in progress" only while a live process holds it. A file
@@ -5863,24 +5980,31 @@ fn index_lock_reports_in_progress_only_while_a_live_process_holds_it() {
     );
 
     // A live process holds it: every surface says the index is being built.
-    let mut holder = spawn_index_lock_holder(repo);
+    let mut holder = IndexLockHolder::spawn(repo);
     for args in [
         vec!["status"],
         vec!["--json", "status"],
         vec!["search", "Worker"],
         vec!["impact", "--file", "src/lib.rs"],
     ] {
+        holder.assert_alive("while the read surfaces were probed");
         let (_stdout, stderr) = run_failure({
             let mut command = ok();
             command.arg("--repo").arg(repo).args(&args);
             command
         });
-        assert!(stderr.contains(&expected), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains(&expected),
+            "{args:?}: {stderr}\n{}",
+            holder.output()
+        );
         assert!(
             !stderr.contains("repository is not indexed"),
-            "{args:?} must not call an index being built unindexed: {stderr}"
+            "{args:?} must not call an index being built unindexed: {stderr}\n{}",
+            holder.output()
         );
     }
+    holder.assert_alive("while the read surfaces were probed");
     let (doctor, _stderr) = run_failure({
         let mut command = ok();
         command.arg("doctor").arg(repo);
@@ -5898,9 +6022,12 @@ fn index_lock_reports_in_progress_only_while_a_live_process_holds_it() {
 
     // Killed, as Ctrl-C or the OOM killer would: no destructor runs, so the file stays, and
     // the kernel has released the lock anyway.
-    holder.kill().unwrap();
-    holder.wait().unwrap();
-    assert!(lock_path.exists(), "a killed writer leaves its lock file");
+    holder.kill();
+    assert!(
+        lock_path.exists(),
+        "a killed writer leaves its lock file\n{}",
+        holder.output()
+    );
     assert!(!index_write_in_progress(repo));
     assert_eq!(json_status(repo)["indexed"], false);
     assert_eq!(
@@ -6001,7 +6128,7 @@ fn snapshot_import_waits_for_a_live_index_writer_and_leaves_the_index_untouched(
     let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
     let index_before = fs::read(&db).unwrap();
 
-    let mut holder = spawn_index_lock_holder(&repo);
+    let mut holder = IndexLockHolder::spawn(&repo);
     let mut import = {
         let mut command = ok();
         command
@@ -6035,8 +6162,7 @@ fn snapshot_import_waits_for_a_live_index_writer_and_leaves_the_index_untouched(
         "the previous index stays published while the import waits: {status}"
     );
 
-    drop(holder.stdin.take());
-    holder.wait().unwrap();
+    holder.release();
     let output = import.wait_with_output().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -6261,7 +6387,7 @@ fn snapshot_export_refuses_an_unpublished_index() {
         .1
     };
 
-    let mut holder = spawn_index_lock_holder(&repo);
+    let mut holder = IndexLockHolder::spawn(&repo);
     // What a full `ok index` leaves between staging its rows and publishing the manifest.
     let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
     rusqlite::Connection::open(&db)
@@ -6273,8 +6399,7 @@ fn snapshot_export_refuses_an_unpublished_index() {
     assert!(stderr.contains(&expected), "{stderr}");
     assert!(!metadata_path.exists(), "nothing is exported mid-index");
 
-    drop(holder.stdin.take());
-    holder.wait().unwrap();
+    holder.release();
     let stderr = export(&repo);
     assert!(stderr.contains("repository is not indexed"), "{stderr}");
     assert!(!metadata_path.exists());
