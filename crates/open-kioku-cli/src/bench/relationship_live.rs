@@ -1089,6 +1089,43 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // `self::child::target_fn()` in the crate root continues into the file of `mod child;`.
+        "self_path_out_of_line_child" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod child;\n\npub fn caller_fn() {\n    self::child::target_fn();\n}\n",
+                ),
+                ("src/child.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // `super::child::target_fn()` in `mod tests` leaves the block for the crate root, then
+        // continues into the file of `mod child;`.
+        "mod_block_super_path_out_of_line_child" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod child;\n\n#[cfg(test)]\nmod tests {\n    fn caller_fn() {\n        super::child::target_fn();\n    }\n}\n",
+                ),
+                ("src/child.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // `self::target_fn()` in `mod tests` reaches the file's `target_fn` through `use super::*;`.
+        "mod_block_self_path_super_glob" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod worker;\n"),
+                (
+                    "src/worker.rs",
+                    "pub fn target_fn() {}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    fn caller_fn() {\n        self::target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
         // `callee.rs` beside `callee/mod.rs` leaves the module file ambiguous. The module is not
         // named `target`: discovery skips any `target/` directory as build output, which would
         // index only one of the two files.
