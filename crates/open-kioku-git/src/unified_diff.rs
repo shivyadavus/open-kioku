@@ -168,7 +168,12 @@ pub fn file_header_name(value: &str) -> &str {
     if value.starts_with('"') {
         return value.trim_end_matches('\t');
     }
-    value.split('\t').next().unwrap_or(value)
+    match value.split_once('\t') {
+        Some((name, _)) => name,
+        // Git always appends a TAB after a name containing a space, so a header without one
+        // came from a hand edit or another tool; trailing spaces there are not part of a path.
+        None => value.trim_end_matches(' '),
+    }
 }
 
 /// The hunk header as far as its closing `@@`, leaving out the function-context source line
@@ -308,6 +313,8 @@ mod tests {
             "src/a.rs"
         );
         assert_eq!(file_header_name("b/plain.rs\r"), "b/plain.rs");
+        assert_eq!(file_header_name("b/pasted.rs  "), "b/pasted.rs");
+        assert_eq!(file_header_name("b/sp ace.txt"), "b/sp ace.txt");
         assert_eq!(
             file_header_name("\"b/tab\\there.rs\""),
             "\"b/tab\\there.rs\""
