@@ -24,7 +24,7 @@ import sys
 
 # Directories and filenames whose only purpose is go-to-market material.
 FORBIDDEN_PATHS = [
-    re.compile(r"^docs/launch(/|-|$)"),
+    re.compile(r"^docs/launch([/.-]|$)"),
     re.compile(r"^docs/marketing(/|$)"),
     re.compile(r"^docs/gtm(/|$)"),
 ]
@@ -60,6 +60,18 @@ TEXT_SUFFIXES = (
     ".md", ".markdown", ".txt", ".rs", ".py", ".sh", ".toml", ".json",
     ".yml", ".yaml", ".html", ".js", ".ts", ".tape",
 )
+
+
+def is_text_candidate(path: str) -> bool:
+    """Scan known text suffixes, and any tracked file with no suffix at all.
+
+    Extensionless files are few but are real publishing surfaces -- Dockerfile,
+    LICENSE, NOTICE, demo/CNAME and the git hooks all ship publicly.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if "." not in name:
+        return True
+    return path.endswith(TEXT_SUFFIXES)
 
 
 def tracked_files() -> list[str]:
@@ -114,7 +126,7 @@ def main() -> int:
                 failures.append(f"{path}: path reserved for go-to-market material")
                 break
 
-        if path in EXEMPT or not path.endswith(TEXT_SUFFIXES):
+        if path in EXEMPT or not is_text_candidate(path):
             continue
 
         try:
