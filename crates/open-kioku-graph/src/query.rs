@@ -273,22 +273,22 @@ fn validate_filter(filter: &FilterExpr, binding: Binding<'_>) -> QueryResult<()>
             "Regex filter only allowed on label, qualified_name, and file_path".into(),
         ));
     }
-    if field == "source_type"
+    if field == "evidence_source_type"
         && filter.operator == FilterOperator::Equals
         && serde_json::from_value::<EvidenceSourceType>(Value::String(value.clone())).is_err()
     {
         return Err(GraphQueryError::ParseError(format!(
-            "Unknown source_type: {value}; source types are {}",
+            "Unknown evidence_source_type: {value}; evidence source types are {}",
             evidence_source_types().join(", ")
         )));
     }
-    // `source` is the pass that recorded the evidence, not the node an edge came from. A node label
-    // or id here parses, matches nothing, and reads as "nothing links these".
-    if field == "source"
+    // `evidence_source` is the pass that recorded the evidence, not the node an edge came from. A
+    // node label or id here parses, matches nothing, and reads as "nothing links these".
+    if field == "evidence_source"
         && (value.starts_with("file:") || value.starts_with("symbol:") || value.contains("::"))
     {
         return Err(GraphQueryError::ParseError(format!(
-            "{value} names a node, but source is the pass that recorded the edge's evidence, such as open-kioku-graph or open-kioku-resolution; to filter an endpoint, filter a node variable's label or id"
+            "{value} names a node, but evidence_source is the pass that recorded the edge's evidence, such as open-kioku-graph or open-kioku-resolution; to filter an endpoint, filter a node variable's label or id"
         )));
     }
     Ok(())
@@ -306,6 +306,18 @@ fn unknown_filter_field(
         Binding::Edge => "edges".to_string(),
     };
     let hint = match binding {
+        // `source` and `source_type` read as the edge's source node and that node's type. Neither is
+        // a field on any binding; say what each reading is actually written as.
+        _ if field == "source" => {
+            "; an edge's source node is the node variable on its left: filter its label or id. The \
+             pass that recorded an edge's evidence is evidence_source on a bound edge"
+                .to_string()
+        }
+        _ if field == "source_type" => {
+            "; an edge's source node type is written in the pattern, such as (a:Function). The kind \
+             of evidence behind an edge is evidence_source_type on a bound edge"
+                .to_string()
+        }
         Binding::Node(_) if EDGE_FILTER_FIELDS.contains(&field) => format!(
             "; {field} is read from edge evidence: bind the edge as -[e:TYPE]-> and filter e.{field}"
         ),
@@ -1025,12 +1037,13 @@ fn text_matches(filter: &FilterExpr, value: &str) -> bool {
     }
 }
 
-/// Graph nodes carry no evidence, so source, source_type and confidence come from a bound edge.
+/// Graph nodes carry no evidence, so evidence_source, evidence_source_type and confidence come
+/// from a bound edge.
 fn edge_matches(edge: &GraphEdge, filter: &FilterExpr) -> bool {
     let evidence = &edge.evidence;
     match filter.field.as_str() {
-        "source" => text_matches(filter, evidence.source.as_str()),
-        "source_type" => serde_json::to_value(&evidence.source_type)
+        "evidence_source" => text_matches(filter, evidence.source.as_str()),
+        "evidence_source_type" => serde_json::to_value(&evidence.source_type)
             .ok()
             .as_ref()
             .and_then(Value::as_str)
@@ -2848,7 +2861,7 @@ mod tests {
 
     #[test]
     fn evidence_fields_on_a_node_say_to_bind_the_edge() {
-        for field in ["source", "source_type", "confidence"] {
+        for field in ["evidence_source", "evidence_source_type", "confidence"] {
             assert_eq!(
                 parse_error(&format!(
                     "MATCH (a:Function)-[:CALLS]->(b:Function) WHERE b.{field} = 'high' RETURN a"
@@ -2866,25 +2879,69 @@ mod tests {
     fn node_fields_on_an_edge_variable_list_the_edge_fields() {
         assert_eq!(
             parse_error("MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.label = 'x' RETURN a"),
-            "Parse error: Unknown filter field: c.label; edges filter on source, source_type, \
-             confidence; label is a node field: filter it on a node variable"
+            "Parse error: Unknown filter field: c.label; edges filter on evidence_source, \
+             evidence_source_type, confidence; label is a node field: filter it on a node variable"
         );
         assert_eq!(
             parse_error(
                 "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.protocol = 'http' RETURN a"
             ),
-            "Parse error: Unknown filter field: c.protocol; edges filter on source, source_type, confidence"
+            "Parse error: Unknown filter field: c.protocol; edges filter on evidence_source, \
+             evidence_source_type, confidence"
         );
         // An edge does have an id, so saying "id is a node field" would be wrong advice.
         assert_eq!(
             parse_error("MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.id = 'e1' RETURN a"),
-            "Parse error: Unknown filter field: c.id; edges filter on source, source_type, \
-             confidence; an edge has an id, but only its evidence fields can be filtered"
+            "Parse error: Unknown filter field: c.id; edges filter on evidence_source, \
+             evidence_source_type, confidence; an edge has an id, but only its evidence fields \
+             can be filtered"
         );
     }
 
-    // `source` names the recording pass. A node label here used to parse, match nothing, and read
-    // as an authoritative "nothing links these".
+    // In Cypher an edge's "source" is the node it leaves, so `source` and `source_type` read as the
+    // endpoint and its type. Neither is a field; the parse error says how each reading is written.
+    #[test]
+    fn source_and_source_type_name_the_endpoint_reading_and_the_evidence_field() {
+        let source_hint = "; an edge's source node is the node variable on its left: filter its \
+                           label or id. The pass that recorded an edge's evidence is \
+                           evidence_source on a bound edge";
+        let source_type_hint = "; an edge's source node type is written in the pattern, such as \
+                                (a:Function). The kind of evidence behind an edge is \
+                                evidence_source_type on a bound edge";
+        let edge_fields = "edges filter on evidence_source, evidence_source_type, confidence";
+        assert_eq!(
+            parse_error(
+                "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.source = 'auth' RETURN b"
+            ),
+            format!("Parse error: Unknown filter field: c.source; {edge_fields}{source_hint}")
+        );
+        assert_eq!(
+            parse_error(
+                "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.source_type = 'scip' RETURN b"
+            ),
+            format!(
+                "Parse error: Unknown filter field: c.source_type; {edge_fields}{source_type_hint}"
+            )
+        );
+        // On a node variable the old names get the same explanation, not the bind-the-edge hint,
+        // which would name a field the edge does not take.
+        let node_fields = "Function nodes filter on label, id, file_path, qualified_name";
+        assert_eq!(
+            parse_error("MATCH (a:Function)-[:CALLS]->(b:Function) WHERE a.source = 'x' RETURN b"),
+            format!("Parse error: Unknown filter field: a.source; {node_fields}{source_hint}")
+        );
+        assert_eq!(
+            parse_error(
+                "MATCH (a:Function)-[:CALLS]->(b:Function) WHERE a.source_type = 'x' RETURN b"
+            ),
+            format!(
+                "Parse error: Unknown filter field: a.source_type; {node_fields}{source_type_hint}"
+            )
+        );
+    }
+
+    // `evidence_source` names the recording pass. A node label here used to parse, match nothing,
+    // and read as an authoritative "nothing links these".
     #[test]
     fn a_node_named_as_source_is_rejected_rather_than_matching_nothing() {
         for value in [
@@ -2893,21 +2950,22 @@ mod tests {
             "symbol:abc123",
         ] {
             let error = parse_error(&format!(
-                "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.source = '{value}' RETURN a"
+                "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.evidence_source = '{value}' RETURN a"
             ));
             assert_eq!(
                 error,
                 format!(
-                    "Parse error: {value} names a node, but source is the pass that recorded the \
-                     edge's evidence, such as open-kioku-graph or open-kioku-resolution; to filter \
-                     an endpoint, filter a node variable's label or id"
+                    "Parse error: {value} names a node, but evidence_source is the pass that \
+                     recorded the edge's evidence, such as open-kioku-graph or \
+                     open-kioku-resolution; to filter an endpoint, filter a node variable's label \
+                     or id"
                 ),
                 "{value}"
             );
         }
         // A real pass name still parses.
         assert!(parse_graph_query(
-            "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.source = 'open-kioku-resolution' RETURN a"
+            "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.evidence_source = 'open-kioku-resolution' RETURN a"
         )
         .is_ok());
     }
@@ -2939,10 +2997,13 @@ mod tests {
             "Parse error: Unknown confidence: certain; confidence is low, medium, high, exact, or \
              an unquoted number such as 0.85"
         );
-        let source_type = parse_error(&format!("{calls} c.source_type = 'treesitter' RETURN a"));
+        let source_type = parse_error(&format!(
+            "{calls} c.evidence_source_type = 'treesitter' RETURN a"
+        ));
         assert!(
             source_type.starts_with(
-                "Parse error: Unknown source_type: treesitter; source types are tree_sitter, scip, "
+                "Parse error: Unknown evidence_source_type: treesitter; evidence source types are \
+                 tree_sitter, scip, "
             ),
             "{source_type}"
         );
@@ -3163,14 +3224,14 @@ mod tests {
     }
 
     #[test]
-    fn source_and_source_type_read_the_bound_edge_evidence() {
+    fn evidence_source_and_evidence_source_type_read_the_bound_edge_evidence() {
         let store = example_store();
         let calls = "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE";
         assert_eq!(
             column_ids(
                 &run(
                     &store,
-                    &format!("{calls} c.source = 'open-kioku-resolution' RETURN a")
+                    &format!("{calls} c.evidence_source = 'open-kioku-resolution' RETURN a")
                 ),
                 0
             ),
@@ -3178,7 +3239,10 @@ mod tests {
         );
         assert_eq!(
             column_ids(
-                &run(&store, &format!("{calls} c.source_type = 'scip' RETURN a")),
+                &run(
+                    &store,
+                    &format!("{calls} c.evidence_source_type = 'scip' RETURN a")
+                ),
                 0
             ),
             ["fn:parse_config"]
@@ -3187,7 +3251,7 @@ mod tests {
             column_ids(
                 &run(
                     &store,
-                    &format!("{calls} c.source_type = 'tree_sitter' RETURN a")
+                    &format!("{calls} c.evidence_source_type = 'tree_sitter' RETURN a")
                 ),
                 0
             ),
@@ -3199,7 +3263,7 @@ mod tests {
             column_ids(
                 &run(
                     &store,
-                    &format!("{defines} d.source = 'open-kioku-graph' RETURN s")
+                    &format!("{defines} d.evidence_source = 'open-kioku-graph' RETURN s")
                 ),
                 0
             ),
@@ -3207,7 +3271,7 @@ mod tests {
         );
         assert!(run(
             &store,
-            &format!("{defines} d.source = 'open-kioku-resolution' RETURN s")
+            &format!("{defines} d.evidence_source = 'open-kioku-resolution' RETURN s")
         )
         .rows
         .is_empty());
@@ -3215,7 +3279,7 @@ mod tests {
             column_ids(
                 &run(
                     &store,
-                    "MATCH (f:File)-[i:IMPORTS]->(g:File) WHERE i.source STARTS_WITH 'open-kioku-import-resolver/' RETURN f"
+                    "MATCH (f:File)-[i:IMPORTS]->(g:File) WHERE i.evidence_source STARTS_WITH 'open-kioku-import-resolver/' RETURN f"
                 ),
                 0
             ),
