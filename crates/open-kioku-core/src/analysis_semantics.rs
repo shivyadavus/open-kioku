@@ -28,7 +28,12 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// (`r#type`) names the module file `type.rs`, a `[lib] path` in `src/` is a crate root, and a
 /// path from a file outside every package's module tree is not followed; v7 indexes hold `CALLS`
 /// edges from workspace members into the root package and from `src/bin/` files into the library.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v8";
+/// v9: a Rust file that no indexed crate root declares is read against no crate when a crate
+/// root of its module tree was not indexed or is one the layout does not follow, and a crate root
+/// a manifest's `[[bin]]`, `[[test]]`, `[[example]]` or `[[bench]]` table names (or that
+/// `autobins = false` and its peers leave out) is followed; v8 indexes hold `CALLS` edges from a
+/// skipped `main.rs`'s modules into the library, and none through a `[[bin]] path` root's modules.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v9";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
