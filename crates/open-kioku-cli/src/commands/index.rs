@@ -173,6 +173,29 @@ fn index_repo_with_config(
             ),
         }
     }
+    // A database an earlier Open Kioku wrote deleted rows without zeroing them, so it can still
+    // hold paths this or an earlier run removed, a newly denied one included (#553). Rewritten
+    // once; an unreadable marker is treated as owing it. The index is correct either way, so a
+    // failure is reported and left for the next run, which finds the marker still unset.
+    if !store.deleted_content_zeroed().unwrap_or(false) {
+        report_index_stage(
+            &reporter,
+            "compact",
+            "rewriting the database once so rows earlier runs deleted, including those of \
+             paths the index policy now excludes, are not left in its free space"
+                .to_string(),
+        );
+        if let Err(err) = store.vacuum() {
+            report_index_stage(
+                &reporter,
+                "compact",
+                format!(
+                    "rewriting the database failed ({err}); rows earlier runs deleted may \
+                     remain in its free space until the next `ok index` retries it"
+                ),
+            );
+        }
+    }
     report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)
 }

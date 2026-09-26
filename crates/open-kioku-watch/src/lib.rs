@@ -359,6 +359,7 @@ pub fn reindex_repo_after_changes<'a>(
             ),
         }
     }
+    compact_deleted_content(&store);
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
@@ -377,6 +378,20 @@ pub fn reindex_repo_after_changes<'a>(
 fn compact_pre_redaction_bytes(root: &Path, store: &SqliteStore) -> Result<()> {
     open_kioku_semantic::discard_vector_store(root)?;
     store.vacuum()
+}
+
+/// A database an earlier Open Kioku wrote deleted rows without zeroing them, so it can still
+/// hold paths a run removed, a newly denied one included (#553). Rewritten once; a failure
+/// leaves the marker unset, so the next run retries it.
+fn compact_deleted_content(store: &SqliteStore) {
+    if store.deleted_content_zeroed().unwrap_or(false) {
+        return;
+    }
+    if let Err(err) = store.vacuum() {
+        eprintln!(
+            "watch: rewriting the database failed ({err}); rows earlier runs deleted may remain in its free space until the next index run retries it"
+        );
+    }
 }
 
 fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
@@ -420,6 +435,7 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
             ),
         }
     }
+    compact_deleted_content(&store);
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {

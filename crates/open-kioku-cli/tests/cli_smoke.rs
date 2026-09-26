@@ -2414,6 +2414,92 @@ fn deny_internal_vault(repo: &std::path::Path) {
     .unwrap();
 }
 
+/// A vault file whose names appear nowhere else, long enough that its rows span several pages.
+fn vault_fixture_repo() -> tempfile::TempDir {
+    let probes = (0..200)
+        .map(|n| format!("    sealing_probe_{n:03}();\n"))
+        .collect::<String>();
+    let keys = format!(
+        "pub struct KeyAnchored;\n\npub fn rotate_sealed_material() -> u32 {{\n    \
+         derive_sealing_key();\n{probes}    seal_inner()\n}}\n\nfn seal_inner() -> u32 {{\n    \
+         7\n}}\n"
+    );
+    snapshot_fixture_repo_with(&[
+        ("src/main.rs", "fn main() {\n    println!(\"ready\");\n}\n"),
+        ("internal/vault/keys.rs", keys.as_str()),
+    ])
+}
+
+const VAULT_ONLY_NAMES: [&str; 5] = [
+    "vault::",
+    "rotate_sealed_material",
+    "seal_inner",
+    "derive_sealing_key",
+    "sealing_probe_",
+];
+
+fn index_repo_stderr(repo: &std::path::Path) -> String {
+    run_ok_with_stderr({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    })
+    .1
+}
+
+/// A path denied after it was indexed leaves nothing on disk that names it once `ok index`
+/// rebuilds (#553): SQLite would otherwise keep its deleted rows in free pages, and in the
+/// unused space of pages it reuses, until they happen to be overwritten.
+#[test]
+fn index_after_a_path_is_denied_leaves_none_of_its_content_on_disk() {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    let before = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(holds(&before, needle), "the first index lacks `{needle}`");
+    }
+
+    deny_internal_vault(repo);
+    let stderr = index_repo_stderr(repo);
+
+    let bytes = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(!holds(&bytes, needle), "the rebuilt index holds `{needle}`");
+    }
+    // Zeroed as it was deleted: an index this version created is never rewritten for it.
+    assert!(!stderr.contains("rewriting the database"), "{stderr}");
+}
+
+/// A database an earlier version wrote deleted rows without zeroing them, so it can already
+/// hold a denied path's content where no row does. The first `ok index` rewrites it once and
+/// records that, and later runs do not rewrite it again (#553).
+#[test]
+fn index_rewrites_once_a_database_an_earlier_version_left_deleted_rows_in() {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    leave_unzeroed_free_pages(repo, "derive_sealing_key ");
+    deny_internal_vault(repo);
+
+    let stderr = index_repo_stderr(repo);
+    assert!(stderr.contains("rewriting the database once"), "{stderr}");
+    let bytes = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(!holds(&bytes, needle), "the rebuilt index holds `{needle}`");
+    }
+    let marked: i64 = rusqlite::Connection::open(active_index_db(repo))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM schema_meta WHERE key = 'deleted_content_zeroed_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marked, 1);
+
+    let again = index_repo_stderr(repo);
+    assert!(!again.contains("rewriting the database"), "{again}");
+}
+
 /// The index database readers open: the active generation's when one is published.
 fn active_index_db(repo: &std::path::Path) -> std::path::PathBuf {
     let active = fs::read_to_string(repo.join(".ok/generations/active"))
@@ -2541,9 +2627,26 @@ fn snapshot_import_keeps_an_admitted_files_own_import_of_a_removed_path() {
     );
 }
 
+/// Leave `text` in the exporter's database as an Open Kioku that deleted rows without zeroing
+/// them did: in a dropped table's free pages, and with no record that deleted content was
+/// zeroed (#553). The current writer zeroes its deletes, so it no longer leaves any.
+fn leave_unzeroed_free_pages(repo: &std::path::Path, text: &str) {
+    let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+    conn.execute_batch(
+        "PRAGMA secure_delete = OFF;
+         DELETE FROM schema_meta WHERE key = 'deleted_content_zeroed_v1';
+         CREATE TABLE earlier_rows(body TEXT);",
+    )
+    .unwrap();
+    conn.execute("INSERT INTO earlier_rows VALUES (?1)", [text.repeat(2000)])
+        .unwrap();
+    conn.execute_batch("DROP TABLE earlier_rows; PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+}
+
 /// A `--quality fast` artifact is a page copy of the exporter's database, free pages included.
-/// An exporter that denied a path after indexing it and re-indexed leaves its rows there; the
-/// import removes no row, and still must not publish those pages (#549).
+/// An exporter that denied a path after indexing it and re-indexed could leave its rows there;
+/// the import removes no row, and still must not publish those pages (#549).
 #[test]
 fn snapshot_import_does_not_publish_the_exporters_free_pages() {
     // Enough rows that the pages they are deleted from outnumber the ones the import writes
@@ -2562,6 +2665,7 @@ fn snapshot_import_does_not_publish_the_exporters_free_pages() {
         command.arg("index").arg(repo);
         command
     });
+    leave_unzeroed_free_pages(repo, "render_sealed_ledger ");
     // The exporter's database holds the removed rows in free pages.
     assert!(holds(&index_bytes(repo), "render_sealed_ledger"));
     export_snapshot(repo);
@@ -2576,6 +2680,35 @@ fn snapshot_import_does_not_publish_the_exporters_free_pages() {
             "the imported index holds `{needle}`"
         );
     }
+}
+
+/// An exporter that deleted rows without zeroing them can leave their bytes in a page that is
+/// still in use, where the free-page count is zero; an artifact that does not record that its
+/// deleted content was zeroed is compacted anyway (#553).
+#[test]
+fn snapshot_import_compacts_an_artifact_whose_deleted_rows_sit_in_pages_in_use() {
+    let temp =
+        snapshot_fixture_repo_with(&[("src/main.rs", "fn main() {\n    println!(\"ok\");\n}\n")]);
+    let repo = temp.path();
+    {
+        let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+        conn.execute_batch("VACUUM;").unwrap();
+        conn.execute_batch(
+            "PRAGMA secure_delete = OFF;
+             INSERT INTO schema_meta(key, value) VALUES ('earlier_row', 'quartz_sealed_ledger');
+             DELETE FROM schema_meta WHERE key IN ('earlier_row', 'deleted_content_zeroed_v1');
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+        let free: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(free, 0);
+    }
+    assert!(holds(&index_bytes(repo), "quartz_sealed_ledger"));
+    export_snapshot(repo);
+    import_snapshot_json(repo, &[]);
+    assert!(!holds(&index_bytes(repo), "quartz_sealed_ledger"));
 }
 
 /// `ok watch` replaces the rows of the files that changed. A deleted file's co-change facts
