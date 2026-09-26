@@ -6,6 +6,7 @@ use open_kioku_core::{
 };
 use open_kioku_errors::{OkError, Result};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use tree_sitter::{Language as TsLanguage, Node, Parser, TreeCursor};
 
 pub struct ParseContext {
@@ -14,6 +15,9 @@ pub struct ParseContext {
     pub callable_stack: Vec<SymbolId>,
     pub type_stack: Vec<SymbolId>,
     pub next_scope_counter: u32,
+    /// Visibility of the Rust traits and types the file declares, by name; built on the first
+    /// trait `impl` member, since only those need it. See [`rust_declared_visibility`].
+    rust_declared_visibility: Option<HashMap<String, Option<Visibility>>>,
 }
 
 impl ParseContext {
@@ -24,6 +28,7 @@ impl ParseContext {
             callable_stack: Vec::new(),
             type_stack: Vec::new(),
             next_scope_counter: 0,
+            rust_declared_visibility: None,
         }
     }
 
@@ -445,7 +450,7 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
                 )));
 
                 let signature = extract_symbol_signature(file, content, node);
-                let visibility = extract_symbol_visibility(file, content, node);
+                let visibility = extract_symbol_visibility(file, content, node, ctx);
 
                 let symbol = Symbol {
                     id: symbol_id.clone(),
@@ -634,10 +639,21 @@ fn extract_symbol_signature(file: &File, content: &str, node: Node<'_>) -> Optio
     }
 }
 
-fn extract_symbol_visibility(file: &File, content: &str, node: Node<'_>) -> Visibility {
+fn extract_symbol_visibility(
+    file: &File,
+    content: &str,
+    node: Node<'_>,
+    ctx: &mut ParseContext,
+) -> Visibility {
     match file.language {
         Language::Java => java_visibility(node),
-        Language::Rust => rust_visibility(node),
+        Language::Rust => match rust_associated_owner(node) {
+            Some(owner) if owner.kind() == "trait_item" => rust_visibility(owner),
+            Some(owner) if owner.child_by_field_name("trait").is_some() => {
+                rust_trait_impl_visibility(content, owner, ctx)
+            }
+            _ => rust_visibility(node),
+        },
         Language::Go => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
@@ -688,15 +704,131 @@ fn rust_visibility(node: Node<'_>) -> Visibility {
     }
 }
 
+/// The `trait` or `impl` whose body directly holds this item. An item nested deeper, such as a
+/// function declared inside a default method's body, has an owner of its own and returns `None`.
+fn rust_associated_owner(node: Node<'_>) -> Option<Node<'_>> {
+    let body = node
+        .parent()
+        .filter(|parent| parent.kind() == "declaration_list")?;
+    body.parent()
+        .filter(|owner| matches!(owner.kind(), "trait_item" | "impl_item"))
+}
+
+/// A trait `impl` member carries no modifier of its own: it can be called wherever the trait is
+/// in scope and the implementing type can be named, so it records the narrower of the two.
+///
+/// The parser sees one file. A trait or type named by a bare identifier that this file declares
+/// exactly once (or always with the same visibility) contributes that declaration's visibility.
+/// Anything else, such as `fmt::Display`, `super::Store`, a prelude trait, a trait imported from
+/// another file, or a name the file declares twice with different visibility, is not bounded:
+/// an external trait is callable wherever it is in scope, so an unknown trait reads `Public`
+/// rather than claiming a narrower reach the evidence does not show.
+fn rust_trait_impl_visibility(
+    content: &str,
+    impl_node: Node<'_>,
+    ctx: &mut ParseContext,
+) -> Visibility {
+    let declared = ctx
+        .rust_declared_visibility
+        .get_or_insert_with(|| rust_declared_visibility(content, impl_node));
+    let declared_visibility = |field: &str| {
+        impl_node
+            .child_by_field_name(field)
+            .and_then(|type_node| rust_bare_type_name(content, type_node))
+            .and_then(|name| declared.get(name).copied().flatten())
+            .unwrap_or(Visibility::Public)
+    };
+    narrower_rust_visibility(declared_visibility("trait"), declared_visibility("type"))
+}
+
+fn narrower_rust_visibility(left: Visibility, right: Visibility) -> Visibility {
+    let reach = |visibility: Visibility| match visibility {
+        Visibility::Public => 2,
+        Visibility::Crate => 1,
+        _ => 0,
+    };
+    if reach(right) < reach(left) {
+        right
+    } else {
+        left
+    }
+}
+
+/// `Store` or `Store<T>`; `None` for a path, reference, tuple or other type form.
+fn rust_bare_type_name<'a>(content: &'a str, node: Node<'_>) -> Option<&'a str> {
+    let node = if node.kind() == "generic_type" {
+        node.child_by_field_name("type")?
+    } else {
+        node
+    };
+    (node.kind() == "type_identifier")
+        .then(|| node.utf8_text(content.as_bytes()).ok())
+        .flatten()
+}
+
+/// Every trait, struct, enum, union and type alias the file declares, anywhere in its tree, by
+/// name, with its own visibility; `None` when the name is declared more than once with different
+/// visibility. Associated types of an `impl` are `type_item`s too and are skipped: they name no
+/// type outside it. Traits and types share one namespace, so one table serves both lookups.
+fn rust_declared_visibility(
+    content: &str,
+    any_node: Node<'_>,
+) -> HashMap<String, Option<Visibility>> {
+    let mut root = any_node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut declared = HashMap::<String, Option<Visibility>>::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let is_declaration = matches!(
+            node.kind(),
+            "trait_item" | "struct_item" | "enum_item" | "union_item" | "type_item"
+        ) && rust_associated_owner(node).is_none();
+        if is_declaration {
+            if let Some(name) = node
+                .child_by_field_name("name")
+                .and_then(|name| name.utf8_text(content.as_bytes()).ok())
+            {
+                let visibility = rust_visibility(node);
+                declared
+                    .entry(name.to_string())
+                    .and_modify(|seen| {
+                        if *seen != Some(visibility) {
+                            *seen = None;
+                        }
+                    })
+                    .or_insert(Some(visibility));
+            }
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    declared
+}
+
 /// Reads the declaration's own `modifiers` child, so a package-private class holding a public
 /// method, or a method whose body spells ` public `, keeps its own access level.
+///
+/// A member of an interface or annotation type with no access keyword is implicitly `public`
+/// (JLS 9.3, 9.4, 9.5, 9.6); an explicit `private` interface method (Java 9+) stays private. The
+/// member records its own access, not its reach: a public method of a package-private interface
+/// is `Public`, as a public method of a package-private class is.
 fn java_visibility(node: Node<'_>) -> Visibility {
+    let implicit = if node
+        .parent()
+        .is_some_and(|parent| matches!(parent.kind(), "interface_body" | "annotation_type_body"))
+    {
+        Visibility::Public
+    } else {
+        Visibility::Package
+    };
     let mut cursor = node.walk();
     let Some(modifiers) = node
         .children(&mut cursor)
         .find(|child| child.kind() == "modifiers")
     else {
-        return Visibility::Package;
+        return implicit;
     };
     let mut cursor = modifiers.walk();
     let visibility = modifiers
@@ -707,7 +839,7 @@ fn java_visibility(node: Node<'_>) -> Visibility {
             "protected" => Some(Visibility::Protected),
             _ => None,
         });
-    visibility.unwrap_or(Visibility::Package)
+    visibility.unwrap_or(implicit)
 }
 
 fn symbol_name_node<'tree>(
@@ -1946,6 +2078,202 @@ mod tests {
             assert!(
                 symbols.contains(&(name.to_string(), visibility)),
                 "{name} should be {visibility:?}; got {symbols:?}"
+            );
+        }
+    }
+
+    /// Pairs of `(name, visibility)` at a line: several items here share a name.
+    fn visibility_at(
+        language: Language,
+        path: &str,
+        source: &str,
+    ) -> Vec<(u32, String, Visibility)> {
+        let file = File {
+            id: FileId::new("file_visibility"),
+            repository_id: RepositoryId::new("repo"),
+            path: path.into(),
+            language,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        parse_symbols(&file, source)
+            .expect("visibility fixture should parse")
+            .into_iter()
+            .map(|symbol| {
+                let line = symbol.range.map(|range| range.start).unwrap_or(0);
+                (line, symbol.name, symbol.visibility)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rust_trait_items_and_trait_impl_members_take_the_traits_visibility() {
+        let symbols = visibility_at(
+            Language::Rust,
+            "src/lib.rs",
+            concat!(
+                "pub trait Store {
+",
+                "    const KIND: u8 = 0;
+",
+                "    fn load(&self) {
+",
+                "        fn scratch() {}
+",
+                "    }
+",
+                "}
+",
+                "pub(crate) trait Cache { fn evict(&self) {} }
+",
+                "trait Local { fn tidy(&self) {} }
+",
+                "pub struct Disk;
+",
+                "impl Store for Disk { fn load(&self) {} }
+",
+                "impl Cache for Disk { fn evict(&self) {} }
+",
+                "impl Local for Disk { fn tidy(&self) {} }
+",
+                "impl std::fmt::Display for Disk {
+",
+                "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }
+",
+                "}
+",
+                "impl From<u8> for Disk { fn from(_: u8) -> Self { Disk } }
+",
+                "struct Hidden;
+",
+                "impl Store for Hidden { fn load(&self) {} }
+",
+                "impl Disk {
+",
+                "    pub fn open() {}
+",
+                "    fn helper() {}
+",
+                "    pub(crate) fn shared() {}
+",
+                "}
+",
+            ),
+        );
+        let expected = [
+            (2, "KIND", Visibility::Public),
+            (3, "load", Visibility::Public),
+            // Declared inside a default method's body, not in the trait: its own modifier.
+            (4, "scratch", Visibility::Private),
+            (7, "evict", Visibility::Crate),
+            (8, "tidy", Visibility::Private),
+            (10, "load", Visibility::Public),
+            (11, "evict", Visibility::Crate),
+            (12, "tidy", Visibility::Private),
+            // External traits: callable wherever the trait is in scope.
+            (14, "fmt", Visibility::Public),
+            (16, "from", Visibility::Public),
+            // A public trait implemented by a private type reaches no further than the type.
+            (18, "load", Visibility::Private),
+            // Inherent `impl` members keep their own modifier.
+            (20, "open", Visibility::Public),
+            (21, "helper", Visibility::Private),
+            (22, "shared", Visibility::Crate),
+        ];
+        for (line, name, visibility) in expected {
+            assert!(
+                symbols.contains(&(line, name.to_string(), visibility)),
+                "{name} at line {line} should be {visibility:?}; got {symbols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_trait_impl_of_an_ambiguous_or_unknown_trait_is_not_narrowed() {
+        let symbols = visibility_at(
+            Language::Rust,
+            "src/lib.rs",
+            concat!(
+                "mod a { pub trait Probe { fn check(&self); } }
+",
+                "mod b { trait Probe { fn check(&self); } }
+",
+                "pub struct Target;
+",
+                "impl Probe for Target { fn check(&self) {} }
+",
+                "impl super::Sink for Target { fn drain(&self) {} }
+",
+            ),
+        );
+        for (line, name) in [(4, "check"), (5, "drain")] {
+            assert!(
+                symbols.contains(&(line, name.to_string(), Visibility::Public)),
+                "{name} at line {line} should be Public; got {symbols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn java_interface_members_without_an_access_keyword_are_public() {
+        let symbols = visibility_at(
+            Language::Java,
+            "src/main/java/app/Store.java",
+            concat!(
+                "interface Store {
+",
+                "    void load();
+",
+                "    default String name() { return \"store\"; }
+",
+                "    static Store empty() { return null; }
+",
+                "    private void audit() {}
+",
+                "    class Entry {}
+",
+                "    interface Listener { void changed(); }
+",
+                "}
+",
+                "@interface Marker { class Holder {} }
+",
+                "class Service {
+",
+                "    void describe() {}
+",
+                "    interface Callback { void done(); }
+",
+                "    private interface Hidden { void run(); }
+",
+                "}
+",
+            ),
+        );
+        let expected = [
+            (1, "Store", Visibility::Package),
+            (2, "load", Visibility::Public),
+            (3, "name", Visibility::Public),
+            (4, "empty", Visibility::Public),
+            (5, "audit", Visibility::Private),
+            (6, "Entry", Visibility::Public),
+            (7, "Listener", Visibility::Public),
+            (7, "changed", Visibility::Public),
+            (9, "Holder", Visibility::Public),
+            // Class members keep the package default.
+            (11, "describe", Visibility::Package),
+            (12, "Callback", Visibility::Package),
+            (12, "done", Visibility::Public),
+            // A member records its own access, not its reach through a private enclosing type.
+            (13, "Hidden", Visibility::Private),
+            (13, "run", Visibility::Public),
+        ];
+        for (line, name, visibility) in expected {
+            assert!(
+                symbols.contains(&(line, name.to_string(), visibility)),
+                "{name} at line {line} should be {visibility:?}; got {symbols:?}"
             );
         }
     }

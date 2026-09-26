@@ -53,7 +53,10 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// matched in its text; a v4 index records a private Rust function whose body spells `pub ` as
 /// public, a package-private Java class holding a public member as public, and `pub(crate)`
 /// items as private.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v5";
+/// v6: a Rust trait item takes the trait's visibility and a trait `impl` member the narrower of
+/// the trait's and the implementing type's, and a Java interface or annotation-type member with
+/// no access keyword is public; a v5 index records them as private and package.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v6";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 
