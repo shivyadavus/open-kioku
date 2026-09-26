@@ -169,6 +169,15 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
     integrity_check_sqlite(&temp_db)?;
     ensure_required_snapshot_tables(&temp_db)?;
     let temp_user_version = sqlite_user_version(&temp_db)?;
+    // A `--quality fast` artifact is a page copy of the exporter's database, free pages
+    // included, and those can hold rows the exporter's own policy had already removed.
+    let staged_free_pages = match sqlite_freelist_count(&temp_db) {
+        Ok(count) => count,
+        Err(err) => {
+            let _ = fs::remove_file(&temp_db);
+            return Err(err);
+        }
+    };
     if temp_user_version != metadata.sqlite_user_version {
         let _ = fs::remove_file(&temp_db);
         anyhow::bail!(
@@ -238,7 +247,8 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
     // The manifest is the publication marker and the artifact carries one. The database is
     // moved into place without it, and it is put back once the search index has been rebuilt
     // from the imported rows, as `ok index` publishes its own.
-    if let Err(err) = withhold_snapshot_manifest(&temp_db, filtered.rows_removed) {
+    let compact = filtered.rows_removed || filtered.manifest_redacted || staged_free_pages > 0;
+    if let Err(err) = withhold_snapshot_manifest(&temp_db, compact) {
         remove_staged_db(&temp_db);
         return Err(err);
     }
@@ -273,6 +283,7 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
         ));
     }
     caveats.extend(filtered.scip_caveat.clone());
+    caveats.extend(filtered.resolution_caveat.clone());
     Ok(SnapshotImportReport {
         ok: true,
         imported: true,
@@ -467,6 +478,11 @@ struct SnapshotPolicyFilter {
     scip_caveat: Option<String>,
     /// Whether the policy step removed any row, so the database holds them in free pages.
     rows_removed: bool,
+    /// Whether the manifest lost content the artifact's copy still holds (withheld notes or
+    /// skipped paths), so that copy must not stay in free pages either.
+    manifest_redacted: bool,
+    /// Set when indexed files' resolutions to removed symbols were withdrawn.
+    resolution_caveat: Option<String>,
 }
 
 fn unanchored_scip_caveat(symbols: usize, occurrences: usize) -> String {
@@ -475,6 +491,14 @@ fn unanchored_scip_caveat(symbols: usize, occurrences: usize) -> String {
          index were removed: they record only a hash of their file's path, so this \
          repository's index policy cannot be checked against them. Run `ok index` to import \
          SCIP for generated or ignored code the policy admits"
+    )
+}
+
+fn withdrawn_resolutions_caveat(count: usize) -> String {
+    format!(
+        "{count} symbol resolution(s) and similarity link(s) from indexed files pointed at \
+         symbols in files this repository's index policy excludes and were withdrawn: those \
+         uses read as unresolved in this index, as `ok index` here would record them"
     )
 }
 
@@ -599,7 +623,7 @@ fn apply_local_policy_to_snapshot(
                 }
             }
         }
-        open_kioku_ingest::path_policy::withhold_notes_about_removed_content(
+        let withheld = open_kioku_ingest::path_policy::withhold_notes_about_removed_content(
             &mut manifest.quality,
             &open_kioku_ingest::path_policy::RemovedContent {
                 paths: &indexed,
@@ -607,6 +631,7 @@ fn apply_local_policy_to_snapshot(
                 remaining_words: &remaining_words,
             },
         );
+        filter.manifest_redacted |= withheld > 0;
     }
     filter.rows_removed = purge != open_kioku_storage_sqlite::PathPurge::default()
         || scip != open_kioku_storage_sqlite::ScipPurge::default();
@@ -632,6 +657,18 @@ fn apply_local_policy_to_snapshot(
         ));
         filter.scip_caveat = Some(caveat);
     }
+    if purge.resolutions_withdrawn > 0 {
+        // Counts only: naming the uses would name the removed symbols.
+        let caveat = withdrawn_resolutions_caveat(purge.resolutions_withdrawn);
+        manifest
+            .quality
+            .quality_notes
+            .push(open_kioku_core::QualityNote::new(
+                open_kioku_core::QualityNoteKind::SymbolRegistryCaveat,
+                caveat.clone(),
+            ));
+        filter.resolution_caveat = Some(caveat);
+    }
     manifest.chunk_count = manifest.chunk_count.saturating_sub(purge.chunks_removed);
     for (file, exclusion) in &excluded_files {
         open_kioku_ingest::path_policy::record_excluded_indexed_file(
@@ -640,7 +677,9 @@ fn apply_local_policy_to_snapshot(
             *exclusion,
         );
     }
-    open_kioku_ingest::path_policy::redact_recorded_skips(&mut manifest.quality, &config);
+    let redacted_skips =
+        open_kioku_ingest::path_policy::redact_recorded_skips(&mut manifest.quality, &config);
+    filter.manifest_redacted |= redacted_skips > 0;
     Ok(filter)
 }
 
@@ -1715,6 +1754,13 @@ fn integrity_check_sqlite(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn sqlite_freelist_count(path: &Path) -> anyhow::Result<i64> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} for freelist_count", path.display()))?;
+    conn.pragma_query_value(None, "freelist_count", |row| row.get(0))
+        .with_context(|| format!("reading sqlite freelist_count from {}", path.display()))
+}
+
 fn sqlite_user_version(path: &Path) -> anyhow::Result<i64> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("opening {} for user_version", path.display()))?;
@@ -1904,8 +1950,10 @@ fn roll_back_to_previous_index(
 /// With `compact`, the database is then rewritten with `VACUUM`. SQLite keeps deleted rows in
 /// free pages until it reuses them, so after the local policy removed rows the file would
 /// still hold the names it withheld, and the artifact's manifest, which names them in its
-/// quality notes, though no query serves either. Compacting after the manifest is gone leaves
-/// no free page behind; the manifest published later is written into new pages.
+/// quality notes, though no query serves either; a `--quality fast` artifact carries the
+/// exporter's own free pages, which can hold rows its policy removed. Compacting after the
+/// manifest is gone leaves no free page behind; the manifest published later is written into
+/// new pages.
 fn withhold_snapshot_manifest(db: &Path, compact: bool) -> anyhow::Result<()> {
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .with_context(|| format!("opening {} to withhold its manifest", db.display()))?;
