@@ -40,6 +40,10 @@ second of those. Three measures close them (#553):
   the run compares the paths the store named before it with those it names after, and asks
   the policy about the ones that are gone (indexed content by every rule discovery applies,
   Git history by the security rules). A run that removes nothing excluded does not compact.
+  The check judges the path that disappeared, not where its content went: a file moved into a
+  newly denied directory, or renamed to a secret-like name, drops a path the policy still
+  admits, so that run does not compact and the old rows' bytes can stay in free pages until a
+  later compaction (#567).
 - **A truncating WAL checkpoint** at the end of every `ok index` and `ok watch` run, which
   copies the log into the database file and empties it. A connection that is merely open,
   such as an idle MCP server's, does not block it; one inside a read transaction does.
