@@ -635,30 +635,12 @@ fn extract_symbol_signature(file: &File, content: &str, node: Node<'_>) -> Optio
 }
 
 fn extract_symbol_visibility(file: &File, content: &str, node: Node<'_>) -> Visibility {
-    let source_bytes = content.as_bytes();
-    let text = node.utf8_text(source_bytes).unwrap_or("");
     match file.language {
-        Language::Java => {
-            if text.starts_with("public ") || text.contains(" public ") {
-                Visibility::Public
-            } else if text.starts_with("private ") || text.contains(" private ") {
-                Visibility::Private
-            } else if text.starts_with("protected ") || text.contains(" protected ") {
-                Visibility::Protected
-            } else {
-                Visibility::Package
-            }
-        }
-        Language::Rust => {
-            if text.starts_with("pub ") || text.contains("pub ") {
-                Visibility::Public
-            } else {
-                Visibility::Private
-            }
-        }
+        Language::Java => java_visibility(node),
+        Language::Rust => rust_visibility(node),
         Language::Go => {
             if let Some(name_node) = node.child_by_field_name("name") {
-                if let Ok(name) = name_node.utf8_text(source_bytes) {
+                if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
                     if name
                         .chars()
                         .next()
@@ -673,6 +655,59 @@ fn extract_symbol_visibility(file: &File, content: &str, node: Node<'_>) -> Visi
         }
         _ => Visibility::Public,
     }
+}
+
+/// Reads the item's own `visibility_modifier` child, never its text: a private function whose
+/// body spells `pub fn` is still private. `pub(super)` and `pub(in path)` reach no further than
+/// the crate, so they record `Crate` alongside `pub(crate)`; `pub(self)` is private.
+fn rust_visibility(node: Node<'_>) -> Visibility {
+    let mut cursor = node.walk();
+    let Some(modifier) = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == "visibility_modifier")
+    else {
+        return Visibility::Private;
+    };
+    let mut cursor = modifier.walk();
+    let mut is_pub = false;
+    let mut restriction = None;
+    for child in modifier.children(&mut cursor) {
+        match child.kind() {
+            "pub" => is_pub = true,
+            "(" | ")" => {}
+            kind => {
+                restriction.get_or_insert(kind);
+            }
+        }
+    }
+    match (is_pub, restriction) {
+        (true, None) => Visibility::Public,
+        (true, Some("self")) => Visibility::Private,
+        // `pub(crate)`, `pub(super)`, `pub(in path)`, and the bare `crate` modifier.
+        _ => Visibility::Crate,
+    }
+}
+
+/// Reads the declaration's own `modifiers` child, so a package-private class holding a public
+/// method, or a method whose body spells ` public `, keeps its own access level.
+fn java_visibility(node: Node<'_>) -> Visibility {
+    let mut cursor = node.walk();
+    let Some(modifiers) = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == "modifiers")
+    else {
+        return Visibility::Package;
+    };
+    let mut cursor = modifiers.walk();
+    let visibility = modifiers
+        .children(&mut cursor)
+        .find_map(|child| match child.kind() {
+            "public" => Some(Visibility::Public),
+            "private" => Some(Visibility::Private),
+            "protected" => Some(Visibility::Protected),
+            _ => None,
+        });
+    visibility.unwrap_or(Visibility::Package)
 }
 
 fn symbol_name_node<'tree>(
@@ -1791,7 +1826,7 @@ fn stable_id(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{parse_file, parse_symbols};
-    use open_kioku_core::{File, FileId, Language, ReceiverKind, RepositoryId};
+    use open_kioku_core::{File, FileId, Language, ReceiverKind, RepositoryId, Visibility};
 
     #[test]
     fn extracts_rust_symbols_from_tree_sitter() {
@@ -1811,6 +1846,108 @@ mod tests {
         assert!(symbols
             .iter()
             .all(|symbol| symbol.provenance == open_kioku_core::EvidenceSourceType::TreeSitter));
+    }
+
+    fn visibility_of(language: Language, path: &str, source: &str) -> Vec<(String, Visibility)> {
+        let file = File {
+            id: FileId::new("file_visibility"),
+            repository_id: RepositoryId::new("repo"),
+            path: path.into(),
+            language,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        parse_symbols(&file, source)
+            .expect("visibility fixture should parse")
+            .into_iter()
+            .map(|symbol| (symbol.name, symbol.visibility))
+            .collect()
+    }
+
+    #[test]
+    fn rust_visibility_comes_from_the_items_own_modifier_not_its_text() {
+        let symbols = visibility_of(
+            Language::Rust,
+            "src/lib.rs",
+            concat!(
+                "#[test]\n",
+                "fn renders_helper() {\n",
+                "    assert_eq!(render(), \"pub fn helper() {}\");\n",
+                "}\n",
+                "fn expands() {\n",
+                "    macro_rules! make { () => { pub fn made() {} } }\n",
+                "}\n",
+                "struct Holder { pub field: u8 }\n",
+                "/// Docs mention pub items.\n",
+                "#[inline]\n",
+                "#[cfg_attr(test, allow(dead_code))]\n",
+                "pub fn exported() {}\n",
+                "pub(crate) fn crate_wide() {}\n",
+                "pub(super) fn parent_only() {}\n",
+                "pub(in crate::outer) fn scoped() {}\n",
+                "pub(self) fn module_only() {}\n",
+                "pub mod api { fn inner() { let _ = \"pub \"; } }\n",
+                "pub(crate) struct Registry;\n",
+                "pub trait Store { fn load(&self); }\n",
+                "pub const LIMIT: u8 = 1;\n",
+                "pub type Alias = u8;\n",
+            ),
+        );
+        let expected = [
+            ("renders_helper", Visibility::Private),
+            ("expands", Visibility::Private),
+            ("Holder", Visibility::Private),
+            ("exported", Visibility::Public),
+            ("crate_wide", Visibility::Crate),
+            ("parent_only", Visibility::Crate),
+            ("scoped", Visibility::Crate),
+            ("module_only", Visibility::Private),
+            ("api", Visibility::Public),
+            ("inner", Visibility::Private),
+            ("Registry", Visibility::Crate),
+            ("Store", Visibility::Public),
+            ("LIMIT", Visibility::Public),
+            ("Alias", Visibility::Public),
+        ];
+        for (name, visibility) in expected {
+            assert!(
+                symbols.contains(&(name.to_string(), visibility)),
+                "{name} should be {visibility:?}; got {symbols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn java_visibility_comes_from_the_declarations_own_modifiers_not_its_text() {
+        let symbols = visibility_of(
+            Language::Java,
+            "src/main/java/app/Service.java",
+            concat!(
+                "class Service {\n",
+                "    public void run() {}\n",
+                "    void describe() { String s = \" public \"; }\n",
+                "    @Override protected String name() { return \"x private y\"; }\n",
+                "    private static final int LIMIT = 1;\n",
+                "}\n",
+                "public final class Api {}\n",
+            ),
+        );
+        let expected = [
+            ("Service", Visibility::Package),
+            ("run", Visibility::Public),
+            ("describe", Visibility::Package),
+            ("name", Visibility::Protected),
+            ("LIMIT", Visibility::Private),
+            ("Api", Visibility::Public),
+        ];
+        for (name, visibility) in expected {
+            assert!(
+                symbols.contains(&(name.to_string(), visibility)),
+                "{name} should be {visibility:?}; got {symbols:?}"
+            );
+        }
     }
 
     #[test]
