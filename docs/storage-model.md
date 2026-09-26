@@ -189,6 +189,58 @@ copy of the artifact:
   and a `scip` quality note and lowers `quality.scip_symbols`, `scip_occurrences` and
   `scip_exact_references` to match; `ok index` imports SCIP for generated or ignored code
   again. The search index is rebuilt from what remains.
+- **What the remaining rows said about removed ones.** A removed file's symbols are named
+  elsewhere by their qualified names, which no path rule matches: the symbol registry's
+  resolution of a bare `KeyAnchored` in an admitted file is a fact targeting
+  `internal::vault::keys::KeyAnchored`, drawn as a graph node with that label and an edge
+  whose message quotes it. The names are taken from the removed symbols themselves, as the
+  language's parser spelled them (for Rust, the module path), not derived from the file's
+  path. Only facts that record a symbol the code resolved to are withdrawn by name (sources
+  `open-kioku-symbol-registry/*` and the similarity passes, `open-kioku-relationships:*`),
+  with the edges those facts drew, unless an indexed file still defines a symbol of that
+  name. An admitted file's own statements that spell the same string stay: its
+  `use internal::vault::keys::KeyAnchored` is an import fact, with its edge to a module node,
+  which `ok index` also keeps (as an unresolved import) when the target file is not indexed.
+  The withdrawn resolutions are counted, never named, in a `symbol_registry_caveat` quality
+  note and an import caveat: those uses now read as unresolved. A graph node no file owns
+  that the removal leaves with no edge (the resolution's target, a removed symbol's
+  `complexity:` resource) is removed too: such nodes exist only as the target of an edge.
+  Call-site dictionary entries no remaining call site uses are removed, since a call site's
+  id spells its file's path. Every history hotspot is recomputed from the file and symbol
+  touches that remain, so a directory hotspot for a directory only removed files were in is
+  gone and a parent directory's counts no longer include the removed touches. The artifact's
+  quality notes about removed content are dropped from the imported manifest: an
+  import-resolver caveat in a removed file, an unresolved name in a removed chunk, and a
+  symbol-registry caveat for a name no remaining chunk uses (the registry records each name
+  once, without its chunk, so a name a remaining chunk also uses keeps its caveat). The
+  manifest's skipped paths still name a denied file, as `ok index` records it; a secret-like
+  one is withheld under `redact_secrets`.
+
+  This is removal, not re-analysis, so the imported index is not what `ok index` would
+  write for the same files. On a small Rust fixture (an admitted file that imports and calls a
+  struct in the removed one) the hotspots, facts, graph nodes and edge count agreed with a
+  fresh `ok index` under the same deny; in general they can
+  differ where the import cannot recompute: a use the registry resolved to a removed symbol
+  is withdrawn, not re-resolved to another candidate; an import whose target became
+  ambiguous or unresolved keeps the edge and resolution status the exporter recorded; the
+  counts of unresolved names, and nodes' `source_pass`, are the exporter's.
+- **Free pages.** The staged database is compacted with `VACUUM`, once the artifact's
+  manifest has been withheld and before it is moved into place, when the policy step removed
+  a row, when the manifest lost notes or skipped paths the artifact's copy still holds, or
+  when the artifact arrived with free pages (a `--quality fast` artifact is a page copy of the
+  exporter's database, and an exporter that denied a path and re-indexed keeps that path's
+  rows in free pages). SQLite keeps the bytes of deleted rows in free pages until they are
+  reused, so without it the imported file would still hold the removed names, and the
+  artifact's manifest with its notes about them, although no query serves either. The
+  compaction runs in rollback-journal mode, so no write-ahead log holds the old pages
+  afterwards; the manifest published after the search index is rebuilt is written into new
+  pages. The cost is one rewrite of the staged database, with free disk space of about twice
+  its size while it runs (the rewritten copy and the rollback journal). A `--quality best`
+  artifact from which nothing is removed skips it. As with the pre-redaction compaction,
+  `VACUUM` cannot scrub blocks the filesystem has already freed, such as the deleted rollback
+  journal's. `ok index` itself does not compact after a full rebuild, so a path denied after
+  it was indexed stays readable in the free pages of the index `ok index` writes until they
+  are reused.
 
 The published manifest carries the result as `snapshot`: `imported_from_commit`,
 `local_commit`, `relation` (`same_commit`, `related` or `foreign`), `commits_behind`,
