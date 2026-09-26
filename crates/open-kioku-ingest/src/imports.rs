@@ -1,5 +1,5 @@
 use crate::rust_use_path::{
-    map_rust_crate_name_path, map_rust_module_file, map_rust_use_path, module_name,
+    map_rust_crate_name_path, map_rust_module_file, map_rust_use_path, module_name, RustCrateTree,
     RustPackageLayout, RustUsePath,
 };
 use open_kioku_core::{
@@ -56,6 +56,8 @@ pub(crate) struct RustModuleTree<'a> {
     files: HashMap<FileId, &'a Path>,
     /// Rust files by repository-relative path without `.rs`.
     files_by_stem: HashMap<String, FileId>,
+    /// Those paths by the directory holding the file.
+    stems_in_dir: HashMap<String, Vec<String>>,
     project: &'a ProjectModel,
     /// `(declaring file without `.rs`, module name)` for each file-backed declaration: `mod name;`
     /// with no body and no `path` attribute, outside any inline module. `mod r#type;` is `type`.
@@ -78,6 +80,17 @@ impl<'a> RustModuleTree<'a> {
             .iter()
             .filter_map(|(id, path)| Some((rust_file_stem(path)?, id.clone())))
             .collect::<HashMap<_, _>>();
+        let mut stems_in_dir = HashMap::<String, Vec<String>>::new();
+        for stem in files_by_stem.keys() {
+            let dir = stem.rsplit_once('/').map_or("", |(dir, _)| dir);
+            stems_in_dir
+                .entry(dir.to_string())
+                .or_default()
+                .push(stem.clone());
+        }
+        for stems in stems_in_dir.values_mut() {
+            stems.sort();
+        }
         let file_modules = declarations
             .iter()
             .filter(|declaration| {
@@ -99,6 +112,7 @@ impl<'a> RustModuleTree<'a> {
         Self {
             files,
             files_by_stem,
+            stems_in_dir,
             project,
             file_modules,
         }
@@ -127,8 +141,8 @@ impl<'a> RustModuleTree<'a> {
     /// roots is two crates, and `crate::` names only the modules of the importer's own root; when
     /// both roots declare the importer's module, a path must be declared under both.
     fn crate_roots(&self, path: &RustUsePath) -> Vec<String> {
-        if let Some(root) = path.importer_root {
-            return path.package.root_stem(root).into_iter().collect();
+        if let Some(root) = &path.importer_root {
+            return vec![root.clone()];
         }
         let roots = self.indexed_crate_roots(path);
         let Some(top) = path.importer_module.first() else {
@@ -152,21 +166,26 @@ impl<'a> RustModuleTree<'a> {
         RustPackageLayout::of(self.project.nearest_root_for(file, Language::Rust))
     }
 
-    /// Where the declared module tree places each Rust file of a package's module tree, for
-    /// paths the resolver spells from file paths. A file is placed at its path when it is a crate
-    /// root, or when every module from the crate root down is declared as a file by the module
-    /// above it; its crate roots are those that declare its top-level module. A file of the tree
-    /// that is not placed there (mounted by `#[path]`, at the default location of a `#[path]` or
-    /// inline module, or declared by no `mod` the parser sees, such as one inside a macro) is
-    /// recorded with no module and every indexed crate root of its package, so a `crate::` path
-    /// written there is still read against its own package. A file outside every package's
-    /// module tree (under `src/bin/`, `tests/` or `examples/`), and every file of a package whose
-    /// crate roots are not indexed, is not recorded.
+    /// The crate module tree of its package that holds `file`, if any.
+    fn crate_tree(&self, file: &Path) -> Option<RustCrateTree> {
+        self.package_layout(file)
+            .crate_tree(&rust_file_stem(file)?, &self.stems_in_dir)
+    }
+
+    /// Where the declared module tree places each Rust file of a crate module tree, for paths
+    /// the resolver spells from file paths. A file is placed at its path when it is a crate root,
+    /// or when every module from the crate root down is declared as a file by the module above
+    /// it; its crate roots are those that declare its top-level module. A file of a tree that is
+    /// not placed there (mounted by `#[path]`, at the default location of a `#[path]` or inline
+    /// module, or declared by no `mod` the parser sees, such as one inside a macro) is recorded
+    /// with no module and every indexed crate root of its tree, so a `crate::` path written there
+    /// is still read against its own package. A file outside every tree (`build.rs`), and every
+    /// file of a tree whose crate roots are not indexed, is not recorded.
     pub(crate) fn module_placements(&self) -> HashMap<FileId, RustModulePlacement> {
         self.files
             .iter()
             .filter_map(|(id, path)| {
-                let file = map_rust_module_file(&self.package_layout(path), path)?;
+                let file = map_rust_module_file(&self.crate_tree(path)?, path)?;
                 let placed = file.importer_root.is_some()
                     || self.declares_file_modules(&file, &file.importer_module);
                 let roots = if placed {
@@ -181,7 +200,7 @@ impl<'a> RustModuleTree<'a> {
                 Some((
                     id.clone(),
                     RustModulePlacement {
-                        crate_dir: qualified(&file.package.src_root),
+                        crate_dir: qualified(&file.tree.module_dir),
                         crate_roots: roots.iter().map(|root| qualified(root)).collect(),
                         module: placed.then(|| file.importer_module.clone()),
                     },
@@ -190,17 +209,20 @@ impl<'a> RustModuleTree<'a> {
             .collect()
     }
 
-    /// How many packages with indexed Rust files have a crate root the module tree cannot place
-    /// them from: files in the package's `src/` but no indexed `lib.rs`/`main.rs` (one discovery
-    /// skipped as over `max_file_size`, say), or a `[lib] path` outside `src/`. Module paths in
-    /// such a package are left unresolved, which the index reports rather than dropping silently.
+    /// How many packages hold indexed Rust files in a crate module tree that has no indexed
+    /// crate root to place them from, or set a `[lib] path` outside `src/`. That covers a
+    /// `lib.rs`/`main.rs` discovery skipped (over `max_file_size`, say) and a crate whose only
+    /// root is a `[[bin]] path` target the manifest reading does not follow. Module paths in such
+    /// a tree are left unresolved, which the index reports rather than dropping silently.
     pub(crate) fn unplaced_package_count(&self) -> usize {
         self.files
             .values()
             .filter_map(|path| {
                 let package = self.package_layout(path);
                 let unplaced = !package.places_library()
-                    || map_rust_module_file(&package, path)
+                    || self
+                        .crate_tree(path)
+                        .and_then(|tree| map_rust_module_file(&tree, path))
                         .is_some_and(|file| self.indexed_crate_roots(&file).is_empty());
                 unplaced.then_some(package.src_root)
             })
@@ -454,10 +476,12 @@ fn rust_import_target(
     {
         return None;
     }
-    let package = RustPackageLayout::of(Some(
-        modules.project.nearest_root_for(importer, Language::Rust)?,
-    ));
-    let path = map_rust_use_path(&package, importer, &binding.source_module)?;
+    modules.project.nearest_root_for(importer, Language::Rust)?;
+    let path = map_rust_use_path(
+        &modules.crate_tree(importer)?,
+        importer,
+        &binding.source_module,
+    )?;
     if path.relative && !modules.declares_file_modules(&path, &path.importer_module) {
         return None;
     }
@@ -699,7 +723,7 @@ fn rust_use_path_for_site(
     {
         return None;
     }
-    let path = map_rust_use_path(&layout, importer, &site.source)?;
+    let path = map_rust_use_path(&modules.crate_tree(importer)?, importer, &site.source)?;
     if path.relative && !modules.declares_file_modules(&path, &path.importer_module) {
         return None;
     }
@@ -1461,8 +1485,7 @@ mod tests {
     fn module_placements_place_only_files_the_module_tree_declares_at_their_path() {
         // `w.rs` mounts `elsewhere.rs` as `w::pathed` with `#[path]`, so neither `elsewhere.rs`
         // nor the `w/pathed.rs` at the default location is the module its path spells. `deep` is
-        // declared inside an inline `mod inner` and `orphan.rs` by nothing. `bin/` and `tests/`
-        // files are crate roots of their own, outside the package's module tree.
+        // declared inside an inline `mod inner` and `orphan.rs` by nothing.
         let files = [
             "src/lib.rs",
             "src/w.rs",
@@ -1529,8 +1552,12 @@ mod tests {
         // An unplaced file of the tree still reads `crate::` against its package's roots.
         let orphan = &placements[&FileId::new("file:src/orphan.rs")];
         assert_eq!(orphan.crate_roots, vec!["src::lib"]);
-        for outside in ["file:src/bin/tool.rs", "file:tests/it.rs"] {
-            assert!(!placements.contains_key(&FileId::new(outside)), "{outside}");
+        // A binary under `src/bin/` and an integration test are crate roots of trees of their own.
+        for (root, dir) in [("src/bin/tool", "src::bin"), ("tests/it", "tests")] {
+            let placement = &placements[&FileId::new(format!("file:{root}.rs"))];
+            assert_eq!(placement.crate_dir, dir);
+            assert_eq!(placement.crate_roots, vec![root.replace('/', "::")]);
+            assert_eq!(placement.module, Some(Vec::new()));
         }
         assert_eq!(modules.unplaced_package_count(), 0);
 
@@ -1584,6 +1611,69 @@ mod tests {
             placements[&FileId::new("file:src/util.rs")].crate_dir,
             "src"
         );
+    }
+
+    #[test]
+    fn module_placements_of_binaries_and_integration_tests_follow_their_own_roots() {
+        // `src/bin/tool.rs` declares `helpers` (in `src/bin/helpers/mod.rs`, beside it) and
+        // `src/bin/multi/main.rs` declares `inner` (in `src/bin/multi/`). `src/bin/tool/sub.rs`
+        // is where rustc does not look for `tool`'s `mod sub;`. `tests/it.rs` declares `common`.
+        let files = [
+            "src/lib.rs",
+            "src/bin/tool.rs",
+            "src/bin/helpers/mod.rs",
+            "src/bin/tool/sub.rs",
+            "src/bin/multi/main.rs",
+            "src/bin/multi/inner.rs",
+            "tests/it.rs",
+            "tests/common/mod.rs",
+        ]
+        .map(source_file);
+        let project = rust_project(&[("", None)]);
+        let declarations = vec![
+            mod_decl("src/bin/tool.rs", "helpers"),
+            mod_decl("src/bin/tool.rs", "sub"),
+            mod_decl("src/bin/multi/main.rs", "inner"),
+            mod_decl("tests/it.rs", "common"),
+        ];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let placements = modules.module_placements();
+        let placed = |file: &str| {
+            let placement = &placements[&FileId::new(format!("file:{file}"))];
+            (
+                placement.crate_dir.as_str(),
+                placement.crate_roots.clone(),
+                placement.module.clone(),
+            )
+        };
+
+        assert_eq!(
+            placed("src/bin/helpers/mod.rs"),
+            (
+                "src::bin",
+                vec!["src::bin::tool".to_string()],
+                Some(vec!["helpers".to_string()])
+            )
+        );
+        assert_eq!(
+            placed("src/bin/multi/inner.rs"),
+            (
+                "src::bin::multi",
+                vec!["src::bin::multi::main".to_string()],
+                Some(vec!["inner".to_string()])
+            )
+        );
+        assert_eq!(
+            placed("tests/common/mod.rs"),
+            (
+                "tests",
+                vec!["tests::it".to_string()],
+                Some(vec!["common".to_string()])
+            )
+        );
+        assert_eq!(placed("src/bin/tool/sub.rs").2, None);
+        assert_eq!(modules.unplaced_package_count(), 0);
     }
 
     #[test]

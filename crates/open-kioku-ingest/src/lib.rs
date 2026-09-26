@@ -229,7 +229,7 @@ fn unplaced_rust_packages_note(count: usize) -> Option<QualityNote> {
         QualityNote::new(
             QualityNoteKind::RelationshipResolution,
             format!(
-                "{count} Rust package(s) have indexed source files but no crate root the module tree can place (a `lib.rs`/`main.rs` that was not indexed, or a `[lib] path` outside `src/`); `crate::`, `self::` and `super::` call paths into other files there are left unresolved"
+                "{count} Rust package(s) have indexed source files in a crate module tree with no crate root the index can place (for example a `lib.rs` or `main.rs` that was not indexed, a `[lib] path` outside `src/`, or a crate whose only root is a `[[bin]] path` target); `crate::`, `self::` and `super::` call paths into other files there are left unresolved"
             ),
         )
     })

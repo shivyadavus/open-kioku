@@ -923,6 +923,47 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // `src/bin/multi/main.rs` keeps the modules it declares in `src/bin/multi/`.
+        "binary_directory_module_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub fn l() {}\n"),
+                (
+                    "src/bin/multi/main.rs",
+                    "mod inner;\n\npub fn caller_fn() {\n    self::inner::target_fn();\n}\n\nfn main() {}\n",
+                ),
+                ("src/bin/multi/inner.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // A crate root is a `mod.rs`-style file: `mod sub;` in `src/bin/tool.rs` is
+        // `src/bin/sub/mod.rs`, never the `src/bin/tool/sub.rs` a module file would use.
+        "binary_file_module_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub fn l() {}\n"),
+                (
+                    "src/bin/tool.rs",
+                    "mod sub;\n\npub fn caller_fn() {\n    crate::sub::target_fn();\n}\n\nfn main() {}\n",
+                ),
+                ("src/bin/sub/mod.rs", "pub fn target_fn() {}\n"),
+                ("src/bin/tool/sub.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // An integration test's `mod common;` is `tests/common/mod.rs`.
+        "integration_test_module_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub fn l() {}\n"),
+                (
+                    "tests/it.rs",
+                    "mod common;\n\n#[test]\nfn caller_fn() {\n    crate::common::target_fn();\n}\n",
+                ),
+                ("tests/common/mod.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
         // `pub mod r#type;` is the file `type.rs` (#543).
         "raw_identifier_module_crate_path" => (
             vec![
