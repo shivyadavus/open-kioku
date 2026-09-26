@@ -22,25 +22,46 @@ SQLite stores metadata:
 Every re-index deletes rows: `ok index` replaces all of them, `ok watch` replaces the changed
 files', and a path the policy excludes after it was indexed (a new `[paths] deny` glob, a
 secret-like name) loses its rows on the next run. The bundled SQLite is built without
-`SQLITE_SECURE_DELETE`, and by default it leaves a deleted row's bytes in place: in the page
-it was removed from, in pages moved to the free list, and in the unallocated space of a free
-page it later reuses. `freelist_count` does not measure that; a page still in use can hold
-them. `SqliteStore` therefore opens every connection with `PRAGMA secure_delete = ON`, which
-overwrites deleted content with zeros in the same transaction as the delete (#553).
+`SQLITE_SECURE_DELETE`, and by default a deleted row's bytes stay readable with a hex dump: in
+the page it was removed from, in pages moved to the free list, in the unallocated space of a
+freed page SQLite later reuses, and, in WAL mode, in the write-ahead log and in database pages
+the log has replaced but not yet been checkpointed over. `freelist_count` measures only the
+second of those. Three measures close them (#553):
 
-A database an earlier version wrote may already hold such bytes, including a path denied
-before this change. The store records in `schema_meta` (`deleted_content_zeroed_v1`) that a
-file holds none: it is set when `SqliteStore` creates the file and after a successful
-`VACUUM`. `ok index` and `ok watch` rewrite a database without it once, with `VACUUM` and a
-truncating WAL checkpoint, after publishing the manifest; a failure (another connection
-reading blocks the checkpoint) is reported on stderr and leaves the marker unset, so the next
-run retries it. The rewrite costs one pass over the database, with free disk space about its
-size while it runs, once per database; later runs skip it. An older Open Kioku writing to a
-marked database deletes without zeroing and leaves the marker in place, so a later run does
-not rewrite it; after running an older version over an index, delete `.ok/` and re-index. `VACUUM`
-and zeroing rewrite the file's blocks; neither can scrub blocks the filesystem has already
-freed, such as a deleted write-ahead log's, a copy-on-write filesystem's old extents, or an
-SSD's spare area.
+- **`PRAGMA secure_delete = FAST`** on every `SqliteStore` connection zeroes a deleted row in
+  a page that stays in use, and the unallocated space of a page when it is reused, at no extra
+  I/O. It does not zero the pages it frees. `ON` would, but it raises the bytes every full
+  `ok index` writes by about a third, for pages that almost always hold content the new index
+  writes again: on this repository's 262 MB index (release builds, five runs each, macOS),
+  a median 752.3 MB with `ON` against 558.6 MB with `FAST` and 558.1 MB with it off. A run
+  that compacted after removing a denied crate wrote 1,336 MB and spent about 5 s in the
+  compaction; the run after it wrote 556 MB.
+- **A compaction** (`VACUUM`) after a run that removed a path the current policy excludes:
+  the run compares the paths the store named before it with those it names after, and asks
+  the policy about the ones that are gone (indexed content by every rule discovery applies,
+  Git history by the security rules). A run that removes nothing excluded does not compact.
+- **A truncating WAL checkpoint** at the end of every `ok index` and `ok watch` run, which
+  copies the log into the database file and empties it. A connection that is merely open,
+  such as an idle MCP server's, does not block it; one inside a read transaction does.
+
+A database an earlier version wrote may already hold excluded content where no row names it.
+The store records in `schema_meta` (`excluded_content_cleared_v1`) that its writer clears
+excluded content as it removes it: set when `SqliteStore` creates the file and after each
+compaction. `ok index`, and `ok watch` when it starts, compact a database without it once.
+
+The work runs after the manifest is published, so a failure never fails the run. The manifest
+is published with `quality.pending_deleted_content_clearing` set when the run owes a
+compaction, and is written again when the outcome changes it: cleared once the clearing
+succeeds, set when the compaction or the checkpoint fails. While it is set, `ok status`,
+`repo_status` and `ok doctor` (a `deleted_content` warning) report that deleted content may
+remain until compaction succeeds, and the next `ok index` or watcher start retries the
+compaction. A file event under `ok watch` compacts only for what that event removed, so a
+compaction that keeps failing is not retried once per change. A compaction costs one rewrite
+of the database, with free disk space about its size while it runs. An older Open Kioku
+writing to a marked database does not clear what it deletes and leaves the record in place;
+after running one over an index, delete `.ok/` and re-index. None of this can scrub blocks
+the filesystem has already freed, such as a deleted write-ahead log's, a copy-on-write
+filesystem's old extents, or an SSD's spare area.
 
 ## Compact graph tables
 
@@ -261,11 +282,12 @@ copy of the artifact:
   afterwards; the manifest published after the search index is rebuilt is written into new
   pages. The cost is one rewrite of the staged database, with free disk space of about twice
   its size while it runs (the rewritten copy and the rollback journal). A `--quality best`
-  artifact from which nothing is removed, and whose database records that its deleted content
-  was zeroed (see [Deleted content](#deleted-content)), skips it; one without that record is
-  compacted whatever its free-page count, because an exporter that deleted rows without
-  zeroing them can leave their bytes in pages still in use. The withheld manifest is deleted
-  with `secure_delete` on, so a skipped compaction does not leave it behind. As with the
+  artifact from which nothing is removed, with no free pages, whose database records that its
+  writer clears excluded content, and whose manifest records no pending clearing (see
+  [Deleted content](#deleted-content)), skips it. One without that record is compacted
+  whatever its free-page count, because an exporter that deleted rows without zeroing them can
+  leave their bytes in pages still in use. The withheld manifest is deleted with
+  `secure_delete` on, so a skipped compaction does not leave it behind. As with the
   pre-redaction compaction, `VACUUM` cannot scrub blocks the filesystem has already freed,
   such as the deleted rollback journal's.
 
