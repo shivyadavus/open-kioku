@@ -762,57 +762,82 @@ fn resolve_chunk(
     let mut facts = Vec::new();
     let mut notes = Vec::new();
     let mut unresolved = Vec::new();
-    let mut seen = HashSet::new();
-    // Items Rust scoping kept from a bare use of a name, per line. The dedup below keys on the
-    // token, line and target, so a bare `path` resolved to a method used to absorb `dir.path()`
-    // on its line; with the bare use ruled out, the member use would surface the same edge.
-    let mut ruled_out = HashSet::new();
-
-    for token_use in token_uses(&chunk.text)
+    let own_name = chunk
+        .symbol_id
+        .as_ref()
+        .and_then(|id| registry.by_id.get(id))
+        .map(|symbol| symbol.name.as_str());
+    let uses = token_uses(&chunk.text)
         .into_iter()
         .take(MAX_TOKENS_PER_CHUNK)
-    {
-        if chunk
-            .symbol_id
-            .as_ref()
-            .and_then(|id| registry.by_id.get(id))
-            .is_some_and(|symbol| symbol.name == token_use.token)
-        {
-            continue;
-        }
-        let scope = ScopeFilter::new(scope_model, chunk, &token_use);
-        let resolution = registry.resolve(chunk, &token_use.token, &scope);
-        for id in scope.ruled_out.take() {
-            ruled_out.insert((token_use.token.clone(), token_use.line, id));
-        }
-        if resolution.symbol.as_ref().is_some_and(|symbol| {
-            ruled_out.contains(&(token_use.token.clone(), token_use.line, symbol.id.clone()))
-        }) {
-            continue;
-        }
+        .filter(|token_use| own_name != Some(token_use.token.as_str()))
+        .collect::<Vec<_>>();
+    // Items Rust scoping kept from a bare use of a name, per line and whatever the edge type: in
+    // `let path = dir.path();` the bare `path` is a local, and the member use must not bring back
+    // the item it was ruled out from as the target of `dir.path()`. Every use on the line is
+    // resolved before any is emitted, so the rule holds when the member use comes first.
+    let mut ruled_out = HashSet::new();
+    let resolutions = uses
+        .iter()
+        .map(|token_use| {
+            let scope = ScopeFilter::new(scope_model, chunk, token_use);
+            let resolution = registry.resolve(chunk, &token_use.token, &scope);
+            for id in scope.ruled_out.take() {
+                ruled_out.insert((token_use.token.clone(), token_use.line, id));
+            }
+            resolution
+        })
+        .collect::<Vec<_>>();
+
+    let kept = uses
+        .into_iter()
+        .zip(resolutions)
+        .filter(|(token_use, resolution)| {
+            !resolution.symbol.as_ref().is_some_and(|symbol| {
+                ruled_out.contains(&(token_use.token.clone(), token_use.line, symbol.id.clone()))
+            })
+        })
+        .collect::<Vec<_>>();
+    // One edge per token, line and target, and a call takes it over a reference whichever use
+    // the line spells first: in `let path = dir.path();` the bare `path` used to take the slot
+    // and hide the `CALLS` edge of `dir.path()`, while `dir.path(); path` kept the call (#534).
+    let called = kept
+        .iter()
+        .filter(|(token_use, _)| token_use.is_call)
+        .filter_map(|(token_use, resolution)| {
+            let symbol = resolution.symbol.as_ref()?;
+            Some((
+                token_use.token.as_str(),
+                token_use.line,
+                symbol.id.0.as_str(),
+            ))
+        })
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut emitted = Vec::with_capacity(kept.len());
+    for (token_use, resolution) in &kept {
         let resolved_id = resolution
             .symbol
             .as_ref()
             .map(|symbol| symbol.id.0.as_str())
             .unwrap_or("<unresolved>");
-        let dedup_key = (
-            token_use.token.clone(),
-            token_use.line,
-            resolved_id.to_owned(),
-        );
-        if !seen.insert(dedup_key) {
+        let key = (token_use.token.as_str(), token_use.line, resolved_id);
+        if (!token_use.is_call && called.contains(&key)) || !seen.insert(key) {
             continue;
         }
+        emitted.push((token_use, resolution));
+    }
 
-        if let Some(note) = quality_note(&token_use.token, &resolution) {
+    for (token_use, resolution) in emitted {
+        if let Some(note) = quality_note(&token_use.token, resolution) {
             notes.push(note);
         }
         if let Some(fact) =
-            fact_for_resolution(chunk, &token_use, &resolution, scip_available, interner)
+            fact_for_resolution(chunk, token_use, resolution, scip_available, interner)
         {
             facts.push(fact);
         } else if !unresolved.contains(&token_use.token) {
-            unresolved.push(token_use.token);
+            unresolved.push(token_use.token.clone());
         }
     }
     ChunkResolution {
@@ -1400,6 +1425,38 @@ mod tests {
                 resolution_from_candidates("test", candidates, Confidence::High, false).unwrap();
             assert_eq!(resolution.candidates, 2);
             assert!(resolution.symbol.is_none());
+        }
+    }
+
+    #[test]
+    fn a_call_takes_the_lines_edge_over_a_reference_to_the_same_target_in_either_order() {
+        let symbols = vec![
+            symbol("caller", "entry", "main", "app::main", SymbolKind::Function),
+            symbol(
+                "target",
+                "entry",
+                "path",
+                "app::Store::path",
+                SymbolKind::Method,
+            ),
+        ];
+        // The same bare and member uses in both orders: the edge a line gets must not depend
+        // on which use comes first (#534).
+        for text in ["let path = dir.path();", "dir.path(); path;"] {
+            let report = resolve_symbol_edges(
+                &[chunk("c1", "entry", Some("caller"), text)],
+                &symbols,
+                &[],
+                false,
+                None,
+            );
+            let edges = report
+                .analysis_facts
+                .iter()
+                .filter(|fact| fact.target == "app::Store::path")
+                .map(|fact| fact.edge_type.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(edges, vec![GraphEdgeType::Calls], "{text}");
         }
     }
 
