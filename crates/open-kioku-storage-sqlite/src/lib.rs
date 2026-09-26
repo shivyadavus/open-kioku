@@ -539,9 +539,11 @@ impl SqliteStore {
     /// `ok index` keeps it for a path the scan policy excludes. Every history row naming one
     /// of `history` is removed as well.
     ///
-    /// What the rows left behind would still say about the removed ones goes too: the facts
-    /// other files hold about a removed symbol, found by its qualified name unless an indexed
-    /// file still defines that name, with the graph nodes labelled by it; every node no file
+    /// What the rows left behind would still say about the removed ones goes too: the
+    /// symbol-registry resolutions and similarity links other files hold to a removed symbol,
+    /// found by its qualified name unless an indexed file still defines that name, with the
+    /// edges drawn from them (counted in `resolutions_withdrawn`; an import naming the same
+    /// string is the importing file's own and stays); every node no file
     /// owns that the removal leaves with no edge; every call-site dictionary entry no remaining
     /// call site uses (a call site's id spells its file's path); and every history hotspot,
     /// recomputed from
@@ -652,36 +654,76 @@ impl SqliteStore {
         for name in still_defined {
             removed_names.remove(&name);
         }
-        // The facts other files hold about a removed symbol (a registry resolution, a
-        // similarity), and the nodes those facts are drawn to, labelled with its name.
+        // What other files resolved to a removed symbol (a symbol-registry resolution, a
+        // similarity), and the edges drawn from those facts. Only facts that name a symbol
+        // they resolved to: an import of `internal::vault::keys::KeyAnchored` spells the same
+        // string, but it is the importing file's own statement, which `ok index` keeps (as an
+        // unresolved import) when the target file is not indexed.
+        let mut resolution_sources_sids = HashSet::new();
         for name in &removed_names {
-            report.other_rows_removed += tx
-                .execute(
-                    "DELETE FROM analysis_facts WHERE target = ?1",
-                    params![name],
-                )
-                .map_err(storage_err)?;
+            let mut ids = Vec::new();
+            {
+                let mut stmt = tx
+                    .prepare_cached(&format!(
+                        "SELECT id, json_extract(json, '$.source') FROM analysis_facts \
+                         WHERE target = ?1 AND ({SYMBOL_RESOLUTION_SOURCE_FILTER})"
+                    ))
+                    .map_err(storage_err)?;
+                let rows = stmt
+                    .query_map(params![name], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(storage_err)?;
+                for row in rows {
+                    let (id, source) = row.map_err(storage_err)?;
+                    ids.push(id);
+                    if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, &source)? {
+                        resolution_sources_sids.insert(sid);
+                    }
+                }
+            }
+            for id in &ids {
+                tx.execute("DELETE FROM analysis_facts WHERE id = ?1", params![id])
+                    .map_err(storage_err)?;
+            }
+            report.resolutions_withdrawn += ids.len();
         }
-        let mut graph_nodes = graph_nodes.clone();
-        if !removed_names.is_empty() {
-            let mut stmt = tx
-                .prepare("SELECT id, label FROM graph_nodes WHERE file_id IS NULL OR file_id = ''")
-                .map_err(storage_err)?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(storage_err)?;
-            for row in rows {
-                let (id, label) = row.map_err(storage_err)?;
-                if removed_names.contains(&label) {
-                    graph_nodes.insert(id);
+        let mut orphan_candidates = HashSet::new();
+        if !removed_names.is_empty() && !resolution_sources_sids.is_empty() {
+            let mut labelled = Vec::new();
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT id, label FROM graph_nodes WHERE file_id IS NULL OR file_id = ''",
+                    )
+                    .map_err(storage_err)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(storage_err)?;
+                for row in rows {
+                    let (id, label) = row.map_err(storage_err)?;
+                    if removed_names.contains(&label) {
+                        labelled.push(id);
+                    }
+                }
+            }
+            // Only the edges those facts drew; a node another fact still reaches (an import's
+            // module node) keeps it, and a node left with none goes in the edgeless pass below.
+            for node_id in &labelled {
+                if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, node_id)? {
+                    delete_edges_at_node_from_sources(
+                        &tx,
+                        sid,
+                        &resolution_sources_sids,
+                        &mut orphan_candidates,
+                    )?;
                 }
             }
         }
         // Nodes no file owns (a test named by history, a resource) go with every edge at them.
-        let mut orphan_candidates = HashSet::new();
-        for node_id in &graph_nodes {
+        for node_id in graph_nodes {
             if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, node_id)? {
                 delete_edges_at_node(&tx, sid, &mut orphan_candidates)?;
                 orphan_candidates.insert(sid);
@@ -3150,6 +3192,9 @@ pub struct PathPurge {
     pub chunks_removed: usize,
     /// Document sections, facts about removed files, and history rows.
     pub other_rows_removed: usize,
+    /// Symbol-registry resolutions and similarity links that indexed files held to a removed
+    /// symbol, withdrawn with it: `ok index` would record those uses as unresolved.
+    pub resolutions_withdrawn: usize,
 }
 
 /// What [`SqliteStore::purge_unanchored_scip_rows`] removed.
@@ -3647,6 +3692,45 @@ fn delete_edges_at_node(
         params![node_sid],
     )
     .map_err(storage_err)
+}
+
+/// The analysis-fact sources that record a symbol another file's code resolved to, by its
+/// qualified name: the symbol registry and the similarity passes. See
+/// [`SqliteStore::purge_paths`].
+const SYMBOL_RESOLUTION_SOURCE_FILTER: &str = "json_extract(json, '$.source') \
+     LIKE 'open-kioku-symbol-registry/%' \
+     OR json_extract(json, '$.source') LIKE 'open-kioku-relationships:%'";
+
+/// Remove the edges at `node_sid` whose source is one of `source_sids`, remembering the
+/// dictionary entries the removed rows referenced. Returns the number of edges removed.
+fn delete_edges_at_node_from_sources(
+    tx: &Transaction<'_>,
+    node_sid: i64,
+    source_sids: &HashSet<i64>,
+    orphan_candidates: &mut HashSet<i64>,
+) -> Result<usize> {
+    let mut ids = Vec::new();
+    {
+        let mut stmt = tx
+            .prepare_cached(&format!(
+                "SELECT id, source_sid, {EDGE_SID_COLUMNS} FROM graph_edges \
+                 WHERE from_sid = ?1 OR to_sid = ?1"
+            ))
+            .map_err(storage_err)?;
+        let mut rows = stmt.query(params![node_sid]).map_err(storage_err)?;
+        while let Some(row) = rows.next().map_err(storage_err)? {
+            let source: Option<i64> = row.get(1).map_err(storage_err)?;
+            if source.is_some_and(|sid| source_sids.contains(&sid)) {
+                ids.push(row.get::<_, String>(0).map_err(storage_err)?);
+                orphan_candidates.extend(edge_sids(row, 2)?.iter().flatten());
+            }
+        }
+    }
+    for id in &ids {
+        tx.execute("DELETE FROM graph_edges WHERE id = ?1", params![id])
+            .map_err(storage_err)?;
+    }
+    Ok(ids.len())
 }
 
 /// The ids of the graph nodes no file owns that no edge reaches.
