@@ -71,6 +71,40 @@ a `GraphEdge` is unchanged by the 4.0 storage work.
 
 The graph builder creates file-to-symbol `DEFINES` edges from extracted symbols and `REFERENCES` edges from persisted exact symbol occurrences. Heuristic reference expansion is intentionally avoided for common repeated names; richer reference coverage should come from configured SCIP indexes or future language-specific resolvers. SQLite persists `graph_nodes` and `graph_edges`, and `open-kioku-storage::GraphStore` exposes neighborhood and shortest-path traversal to CLI and MCP callers.
 
+### Bounded edge windows
+
+Every read that keeps only some of a node's edges keeps them in one order, set by
+`open_kioku_core::sort_graph_edges_for_window`: evidence tier first, then evidence confidence
+within the tier, then edge id. A relationship edge's tier is its effective relationship authority
+(authoritative, then corroborating, then heuristic), recomputed from its typed proofs.
+Containment edges (`CONTAINS`, `DEFINES`) resolve no name — they record where an extracted
+symbol lives — so one from a parser or index (tree-sitter, SCIP, LSP) ranks with proven edges,
+and one from the regex fallback ranks as heuristic. Everything else, including symbol-registry name
+matches and `SIMILAR_TO`/`SEMANTICALLY_RELATED`, is heuristic, and no confidence lifts a
+heuristic edge above a proven one. `neighbors`, `edges_by_type_for_node` (and its paging),
+`edges_by_type_for_nodes` and `graph_edges_between` all cut in that order, so a limit drops the
+weakest edges and never a proven edge in favour of a heuristic one. A window used to be the
+lowest edge ids, and edge ids are content hashes, so which edges survived had nothing to do with
+their evidence: on this repository's own index a heuristic symbol-registry `CALLS` edge displaced
+an authoritative resolver edge from a 20-edge window. `shortest_path` enqueues each node's hops in
+the same order, so where two equally short routes first diverge the stronger hop is tried first;
+it does not compare whole routes. Authority
+lives in the typed proofs, which SQL cannot evaluate, so the SQLite store reads a node's candidate
+edges, orders them, and then cuts; the cost is that node's degree, paid again on every page of a
+paged read, so graph queries read an anchor's typed edges once rather than paging them.
+
+`GraphStore::neighbor_window` returns the kept edges with the node's total edge count, and the
+surfaces that already report caps use it: MCP `dependency_path` without `to` adds
+`edges_omitted`, and the context pack's graph stream adds a caveat naming how many edges it cut.
+Callers that ask a typed question read by type rather than filtering an untyped window: `ok impact`
+reads each seed's inbound dependency edges type by type, because a file's own `DEFINES` edges
+rank with proven edges and would otherwise fill its window ahead of the heuristic inbound edges
+`possible_impact` is made of; MCP `get_references` callers and callees read `CALLS` by direction;
+`explain_flow` follows each hop's first outgoing `CALLS` edge in window order; and a typed
+multi-hop graph query reads that type at each hop.
+`edges_by_type` is a whole-graph scan paged by edge id, not a window; a caller that stops early
+must report the scan as truncated, as `query_relationship_edges` does with `scan_truncated`.
+
 `graph_nodes` keeps the full node JSON as the source of truth, with query columns
 maintained for common filters:
 
