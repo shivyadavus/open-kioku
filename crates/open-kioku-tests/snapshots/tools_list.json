@@ -437,7 +437,7 @@
               "type": "string"
             },
             "limit": {
-              "description": "Maximum number of neighbours to return when `to` is omitted. Defaults to 20, capped at 100.",
+              "description": "Maximum number of neighbour edges to return when `to` is omitted, in evidence order (proven, then corroborating, then heuristic; confidence, then edge id, within each); `edges_omitted` counts the rest. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "to": {

@@ -756,7 +756,10 @@ impl<'a> ContextPackBuilder<'a> {
                 Err(err) => return Err(err),
             }
         }
-        dependency_edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        // Authority order before the cap, as in each neighbourhood window above: an id-ordered
+        // cut kept whichever edges hashed low. One edge read from both of its files carries the
+        // same sort key both times, so the copies are adjacent for `dedup_by`.
+        open_kioku_core::sort_graph_edges_for_window(&mut dependency_edges);
         dependency_edges.dedup_by(|a, b| a.id == b.id);
         dependency_edges.truncate(50);
 

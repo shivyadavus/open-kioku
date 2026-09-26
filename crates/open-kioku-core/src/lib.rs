@@ -14,8 +14,8 @@ pub mod relationship;
 pub use analysis_semantics::*;
 
 pub use relationship::{
-    normalize_relationship_proofs, relationship_authority, RelationshipAuthority,
-    RelationshipProof, RelationshipProofFilter, RelationshipProofKind,
+    normalize_relationship_proofs, relationship_authority, sort_graph_edges_for_window,
+    RelationshipAuthority, RelationshipProof, RelationshipProofFilter, RelationshipProofKind,
     RELATIONSHIP_PROOFS_PROPERTY,
 };
 

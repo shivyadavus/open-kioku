@@ -1013,53 +1013,11 @@ fn relationship_impacts(
         // `ImpactReport` has no caveat channel to say so, so the report is refused instead.
         // Two surfaces (`ok impact`, MCP `impact_analysis`) answered `proven_impact: []` from
         // an index whose edges had been discarded on open before this propagated.
-        let (nodes, mut edges) =
-            match graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT) {
-                Ok(window) => window,
-                Err(OkError::Unsupported(_)) => continue,
-                Err(err) => return Err(err),
-            };
-        // `neighbors` is an untyped, unordered window over every edge touching the node. A file
-        // node has one outgoing `DEFINES` edge per symbol, so on a 60-symbol source file the
-        // window is exhausted by its own definitions and the incoming derived edges never come
-        // back — measured on a real repository, where files with 61-65 symbols reported no
-        // derived impact at all while an 8-symbol file reported it correctly. Ask for those
-        // edges by type, which filters in SQL.
-        let mut nodes = nodes;
-        // Only the file seed can carry this edge: derived edges join two file nodes, so the
-        // symbol seeds below it would always come back empty.
-        //
-        // One absence is still swallowed here that the context path reports as a caveat: an
-        // origin with more derived files than the row cap loses the rest silently, because
-        // `ImpactReport` has no caveat channel. Giving it one is out of scope here.
-        if node_id.0.starts_with("file:") {
-            let derived = match graph.edges_by_type_for_node(
-                GraphEdgeType::DerivedFrom,
-                &node_id.0,
-                false,
-                RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT,
-                0,
-            ) {
-                Ok(derived) => derived,
-                Err(OkError::Unsupported(_)) => Vec::new(),
-                Err(err) => return Err(err),
-            };
-            for edge in derived {
-                if edges.iter().any(|existing| existing.id == edge.id) {
-                    continue;
-                }
-                // `neighbors` returned nodes for its own window only. A derived edge's other
-                // endpoint is always a file node (`file:<path>`), so it is resolved from the
-                // indexed files rather than with a second graph query.
-                if !nodes.iter().any(|existing| existing.id == edge.from) {
-                    let Some(node) = file_node_for_id(&edge.from, &files_by_path) else {
-                        continue;
-                    };
-                    nodes.push(node);
-                }
-                edges.push(edge);
-            }
-        }
+        let (nodes, edges) = match inbound_impact_edges(graph, node_id, &files_by_path) {
+            Ok(read) => read,
+            Err(OkError::Unsupported(_)) => continue,
+            Err(err) => return Err(err),
+        };
         let nodes_by_id = nodes
             .iter()
             .map(|node| (node.id.clone(), node))
@@ -1091,6 +1049,76 @@ fn relationship_impacts(
         list.truncate(RELATIONSHIP_IMPACT_LIMIT);
     }
     Ok((proven, possible))
+}
+
+/// The edges into `node_id` that can carry impact, read by type, with the nodes they come from.
+///
+/// An untyped `neighbors` window around a file node is spent on the file's own outgoing
+/// `DEFINES` edges, one per symbol, and in window order those rank with proven edges, ahead of
+/// the heuristic inbound edges `possible_impact` is made of: a file with more symbols than the
+/// window would report no possible impact at all. (Before window ordering the same window was
+/// cut by edge id, and files with 61-65 symbols measured on a real repository reported no derived
+/// impact while an 8-symbol file did.) Each impacted type is read inbound and filtered in SQL, so
+/// the cap applies per type, in window order, to edges that can actually be impacts.
+///
+/// A store without typed reads falls back to the untyped window.
+fn inbound_impact_edges(
+    graph: &dyn GraphStore,
+    node_id: &NodeId,
+    files_by_path: &HashMap<String, FileId>,
+) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)> {
+    const IMPACT_EDGE_TYPES: [GraphEdgeType; 8] = [
+        GraphEdgeType::Calls,
+        GraphEdgeType::References,
+        GraphEdgeType::UsesType,
+        GraphEdgeType::Implements,
+        GraphEdgeType::Extends,
+        GraphEdgeType::Imports,
+        GraphEdgeType::DependsOn,
+        GraphEdgeType::DerivedFrom,
+    ];
+    debug_assert!(IMPACT_EDGE_TYPES.iter().all(is_impacted_by_edge_type));
+    let mut edges = Vec::new();
+    for edge_type in IMPACT_EDGE_TYPES {
+        // Derived edges join two file nodes, so a symbol seed never has one.
+        if edge_type == GraphEdgeType::DerivedFrom && !node_id.0.starts_with("file:") {
+            continue;
+        }
+        match graph.edges_by_type_for_node(
+            edge_type,
+            &node_id.0,
+            false,
+            RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT,
+            0,
+        ) {
+            Ok(batch) => edges.extend(batch),
+            Err(OkError::Unsupported(_)) => {
+                return graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    let sources = edges
+        .iter()
+        .map(|edge| edge.from.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut nodes = Vec::with_capacity(sources.len());
+    for source in sources {
+        // A file endpoint is rebuilt from the indexed files, as derived edges always were; a
+        // symbol endpoint is read from the graph.
+        let node = match file_node_for_id(&source, files_by_path) {
+            Some(node) => Some(node),
+            None => match graph.node_by_id(&source.0) {
+                Ok(node) => node,
+                Err(OkError::Unsupported(_)) => None,
+                Err(err) => return Err(err),
+            },
+        };
+        if let Some(node) = node {
+            nodes.push(node);
+        }
+    }
+    Ok((nodes, edges))
 }
 
 /// Rebuild the `GraphNode` for a `file:<path>` id from the indexed files. Used for edges fetched
@@ -3265,6 +3293,120 @@ mod tests {
             "{:?} {:?}",
             reverse.proven_impact,
             reverse.possible_impact
+        );
+    }
+
+    /// A file with more parsed definitions than the relationship window still reports the
+    /// heuristic edge into it. Its own `DEFINES` edges rank with proven edges, so an untyped
+    /// window around the file is spent on them before any inbound heuristic edge.
+    #[test]
+    fn a_file_with_more_definitions_than_the_window_keeps_its_inbound_possible_impact() {
+        use open_kioku_core::{identity, EvidenceSourceType, GraphEdge, GraphNode};
+
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let make_file = |id: &str, path: &str| File {
+            id: FileId::new(id),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: id.into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let target = make_file("target", "src/big.rs");
+        let caller = make_file("caller", "src/caller.rs");
+        let manifest = IndexManifest {
+            repository: Repository {
+                id: repo_id.clone(),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 2,
+            symbol_count: 0,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            quality: IndexQuality::default(),
+            snapshot: None,
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[target.clone(), caller.clone()],
+                symbols: &[],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let target_node = identity::file_node_id(&target.path);
+        let mut nodes = [&target, &caller]
+            .into_iter()
+            .map(|file| GraphNode {
+                id: identity::file_node_id(&file.path),
+                node_type: GraphNodeType::File,
+                label: file.path.display().to_string(),
+                file_id: Some(file.id.clone()),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let mut edges = Vec::new();
+        for index in 0..(RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT + 5) {
+            let symbol = open_kioku_core::NodeId::new(format!("symbol:s{index:02}"));
+            nodes.push(GraphNode {
+                id: symbol.clone(),
+                node_type: GraphNodeType::Function,
+                label: format!("s{index:02}"),
+                ..Default::default()
+            });
+            let mut defines = GraphEdge {
+                id: open_kioku_core::EdgeId::new(format!("a-defines-{index:02}")),
+                from: target_node.clone(),
+                to: symbol,
+                edge_type: GraphEdgeType::Defines,
+                ..Default::default()
+            };
+            defines.evidence.source_type = EvidenceSourceType::TreeSitter;
+            defines.evidence.confidence = Confidence::High;
+            edges.push(defines);
+        }
+        // Proofless, so heuristic, and its id sorts after every definition.
+        let mut import = GraphEdge {
+            id: open_kioku_core::EdgeId::new("z-import"),
+            from: identity::file_node_id(&caller.path),
+            to: target_node,
+            edge_type: GraphEdgeType::Imports,
+            ..Default::default()
+        };
+        import.evidence.confidence = Confidence::Medium;
+        edges.push(import);
+        store.replace_graph(&nodes, &edges).unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .with_graph_store(Some(&store))
+            .for_file(Path::new("src/big.rs"))
+            .unwrap();
+        assert!(
+            report
+                .possible_impact
+                .iter()
+                .any(|impact| impact.path == Path::new("src/caller.rs")),
+            "{:?}",
+            report.possible_impact
         );
     }
 

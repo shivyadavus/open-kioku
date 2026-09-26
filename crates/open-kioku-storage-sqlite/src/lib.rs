@@ -4331,31 +4331,35 @@ impl GraphStore for SqliteStore {
     }
 
     fn neighbors(&self, node: &str, limit: usize) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)> {
+        let window = self.neighbor_window(node, limit)?;
+        Ok((window.nodes, window.edges))
+    }
+
+    fn neighbor_window(
+        &self,
+        node: &str,
+        limit: usize,
+    ) -> Result<open_kioku_storage::NeighborWindow> {
         require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let Some(node_sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, node)? else {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(open_kioku_storage::NeighborWindow::default());
         };
         // `DERIVED_FROM` is excluded from every untyped read. It is a sibling relation, not a
         // dependency — a test does not depend on the module it is named after — and `neighbors`
         // backs `module_dependencies`, which callers read as imports and dependents. Consumers
         // that want it ask for it by type through `edges_by_type_for_node`.
-        // Ordered by edge id before the limit: row order is insertion order, which an incremental
-        // `ok watch` update changes, so a high-degree node kept a different set of edges than a
-        // fresh index of the same tree.
         let mut stmt = conn
             .prepare(&format!(
-                "{} WHERE (e.from_sid = ?1 OR e.to_sid = ?1) AND e.edge_type != 'DerivedFrom' ORDER BY e.id LIMIT ?2",
+                "{} WHERE (e.from_sid = ?1 OR e.to_sid = ?1) AND e.edge_type != 'DerivedFrom'",
                 compact::EDGE_SELECT
             ))
             .map_err(storage_err)?;
-        let mut rows = stmt
-            .query(params![node_sid, limit as i64])
-            .map_err(storage_err)?;
-        let edges = collect_edges(&mut rows)?;
+        let mut rows = stmt.query(params![node_sid]).map_err(storage_err)?;
+        let (edges, total_edges) = window_of_edges(&mut rows, 0, limit)?;
         let mut ids = edges
             .iter()
             .flat_map(|edge| [edge.from.0.clone(), edge.to.0.clone()])
@@ -4368,7 +4372,11 @@ impl GraphStore for SqliteStore {
                 nodes.push(node);
             }
         }
-        Ok((nodes, edges))
+        Ok(open_kioku_storage::NeighborWindow::new(
+            nodes,
+            edges,
+            total_edges,
+        ))
     }
 
     fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>> {
@@ -4406,7 +4414,12 @@ impl GraphStore for SqliteStore {
                 continue;
             };
             let mut rows = edge_stmt.query(params![node_sid]).map_err(storage_err)?;
-            let edges = collect_edges(&mut rows)?;
+            // Of two shortest paths, the one whose hops were enqueued first is returned, so hops
+            // are enqueued in window order: where equally short routes first diverge, the
+            // stronger hop is tried first, and the answer no longer depends on row insertion
+            // order. Routes are not compared whole: a proven first hop followed by a heuristic
+            // one still wins over a route that is weaker only at its first hop.
+            let (edges, _) = window_of_edges(&mut rows, 0, usize::MAX)?;
             for edge in edges {
                 let mut next_path = path.clone();
                 next_path.push(edge.clone());
@@ -4533,22 +4546,21 @@ impl GraphStore for SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let limit = clamp_limit(limit) as i64;
-        let offset = offset as i64;
+        let limit = clamp_limit(limit);
         let edge_type = format!("{edge_type:?}");
         let Some(node_sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, node_id)? else {
             return Ok(Vec::new());
         };
         let endpoint_column = if outgoing { "from_sid" } else { "to_sid" };
         let sql = format!(
-            "{} WHERE e.{endpoint_column} = ?1 AND e.edge_type = ?2 ORDER BY e.id LIMIT ?3 OFFSET ?4",
+            "{} WHERE e.{endpoint_column} = ?1 AND e.edge_type = ?2",
             compact::EDGE_SELECT
         );
         let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
         let mut rows = stmt
-            .query(params![node_sid, edge_type, limit, offset])
+            .query(params![node_sid, edge_type])
             .map_err(storage_err)?;
-        collect_edges(&mut rows)
+        Ok(window_of_edges(&mut rows, offset, limit)?.0)
     }
 
     fn edges_by_type_for_nodes(
@@ -4578,7 +4590,7 @@ impl GraphStore for SqliteStore {
         for chunk in node_sids.chunks(900) {
             let placeholders = vec!["?"; chunk.len()].join(", ");
             let sql = format!(
-                "{} WHERE e.edge_type = ? AND e.{endpoint_column} IN ({placeholders}) ORDER BY e.id",
+                "{} WHERE e.edge_type = ? AND e.{endpoint_column} IN ({placeholders})",
                 compact::EDGE_SELECT
             );
             let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
@@ -4592,10 +4604,9 @@ impl GraphStore for SqliteStore {
                 .map_err(storage_err)?;
             edges.extend(collect_edges(&mut rows)?);
         }
-        // Each chunk is ordered by edge id, so the accumulation is ordered by (chunk, id) until it
-        // is sorted here. Chunk membership follows string-interning order, which is not meaningful
-        // to a caller, and a caller that truncates this list would otherwise get that order.
-        edges.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+        // Chunk membership follows string-interning order, which is not meaningful to a caller,
+        // and a caller that truncates this list would otherwise get that order.
+        open_kioku_core::sort_graph_edges_for_window(&mut edges);
         Ok(edges)
     }
 
@@ -4658,7 +4669,7 @@ impl GraphStore for SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let limit = clamp_limit(limit) as i64;
+        let limit = clamp_limit(limit);
         let (Some(from_sid), Some(to_sid)) = (
             compact::lookup_sid(&conn, compact::GRAPH_STRINGS, from)?,
             compact::lookup_sid(&conn, compact::GRAPH_STRINGS, to)?,
@@ -4667,15 +4678,37 @@ impl GraphStore for SqliteStore {
         };
         let mut stmt = conn
             .prepare(&format!(
-                "{} WHERE e.from_sid = ?1 AND e.to_sid = ?2 ORDER BY e.id LIMIT ?3",
+                "{} WHERE e.from_sid = ?1 AND e.to_sid = ?2",
                 compact::EDGE_SELECT
             ))
             .map_err(storage_err)?;
-        let mut rows = stmt
-            .query(params![from_sid, to_sid, limit])
-            .map_err(storage_err)?;
-        collect_edges(&mut rows)
+        let mut rows = stmt.query(params![from_sid, to_sid]).map_err(storage_err)?;
+        Ok(window_of_edges(&mut rows, 0, limit)?.0)
     }
+}
+
+/// One page of the edges a statement yields, in window order, and how many it yielded in all.
+///
+/// Authority is decided by the typed proofs an edge carries, which SQL cannot read, so a bounded
+/// read materializes every candidate edge, orders it with the core policy, and only then cuts.
+/// `ORDER BY id LIMIT` here let whichever edges hashed low fill the window, and a heuristic edge
+/// displaced a proven one from a node's neighbourhood. The candidates are one node's incident
+/// edges, so the cost is that node's degree; the id tiebreak keeps pages stable across runs and
+/// across an incremental `ok watch` update, which changes insertion order.
+fn window_of_edges(
+    rows: &mut rusqlite::Rows<'_>,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<GraphEdge>, usize)> {
+    let mut edges = collect_edges(rows)?;
+    open_kioku_core::sort_graph_edges_for_window(&mut edges);
+    let total = edges.len();
+    let edges = edges
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    Ok((edges, total))
 }
 
 /// Materialize [`GraphEdge`]s from a statement projecting [`compact::EDGE_SELECT`].
@@ -5674,9 +5707,10 @@ mod tests {
         EvidenceSourceType, File, FileId, FileRange, GitChangeKind, GitCochangeEdge, GitCommitId,
         GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
         GraphNodeType, HistoryRecordId, HistorySignalQuery, HistorySnapshot, IndexManifest,
-        IndexQuality, Language, LineRange, NodeId, Owner, Repository, RepositoryId,
-        ReviewerEvidence, ReviewerRole, SimilarChangeQuery, SimilarityEvidenceSource, Symbol,
-        SymbolId, SymbolKind, SymbolOccurrence, HISTORY_SCHEMA_VERSION,
+        IndexQuality, Language, LineRange, NodeId, Owner, RelationshipProof, RelationshipProofKind,
+        Repository, RepositoryId, ReviewerEvidence, ReviewerRole, SimilarChangeQuery,
+        SimilarityEvidenceSource, Symbol, SymbolId, SymbolKind, SymbolOccurrence,
+        HISTORY_SCHEMA_VERSION,
     };
     use open_kioku_storage::{
         GraphStore, HistoryStore, IndexData, MetadataStore, PartialIndexUpdate,
@@ -8323,6 +8357,138 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(ids, vec!["e-1", "e-2"]);
         }
+    }
+
+    /// A node with more heuristic edges than a window holds, and one proven edge whose id sorts
+    /// after all of them. Every bounded read must keep the proven edge and say what it cut.
+    #[test]
+    fn bounded_edge_reads_keep_a_proven_edge_that_heuristic_edges_outnumber() {
+        let store = make_current_store();
+        let node = |path: &str| GraphNode {
+            id: NodeId::new(format!("file:{path}")),
+            node_type: GraphNodeType::File,
+            label: path.into(),
+            ..Default::default()
+        };
+        let heuristic = |id: String, to: &str| {
+            let mut edge = GraphEdge {
+                id: EdgeId::new(id),
+                from: NodeId::new("file:a.rs"),
+                to: NodeId::new(format!("file:{to}")),
+                edge_type: GraphEdgeType::Imports,
+                ..Default::default()
+            };
+            edge.evidence.confidence = Confidence::High;
+            edge
+        };
+        let mut proven = heuristic("z-proven".into(), "proven.rs");
+        proven.evidence.confidence = Confidence::Exact;
+        proven
+            .set_relationship_proofs(vec![RelationshipProof::new(
+                RelationshipProofKind::ImportBinding,
+                "test",
+                1,
+            )])
+            .unwrap();
+        assert!(proven.is_authoritative_relationship());
+
+        let mut nodes = vec![node("a.rs"), node("proven.rs")];
+        let mut edges = vec![proven.clone()];
+        for index in 0..25 {
+            let target = format!("h{index:02}.rs");
+            nodes.push(node(&target));
+            edges.push(heuristic(format!("e-{index:02}"), &target));
+        }
+        store.replace_graph(&nodes, &edges).unwrap();
+
+        let window = store.neighbor_window("file:a.rs", 20).unwrap();
+        assert_eq!(window.edges.len(), 20);
+        assert_eq!(window.edges[0].id.0, "z-proven");
+        assert_eq!(window.total_edges, 26);
+        assert_eq!(window.omitted_edges(), 6);
+        // Only the nodes a kept edge reaches: the anchor, the proven target, 19 heuristic ones.
+        assert_eq!(window.nodes.len(), 21);
+        assert!(window
+            .nodes
+            .iter()
+            .any(|node| node.id.0 == "file:proven.rs"));
+        let (_, kept) = store.neighbors("file:a.rs", 20).unwrap();
+        assert_eq!(kept[0].id.0, "z-proven");
+
+        // Typed paging starts from the proven edge and still covers every edge exactly once.
+        let first = store
+            .edges_by_type_for_node(GraphEdgeType::Imports, "file:a.rs", true, 20, 0)
+            .unwrap();
+        assert_eq!(first[0].id.0, "z-proven");
+        let second = store
+            .edges_by_type_for_node(GraphEdgeType::Imports, "file:a.rs", true, 20, 20)
+            .unwrap();
+        let mut paged = first
+            .iter()
+            .chain(&second)
+            .map(|edge| edge.id.0.clone())
+            .collect::<Vec<_>>();
+        paged.sort();
+        paged.dedup();
+        assert_eq!(paged.len(), 26);
+        let batched = store
+            .edges_by_type_for_nodes(GraphEdgeType::Imports, &["file:a.rs"], true)
+            .unwrap();
+        assert_eq!(batched[0].id.0, "z-proven");
+
+        // Two edges between the same pair: a one-edge window keeps the proven one.
+        let mut parallel = heuristic("a-parallel".into(), "proven.rs");
+        parallel.evidence.confidence = Confidence::Low;
+        store
+            .replace_graph(&nodes, &[parallel, proven.clone()])
+            .unwrap();
+        let between = store
+            .graph_edges_between("file:a.rs", "file:proven.rs", 1)
+            .unwrap();
+        assert_eq!(between.len(), 1);
+        assert_eq!(between[0].id.0, "z-proven");
+    }
+
+    /// Of two routes of equal length, the one whose first hop is proven is returned, whichever
+    /// edge id sorts first.
+    #[test]
+    fn shortest_path_prefers_a_proven_route_of_equal_length() {
+        let store = make_current_store();
+        let node = |path: &str| GraphNode {
+            id: NodeId::new(format!("file:{path}")),
+            node_type: GraphNodeType::File,
+            label: path.into(),
+            ..Default::default()
+        };
+        let hop = |id: &str, from: &str, to: &str| GraphEdge {
+            id: EdgeId::new(id),
+            from: NodeId::new(format!("file:{from}")),
+            to: NodeId::new(format!("file:{to}")),
+            edge_type: GraphEdgeType::Imports,
+            ..Default::default()
+        };
+        let mut proven = hop("z-proven", "a.rs", "c.rs");
+        proven
+            .set_relationship_proofs(vec![RelationshipProof::new(
+                RelationshipProofKind::ImportBinding,
+                "test",
+                1,
+            )])
+            .unwrap();
+        let nodes = [node("a.rs"), node("b.rs"), node("c.rs"), node("d.rs")];
+        let edges = [
+            hop("a-heuristic", "a.rs", "b.rs"),
+            hop("b-to-d", "b.rs", "d.rs"),
+            proven,
+            hop("c-to-d", "c.rs", "d.rs"),
+        ];
+        store.replace_graph(&nodes, &edges).unwrap();
+        let path = store.shortest_path("file:a.rs", "file:d.rs", 5).unwrap();
+        let ids = path
+            .iter()
+            .map(|edge| edge.id.0.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["z-proven", "c-to-d"]);
     }
 
     #[test]

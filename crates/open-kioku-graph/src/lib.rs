@@ -563,7 +563,8 @@ impl InMemoryGraph {
     }
 
     pub fn neighbors(&self, node: &str, limit: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
-        // Derived siblings are excluded from the untyped read; see the SQLite store.
+        // Derived siblings are excluded from the untyped read; see the SQLite store. The window
+        // is cut in authority order, as every store's is, never in insertion order.
         let mut edges = self
             .edges
             .iter()
@@ -571,15 +572,15 @@ impl InMemoryGraph {
                 (edge.from.0 == node || edge.to.0 == node)
                     && edge.edge_type != GraphEdgeType::DerivedFrom
             })
-            .take(limit)
             .cloned()
             .collect::<Vec<_>>();
+        open_kioku_core::sort_graph_edges_for_window(&mut edges);
+        edges.truncate(limit);
         let nodes = edges
             .iter()
             .flat_map(|edge| [edge.from.0.clone(), edge.to.0.clone()])
             .filter_map(|id| self.nodes.get(&id).cloned())
             .collect::<Vec<_>>();
-        edges.truncate(limit);
         (nodes, edges)
     }
 
@@ -594,11 +595,16 @@ impl InMemoryGraph {
                 continue;
             }
             // A derived sibling is not a dependency hop; see the SQLite store for the rationale.
-            for edge in self
+            // Hops are enqueued in window order, as the SQLite store does, so where equally short
+            // routes first diverge the stronger hop is tried first.
+            let mut hops = self
                 .edges
                 .iter()
                 .filter(|edge| edge.from.0 == node && edge.edge_type != GraphEdgeType::DerivedFrom)
-            {
+                .cloned()
+                .collect::<Vec<_>>();
+            open_kioku_core::sort_graph_edges_for_window(&mut hops);
+            for edge in hops {
                 let mut next_path = path.clone();
                 next_path.push(edge.clone());
                 queue.push_back((edge.to.0.clone(), next_path));

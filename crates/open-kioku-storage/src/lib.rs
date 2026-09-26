@@ -1,10 +1,10 @@
 use open_kioku_core::{
-    AnalysisFact, ChurnSummary, CodeChunk, DocumentSection, EvidenceSourceType, File, FileId,
-    FileProvenance, GitCochangeEdge, GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode,
-    GraphNodeType, HistorySignalQuery, HistorySignalSummary, HistorySnapshot, HistorySummary,
-    ImpactReport, Import, IndexCoverage, IndexManifest, ScoreComponent, SearchResult,
-    SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance,
-    TestTarget,
+    sort_graph_edges_for_window, AnalysisFact, ChurnSummary, CodeChunk, DocumentSection,
+    EvidenceSourceType, File, FileId, FileProvenance, GitCochangeEdge, GitCommitRecord, GraphEdge,
+    GraphEdgeType, GraphNode, GraphNodeType, HistorySignalQuery, HistorySignalSummary,
+    HistorySnapshot, HistorySummary, ImpactReport, Import, IndexCoverage, IndexManifest,
+    ScoreComponent, SearchResult, SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId,
+    SymbolOccurrence, SymbolProvenance, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 
@@ -647,6 +647,44 @@ pub struct TypeStats {
     pub freshness: Option<u64>,
 }
 
+/// One bounded read of a node's neighbourhood: see [`GraphStore::neighbor_window`].
+#[derive(Debug, Clone, Default)]
+pub struct NeighborWindow {
+    /// The nodes at the ends of `edges`, ordered by id.
+    pub nodes: Vec<GraphNode>,
+    /// The edges kept, in [`sort_graph_edges_for_window`] order.
+    pub edges: Vec<GraphEdge>,
+    /// Every edge the window was taken from, including the ones the limit cut.
+    pub total_edges: usize,
+}
+
+impl NeighborWindow {
+    /// Keeps only the nodes an edge in `edges` reaches, so a caller never sees a node whose
+    /// connecting edge the window cut.
+    pub fn new(nodes: Vec<GraphNode>, edges: Vec<GraphEdge>, total_edges: usize) -> Self {
+        let reached = edges
+            .iter()
+            .flat_map(|edge| [edge.from.0.as_str(), edge.to.0.as_str()])
+            .collect::<BTreeSet<_>>();
+        let mut nodes = nodes
+            .into_iter()
+            .filter(|node| reached.contains(node.id.0.as_str()))
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+        nodes.dedup_by(|left, right| left.id == right.id);
+        Self {
+            nodes,
+            edges,
+            total_edges,
+        }
+    }
+
+    /// Incident edges the limit left out.
+    pub fn omitted_edges(&self) -> usize {
+        self.total_edges.saturating_sub(self.edges.len())
+    }
+}
+
 pub trait GraphStore: Send + Sync {
     fn replace_graph(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()>;
     fn node_by_id(&self, _id: &str) -> Result<Option<GraphNode>> {
@@ -654,7 +692,27 @@ pub trait GraphStore: Send + Sync {
             "node_by_id is not implemented by this graph store".into(),
         ))
     }
+    /// The first `limit` edges touching `node`, and the nodes at their ends. `DERIVED_FROM` is
+    /// excluded: it is a sibling relation, not a dependency, and is read by type instead.
+    ///
+    /// The window keeps edges in [`sort_graph_edges_for_window`] order — authority, then
+    /// confidence, then edge id — so a limit cuts the weakest edges, never a proven edge in
+    /// favour of a heuristic one. Use [`GraphStore::neighbor_window`] to learn how many it cut.
     fn neighbors(&self, node: &str, limit: usize) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)>;
+
+    /// [`GraphStore::neighbors`] together with how many edges touch `node` in all, so a caller
+    /// that reports a cap can say what the limit cut.
+    ///
+    /// The default reads the whole neighbourhood through `neighbors` and orders it itself; a
+    /// store that can count without returning every edge should override it.
+    fn neighbor_window(&self, node: &str, limit: usize) -> Result<NeighborWindow> {
+        let (nodes, mut edges) = self.neighbors(node, usize::MAX)?;
+        sort_graph_edges_for_window(&mut edges);
+        let total_edges = edges.len();
+        edges.truncate(limit);
+        Ok(NeighborWindow::new(nodes, edges, total_edges))
+    }
+
     fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>>;
 
     fn node_type_stats(&self) -> Result<std::collections::HashMap<String, TypeStats>> {
@@ -694,6 +752,9 @@ pub trait GraphStore: Send + Sync {
         ))
     }
 
+    /// Every edge of `edge_type` across the graph, paged by edge id. This is a scan primitive:
+    /// its pages are not authority-ordered, so a caller that stops before the last page must
+    /// report the scan as truncated rather than treat the edges it saw as the strongest.
     fn edges_by_type(
         &self,
         _edge_type: GraphEdgeType,
@@ -705,6 +766,9 @@ pub trait GraphStore: Send + Sync {
         ))
     }
 
+    /// The `edge_type` edges ending at (or, with `outgoing`, starting from) `node_id`, paged by
+    /// `limit` and `offset` over [`sort_graph_edges_for_window`] order, so the first page holds
+    /// the node's strongest edges of that type.
     fn edges_by_type_for_node(
         &self,
         _edge_type: GraphEdgeType,
@@ -722,7 +786,8 @@ pub trait GraphStore: Send + Sync {
     /// in one read and without paging, so the caller bounds `node_ids`. A store that returns
     /// `Unsupported` leaves callers to page `edges_by_type_for_node` per node.
     ///
-    /// Ordered by edge id, so a caller that truncates the result keeps the same edges across runs.
+    /// In [`sort_graph_edges_for_window`] order, so a caller that truncates the result keeps the
+    /// strongest edges, and the same ones across runs.
     fn edges_by_type_for_nodes(
         &self,
         _edge_type: GraphEdgeType,
@@ -746,6 +811,7 @@ pub trait GraphStore: Send + Sync {
         ))
     }
 
+    /// Up to `limit` edges from `from` to `to`, in [`sort_graph_edges_for_window`] order.
     fn graph_edges_between(&self, _from: &str, _to: &str, _limit: usize) -> Result<Vec<GraphEdge>> {
         Err(OkError::Unsupported(
             "graph_edges_between is not implemented by this graph store".into(),

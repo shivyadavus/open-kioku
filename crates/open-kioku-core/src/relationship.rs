@@ -5,7 +5,7 @@
 //! do not independently decide whether a structural graph relationship is trusted.
 
 use crate::identity::symbol_id_node_id;
-use crate::{EvidenceId, FileRange, GraphEdge, GraphEdgeType, SymbolId};
+use crate::{Confidence, EvidenceId, FileRange, GraphEdge, GraphEdgeType, SymbolId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -379,6 +379,65 @@ impl GraphEdge {
     }
 }
 
+/// Rank of an evidence confidence for window ordering: higher is stronger. `Confidence` has no
+/// derived order, and its declaration order is the reverse of what a window keeps first.
+fn confidence_rank(confidence: Confidence) -> u8 {
+    match confidence {
+        Confidence::Low => 0,
+        Confidence::Medium => 1,
+        Confidence::High => 2,
+        Confidence::Exact => 3,
+    }
+}
+
+/// Evidence tier a bounded window ranks an edge by: 2 proven, 1 corroborating, 0 heuristic.
+///
+/// Relationship edges take the tier of their effective [`relationship_authority`], recomputed
+/// from their typed proofs. Containment edges (`CONTAINS`, `DEFINES`) resolve no name: they
+/// record where an extracted symbol lives, so no proof policy applies to them. One extracted by a
+/// parser or an index (tree-sitter, SCIP, LSP) ranks with proven edges; one from the regex
+/// fallback or another heuristic extractor is a guess about where a symbol is, and ranks as
+/// heuristic. Every other edge, proofless or statistical (`SIMILAR_TO`, `SEMANTICALLY_RELATED`,
+/// a symbol-registry name match), is heuristic.
+fn window_tier(edge: &GraphEdge) -> u8 {
+    match edge.edge_type {
+        GraphEdgeType::Contains | GraphEdgeType::Defines => {
+            if edge.evidence.source_type.is_exact_reference_source() {
+                2
+            } else {
+                0
+            }
+        }
+        _ => match edge.relationship_authority() {
+            RelationshipAuthority::Authoritative => 2,
+            RelationshipAuthority::Corroborating => 1,
+            RelationshipAuthority::Heuristic => 0,
+        },
+    }
+}
+
+/// Order a set of graph edges the way every bounded edge window keeps them: proven edges first,
+/// then corroborating, then heuristic (see [`window_tier`]); within a tier stronger evidence
+/// confidence first; then edge id.
+///
+/// A window that truncates by edge id alone lets whichever edges happen to hash low fill it, so
+/// a heuristic edge could displace a proven one from a node's neighbourhood. Sorting rather than
+/// reserving slots keeps every prefix tier-ordered, so any `limit` a caller picks cuts the
+/// weakest edges. Confidence only orders edges within one tier — a confident heuristic edge never
+/// outranks a proven one — and the edge id makes the order total and independent of insertion
+/// order.
+pub fn sort_graph_edges_for_window(edges: &mut [GraphEdge]) {
+    // The tier parses the typed proofs, so it is computed once per edge rather than per
+    // comparison.
+    edges.sort_by_cached_key(|edge| {
+        (
+            std::cmp::Reverse(window_tier(edge)),
+            std::cmp::Reverse(confidence_rank(edge.evidence.confidence)),
+            edge.id.0.clone(),
+        )
+    });
+}
+
 /// Reusable typed filter for callers that need authority-aware relationship reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RelationshipProofFilter {
@@ -420,7 +479,7 @@ impl RelationshipProofFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EdgeId, NodeId};
+    use crate::{EdgeId, EvidenceSourceType, NodeId};
     use serde_json::json;
 
     fn proof(kind: RelationshipProofKind, candidate_count: usize) -> RelationshipProof {
@@ -437,6 +496,69 @@ mod tests {
         };
         edge.set_relationship_proofs(proofs).unwrap();
         edge
+    }
+
+    #[test]
+    fn window_order_ranks_evidence_tier_then_confidence_then_edge_id() {
+        let windowed = |id: &str, proofs: Vec<RelationshipProof>, confidence: Confidence| {
+            let mut edge = edge(GraphEdgeType::Imports, proofs);
+            edge.id = EdgeId::new(id);
+            edge.evidence.confidence = confidence;
+            edge
+        };
+        // Declared weakest-first by id, so an id-ordered cut would keep exactly the wrong ones.
+        let mut edges = vec![
+            windowed("a-heuristic-low", Vec::new(), Confidence::Low),
+            windowed("b-heuristic-high", Vec::new(), Confidence::High),
+            windowed("c-heuristic-high", Vec::new(), Confidence::High),
+            // An ambiguous binding proves nothing, so it stays in the heuristic tier however
+            // confident the edge claims to be; confidence only orders it within that tier.
+            windowed(
+                "d-ambiguous-binding",
+                vec![proof(RelationshipProofKind::ImportBinding, 2)],
+                Confidence::Exact,
+            ),
+            windowed(
+                "z-proven",
+                vec![proof(RelationshipProofKind::ImportBinding, 1)],
+                Confidence::Medium,
+            ),
+            windowed(
+                "y-corroborated",
+                vec![proof(RelationshipProofKind::DeclaredOrigin, 1)],
+                Confidence::Exact,
+            ),
+        ];
+        edges.last_mut().unwrap().edge_type = GraphEdgeType::DerivedFrom;
+        // A parsed containment edge resolves no name, so it ranks with proven edges; the same
+        // edge from the regex fallback is a guess and ranks with heuristic ones.
+        let mut defines = windowed("x-defines", Vec::new(), Confidence::High);
+        defines.edge_type = GraphEdgeType::Defines;
+        defines.evidence.source_type = EvidenceSourceType::TreeSitter;
+        let mut guessed = defines.clone();
+        guessed.id = EdgeId::new("w-regex-defines");
+        guessed.evidence.source_type = EvidenceSourceType::Regex;
+        guessed.evidence.confidence = Confidence::Medium;
+        edges.push(defines);
+        edges.push(guessed);
+        sort_graph_edges_for_window(&mut edges);
+        let order = edges
+            .iter()
+            .map(|edge| edge.id.0.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            [
+                "x-defines",
+                "z-proven",
+                "y-corroborated",
+                "d-ambiguous-binding",
+                "b-heuristic-high",
+                "c-heuristic-high",
+                "w-regex-defines",
+                "a-heuristic-low"
+            ]
+        );
     }
 
     #[test]

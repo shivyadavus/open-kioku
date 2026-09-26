@@ -468,6 +468,21 @@ pub fn execute_graph_query(
                             (true, Direction::Forward) | (false, Direction::Reverse) => true,
                             (true, Direction::Reverse) | (false, Direction::Forward) => false,
                         };
+                        // One unpaged read per anchor where the store has it: every page of
+                        // `edges_by_type_for_node` re-reads and re-orders the anchor's whole typed
+                        // edge set, so paging a hub costs its degree once per page.
+                        match store.edges_by_type_for_nodes(
+                            edge_type.clone(),
+                            &[anchor.id.0.as_str()],
+                            outgoing,
+                        ) {
+                            Ok(batch) => {
+                                anchored_edges.extend(batch);
+                                continue;
+                            }
+                            Err(OkError::Unsupported(_)) => {}
+                            Err(error) => return Err(error.into()),
+                        }
                         let mut edge_offset = 0;
                         loop {
                             match store.edges_by_type_for_node(
@@ -494,7 +509,10 @@ pub fn execute_graph_query(
                             }
                         }
                     }
-                    anchored_edges.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+                    // Rows are cut at the query's limit in this order, so it is the window order:
+                    // an anchor's proven edges are matched before its heuristic ones. An edge read
+                    // from two anchors has one sort key, so its copies stay adjacent for dedup.
+                    open_kioku_core::sort_graph_edges_for_window(&mut anchored_edges);
                     anchored_edges.dedup_by(|left, right| left.id == right.id);
                 }
             }
@@ -685,8 +703,25 @@ pub fn execute_graph_query(
                         }
 
                         if depth < edge_range.max_hops {
-                            let (_, edges) =
-                                store.neighbors(&curr_node.id.0, EDGE_SCAN_BATCH_SIZE)?;
+                            // A typed hop reads that type, outgoing, so edges of other types that
+                            // outrank it cannot fill the window; an untyped hop reads the node's
+                            // window. Either is cut at the batch size in window order.
+                            let edges = match &edge_range.edge_type {
+                                Some(hop_type) => match store.edges_by_type_for_node(
+                                    hop_type.clone(),
+                                    &curr_node.id.0,
+                                    true,
+                                    EDGE_SCAN_BATCH_SIZE,
+                                    0,
+                                ) {
+                                    Ok(edges) => edges,
+                                    Err(OkError::Unsupported(_)) => {
+                                        store.neighbors(&curr_node.id.0, EDGE_SCAN_BATCH_SIZE)?.1
+                                    }
+                                    Err(error) => return Err(error.into()),
+                                },
+                                None => store.neighbors(&curr_node.id.0, EDGE_SCAN_BATCH_SIZE)?.1,
+                            };
                             for edge in edges {
                                 // Follow only forward edges for multi-hop
                                 if edge.from.0 != curr_node.id.0 {
