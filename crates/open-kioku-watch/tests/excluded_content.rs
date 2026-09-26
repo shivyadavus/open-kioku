@@ -22,8 +22,8 @@ fn initialize_repo(repo: &Path) {
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::create_dir_all(repo.join("internal/vault")).unwrap();
     fs::write(repo.join("src/lib.rs"), "pub fn ledger_target() {}\n").unwrap();
-    let probes = (0..200)
-        .map(|n| format!("    sealing_probe_{n:03}();\n"))
+    let probes = (0..3000)
+        .map(|n| format!("    sealing_probe_{n:04}();\n"))
         .collect::<String>();
     fs::write(
         repo.join("internal/vault/keys.rs"),
@@ -62,11 +62,22 @@ fn holds(bytes: &[u8], needle: &str) -> bool {
         .any(|window| window == needle.as_bytes())
 }
 
+/// Another process (an MCP server) keeps the index open across the watcher's runs, so the
+/// write-ahead log is never removed at exit; each run empties it instead.
 #[test]
 fn watch_reindex_after_a_path_is_denied_leaves_none_of_its_content_on_disk() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
     initialize_repo(repo);
+    reindex_repo(repo).unwrap();
+    let db = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    let reader = rusqlite::Connection::open(&db).unwrap();
+    let count = |reader: &rusqlite::Connection| -> i64 {
+        reader
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert!(count(&reader) > 0);
     reindex_repo(repo).unwrap();
     let before = index_bytes(repo);
     for needle in VAULT_ONLY_NAMES {
@@ -82,9 +93,62 @@ fn watch_reindex_after_a_path_is_denied_leaves_none_of_its_content_on_disk() {
     .unwrap();
     let changed = repo.join("ok.toml");
     reindex_repo_after_changes(repo, [changed.as_path()]).unwrap();
+    assert!(count(&reader) > 0);
 
     let bytes = index_bytes(repo);
     for needle in VAULT_ONLY_NAMES {
         assert!(!holds(&bytes, needle), "the watched index holds `{needle}`");
     }
+    drop(reader);
+}
+
+fn set_pending_clearing(repo: &Path) {
+    let db = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let manifest: String = conn
+        .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    manifest["quality"]["pending_deleted_content_clearing"] = serde_json::Value::Bool(true);
+    conn.execute(
+        "UPDATE manifests SET json = ?1 WHERE id = 1",
+        [manifest.to_string()],
+    )
+    .unwrap();
+}
+
+fn pending_clearing(repo: &Path) -> bool {
+    use open_kioku_storage::MetadataStore;
+    let db = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    open_kioku_storage_sqlite::SqliteStore::open(db)
+        .unwrap()
+        .manifest()
+        .unwrap()
+        .unwrap()
+        .quality
+        .pending_deleted_content_clearing
+}
+
+/// A clearing an earlier run left unfinished is retried when the watcher starts, not on each
+/// file event, where a compaction that keeps failing would cost a full rewrite per change.
+#[test]
+fn an_unfinished_clearing_is_retried_at_watch_start_not_per_file_event() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    initialize_repo(repo);
+    reindex_repo(repo).unwrap();
+    set_pending_clearing(repo);
+
+    fs::write(repo.join("src/lib.rs"), "pub fn ledger_renamed() {}\n").unwrap();
+    let changed = repo.join("src/lib.rs");
+    reindex_repo_after_changes(repo, [changed.as_path()]).unwrap();
+    assert!(
+        pending_clearing(repo),
+        "a file event settled an earlier clearing"
+    );
+
+    reindex_repo(repo).unwrap();
+    assert!(!pending_clearing(repo));
 }

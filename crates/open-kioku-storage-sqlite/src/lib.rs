@@ -306,11 +306,12 @@ impl SqliteStore {
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(storage_err)?;
         // The bundled SQLite is built without SQLITE_SECURE_DELETE, so a deleted row's bytes
-        // stay in its page, in freed pages, and in reused pages' unallocated space until they
-        // happen to be overwritten. An index run deletes every row of a path the policy now
-        // excludes (#553); zeroing on delete is what keeps that content out of the file.
+        // stay in the page it left and in the unallocated space of pages it later reuses. FAST
+        // zeroes both at no extra I/O; the pages it frees keep their bytes until a writer
+        // compacts the file after removing a path the policy excludes (#553). ON would zero
+        // those as well, at about a third more bytes written by every full `ok index`.
         connection
-            .pragma_update(None, "secure_delete", true)
+            .pragma_update(None, "secure_delete", "FAST")
             .map_err(storage_err)?;
         Ok(Self {
             path,
@@ -354,14 +355,33 @@ impl SqliteStore {
     /// (#379). The cost is one rewrite of the database, with free disk space about its size
     /// while it runs. A checkpoint blocked by another reader completes at a later checkpoint.
     pub fn vacuum(&self) -> Result<()> {
+        self.compact()?;
+        self.truncate_wal()
+    }
+
+    /// `VACUUM` alone: every table and index rewritten into fresh pages and the file cut to
+    /// them, so no free page, and no unallocated space in a page in use, keeps a deleted row's
+    /// bytes. Recorded as [`excluded_content_cleared`](Self::excluded_content_cleared). In WAL
+    /// mode the rewrite lands in the log first; [`truncate_wal`](Self::truncate_wal) moves it
+    /// into the file and empties the log.
+    pub fn compact(&self) -> Result<()> {
         let conn = self
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         conn.execute_batch("VACUUM;").map_err(storage_err)?;
-        // Recorded before the checkpoint so the log it truncates carries the record too, and
-        // withdrawn if the checkpoint is blocked, so the next writer rewrites the file again.
-        record_deleted_content_zeroed(&conn)?;
+        record_excluded_content_cleared(&conn)
+    }
+
+    /// Copy every committed page from the write-ahead log into the database file and truncate
+    /// the log to zero bytes. Until then the log holds pages as earlier transactions wrote
+    /// them, and the file holds pages the log has since replaced, so a deleted row can stay
+    /// readable in either while another connection keeps the log from being reset (#553).
+    pub fn truncate_wal(&self) -> Result<()> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         // `wal_checkpoint` does not fail when it is blocked: it returns `(busy, log,
         // checkpointed)` with `busy = 1` and leaves the log in place. Discarding that row
         // reported a compaction that had not happened, with the values still in the WAL.
@@ -371,27 +391,40 @@ impl SqliteStore {
             })
             .map_err(storage_err)?;
         if busy != 0 {
-            clear_schema_meta_flag(&conn, DELETED_CONTENT_ZEROED_FLAG)?;
             return Err(OkError::Storage(
                 "the write-ahead log could not be truncated because another connection is \
-                 reading the database; bytes of deleted rows may remain in it"
+                 reading the database; bytes of deleted rows may remain in it and in the \
+                 database file"
                     .into(),
             ));
         }
         Ok(())
     }
 
-    /// Whether every deleted row's bytes are known to be gone from this file: it was created,
-    /// or last rewritten by [`vacuum`](Self::vacuum), by a writer that opens with
-    /// `secure_delete`. A file an earlier Open Kioku wrote can hold, in free pages and in the
-    /// unallocated space of pages in use, the content of paths its later runs removed,
-    /// including paths the policy excluded after they were indexed (#553).
-    pub fn deleted_content_zeroed(&self) -> Result<bool> {
+    /// Whether this file was created, or last rewritten by [`compact`](Self::compact), by a
+    /// writer that compacts after removing a path the policy excludes. A file an earlier Open
+    /// Kioku wrote can hold such a path's content in free pages and in the unallocated space
+    /// of pages in use, including a path excluded before that writer existed (#553).
+    pub fn excluded_content_cleared(&self) -> Result<bool> {
         let conn = self
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        deleted_content_zeroed(&conn)
+        excluded_content_cleared(&conn)
+    }
+
+    /// Every repository-relative path the store's indexed content (files and document
+    /// sections) and Git history name: [`stored_paths`](Self::stored_paths) without the graph
+    /// scan, for a writer comparing what it replaced with what it wrote.
+    pub fn repository_paths(&self) -> Result<(BTreeSet<PathBuf>, BTreeSet<PathBuf>)> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        Ok((
+            read_paths(&conn, INDEXED_PATH_QUERIES)?,
+            read_paths(&conn, HISTORY_PATH_QUERIES)?,
+        ))
     }
 
     pub fn graph_rebuild_required(&self) -> Result<bool> {
@@ -473,21 +506,6 @@ impl SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let read = |queries: &[&str]| -> Result<BTreeSet<PathBuf>> {
-            let mut paths = BTreeSet::new();
-            for sql in queries {
-                let mut stmt = conn.prepare(sql).map_err(storage_err)?;
-                let rows = stmt
-                    .query_map([], |row| row.get::<_, Option<String>>(0))
-                    .map_err(storage_err)?;
-                for row in rows {
-                    if let Some(path) = row.map_err(storage_err)? {
-                        paths.insert(PathBuf::from(path));
-                    }
-                }
-            }
-            Ok(paths)
-        };
         let mut unanchored_nodes = Vec::new();
         let mut stmt = conn
             .prepare(
@@ -505,8 +523,8 @@ impl SqliteStore {
         }
         drop(stmt);
         Ok(StoredPaths {
-            indexed: read(INDEXED_PATH_QUERIES)?,
-            history: read(HISTORY_PATH_QUERIES)?,
+            indexed: read_paths(&conn, INDEXED_PATH_QUERIES)?,
+            history: read_paths(&conn, HISTORY_PATH_QUERIES)?,
             unanchored_nodes,
         })
     }
@@ -1233,10 +1251,10 @@ impl MetadataStore for SqliteStore {
         .map_err(storage_err)?;
         migrate_history_schema(&mut conn)?;
         migrate_graph_schema(&mut conn)?;
-        // Every delete this file will see runs with `secure_delete` on, so nothing it holds
-        // needs the one-time compaction an older file does.
+        // Every writer this file will see clears excluded content as it removes it, so nothing
+        // it holds needs the one-time compaction an older file does.
         if created_here {
-            set_schema_meta_flag(&conn, DELETED_CONTENT_ZEROED_FLAG)?;
+            set_schema_meta_flag(&conn, EXCLUDED_CONTENT_CLEARED_FLAG)?;
         }
         Ok(())
     }
@@ -3056,6 +3074,22 @@ const INDEXED_PATH_QUERIES: &[&str] = &[
     "SELECT DISTINCT path FROM document_sections",
 ];
 
+fn read_paths(conn: &Connection, queries: &[&str]) -> Result<BTreeSet<PathBuf>> {
+    let mut paths = BTreeSet::new();
+    for sql in queries {
+        let mut stmt = conn.prepare(sql).map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, Option<String>>(0))
+            .map_err(storage_err)?;
+        for row in rows {
+            if let Some(path) = row.map_err(storage_err)? {
+                paths.insert(PathBuf::from(path));
+            }
+        }
+    }
+    Ok(paths)
+}
+
 /// The Git history path columns [`SqliteStore::stored_paths`] reads.
 const HISTORY_PATH_QUERIES: &[&str] = &[
     "SELECT DISTINCT path FROM git_file_touches",
@@ -4653,16 +4687,16 @@ fn collect_edges(rows: &mut rusqlite::Rows<'_>) -> Result<Vec<GraphEdge>> {
     Ok(edges)
 }
 
-/// [`SqliteStore::deleted_content_zeroed`] for a connection opened outside the store, such as
-/// the one `ok snapshot import` rewrites a staged artifact on. A file with no `schema_meta`
+/// [`SqliteStore::excluded_content_cleared`] for a connection opened outside the store, such
+/// as the one `ok snapshot import` rewrites a staged artifact on. A file with no `schema_meta`
 /// table reports `false`.
-pub fn deleted_content_zeroed(conn: &Connection) -> Result<bool> {
+pub fn excluded_content_cleared(conn: &Connection) -> Result<bool> {
     if !table_exists(conn, "schema_meta")? {
         return Ok(false);
     }
     conn.query_row(
         "SELECT 1 FROM schema_meta WHERE key = ?1",
-        params![DELETED_CONTENT_ZEROED_FLAG],
+        params![EXCLUDED_CONTENT_CLEARED_FLAG],
         |_| Ok(()),
     )
     .optional()
@@ -4670,10 +4704,10 @@ pub fn deleted_content_zeroed(conn: &Connection) -> Result<bool> {
     .map_err(storage_err)
 }
 
-/// Record that the database on `conn` was just rewritten by `VACUUM`: it holds no deleted
-/// content, and every later delete through [`SqliteStore`] zeroes its own.
-pub fn record_deleted_content_zeroed(conn: &Connection) -> Result<()> {
-    set_schema_meta_flag(conn, DELETED_CONTENT_ZEROED_FLAG)
+/// Record that the database on `conn` was just rewritten by `VACUUM`, so it holds no deleted
+/// row's bytes; see [`SqliteStore::excluded_content_cleared`].
+pub fn record_excluded_content_cleared(conn: &Connection) -> Result<()> {
+    set_schema_meta_flag(conn, EXCLUDED_CONTENT_CLEARED_FLAG)
 }
 
 /// Whether this index file's graph edges were discarded and are waiting on `ok index`.
@@ -4787,9 +4821,9 @@ fn add_column_if_not_exists(conn: &mut Connection, stmt: &str) -> Result<bool> {
     }
 }
 
-/// Marker recording that no deleted row's bytes remain in the file; see
-/// [`SqliteStore::deleted_content_zeroed`].
-const DELETED_CONTENT_ZEROED_FLAG: &str = "deleted_content_zeroed_v1";
+/// Marker recording that the file was created or compacted by a writer that clears excluded
+/// content as it removes it; see [`SqliteStore::excluded_content_cleared`].
+const EXCLUDED_CONTENT_CLEARED_FLAG: &str = "excluded_content_cleared_v1";
 
 /// Marker recording that the graph query-column backfill has completed for this store, so
 /// store open never rescans the graph tables once they are migrated.
@@ -7476,40 +7510,52 @@ mod tests {
     }
 
     #[test]
-    fn a_store_zeroes_deleted_content_and_records_it_for_a_file_it_created() {
+    fn a_row_deleted_from_a_page_in_use_leaves_no_bytes_in_the_file() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("index.sqlite");
         let store = SqliteStore::open(&path).unwrap();
-        let secure: i64 = store
-            .connection
-            .lock()
+        let exec = |sql: &str| store.connection.lock().unwrap().execute_batch(sql).unwrap();
+        // Two small rows share one leaf page, which stays in use after one is deleted.
+        exec(
+            "CREATE TABLE sample_rows(body TEXT);
+             INSERT INTO sample_rows VALUES ('kept_row_body'), ('quartz_removed_body');",
+        );
+        store.truncate_wal().unwrap();
+        assert!(std::fs::read(&path)
             .unwrap()
-            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(secure, 1);
-        assert!(store.deleted_content_zeroed().unwrap());
-        drop(store);
+            .windows(19)
+            .any(|window| window == b"quartz_removed_body"));
 
-        // A file this store did not create carries no record until it is rewritten.
+        exec("DELETE FROM sample_rows WHERE body = 'quartz_removed_body';");
+        store.truncate_wal().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.windows(13).any(|window| window == b"kept_row_body"));
+        assert!(!bytes
+            .windows(19)
+            .any(|window| window == b"quartz_removed_body"));
+    }
+
+    #[test]
+    fn only_a_file_this_store_created_or_compacted_is_recorded_as_cleared() {
+        let temp = tempfile::tempdir().unwrap();
+        let created = SqliteStore::open(temp.path().join("index.sqlite")).unwrap();
+        assert!(created.excluded_content_cleared().unwrap());
+
         let earlier = temp.path().join("earlier.sqlite");
         rusqlite::Connection::open(&earlier)
             .unwrap()
             .execute_batch("CREATE TABLE earlier_rows(body TEXT);")
             .unwrap();
         let store = SqliteStore::open(&earlier).unwrap();
-        assert!(!store.deleted_content_zeroed().unwrap());
-        store.vacuum().unwrap();
-        assert!(store.deleted_content_zeroed().unwrap());
+        assert!(!store.excluded_content_cleared().unwrap());
+        store.compact().unwrap();
+        assert!(store.excluded_content_cleared().unwrap());
     }
 
     #[test]
-    fn a_rewrite_whose_checkpoint_is_blocked_is_not_recorded() {
+    fn a_blocked_log_truncation_is_an_error_and_a_later_one_empties_the_log() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("index.sqlite");
-        rusqlite::Connection::open(&path)
-            .unwrap()
-            .execute_batch("CREATE TABLE earlier_rows(body TEXT);")
-            .unwrap();
         let store = SqliteStore::open(&path).unwrap();
         store.put_manifest(&make_manifest()).unwrap();
         // A reader inside a transaction pins a snapshot the truncating checkpoint cannot pass;
@@ -7524,10 +7570,17 @@ mod tests {
         reader
             .execute_batch("BEGIN; SELECT COUNT(*) FROM manifests;")
             .unwrap();
+        store.put_manifest(&make_manifest()).unwrap();
+        assert!(store.truncate_wal().is_err());
 
-        assert!(store.vacuum().is_err());
-        assert!(!store.deleted_content_zeroed().unwrap());
+        // An open connection outside a transaction does not block it.
         reader.execute_batch("COMMIT;").unwrap();
+        store.truncate_wal().unwrap();
+        let wal = temp.path().join("index.sqlite-wal");
+        assert_eq!(
+            std::fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0),
+            0
+        );
     }
 
     #[test]

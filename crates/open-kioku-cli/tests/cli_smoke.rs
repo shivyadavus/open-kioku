@@ -2416,8 +2416,8 @@ fn deny_internal_vault(repo: &std::path::Path) {
 
 /// A vault file whose names appear nowhere else, long enough that its rows span several pages.
 fn vault_fixture_repo() -> tempfile::TempDir {
-    let probes = (0..200)
-        .map(|n| format!("    sealing_probe_{n:03}();\n"))
+    let probes = (0..3000)
+        .map(|n| format!("    sealing_probe_{n:04}();\n"))
         .collect::<String>();
     let keys = format!(
         "pub struct KeyAnchored;\n\npub fn rotate_sealed_material() -> u32 {{\n    \
@@ -2449,7 +2449,8 @@ fn index_repo_stderr(repo: &std::path::Path) -> String {
 
 /// A path denied after it was indexed leaves nothing on disk that names it once `ok index`
 /// rebuilds (#553): SQLite would otherwise keep its deleted rows in free pages, and in the
-/// unused space of pages it reuses, until they happen to be overwritten.
+/// unused space of pages it reuses, until they happen to be overwritten. The run that removed
+/// it compacts; a run that removes nothing does not.
 #[test]
 fn index_after_a_path_is_denied_leaves_none_of_its_content_on_disk() {
     let temp = vault_fixture_repo();
@@ -2461,35 +2462,63 @@ fn index_after_a_path_is_denied_leaves_none_of_its_content_on_disk() {
 
     deny_internal_vault(repo);
     let stderr = index_repo_stderr(repo);
-
+    assert!(stderr.contains("compacting the database"), "{stderr}");
     let bytes = index_bytes(repo);
     for needle in VAULT_ONLY_NAMES {
         assert!(!holds(&bytes, needle), "the rebuilt index holds `{needle}`");
     }
-    // Zeroed as it was deleted: an index this version created is never rewritten for it.
-    assert!(!stderr.contains("rewriting the database"), "{stderr}");
+
+    let again = index_repo_stderr(repo);
+    assert!(!again.contains("compacting the database"), "{again}");
 }
 
-/// A database an earlier version wrote deleted rows without zeroing them, so it can already
-/// hold a denied path's content where no row does. The first `ok index` rewrites it once and
-/// records that, and later runs do not rewrite it again (#553).
+/// The usual setup keeps the index open in another process (an MCP server) across `ok index`
+/// runs. A connection that is open but not reading does not stop the log from being emptied,
+/// and until it is, the log holds the pages as the first run wrote them and the database file
+/// the pages the log has since replaced (#553).
 #[test]
-fn index_rewrites_once_a_database_an_earlier_version_left_deleted_rows_in() {
+fn index_after_a_path_is_denied_leaves_nothing_while_another_connection_holds_the_index() {
     let temp = vault_fixture_repo();
     let repo = temp.path();
-    leave_unzeroed_free_pages(repo, "derive_sealing_key ");
-    deny_internal_vault(repo);
+    let reader = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+    let count = |reader: &rusqlite::Connection| -> i64 {
+        reader
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert!(count(&reader) > 0);
+    // A second run while the reader is open, so the log is not removed at exit.
+    index_repo_stderr(repo);
+    assert!(count(&reader) > 0);
 
-    let stderr = index_repo_stderr(repo);
-    assert!(stderr.contains("rewriting the database once"), "{stderr}");
+    deny_internal_vault(repo);
+    index_repo_stderr(repo);
+    assert!(count(&reader) > 0);
     let bytes = index_bytes(repo);
     for needle in VAULT_ONLY_NAMES {
         assert!(!holds(&bytes, needle), "the rebuilt index holds `{needle}`");
     }
+    drop(reader);
+}
+
+/// A database an earlier version wrote deleted rows without clearing them, so it can already
+/// hold a path it excluded before this version, where no row names that path any more and
+/// nothing this run removes points at it. The first `ok index` compacts it once and records
+/// that, and later runs do not compact it again (#553).
+#[test]
+fn index_compacts_once_a_database_an_earlier_version_left_deleted_rows_in() {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    leave_unzeroed_free_pages(repo, "quartz_earlier_residue ", false);
+    assert!(holds(&index_bytes(repo), "quartz_earlier_residue"));
+
+    let stderr = index_repo_stderr(repo);
+    assert!(stderr.contains("compacting the database"), "{stderr}");
+    assert!(!holds(&index_bytes(repo), "quartz_earlier_residue"));
     let marked: i64 = rusqlite::Connection::open(active_index_db(repo))
         .unwrap()
         .query_row(
-            "SELECT COUNT(*) FROM schema_meta WHERE key = 'deleted_content_zeroed_v1'",
+            "SELECT COUNT(*) FROM schema_meta WHERE key = 'excluded_content_cleared_v1'",
             [],
             |row| row.get(0),
         )
@@ -2497,7 +2526,80 @@ fn index_rewrites_once_a_database_an_earlier_version_left_deleted_rows_in() {
     assert_eq!(marked, 1);
 
     let again = index_repo_stderr(repo);
-    assert!(!again.contains("rewriting the database"), "{again}");
+    assert!(!again.contains("compacting the database"), "{again}");
+}
+
+/// A clearing that did not complete is recorded in the manifest, reported by `ok status` and
+/// `ok doctor`, and retried by the next `ok index`, which reports it settled (#553).
+#[test]
+fn an_unfinished_clearing_is_reported_until_ok_index_completes_it() {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    {
+        let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+        let manifest: String = conn
+            .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        assert!(manifest["quality"]
+            .get("pending_deleted_content_clearing")
+            .is_none());
+        manifest["quality"]["pending_deleted_content_clearing"] = serde_json::Value::Bool(true);
+        conn.execute(
+            "UPDATE manifests SET json = ?1 WHERE id = 1",
+            [manifest.to_string()],
+        )
+        .unwrap();
+    }
+    let status = |repo: &std::path::Path| -> serde_json::Value {
+        serde_json::from_str(&run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("--json").arg("status");
+            command
+        }))
+        .unwrap()
+    };
+    let doctor_check = |repo: &std::path::Path| -> Option<serde_json::Value> {
+        let doctor: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command.arg("--json").arg("doctor").arg(repo);
+            command
+        }))
+        .unwrap();
+        doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "deleted_content")
+            .cloned()
+    };
+    let pending = status(repo);
+    assert_eq!(
+        pending["quality"]["pending_deleted_content_clearing"], true,
+        "{pending}"
+    );
+    let check = doctor_check(repo).expect("doctor reports the unfinished clearing");
+    assert_eq!(check["status"], "warn", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .contains("deleted content may remain until compaction succeeds"),
+        "{check}"
+    );
+
+    let stderr = index_repo_stderr(repo);
+    assert!(stderr.contains("compacting the database"), "{stderr}");
+    let settled = status(repo);
+    assert!(
+        settled["quality"]
+            .get("pending_deleted_content_clearing")
+            .is_none(),
+        "{settled}"
+    );
+    assert!(doctor_check(repo).is_none());
 }
 
 /// The index database readers open: the active generation's when one is published.
@@ -2627,28 +2729,31 @@ fn snapshot_import_keeps_an_admitted_files_own_import_of_a_removed_path() {
     );
 }
 
-/// Leave `text` in the exporter's database as an Open Kioku that deleted rows without zeroing
-/// them did: in a dropped table's free pages, and with no record that deleted content was
-/// zeroed (#553). The current writer zeroes its deletes, so it no longer leaves any.
-fn leave_unzeroed_free_pages(repo: &std::path::Path, text: &str) {
+/// Leave `text` in the index's free pages, as a dropped table's rows, the way an Open Kioku
+/// that did not clear deleted content left them. With `keep_marker` false the database also
+/// loses the record that its writer clears excluded content, as an earlier version's has none.
+fn leave_unzeroed_free_pages(repo: &std::path::Path, text: &str, keep_marker: bool) {
     let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
-    conn.execute_batch(
-        "PRAGMA secure_delete = OFF;
-         DELETE FROM schema_meta WHERE key = 'deleted_content_zeroed_v1';
-         CREATE TABLE earlier_rows(body TEXT);",
+    conn.execute_batch("PRAGMA secure_delete = OFF; CREATE TABLE earlier_rows(body TEXT);")
+        .unwrap();
+    if !keep_marker {
+        conn.execute_batch("DELETE FROM schema_meta WHERE key = 'excluded_content_cleared_v1';")
+            .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO earlier_rows VALUES (?1)",
+        [text.repeat(20_000)],
     )
     .unwrap();
-    conn.execute("INSERT INTO earlier_rows VALUES (?1)", [text.repeat(2000)])
-        .unwrap();
     conn.execute_batch("DROP TABLE earlier_rows; PRAGMA wal_checkpoint(TRUNCATE);")
         .unwrap();
 }
 
 /// A `--quality fast` artifact is a page copy of the exporter's database, free pages included.
 /// An exporter that denied a path after indexing it and re-indexed could leave its rows there;
-/// the import removes no row, and still must not publish those pages (#549).
-#[test]
-fn snapshot_import_does_not_publish_the_exporters_free_pages() {
+/// the import removes no row, and still must not publish those pages (#549). `keep_marker`
+/// decides which gate compacts it: the free-page count, or the missing record (#553).
+fn assert_import_drops_the_exporters_free_pages(keep_marker: bool) {
     // Enough rows that the pages they are deleted from outnumber the ones the import writes
     // again (the manifest), which would otherwise overwrite some of them by chance.
     let util = (0..300)
@@ -2665,7 +2770,7 @@ fn snapshot_import_does_not_publish_the_exporters_free_pages() {
         command.arg("index").arg(repo);
         command
     });
-    leave_unzeroed_free_pages(repo, "render_sealed_ledger ");
+    leave_unzeroed_free_pages(repo, "render_sealed_ledger ", keep_marker);
     // The exporter's database holds the removed rows in free pages.
     assert!(holds(&index_bytes(repo), "render_sealed_ledger"));
     export_snapshot(repo);
@@ -2682,9 +2787,19 @@ fn snapshot_import_does_not_publish_the_exporters_free_pages() {
     }
 }
 
+#[test]
+fn snapshot_import_does_not_publish_the_exporters_free_pages() {
+    assert_import_drops_the_exporters_free_pages(true);
+}
+
+#[test]
+fn snapshot_import_does_not_publish_free_pages_an_earlier_exporter_left() {
+    assert_import_drops_the_exporters_free_pages(false);
+}
+
 /// An exporter that deleted rows without zeroing them can leave their bytes in a page that is
 /// still in use, where the free-page count is zero; an artifact that does not record that its
-/// deleted content was zeroed is compacted anyway (#553).
+/// writer clears excluded content is compacted anyway (#553).
 #[test]
 fn snapshot_import_compacts_an_artifact_whose_deleted_rows_sit_in_pages_in_use() {
     let temp =
@@ -2696,7 +2811,7 @@ fn snapshot_import_compacts_an_artifact_whose_deleted_rows_sit_in_pages_in_use()
         conn.execute_batch(
             "PRAGMA secure_delete = OFF;
              INSERT INTO schema_meta(key, value) VALUES ('earlier_row', 'quartz_sealed_ledger');
-             DELETE FROM schema_meta WHERE key IN ('earlier_row', 'deleted_content_zeroed_v1');
+             DELETE FROM schema_meta WHERE key IN ('earlier_row', 'excluded_content_cleared_v1');
              PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
