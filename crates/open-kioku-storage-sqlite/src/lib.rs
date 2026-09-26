@@ -305,6 +305,13 @@ impl SqliteStore {
         connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(storage_err)?;
+        // The bundled SQLite is built without SQLITE_SECURE_DELETE, so a deleted row's bytes
+        // stay in its page, in freed pages, and in reused pages' unallocated space until they
+        // happen to be overwritten. An index run deletes every row of a path the policy now
+        // excludes (#553); zeroing on delete is what keeps that content out of the file.
+        connection
+            .pragma_update(None, "secure_delete", true)
+            .map_err(storage_err)?;
         Ok(Self {
             path,
             connection: Mutex::new(connection),
@@ -352,6 +359,9 @@ impl SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         conn.execute_batch("VACUUM;").map_err(storage_err)?;
+        // Recorded before the checkpoint so the log it truncates carries the record too, and
+        // withdrawn if the checkpoint is blocked, so the next writer rewrites the file again.
+        record_deleted_content_zeroed(&conn)?;
         // `wal_checkpoint` does not fail when it is blocked: it returns `(busy, log,
         // checkpointed)` with `busy = 1` and leaves the log in place. Discarding that row
         // reported a compaction that had not happened, with the values still in the WAL.
@@ -361,14 +371,27 @@ impl SqliteStore {
             })
             .map_err(storage_err)?;
         if busy != 0 {
+            clear_schema_meta_flag(&conn, DELETED_CONTENT_ZEROED_FLAG)?;
             return Err(OkError::Storage(
                 "the write-ahead log could not be truncated because another connection is \
-                 reading the database; bytes stored before secret-value redaction may remain in \
-                 it"
-                .into(),
+                 reading the database; bytes of deleted rows may remain in it"
+                    .into(),
             ));
         }
         Ok(())
+    }
+
+    /// Whether every deleted row's bytes are known to be gone from this file: it was created,
+    /// or last rewritten by [`vacuum`](Self::vacuum), by a writer that opens with
+    /// `secure_delete`. A file an earlier Open Kioku wrote can hold, in free pages and in the
+    /// unallocated space of pages in use, the content of paths its later runs removed,
+    /// including paths the policy excluded after they were indexed (#553).
+    pub fn deleted_content_zeroed(&self) -> Result<bool> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        deleted_content_zeroed(&conn)
     }
 
     pub fn graph_rebuild_required(&self) -> Result<bool> {
@@ -989,6 +1012,12 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         ensure_supported_sqlite_schema(&conn)?;
+        let created_here = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(storage_err)?
+            == 0;
         reset_legacy_graph_storage(&mut conn)?;
         conn.execute_batch(
             r#"
@@ -1204,6 +1233,11 @@ impl MetadataStore for SqliteStore {
         .map_err(storage_err)?;
         migrate_history_schema(&mut conn)?;
         migrate_graph_schema(&mut conn)?;
+        // Every delete this file will see runs with `secure_delete` on, so nothing it holds
+        // needs the one-time compaction an older file does.
+        if created_here {
+            set_schema_meta_flag(&conn, DELETED_CONTENT_ZEROED_FLAG)?;
+        }
         Ok(())
     }
 
@@ -4619,6 +4653,29 @@ fn collect_edges(rows: &mut rusqlite::Rows<'_>) -> Result<Vec<GraphEdge>> {
     Ok(edges)
 }
 
+/// [`SqliteStore::deleted_content_zeroed`] for a connection opened outside the store, such as
+/// the one `ok snapshot import` rewrites a staged artifact on. A file with no `schema_meta`
+/// table reports `false`.
+pub fn deleted_content_zeroed(conn: &Connection) -> Result<bool> {
+    if !table_exists(conn, "schema_meta")? {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT 1 FROM schema_meta WHERE key = ?1",
+        params![DELETED_CONTENT_ZEROED_FLAG],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
+    .map_err(storage_err)
+}
+
+/// Record that the database on `conn` was just rewritten by `VACUUM`: it holds no deleted
+/// content, and every later delete through [`SqliteStore`] zeroes its own.
+pub fn record_deleted_content_zeroed(conn: &Connection) -> Result<()> {
+    set_schema_meta_flag(conn, DELETED_CONTENT_ZEROED_FLAG)
+}
+
 /// Whether this index file's graph edges were discarded and are waiting on `ok index`.
 ///
 /// Read-only on purpose: callers such as the cross-project workspace linker open member
@@ -4729,6 +4786,10 @@ fn add_column_if_not_exists(conn: &mut Connection, stmt: &str) -> Result<bool> {
         Err(err) => Err(storage_err(err)),
     }
 }
+
+/// Marker recording that no deleted row's bytes remain in the file; see
+/// [`SqliteStore::deleted_content_zeroed`].
+const DELETED_CONTENT_ZEROED_FLAG: &str = "deleted_content_zeroed_v1";
 
 /// Marker recording that the graph query-column backfill has completed for this store, so
 /// store open never rescans the graph tables once they are migrated.
@@ -7412,6 +7473,61 @@ mod tests {
         assert!(SqliteStore::probe_repo_index(repo)
             .expect("the index is still served")
             .is_some());
+    }
+
+    #[test]
+    fn a_store_zeroes_deleted_content_and_records_it_for_a_file_it_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("index.sqlite");
+        let store = SqliteStore::open(&path).unwrap();
+        let secure: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(secure, 1);
+        assert!(store.deleted_content_zeroed().unwrap());
+        drop(store);
+
+        // A file this store did not create carries no record until it is rewritten.
+        let earlier = temp.path().join("earlier.sqlite");
+        rusqlite::Connection::open(&earlier)
+            .unwrap()
+            .execute_batch("CREATE TABLE earlier_rows(body TEXT);")
+            .unwrap();
+        let store = SqliteStore::open(&earlier).unwrap();
+        assert!(!store.deleted_content_zeroed().unwrap());
+        store.vacuum().unwrap();
+        assert!(store.deleted_content_zeroed().unwrap());
+    }
+
+    #[test]
+    fn a_rewrite_whose_checkpoint_is_blocked_is_not_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("index.sqlite");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE earlier_rows(body TEXT);")
+            .unwrap();
+        let store = SqliteStore::open(&path).unwrap();
+        store.put_manifest(&make_manifest()).unwrap();
+        // A reader inside a transaction pins a snapshot the truncating checkpoint cannot pass;
+        // the checkpoint would otherwise wait out the whole busy timeout before reporting it.
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        let reader = rusqlite::Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM manifests;")
+            .unwrap();
+
+        assert!(store.vacuum().is_err());
+        assert!(!store.deleted_content_zeroed().unwrap());
+        reader.execute_batch("COMMIT;").unwrap();
     }
 
     #[test]
