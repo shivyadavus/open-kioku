@@ -169,7 +169,7 @@ impl<'a> RustModuleTree<'a> {
     /// The crate module tree of its package that holds `file`, if any.
     fn crate_tree(&self, file: &Path) -> Option<RustCrateTree> {
         self.package_layout(file)
-            .crate_tree(&rust_file_stem(file)?, &self.stems_in_dir)
+            .crate_tree_of(file, &self.stems_in_dir)
     }
 
     /// Where the declared module tree places each Rust file of a crate module tree, for paths
@@ -177,21 +177,30 @@ impl<'a> RustModuleTree<'a> {
     /// or when every module from the crate root down is declared as a file by the module above
     /// it; its crate roots are those that declare its top-level module. A file of a tree that is
     /// not placed there (mounted by `#[path]`, at the default location of a `#[path]` or inline
-    /// module, or declared by no `mod` the parser sees, such as one inside a macro) is recorded
-    /// with no module and every indexed crate root of its tree, so a `crate::` path written there
-    /// is still read against its own package. A file outside every tree (`build.rs`), and every
-    /// file of a tree whose crate roots are not indexed, is not recorded.
+    /// module, or declared by no `mod` the parser sees, such as one inside a macro) in `src/` is
+    /// recorded with no module and the indexed `lib.rs`/`main.rs`, so a `crate::` path written
+    /// there is still read against its own package. One in a target directory (`src/bin/`,
+    /// `tests/`, `examples/`, `benches/`), whose crate roots are independent crates, a file
+    /// outside every tree (`build.rs`), and every file of a tree whose crate roots are not
+    /// indexed, is not recorded.
     pub(crate) fn module_placements(&self) -> HashMap<FileId, RustModulePlacement> {
         self.files
             .iter()
             .filter_map(|(id, path)| {
-                let file = map_rust_module_file(&self.crate_tree(path)?, path)?;
+                let package = self.package_layout(path);
+                let file =
+                    map_rust_module_file(&package.crate_tree_of(path, &self.stems_in_dir)?, path)?;
                 let placed = file.importer_root.is_some()
                     || self.declares_file_modules(&file, &file.importer_module);
                 let roots = if placed {
                     self.crate_roots(&file)
-                } else {
+                } else if file.tree.module_dir == package.src_root {
                     self.indexed_crate_roots(&file)
+                } else {
+                    // The binaries, tests, examples or benches of a target directory are
+                    // independent crates, so no root of the directory stands for one it does not
+                    // declare.
+                    return None;
                 };
                 if roots.is_empty() {
                     return None;
@@ -1672,8 +1681,40 @@ mod tests {
                 Some(vec!["common".to_string()])
             )
         );
-        assert_eq!(placed("src/bin/tool/sub.rs").2, None);
+        assert!(!placements.contains_key(&FileId::new("file:src/bin/tool/sub.rs")));
         assert_eq!(modules.unplaced_package_count(), 0);
+    }
+
+    #[test]
+    fn unplaced_files_of_a_target_directory_are_read_against_no_crate() {
+        // `tests/a.rs` mounts `tests/support/util.rs` with `#[path]`; `tests/c.rs` is another
+        // test crate. `crate::` in `util.rs` is `a`'s crate, which no placement can tell from
+        // `c`'s, so the file is not recorded. In `src/` an unplaced file keeps the package's roots.
+        let files = [
+            "src/lib.rs",
+            "src/stray.rs",
+            "tests/a.rs",
+            "tests/c.rs",
+            "tests/support/util.rs",
+        ]
+        .map(source_file);
+        let project = rust_project(&[("", None)]);
+        let declarations = vec![ModuleDeclarationSite {
+            has_path_attribute: true,
+            ..mod_decl("tests/a.rs", "util")
+        }];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let placements = modules.module_placements();
+
+        assert!(!placements.contains_key(&FileId::new("file:tests/support/util.rs")));
+        let stray = &placements[&FileId::new("file:src/stray.rs")];
+        assert_eq!(stray.module, None);
+        assert_eq!(stray.crate_roots, vec!["src::lib"]);
+        assert_eq!(
+            placements[&FileId::new("file:tests/c.rs")].crate_roots,
+            vec!["tests::c"]
+        );
     }
 
     #[test]

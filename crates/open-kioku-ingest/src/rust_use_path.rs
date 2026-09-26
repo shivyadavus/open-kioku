@@ -83,6 +83,16 @@ impl RustPackageLayout {
         }
     }
 
+    /// [`RustPackageLayout::crate_tree`] for a repository-relative Rust file path.
+    pub(crate) fn crate_tree_of(
+        &self,
+        file: &Path,
+        stems_in_dir: &HashMap<String, Vec<String>>,
+    ) -> Option<RustCrateTree> {
+        let file = file.to_string_lossy().replace('\\', "/");
+        self.crate_tree(file.strip_suffix(".rs")?, stems_in_dir)
+    }
+
     /// The crate module tree holding `file`, repository-relative with `/` separators, given the
     /// extension-less paths of the indexed Rust files in each directory. Under a target directory
     /// (`src/bin/`, `tests/`, `examples/`, `benches/`) each file directly in it is a crate root of

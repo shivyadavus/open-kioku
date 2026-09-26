@@ -964,6 +964,27 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // `tests/a.rs` mounts `tests/support/util.rs` with `#[path]`, so its `crate::target_fn`
+        // is `a`'s, which imports the library's; the other test crate `tests/c.rs` is unrelated.
+        "integration_test_path_module_other_test_crate" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub fn target_fn() {}\n"),
+                (
+                    "tests/a.rs",
+                    "#[path = \"support/util.rs\"]\nmod util;\nuse bench::target_fn;\n\n#[test]\nfn ta() {\n    util::caller_fn();\n    target_fn();\n}\n",
+                ),
+                (
+                    "tests/c.rs",
+                    "fn target_fn() {}\n\n#[test]\nfn tc() {\n    target_fn();\n}\n",
+                ),
+                (
+                    "tests/support/util.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
         // `pub mod r#type;` is the file `type.rs` (#543).
         "raw_identifier_module_crate_path" => (
             vec![
