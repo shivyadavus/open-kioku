@@ -2299,11 +2299,10 @@ fn snapshot_import_leaves_no_trace_of_a_path_the_local_policy_excludes() {
         ("internal/vault/keys.rs", keys.as_str()),
     ]);
     let repo = temp.path();
-    let db = repo.join(".ok/index.sqlite");
     // The exporter indexed the file, resolved `main`'s uses to it, and aggregated its
     // directory's history: the residue this test looks for exists before the import.
     {
-        let conn = rusqlite::Connection::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
         assert!(
             count(
@@ -2333,34 +2332,25 @@ fn snapshot_import_leaves_no_trace_of_a_path_the_local_policy_excludes() {
     // No byte of the database, or of a sidecar beside it, holds a name only the removed rows
     // held: its module path, a call site's id or a quality note (which spell the file's
     // path), or a name nothing else uses.
-    for suffix in ["", "-wal", "-shm", "-journal"] {
-        let mut path = db.clone().into_os_string();
-        path.push(suffix);
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        for needle in [
-            "vault::",
-            "vault/keys.rs:",
-            "vault/keys.rs for",
-            "sealed_material",
-            "seal_inner",
-            "derive_sealing_key",
-            "sealing_probe_",
-        ] {
-            assert!(
-                !bytes
-                    .windows(needle.len())
-                    .any(|window| window == needle.as_bytes()),
-                "{} holds `{needle}`",
-                std::path::Path::new(&path).display()
-            );
-        }
+    let bytes = index_bytes(repo);
+    for needle in [
+        "vault::",
+        "vault/keys.rs:",
+        "vault/keys.rs for",
+        "sealed_material",
+        "seal_inner",
+        "derive_sealing_key",
+        "sealing_probe_",
+    ] {
+        assert!(
+            !holds(&bytes, needle),
+            "the imported index holds `{needle}`"
+        );
     }
 
     // No row names the directory. The one exception is the report of the exclusion itself:
     // the manifest lists the denied file among the skipped paths, as `ok index` does.
-    let conn = rusqlite::Connection::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
     let tables = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
         .unwrap()
@@ -2410,6 +2400,181 @@ fn snapshot_import_leaves_no_trace_of_a_path_the_local_policy_excludes() {
     ] {
         let count: i64 = conn.query_row(sql, [], |row| row.get(0)).unwrap();
         assert!(count > 0, "{sql}");
+    }
+}
+
+/// Deny `internal/vault/**` in the checkout's `ok.toml`.
+fn deny_internal_vault(repo: &std::path::Path) {
+    let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    assert!(config.contains("deny = [\n"));
+    fs::write(
+        repo.join("ok.toml"),
+        config.replacen("deny = [\n", "deny = [\n    \"internal/vault/**\",\n", 1),
+    )
+    .unwrap();
+}
+
+/// The index database readers open: the active generation's when one is published.
+fn active_index_db(repo: &std::path::Path) -> std::path::PathBuf {
+    let active = fs::read_to_string(repo.join(".ok/generations/active"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value["generation_id"].as_str().map(str::to_string));
+    match active {
+        Some(generation) => repo
+            .join(".ok/generations")
+            .join(generation)
+            .join("index.sqlite"),
+        None => repo.join(".ok/index.sqlite"),
+    }
+}
+
+/// Every byte of the index database and its sidecars, and of the legacy path beside them.
+fn index_bytes(repo: &std::path::Path) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for db in [active_index_db(repo), repo.join(".ok/index.sqlite")] {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut path = db.clone().into_os_string();
+            path.push(suffix);
+            if let Ok(read) = fs::read(&path) {
+                bytes.extend(read);
+            }
+        }
+    }
+    bytes
+}
+
+fn holds(bytes: &[u8], needle: &str) -> bool {
+    bytes
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+/// What an admitted file says about a removed path in its own words stays (#549): an import of
+/// `internal::vault::keys::KeyAnchored` is the importing file's statement, which `ok index`
+/// keeps as an unresolved import when the target is not indexed. What it resolved to the
+/// removed symbol is withdrawn, and the withdrawal is counted where `ok status` shows it.
+#[test]
+fn snapshot_import_keeps_an_admitted_files_own_import_of_a_removed_path() {
+    let temp = snapshot_fixture_repo_with(&[
+        (
+            "src/uses.rs",
+            "use internal::vault::keys::KeyAnchored;\n\npub fn go() {\n    \
+             let _ = KeyAnchored::new();\n}\n",
+        ),
+        (
+            "internal/vault/keys.rs",
+            "pub struct KeyAnchored;\n\nimpl KeyAnchored {\n    pub fn new() -> Self {\n        \
+             KeyAnchored\n    }\n}\n",
+        ),
+    ]);
+    let repo = temp.path();
+    let target = "internal::vault::keys::KeyAnchored";
+    let facts = |repo: &std::path::Path| -> Vec<String> {
+        let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT json_extract(json, '$.source') FROM analysis_facts \
+                 WHERE target = ?1 ORDER BY 1",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([target], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows
+    };
+    let module_edges = |repo: &std::path::Path| -> i64 {
+        let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM graph_edges e JOIN graph_strings s ON s.sid = e.to_sid \
+             JOIN graph_nodes n ON n.id = s.value \
+             WHERE n.label = ?1 AND lower(n.node_type) = 'module'",
+            [target],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let exported = facts(repo);
+    assert!(
+        exported
+            .iter()
+            .any(|source| source.starts_with("open-kioku-symbol-registry/")),
+        "{exported:?}"
+    );
+    assert!(
+        exported
+            .iter()
+            .any(|source| source.starts_with("open-kioku-import-resolver/")),
+        "{exported:?}"
+    );
+    assert!(module_edges(repo) > 0);
+    export_snapshot(repo);
+    deny_internal_vault(repo);
+
+    let imported = import_snapshot_json(repo, &[]);
+    let caveats = imported["caveats"].to_string();
+    assert!(
+        caveats.contains("symbol resolution(s) and similarity link(s)"),
+        "{imported}"
+    );
+    let kept = facts(repo);
+    assert!(
+        kept.iter()
+            .all(|source| source.starts_with("open-kioku-import-resolver/")),
+        "{kept:?}"
+    );
+    assert!(!kept.is_empty(), "the import fact was removed");
+    assert!(module_edges(repo) > 0, "the import edge was removed");
+    let status = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "status", "--full"]);
+        command
+    });
+    assert!(
+        status.contains("symbol resolution(s) and similarity link(s)"),
+        "{status}"
+    );
+}
+
+/// A `--quality fast` artifact is a page copy of the exporter's database, free pages included.
+/// An exporter that denied a path after indexing it and re-indexed leaves its rows there; the
+/// import removes no row, and still must not publish those pages (#549).
+#[test]
+fn snapshot_import_does_not_publish_the_exporters_free_pages() {
+    // Enough rows that the pages they are deleted from outnumber the ones the import writes
+    // again (the manifest), which would otherwise overwrite some of them by chance.
+    let util = (0..300)
+        .map(|n| format!("pub fn render_sealed_ledger_{n:03}() -> u32 {{\n    {n}\n}}\n\n"))
+        .collect::<String>();
+    let temp = snapshot_fixture_repo_with(&[
+        ("src/main.rs", "fn main() {\n    println!(\"ok\");\n}\n"),
+        ("internal/vault/util.rs", util.as_str()),
+    ]);
+    let repo = temp.path();
+    deny_internal_vault(repo);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    // The exporter's database holds the removed rows in free pages.
+    assert!(holds(&index_bytes(repo), "render_sealed_ledger"));
+    export_snapshot(repo);
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(imported["snapshot"]["policy_filtered"], 0, "{imported}");
+    let bytes = index_bytes(repo);
+    // The path itself is named once, as `ok index` names it: among the manifest's skipped
+    // paths, as denied.
+    for needle in ["vault::", "render_sealed_ledger"] {
+        assert!(
+            !holds(&bytes, needle),
+            "the imported index holds `{needle}`"
+        );
     }
 }
 
