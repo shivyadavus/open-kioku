@@ -171,26 +171,33 @@ impl RustPackageLayout {
     /// The module tree of `src/`: the library, the default binary `src/main.rs` unless binary
     /// auto-discovery is off, and any target the manifest roots directly in `src/`.
     pub(crate) fn main_tree(&self) -> RustCrateTree {
-        let default_binary = self
+        let binaries_discovered = self
             .target_dirs
             .first()
-            .is_some_and(|(_, discovered)| *discovered)
-            .then(|| format!("{}/main", self.src_root));
+            .is_some_and(|(_, discovered)| *discovered);
+        let default_binary = format!("{}/main", self.src_root);
         let mut roots = self
             .library_stem()
             .into_iter()
-            .chain(default_binary)
+            .chain(binaries_discovered.then(|| default_binary.clone()))
             .collect::<Vec<_>>();
-        for root in self.own_target_roots(&self.src_root) {
-            if !roots.contains(&root) {
-                roots.push(root);
+        let declared_roots = self.own_target_roots(&self.src_root);
+        for root in &declared_roots {
+            if !roots.contains(root) {
+                roots.push(root.clone());
             }
         }
+        let unbuilt_files = (!roots.contains(&default_binary))
+            .then_some(default_binary)
+            .into_iter()
+            .collect();
         RustCrateTree {
             module_dir: self.src_root.clone(),
             roots,
             is_src: true,
             discovers_roots: false,
+            declared_roots,
+            unbuilt_files,
             unmodeled_roots: self.unmodeled_roots_in(&self.src_root),
         }
     }
@@ -262,9 +269,9 @@ impl RustPackageLayout {
             } else {
                 Vec::new()
             };
-            for root in own {
-                if !roots.contains(&root) {
-                    roots.push(root);
+            for root in &own {
+                if !roots.contains(root) {
+                    roots.push(root.clone());
                 }
             }
             return Some(RustCrateTree {
@@ -272,6 +279,8 @@ impl RustPackageLayout {
                 roots,
                 is_src: false,
                 discovers_roots: *discovered,
+                declared_roots: own,
+                unbuilt_files: Vec::new(),
                 unmodeled_roots: self.unmodeled_roots_in(dir),
             });
         }
@@ -290,9 +299,9 @@ impl RustPackageLayout {
                 roots.push(main);
             }
         }
-        for root in own {
-            if !roots.contains(&root) {
-                roots.push(root);
+        for root in &own {
+            if !roots.contains(root) {
+                roots.push(root.clone());
             }
         }
         (!roots.is_empty()).then(|| RustCrateTree {
@@ -300,6 +309,8 @@ impl RustPackageLayout {
             roots,
             is_src: false,
             discovers_roots: false,
+            declared_roots: own,
+            unbuilt_files: Vec::new(),
             unmodeled_roots: Vec::new(),
         })
     }
@@ -320,6 +331,13 @@ pub(crate) struct RustCrateTree {
     /// Every Rust file directly in `module_dir` is a crate root: a target directory Cargo
     /// discovers, whose `roots` are only the indexed ones.
     pub(crate) discovers_roots: bool,
+    /// The `roots` the manifest names, which are crate roots whether or not discovery saw them:
+    /// one it skipped as secret-like is recorded with no path.
+    pub(crate) declared_roots: Vec<String>,
+    /// Extension-less paths where Cargo would find a crate root it does not build, because the
+    /// manifest turns that auto-discovery off (`src/main.rs` under `autobins = false`). Such a
+    /// file is no crate's module unless a root declares it.
+    pub(crate) unbuilt_files: Vec<String>,
     /// Crate roots the manifest names in this tree's directory whose own module trees the layout
     /// does not follow.
     pub(crate) unmodeled_roots: Vec<String>,

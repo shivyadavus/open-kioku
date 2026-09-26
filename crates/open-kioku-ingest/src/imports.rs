@@ -148,8 +148,9 @@ impl<'a> RustModuleTree<'a> {
     }
 
     /// The crate roots of `tree` whose modules the index cannot place: roots discovery skipped,
-    /// and roots the manifest names whose own module trees the layout does not follow. A file
-    /// of the tree that no indexed root declares may belong to one of them.
+    /// roots the manifest names that were not indexed (a skipped secret-like path is recorded
+    /// without one), and roots the manifest names whose own module trees the layout does not
+    /// follow. A file of the tree that no indexed root declares may belong to one of them.
     fn unreadable_roots(&self, tree: &RustCrateTree) -> Vec<String> {
         let discovered = tree
             .discovers_roots
@@ -163,7 +164,11 @@ impl<'a> RustModuleTree<'a> {
         let mut roots = tree
             .roots
             .iter()
-            .filter(|root| self.unindexed_stems.contains(*root))
+            .filter(|root| {
+                self.unindexed_stems.contains(*root)
+                    || (tree.declared_roots.contains(*root)
+                        && !self.files_by_stem.contains_key(*root))
+            })
             .chain(discovered)
             .chain(&tree.unmodeled_roots)
             .cloned()
@@ -176,10 +181,14 @@ impl<'a> RustModuleTree<'a> {
     /// The crate roots a file of `tree` that no indexed root declares is read against: the
     /// indexed roots of `src/`, whose library and default binary hold its modules unless
     /// declared otherwise. None when a root of the tree cannot be read, since the file may be
-    /// that crate's alone, and none in a target directory, whose crate roots are independent
-    /// crates that do not stand for one another.
+    /// that crate's alone; none for a file where Cargo would find a crate root it does not build
+    /// (`src/main.rs` under `autobins = false`), which no crate compiles; and none in a target
+    /// directory, whose crate roots are independent crates that do not stand for one another.
     fn undeclared_file_roots(&self, path: &RustUsePath) -> Vec<String> {
-        if !path.tree.is_src || !self.unreadable_roots(&path.tree).is_empty() {
+        if !path.tree.is_src
+            || !self.unreadable_roots(&path.tree).is_empty()
+            || path.tree.unbuilt_files.contains(&importer_stem(path))
+        {
             return Vec::new();
         }
         self.indexed_crate_roots(path)
@@ -305,7 +314,9 @@ impl<'a> RustModuleTree<'a> {
                 continue;
             };
             let unreadable = self.unreadable_roots(&file.tree);
+            // An unfollowed root is not a module of the tree, so it is no file withheld from one.
             if unreadable.is_empty()
+                || unreadable.contains(&importer_stem(&file))
                 || rootless
                 || self.declares_file_modules(&file, &file.importer_module)
             {
@@ -370,6 +381,15 @@ impl<'a> RustModuleTree<'a> {
             _ => None,
         }
     }
+}
+
+/// The extension-less path of the file `path` was mapped from, for a file below its crate root.
+fn importer_stem(path: &RustUsePath) -> String {
+    format!(
+        "{}/{}",
+        path.tree.module_dir,
+        path.importer_module.join("/")
+    )
 }
 
 fn rust_file_stem(path: &Path) -> Option<String> {
@@ -2009,12 +2029,13 @@ mod tests {
         let placements = modules.module_placements();
 
         assert!(!placements.contains_key(&FileId::new("file:src/tools/args.rs")));
+        // The unfollowed root itself is not counted as a file withheld from `src/`.
         assert_eq!(
             modules.placement_gaps(),
             RustPlacementGaps {
                 unplaced_packages: 1,
                 unread_roots: 1,
-                withheld_files: 2,
+                withheld_files: 1,
             }
         );
     }
@@ -2043,11 +2064,34 @@ mod tests {
             vec!["src::bin::tool"]
         );
         assert!(!placements.contains_key(&FileId::new("file:src/bin/other.rs")));
+        // No crate compiles an unnamed `src/main.rs`, so it is not read against the library.
+        assert!(!placements.contains_key(&FileId::new("file:src/main.rs")));
+        assert_eq!(modules.placement_gaps(), RustPlacementGaps::default());
+    }
+
+    #[test]
+    fn a_manifest_named_root_discovery_skipped_without_a_path_still_withholds() {
+        // `[[bin]] path = "src/id_rsa_tool.rs"` is skipped as secret-like, and its skip is
+        // redacted, so no unindexed path names it; the manifest still does. It declares `cli`.
+        let files = ["src/lib.rs", "src/cli.rs"].map(source_file);
+        let project = rust_package_with_targets(CargoTargets {
+            roots: vec![PathBuf::from("src/id_rsa_tool.rs")],
+            not_autodiscovered: Vec::new(),
+        });
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &[], &scopes);
+
+        assert!(!modules
+            .module_placements()
+            .contains_key(&FileId::new("file:src/cli.rs")));
         assert_eq!(
-            placements[&FileId::new("file:src/main.rs")].crate_roots,
-            vec!["src::lib"]
+            modules.placement_gaps(),
+            RustPlacementGaps {
+                unplaced_packages: 0,
+                unread_roots: 1,
+                withheld_files: 1,
+            }
         );
-        assert_eq!(placements[&FileId::new("file:src/main.rs")].module, None);
     }
 
     #[test]
