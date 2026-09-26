@@ -222,6 +222,19 @@ fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+/// Reports the Rust packages whose crate root the module tree cannot place, whose module-path
+/// `CALLS` edges are left unresolved. Paths are not named: a skipped root may be a secret-like one.
+fn unplaced_rust_packages_note(count: usize) -> Option<QualityNote> {
+    (count > 0).then(|| {
+        QualityNote::new(
+            QualityNoteKind::RelationshipResolution,
+            format!(
+                "{count} Rust package(s) have indexed source files in a crate module tree with no crate root the index can place (for example a `lib.rs` or `main.rs` that was not indexed, a `[lib] path` outside `src/`, or a crate whose only root is a `[[bin]] path` target); `crate::`, `self::` and `super::` call paths into other files there are left unresolved"
+            ),
+        )
+    })
+}
+
 fn attach_resolution_quality(quality: &mut IndexQuality, report: Option<ResolutionQualityReport>) {
     if let Some(report) = report.as_ref() {
         if report.candidate_cap_hits > 0 {
@@ -711,7 +724,8 @@ impl Indexer {
             &module_declarations,
             &scope_index,
         );
-        scope_index.record_misplaced_rust_module_files(rust_modules.misplaced_module_files());
+        scope_index.record_rust_module_placements(rust_modules.module_placements());
+        let unplaced_rust_packages = rust_modules.unplaced_package_count();
         import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
         // Import bindings and file-level import edges follow the same declared module tree, and
         // `rust_modules` borrows the project model that moves into `semantic_repo` below.
@@ -1191,6 +1205,7 @@ impl Indexer {
         };
         let mut resolver_quality_notes = resolver_report.quality_notes.clone();
         resolver_quality_notes.extend(registry_report.quality_notes);
+        resolver_quality_notes.extend(unplaced_rust_packages_note(unplaced_rust_packages));
         let mut mode_notes = mode_quality_notes(mode);
         mode_notes.extend(resolver_quality_notes);
         mode_notes.extend(git_history.quality_notes.iter().cloned());

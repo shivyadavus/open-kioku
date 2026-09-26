@@ -13,7 +13,7 @@ mod typed_calls;
 pub use calls::{resolve_call, resolve_call_outcome};
 pub use context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 pub use evidence::{ResolutionEvidence, ResolutionEvidenceKind, ResolvedRelationship};
-pub use index::{BindingIndex, ScopeIndex, SymbolIndex};
+pub use index::{BindingIndex, RustModulePlacement, ScopeIndex, SymbolIndex};
 pub use inheritance::InheritanceIndex;
 pub use language_capabilities::{
     semantic_capabilities_for, CapabilityState, LanguageSemanticCapabilities, SemanticCapability,

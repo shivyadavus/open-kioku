@@ -4415,7 +4415,8 @@ pub enum QualityNoteKind {
     SymbolRegistryCaveat,
     /// One token the symbol registry could not resolve at all.
     SymbolRegistryUnresolved,
-    /// Relationship resolution hit its candidate cap and suppressed emission.
+    /// Relationship resolution suppressed authoritative emission: a candidate cap was hit, or a
+    /// Rust package has no crate root the module tree can place.
     RelationshipResolution,
     /// The git history scan skipped commits whose patch it could not read.
     GitHistory,

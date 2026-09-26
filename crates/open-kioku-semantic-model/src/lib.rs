@@ -19,6 +19,10 @@ pub struct ProjectRoot {
     pub language: Language,
     pub package_name: Option<String>,
     pub source_roots: Vec<PathBuf>,
+    /// Repository-relative root file of a Rust package's library crate when its manifest sets one
+    /// with `[lib] path`; `None` means the default `src/lib.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
