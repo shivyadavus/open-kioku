@@ -44,7 +44,11 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// `_test`, `.test.js`, `.spec.js`, `.test.tsx` and `__tests__/` files gain targets; only
 /// callables are targets anywhere, and a JS/TS registration call such as `test("name", fn)` is
 /// one too; a v3 index holds none of that and must be rebuilt.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v4";
+/// v5: Rust and Java symbol visibility is read from the item's own visibility modifier, not
+/// matched in its text; a v4 index records a private Rust function whose body spells `pub ` as
+/// public, a package-private Java class holding a public member as public, and `pub(crate)`
+/// items as private.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v5";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 
