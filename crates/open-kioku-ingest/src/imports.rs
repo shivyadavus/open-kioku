@@ -62,6 +62,24 @@ pub(crate) struct RustModuleTree<'a> {
     /// `(declaring file without `.rs`, module name)` for each file-backed declaration: `mod name;`
     /// with no body and no `path` attribute, outside any inline module. `mod r#type;` is `type`.
     file_modules: HashSet<(String, String)>,
+    /// Rust files discovery saw but did not index (over `max_file_size`, excluded, ignored,
+    /// unreadable), by repository-relative path without `.rs`. A crate root among them owns
+    /// modules the index cannot place.
+    unindexed_stems: HashSet<String>,
+}
+
+/// Rust files whose module paths the index leaves unresolved because it cannot tell which crate
+/// they belong to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RustPlacementGaps {
+    /// Packages with indexed files in a crate module tree that has no indexed crate root, or
+    /// whose manifest names a crate root in a tree the layout does not follow.
+    pub(crate) unplaced_packages: usize,
+    /// Crate roots of `src/` trees discovery skipped or the layout does not follow, where a file
+    /// no indexed root declares was withheld.
+    pub(crate) unread_roots: usize,
+    /// Files of those trees that no indexed crate root declares, read against no crate.
+    pub(crate) withheld_files: usize,
 }
 
 impl<'a> RustModuleTree<'a> {
@@ -115,7 +133,56 @@ impl<'a> RustModuleTree<'a> {
             stems_in_dir,
             project,
             file_modules,
+            unindexed_stems: HashSet::new(),
         }
+    }
+
+    /// Records the repository-relative paths discovery skipped; only Rust files matter.
+    pub(crate) fn with_unindexed_files<'p>(
+        mut self,
+        paths: impl IntoIterator<Item = &'p Path>,
+    ) -> Self {
+        self.unindexed_stems
+            .extend(paths.into_iter().filter_map(rust_file_stem));
+        self
+    }
+
+    /// The crate roots of `tree` whose modules the index cannot place: roots discovery skipped,
+    /// and roots the manifest names whose own module trees the layout does not follow. A file
+    /// of the tree that no indexed root declares may belong to one of them.
+    fn unreadable_roots(&self, tree: &RustCrateTree) -> Vec<String> {
+        let discovered = tree
+            .discovers_roots
+            .then(|| {
+                self.unindexed_stems.iter().filter(|stem| {
+                    stem.rsplit_once('/').map_or("", |(dir, _)| dir) == tree.module_dir
+                })
+            })
+            .into_iter()
+            .flatten();
+        let mut roots = tree
+            .roots
+            .iter()
+            .filter(|root| self.unindexed_stems.contains(*root))
+            .chain(discovered)
+            .chain(&tree.unmodeled_roots)
+            .cloned()
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
+    /// The crate roots a file of `tree` that no indexed root declares is read against: the
+    /// indexed roots of `src/`, whose library and default binary hold its modules unless
+    /// declared otherwise. None when a root of the tree cannot be read, since the file may be
+    /// that crate's alone, and none in a target directory, whose crate roots are independent
+    /// crates that do not stand for one another.
+    fn undeclared_file_roots(&self, path: &RustUsePath) -> Vec<String> {
+        if !path.tree.is_src || !self.unreadable_roots(&path.tree).is_empty() {
+            return Vec::new();
+        }
+        self.indexed_crate_roots(path)
     }
 
     /// Whether every module on `module`, from the crate root down, is declared as a file by the
@@ -139,7 +206,8 @@ impl<'a> RustModuleTree<'a> {
     /// The crate root files whose module tree holds the importer: the root file itself, or the
     /// `lib.rs` and `main.rs` that declare the importer's top-level module. A package with both
     /// roots is two crates, and `crate::` names only the modules of the importer's own root; when
-    /// both roots declare the importer's module, a path must be declared under both.
+    /// both roots declare the importer's module, a path must be declared under both. When no
+    /// indexed root declares it, those of [`RustModuleTree::undeclared_file_roots`].
     fn crate_roots(&self, path: &RustUsePath) -> Vec<String> {
         if let Some(root) = &path.importer_root {
             return vec![root.clone()];
@@ -154,7 +222,7 @@ impl<'a> RustModuleTree<'a> {
             .cloned()
             .collect::<Vec<_>>();
         if declaring.is_empty() {
-            roots
+            self.undeclared_file_roots(path)
         } else {
             declaring
         }
@@ -179,7 +247,8 @@ impl<'a> RustModuleTree<'a> {
     /// not placed there (mounted by `#[path]`, at the default location of a `#[path]` or inline
     /// module, or declared by no `mod` the parser sees, such as one inside a macro) in `src/` is
     /// recorded with no module and the indexed `lib.rs`/`main.rs`, so a `crate::` path written
-    /// there is still read against its own package. One in a target directory (`src/bin/`,
+    /// there is still read against its own package, unless a crate root of `src/` cannot be read
+    /// (see [`RustModuleTree::undeclared_file_roots`]). One in a target directory (`src/bin/`,
     /// `tests/`, `examples/`, `benches/`), whose crate roots are independent crates, a file
     /// outside every tree (`build.rs`), and every file of a tree whose crate roots are not
     /// indexed, is not recorded.
@@ -187,20 +256,13 @@ impl<'a> RustModuleTree<'a> {
         self.files
             .iter()
             .filter_map(|(id, path)| {
-                let package = self.package_layout(path);
-                let file =
-                    map_rust_module_file(&package.crate_tree_of(path, &self.stems_in_dir)?, path)?;
+                let file = self.module_file_of(path)?;
                 let placed = file.importer_root.is_some()
                     || self.declares_file_modules(&file, &file.importer_module);
                 let roots = if placed {
                     self.crate_roots(&file)
-                } else if file.tree.module_dir == package.src_root {
-                    self.indexed_crate_roots(&file)
                 } else {
-                    // The binaries, tests, examples or benches of a target directory are
-                    // independent crates, so no root of the directory stands for one it does not
-                    // declare.
-                    return None;
+                    self.undeclared_file_roots(&file)
                 };
                 if roots.is_empty() {
                     return None;
@@ -218,25 +280,45 @@ impl<'a> RustModuleTree<'a> {
             .collect()
     }
 
-    /// How many packages hold indexed Rust files in a crate module tree that has no indexed
-    /// crate root to place them from, or set a `[lib] path` outside `src/`. That covers a
-    /// `lib.rs`/`main.rs` discovery skipped (over `max_file_size`, say) and a crate whose only
-    /// root is a `[[bin]] path` target the manifest reading does not follow. Module paths in such
-    /// a tree are left unresolved, which the index reports rather than dropping silently.
-    pub(crate) fn unplaced_package_count(&self) -> usize {
-        self.files
-            .values()
-            .filter_map(|path| {
-                let package = self.package_layout(path);
-                let unplaced = !package.places_library()
-                    || self
-                        .crate_tree(path)
-                        .and_then(|tree| map_rust_module_file(&tree, path))
-                        .is_some_and(|file| self.indexed_crate_roots(&file).is_empty());
-                unplaced.then_some(package.src_root)
-            })
-            .collect::<HashSet<_>>()
-            .len()
+    /// `path` as a file of its package's crate module tree, if one holds it.
+    fn module_file_of(&self, path: &Path) -> Option<RustUsePath> {
+        map_rust_module_file(&self.crate_tree(path)?, path)
+    }
+
+    /// What the index could not place, for the `relationship_resolution` quality note. Counts
+    /// only: a skipped root may be a path the index must not name.
+    pub(crate) fn placement_gaps(&self) -> RustPlacementGaps {
+        let mut unplaced_packages = HashSet::new();
+        let mut unread_roots = HashSet::new();
+        let mut withheld_files = 0;
+        for path in self.files.values() {
+            let package = self.package_layout(path);
+            let file = self.module_file_of(path);
+            let rootless = file
+                .as_ref()
+                .is_some_and(|file| self.indexed_crate_roots(file).is_empty());
+            if !package.places_all_roots() || rootless {
+                unplaced_packages.insert(package.src_root.clone());
+            }
+            let Some(file) = file.filter(|file| file.tree.is_src && file.importer_root.is_none())
+            else {
+                continue;
+            };
+            let unreadable = self.unreadable_roots(&file.tree);
+            if unreadable.is_empty()
+                || rootless
+                || self.declares_file_modules(&file, &file.importer_module)
+            {
+                continue;
+            }
+            withheld_files += 1;
+            unread_roots.extend(unreadable);
+        }
+        RustPlacementGaps {
+            unplaced_packages: unplaced_packages.len(),
+            unread_roots: unread_roots.len(),
+            withheld_files,
+        }
     }
 
     /// The indexed crate root files of the package holding `path`.
@@ -792,7 +874,7 @@ mod tests {
         Confidence, EvidenceSourceType, FileId, ImportSite, ImportedName, Language, RepositoryId,
         Scope, SourceRange, Symbol, SymbolId, SymbolKind,
     };
-    use open_kioku_semantic_model::ProjectRoot;
+    use open_kioku_semantic_model::{CargoTargetKind, CargoTargets, ProjectRoot};
     use std::path::PathBuf;
 
     fn one_file_map(key: &str, file_id: &str) -> FileMap {
@@ -1123,6 +1205,7 @@ mod tests {
                 package_name: None,
                 source_roots: Vec::new(),
                 library_root: None,
+                cargo_targets: Default::default(),
             }));
         let scopes = open_kioku_resolution::ScopeIndex::build(scopes);
         let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
@@ -1515,6 +1598,7 @@ mod tests {
             package_name: None,
             source_roots: Vec::new(),
             library_root: None,
+            cargo_targets: Default::default(),
         });
         let declarations = vec![
             mod_decl("src/lib.rs", "w"),
@@ -1568,7 +1652,7 @@ mod tests {
             assert_eq!(placement.crate_roots, vec![root.replace('/', "::")]);
             assert_eq!(placement.module, Some(Vec::new()));
         }
-        assert_eq!(modules.unplaced_package_count(), 0);
+        assert_eq!(modules.placement_gaps().unplaced_packages, 0);
 
         // Without a `Cargo.toml` the files are read against the top-level `src/`.
         let no_manifest = ProjectModel::new();
@@ -1586,6 +1670,7 @@ mod tests {
                 package_name: None,
                 source_roots: Vec::new(),
                 library_root: library.map(PathBuf::from),
+                cargo_targets: Default::default(),
             }));
         project
     }
@@ -1682,7 +1767,7 @@ mod tests {
             )
         );
         assert!(!placements.contains_key(&FileId::new("file:src/bin/tool/sub.rs")));
-        assert_eq!(modules.unplaced_package_count(), 0);
+        assert_eq!(modules.placement_gaps().unplaced_packages, 0);
     }
 
     #[test]
@@ -1741,7 +1826,7 @@ mod tests {
             placements[&FileId::new("file:src/mylib.rs")].module,
             Some(Vec::new())
         );
-        assert_eq!(modules.unplaced_package_count(), 0);
+        assert_eq!(modules.placement_gaps().unplaced_packages, 0);
     }
 
     #[test]
@@ -1768,7 +1853,7 @@ mod tests {
         let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
         let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
 
-        assert_eq!(modules.unplaced_package_count(), 2);
+        assert_eq!(modules.placement_gaps().unplaced_packages, 2);
         let placements = modules.module_placements();
         let mut placed = placements
             .keys()
@@ -1779,6 +1864,190 @@ mod tests {
             placed,
             vec!["file:crates/c/src/lib.rs", "file:crates/c/src/util.rs"]
         );
+    }
+
+    #[test]
+    fn a_file_no_indexed_root_declares_is_read_against_no_crate_when_a_src_root_was_skipped() {
+        // `main.rs` (over `max_file_size`, say) declares `cli`; `lib.rs` declares `auth`. Read
+        // against `lib.rs`, `crate::helper` in `cli.rs` would name the library's `helper`, but
+        // rustc compiles `cli.rs` into the binary alone.
+        let files = ["src/lib.rs", "src/auth.rs", "src/cli.rs"].map(source_file);
+        let project = rust_project(&[("", None)]);
+        let declarations = vec![mod_decl("src/lib.rs", "auth")];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let skipped = [Path::new("src/main.rs"), Path::new("README.md")];
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes)
+            .with_unindexed_files(skipped);
+        let placements = modules.module_placements();
+
+        assert!(!placements.contains_key(&FileId::new("file:src/cli.rs")));
+        // A file the indexed root declares is still that crate's.
+        let auth = &placements[&FileId::new("file:src/auth.rs")];
+        assert_eq!(auth.crate_roots, vec!["src::lib"]);
+        assert_eq!(auth.module, Some(vec!["auth".to_string()]));
+        assert_eq!(
+            modules.placement_gaps(),
+            RustPlacementGaps {
+                unplaced_packages: 0,
+                unread_roots: 1,
+                withheld_files: 1,
+            }
+        );
+
+        // With nothing skipped the file is read against the package's indexed root, as before.
+        let indexed = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        assert_eq!(
+            indexed.module_placements()[&FileId::new("file:src/cli.rs")].crate_roots,
+            vec!["src::lib"]
+        );
+        assert_eq!(indexed.placement_gaps(), RustPlacementGaps::default());
+    }
+
+    #[test]
+    fn a_crate_import_from_a_file_no_indexed_root_declares_stays_unbound_when_a_root_is_skipped() {
+        let files = [
+            "src/lib.rs",
+            "src/cli.rs",
+            "src/bin/tool.rs",
+            "src/bin/tool/sub.rs",
+        ]
+        .map(source_file);
+        let sites = [
+            rust_use_site("src/cli.rs", "crate::helper", "helper", None),
+            // No root declares `tool/sub.rs`, and `tool.rs`'s `mod sub;` would not look there.
+            rust_use_site("src/bin/tool/sub.rs", "crate::run", "run", None),
+        ];
+        let symbols = open_kioku_resolution::SymbolIndex::build(vec![
+            rust_symbol("src/lib.rs", "helper"),
+            rust_symbol("src/bin/tool.rs", "run"),
+        ]);
+        let project = rust_project(&[("", None)]);
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let bind = |skipped: &[&str]| {
+            let mut registry = ImportRegistry::default();
+            for site in &sites {
+                registry.insert_unresolved_site(site);
+            }
+            let modules = RustModuleTree::new(&files, &project, &[], &scopes)
+                .with_unindexed_files(skipped.iter().map(Path::new));
+            registry.resolve_rust_imports(&symbols, &scopes, &modules);
+            registry
+        };
+
+        let skipped = bind(&["src/main.rs"]);
+        assert_eq!(bound_target(&skipped, "src/cli.rs", "helper"), None);
+        let indexed = bind(&[]);
+        assert_eq!(
+            bound_target(&indexed, "src/cli.rs", "helper").as_deref(),
+            Some("symbol:src/lib.rs:helper")
+        );
+        assert_eq!(bound_target(&indexed, "src/bin/tool/sub.rs", "run"), None);
+    }
+
+    fn rust_package_with_targets(targets: CargoTargets) -> ProjectModel {
+        let mut project = rust_project(&[("", None)]);
+        project.roots[0].cargo_targets = targets;
+        project
+    }
+
+    #[test]
+    fn module_placements_follow_the_crate_roots_a_manifest_names() {
+        // `[[bin]] path = "src/cli.rs"` declares `util`; `[[test]] path = "it/main.rs"` declares
+        // `common`; the library declares nothing.
+        let files = [
+            "src/lib.rs",
+            "src/cli.rs",
+            "src/util.rs",
+            "it/main.rs",
+            "it/common.rs",
+        ]
+        .map(source_file);
+        let project = rust_package_with_targets(CargoTargets {
+            roots: vec![PathBuf::from("src/cli.rs"), PathBuf::from("it/main.rs")],
+            not_autodiscovered: Vec::new(),
+        });
+        let declarations = vec![
+            mod_decl("src/cli.rs", "util"),
+            mod_decl("it/main.rs", "common"),
+        ];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let placements = modules.module_placements();
+
+        let util = &placements[&FileId::new("file:src/util.rs")];
+        assert_eq!(util.crate_roots, vec!["src::cli"]);
+        assert_eq!(util.module, Some(vec!["util".to_string()]));
+        assert_eq!(
+            placements[&FileId::new("file:src/cli.rs")].module,
+            Some(Vec::new())
+        );
+        let common = &placements[&FileId::new("file:it/common.rs")];
+        assert_eq!(common.crate_dir, "it");
+        assert_eq!(common.crate_roots, vec!["it::main"]);
+        assert_eq!(modules.placement_gaps(), RustPlacementGaps::default());
+
+        // Without the manifest's targets `cli.rs` is a module no root declares.
+        let plain = rust_project(&[("", None)]);
+        let unread = RustModuleTree::new(&files, &plain, &declarations, &scopes);
+        let unread = unread.module_placements();
+        assert_eq!(unread[&FileId::new("file:src/util.rs")].module, None);
+        assert!(!unread.contains_key(&FileId::new("file:it/common.rs")));
+    }
+
+    #[test]
+    fn a_target_root_in_a_tree_the_layout_does_not_follow_withholds_and_is_reported() {
+        // `[[bin]] path = "src/tools/cli.rs"` roots a crate whose modules live in `src/tools/`,
+        // which is also where the library's `tools` module would keep its own.
+        let files = ["src/lib.rs", "src/tools/cli.rs", "src/tools/args.rs"].map(source_file);
+        let project = rust_package_with_targets(CargoTargets {
+            roots: vec![PathBuf::from("src/tools/cli.rs")],
+            not_autodiscovered: Vec::new(),
+        });
+        let declarations = vec![mod_decl("src/tools/cli.rs", "args")];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let placements = modules.module_placements();
+
+        assert!(!placements.contains_key(&FileId::new("file:src/tools/args.rs")));
+        assert_eq!(
+            modules.placement_gaps(),
+            RustPlacementGaps {
+                unplaced_packages: 1,
+                unread_roots: 1,
+                withheld_files: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn target_auto_discovery_turned_off_leaves_only_the_roots_the_manifest_names() {
+        // `autobins = false` with `[[bin]] name = "tool"`: `src/main.rs` and `src/bin/other.rs`
+        // are not binaries, so neither roots a crate.
+        let files = [
+            "src/lib.rs",
+            "src/main.rs",
+            "src/bin/tool.rs",
+            "src/bin/other.rs",
+        ]
+        .map(source_file);
+        let project = rust_package_with_targets(CargoTargets {
+            roots: vec![PathBuf::from("src/bin/tool.rs")],
+            not_autodiscovered: vec![CargoTargetKind::Bin],
+        });
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &[], &scopes);
+        let placements = modules.module_placements();
+
+        assert_eq!(
+            placements[&FileId::new("file:src/bin/tool.rs")].crate_roots,
+            vec!["src::bin::tool"]
+        );
+        assert!(!placements.contains_key(&FileId::new("file:src/bin/other.rs")));
+        assert_eq!(
+            placements[&FileId::new("file:src/main.rs")].crate_roots,
+            vec!["src::lib"]
+        );
+        assert_eq!(placements[&FileId::new("file:src/main.rs")].module, None);
     }
 
     #[test]
@@ -2081,6 +2350,7 @@ mod tests {
                 package_name: package.map(str::to_string),
                 source_roots: Vec::new(),
                 library_root: None,
+                cargo_targets: Default::default(),
             }));
         let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
         let scopes = open_kioku_resolution::ScopeIndex::build(scopes);
