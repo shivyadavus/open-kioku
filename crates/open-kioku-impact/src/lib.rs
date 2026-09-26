@@ -18,6 +18,8 @@ const RELATIONSHIP_IMPACT_SYMBOL_SEEDS: usize = 16;
 const RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT: usize = 40;
 /// Bounded size of each relationship impact list in the report.
 const RELATIONSHIP_IMPACT_LIMIT: usize = 25;
+/// Number of the changed file's names searched for lexical dependents; see [`impact_terms`].
+const MAX_IMPACT_TERMS: usize = 8;
 
 pub struct ImpactEngine<'a> {
     store: &'a dyn MetadataStore,
@@ -155,9 +157,10 @@ impl<'a> ImpactEngine<'a> {
                 file,
                 &service_facts,
             )?);
-            for term in impact_terms(path, file, &target_symbols)
+            let file_tests = self.store.tests_for_files(std::slice::from_ref(&file.id))?;
+            for term in impact_terms(path, file, &target_symbols, &file_tests)
                 .into_iter()
-                .take(8)
+                .take(MAX_IMPACT_TERMS)
             {
                 let results = search(&term, 25)?;
                 direct.extend(
@@ -1626,18 +1629,47 @@ fn result_key(result: &SearchResult) -> String {
     )
 }
 
+/// The file's names searched for lexical dependents, longest first; only the first
+/// [`MAX_IMPACT_TERMS`] are searched.
+///
+/// Test code is left out: nothing outside a file depends on its tests, and with names ranked
+/// by length, long `#[test]` names and `#[cfg(test)]` helpers took the searched slots, so adding
+/// a test reshuffled the file's direct impacts. Which names are test code is read from the
+/// index's test targets, see [`TestScope`]. A file whose only non-generic names are tests (a
+/// test-path file, or a source file of nothing but tests) keeps them, since they are then the
+/// only names it has.
 fn impact_terms(
     path: &Path,
     file: &open_kioku_core::File,
     symbols: &[open_kioku_core::Symbol],
+    file_tests: &[open_kioku_core::TestTarget],
 ) -> Vec<String> {
-    let mut terms = symbols
+    let file_symbols = symbols
         .iter()
         .filter(|symbol| symbol.file_id == file.id)
+        .collect::<Vec<_>>();
+    // Built before generic names are dropped: `mod tests` is one.
+    let test_scope = TestScope::new(&file_symbols, file_tests);
+    let test_file = open_kioku_core::is_test_code_path(&file.path.to_string_lossy());
+    let symbols = file_symbols
+        .into_iter()
         .filter(|symbol| !is_generic_symbol_name(&symbol.name))
+        .collect::<Vec<_>>();
+    let production = symbols
+        .iter()
+        .copied()
+        .filter(|symbol| !test_file && !test_scope.contains(symbol))
+        .collect::<Vec<_>>();
+    let selected = if production.is_empty() {
+        symbols
+    } else {
+        production
+    };
+
+    let mut terms = selected
+        .iter()
         .map(|symbol| symbol.name.clone())
         .collect::<Vec<_>>();
-
     if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
         if !is_generic_symbol_name(stem) {
             terms.push(stem.into());
@@ -1647,6 +1679,99 @@ fn impact_terms(
     terms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     terms.dedup();
     terms
+}
+
+/// A file's test code as the index recorded it.
+///
+/// A symbol is test code when it is one of the file's test targets, matched by name and an
+/// overlapping line range (a SCIP definition covers only the name's line, a tree-sitter one the
+/// whole item), or when it lies in the innermost Rust inline module enclosing such a target: the
+/// `cfg(test)` attribute is not indexed, and this is how a `mod tests` helper is recognised. Only
+/// the innermost module, so `pub mod client { pub fn open() {} #[cfg(test)] mod tests { .. } }`
+/// keeps `client` and `open`.
+///
+/// A public symbol matched as a test only by its name or an annotation outside a test path
+/// (`TestTargetOrigin::Symbol`) is production API that happens to start with `test`, such as
+/// `pub fn test_connection_health`: a `#[test]` function is never public, and a public JUnit
+/// method lives in a test path, where its origin is `TestFileSymbol`. It stays a search term.
+struct TestScope<'a> {
+    targets: Vec<(&'a str, Option<&'a open_kioku_core::LineRange>)>,
+    modules: Vec<&'a open_kioku_core::LineRange>,
+}
+
+impl<'a> TestScope<'a> {
+    fn new(
+        file_symbols: &[&'a open_kioku_core::Symbol],
+        file_tests: &'a [open_kioku_core::TestTarget],
+    ) -> Self {
+        let targets = file_tests
+            .iter()
+            .filter(|test| {
+                test.origin != open_kioku_core::TestTargetOrigin::Symbol
+                    || !file_symbols.iter().any(|symbol| {
+                        symbol.visibility == open_kioku_core::Visibility::Public
+                            && names_same_item(symbol, test.name.as_str(), test.range.as_ref())
+                    })
+            })
+            .map(|test| (test.name.as_str(), test.range.as_ref()))
+            .collect::<Vec<_>>();
+        let rust_modules = file_symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.kind == open_kioku_core::SymbolKind::Module
+                    && symbol.language == open_kioku_core::Language::Rust
+            })
+            .filter_map(|module| module.range.as_ref())
+            .collect::<Vec<_>>();
+        let mut modules = Vec::<&open_kioku_core::LineRange>::new();
+        for test_range in targets.iter().filter_map(|(_, range)| *range) {
+            let innermost = rust_modules
+                .iter()
+                .copied()
+                .filter(|module_range| line_range_contains(module_range, test_range))
+                .min_by_key(|module_range| {
+                    (module_range.end - module_range.start, module_range.start)
+                });
+            if let Some(module_range) = innermost {
+                if !modules.contains(&module_range) {
+                    modules.push(module_range);
+                }
+            }
+        }
+        Self { targets, modules }
+    }
+
+    fn contains(&self, symbol: &open_kioku_core::Symbol) -> bool {
+        self.targets
+            .iter()
+            .any(|(name, range)| names_same_item(symbol, name, *range))
+            || symbol.range.as_ref().is_some_and(|range| {
+                self.modules
+                    .iter()
+                    .any(|module_range| line_range_contains(module_range, range))
+            })
+    }
+}
+
+/// Whether `symbol` is the item a test target names: the same name, and line ranges that
+/// overlap when both are known.
+fn names_same_item(
+    symbol: &open_kioku_core::Symbol,
+    name: &str,
+    range: Option<&open_kioku_core::LineRange>,
+) -> bool {
+    symbol.name == name
+        && match (symbol.range.as_ref(), range) {
+            (Some(left), Some(right)) => left.start <= right.end && right.start <= left.end,
+            _ => true,
+        }
+}
+
+fn line_range_contains(
+    outer: &open_kioku_core::LineRange,
+    inner: &open_kioku_core::LineRange,
+) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
 }
 
 fn is_generic_symbol_name(value: &str) -> bool {
@@ -3632,5 +3757,236 @@ mod tests {
             .evidence
             .iter()
             .any(|evidence| evidence.message.contains("not in the index")));
+    }
+
+    fn term_symbol(
+        name: &str,
+        kind: SymbolKind,
+        lines: (u32, u32),
+        visibility: open_kioku_core::Visibility,
+    ) -> Symbol {
+        Symbol {
+            id: SymbolId::new(format!("symbol:{name}:{}", lines.0)),
+            name: name.into(),
+            qualified_name: name.into(),
+            kind,
+            file_id: FileId::new("terms"),
+            range: Some(LineRange {
+                start: lines.0,
+                end: lines.1,
+            }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility,
+        }
+    }
+
+    fn term_test(symbol: &Symbol) -> open_kioku_core::TestTarget {
+        open_kioku_core::TestTarget {
+            id: format!("test:{}", symbol.name),
+            name: symbol.name.clone(),
+            file_id: symbol.file_id.clone(),
+            range: symbol.range.clone(),
+            command: None,
+            confidence: Confidence::Medium,
+            reason: "test-like path, annotation, or naming convention".into(),
+            evidence_refs: Vec::new(),
+            score_breakdown: Vec::new(),
+            selection_tier: Default::default(),
+            tier_justification: Vec::new(),
+            origin: open_kioku_core::TestTargetOrigin::Symbol,
+        }
+    }
+
+    fn term_file(path: &str) -> File {
+        File {
+            id: FileId::new("terms"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            size_bytes: 1,
+            content_hash: "terms".into(),
+            is_generated: false,
+            is_vendor: false,
+        }
+    }
+
+    #[test]
+    fn impact_terms_leave_out_test_functions_and_cfg_test_helpers() {
+        use open_kioku_core::Visibility::{Private, Public};
+        let production = term_symbol("rank", SymbolKind::Function, (1, 3), Public);
+        let tests_module = term_symbol("tests", SymbolKind::Module, (5, 40), Private);
+        let helper = term_symbol(
+            "build_a_fixture_with_a_very_long_name",
+            SymbolKind::Function,
+            (7, 9),
+            Private,
+        );
+        let test_fn = term_symbol(
+            "ranking_breaks_ties_by_path_when_scores_match",
+            SymbolKind::Function,
+            (11, 14),
+            Private,
+        );
+        let file = term_file("src/scoring.rs");
+        let symbols = vec![production, tests_module, helper, test_fn.clone()];
+
+        let terms = impact_terms(&file.path, &file, &symbols, &[term_test(&test_fn)]);
+
+        assert_eq!(terms, vec!["scoring".to_string(), "rank".to_string()]);
+    }
+
+    #[test]
+    fn adding_a_test_does_not_change_a_files_impact_terms() {
+        use open_kioku_core::Visibility::{Private, Public};
+        let file = term_file("src/scoring.rs");
+        let mut symbols = (0..8)
+            .map(|index| {
+                term_symbol(
+                    &format!("score_{index}"),
+                    SymbolKind::Function,
+                    (index * 2 + 1, index * 2 + 2),
+                    Public,
+                )
+            })
+            .collect::<Vec<_>>();
+        let before = impact_terms(&file.path, &file, &symbols, &[]);
+
+        let added = term_symbol(
+            "scores_are_rounded_half_up_for_every_supported_precision",
+            SymbolKind::Function,
+            (100, 104),
+            Private,
+        );
+        symbols.push(added.clone());
+        let after = impact_terms(&file.path, &file, &symbols, &[term_test(&added)]);
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_test_module_nested_in_a_production_module_leaves_the_outer_module_searched() {
+        use open_kioku_core::Visibility::{Private, Public};
+        let file = term_file("src/net.rs");
+        let client = term_symbol("client", SymbolKind::Module, (1, 20), Public);
+        let open = term_symbol(
+            "open_connection_pool_for_tenant",
+            SymbolKind::Function,
+            (2, 4),
+            Public,
+        );
+        let tests_module = term_symbol("tests", SymbolKind::Module, (6, 19), Private);
+        let helper = term_symbol(
+            "build_a_fixture_with_a_very_long_name",
+            SymbolKind::Function,
+            (8, 10),
+            Private,
+        );
+        let test_fn = term_symbol("opens", SymbolKind::Function, (12, 15), Private);
+        let symbols = vec![client, open, tests_module, helper, test_fn.clone()];
+
+        let terms = impact_terms(&file.path, &file, &symbols, &[term_test(&test_fn)]);
+
+        assert_eq!(
+            terms,
+            vec![
+                "open_connection_pool_for_tenant".to_string(),
+                "client".to_string(),
+                "net".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_public_production_name_starting_with_test_stays_a_search_term() {
+        use open_kioku_core::Visibility::{Private, Public};
+        // Rust: recorded as a test target by its `test_` prefix, but public, so production API.
+        let rust_file = term_file("src/health.rs");
+        let rust_api = term_symbol(
+            "test_connection_health",
+            SymbolKind::Function,
+            (1, 3),
+            Public,
+        );
+        let rust_test = term_symbol("checks_health", SymbolKind::Function, (5, 8), Private);
+        let symbols = vec![rust_api.clone(), rust_test.clone()];
+        let terms = impact_terms(
+            &rust_file.path,
+            &rust_file,
+            &symbols,
+            &[term_test(&rust_api), term_test(&rust_test)],
+        );
+        assert_eq!(
+            terms,
+            vec!["test_connection_health".to_string(), "health".to_string()]
+        );
+
+        // Java: `public boolean testConnection()` in a main source set.
+        let java_file = term_file("src/main/java/app/Db.java");
+        let mut java_api = term_symbol("testConnection", SymbolKind::Method, (4, 6), Public);
+        java_api.language = Language::Java;
+        let terms = impact_terms(
+            &java_file.path,
+            &java_file,
+            &[java_api.clone()],
+            &[term_test(&java_api)],
+        );
+        assert_eq!(terms, vec!["testConnection".to_string(), "Db".to_string()]);
+    }
+
+    #[test]
+    fn a_scip_definition_of_a_test_function_is_test_code_too() {
+        use open_kioku_core::Visibility::{Private, Public, Unknown};
+        let file = term_file("src/scoring.rs");
+        let production = term_symbol("rank", SymbolKind::Function, (1, 3), Public);
+        let test_fn = term_symbol(
+            "ranking_breaks_ties_by_path_when_scores_match",
+            SymbolKind::Function,
+            (10, 14),
+            Private,
+        );
+        // SCIP's definition range is the name's line, not the item's.
+        let mut scip_test_fn = term_symbol(
+            "ranking_breaks_ties_by_path_when_scores_match",
+            SymbolKind::Function,
+            (11, 11),
+            Unknown,
+        );
+        scip_test_fn.provenance = EvidenceSourceType::Scip;
+        let symbols = vec![production, test_fn.clone(), scip_test_fn];
+
+        let terms = impact_terms(&file.path, &file, &symbols, &[term_test(&test_fn)]);
+
+        assert_eq!(terms, vec!["scoring".to_string(), "rank".to_string()]);
+    }
+
+    #[test]
+    fn a_file_of_only_tests_keeps_its_test_names_as_impact_terms() {
+        use open_kioku_core::Visibility::Private;
+        let test_fn = term_symbol("rounds_half_up", SymbolKind::Function, (1, 3), Private);
+        let symbols = vec![test_fn.clone()];
+
+        // A test-path file: every name is test code, so none is dropped.
+        let test_path = term_file("tests/rounding.rs");
+        assert_eq!(
+            impact_terms(
+                &test_path.path,
+                &test_path,
+                &symbols,
+                &[term_test(&test_fn)]
+            ),
+            vec!["rounds_half_up".to_string(), "rounding".to_string()]
+        );
+        // A source file whose only names are tests keeps them too.
+        let source = term_file("src/checks.rs");
+        assert_eq!(
+            impact_terms(&source.path, &source, &symbols, &[term_test(&test_fn)]),
+            vec!["rounds_half_up".to_string(), "checks".to_string()]
+        );
     }
 }
