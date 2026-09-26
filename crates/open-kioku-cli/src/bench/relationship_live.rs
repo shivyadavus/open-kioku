@@ -670,6 +670,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
     const PACKAGE_B: &str = "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
     const ROOT_WORKSPACE_PACKAGE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"crates/a\"]\n";
     const SESSION_B: &str = "use crate::auth::issue_token;\n\npub fn caller_fn() {\n    issue_token();\n}\n";
+    const LIB_AND_BIN_BESIDE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n\n[[bin]]\nname = \"app\"\npath = \"main.rs\"\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
         "cross_module_item_import" => (
             vec![
@@ -1058,6 +1059,37 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                     "mod util;\n\npub fn caller_fn() {\n    crate::util::target_fn();\n}\n\nfn main() {}\n",
                 ),
                 ("src/util.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // `[lib] path = "lib.rs"` beside `[[bin]] path = "main.rs"`: both declare `mod util;`, so
+        // `crate::target_fn` in `util.rs` is a different function in each crate (#561).
+        "lib_path_beside_bin_path_shared_module" => (
+            vec![
+                ("Cargo.toml", LIB_AND_BIN_BESIDE),
+                ("lib.rs", "mod util;\n\npub fn target_fn() {}\n"),
+                (
+                    "main.rs",
+                    "mod util;\n\nfn target_fn() {}\n\nfn main() {\n    util::caller_fn();\n}\n",
+                ),
+                (
+                    "util.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // The same layout, with `util.rs` declared by the library alone: it is the library's
+        // module, so `crate::target_fn` there is the library's (#561).
+        "lib_path_beside_bin_path_library_module" => (
+            vec![
+                ("Cargo.toml", LIB_AND_BIN_BESIDE),
+                ("lib.rs", "mod util;\n\npub fn target_fn() {}\n"),
+                ("main.rs", "fn main() {}\n"),
+                (
+                    "util.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
             ],
             true,
         ),

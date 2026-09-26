@@ -23,8 +23,14 @@ pub(crate) struct RustPackageLayout {
     pub(crate) src_root: String,
     /// The library crate root's file name in `src_root`, without `.rs`: `lib`, or the file that
     /// `[lib] path` names there. `None` when `[lib] path` puts the root outside `src_root`, whose
-    /// modules this layout cannot follow.
+    /// modules this layout follows only beside another crate root (`outside_library`), and whose
+    /// crate-name paths it does not follow at all.
     library: Option<String>,
+    /// Extension-less library crate root a `[lib] path` puts outside `src_root`, in the package
+    /// and in no subdirectory of `src_root`. Its modules live beside it, so where another crate
+    /// root the layout follows shares that directory it is one of that tree's roots, and a
+    /// module both declare belongs to both crates.
+    outside_library: Option<String>,
     /// The target directories (`src/bin`, `tests`, `examples`, `benches`), whether Cargo
     /// discovers the crate roots directly in each.
     target_dirs: Vec<(String, bool)>,
@@ -74,6 +80,7 @@ impl RustPackageLayout {
             package_dir,
             src_root,
             library: None,
+            outside_library: None,
             target_dirs,
             target_roots: Vec::new(),
             unmodeled_roots: Vec::new(),
@@ -92,7 +99,10 @@ impl RustPackageLayout {
                     Some(_) => layout
                         .unmodeled_roots
                         .push((Some(layout.holding_tree_dir(stem)), stem.to_string())),
-                    None => {}
+                    None => {
+                        layout.outside_library =
+                            layout.follows_target_root(stem).then(|| stem.to_string());
+                    }
                 }
             }
         }
@@ -210,6 +220,13 @@ impl RustPackageLayout {
             .collect()
     }
 
+    /// The library root a `[lib] path` outside `src/` puts directly in `dir`, if it does.
+    fn library_in(&self, dir: &str) -> Option<String> {
+        self.outside_library
+            .clone()
+            .filter(|library| parent_dir(library) == dir)
+    }
+
     fn unmodeled_roots_in(&self, dir: &str) -> Vec<String> {
         self.unmodeled_roots
             .iter()
@@ -263,13 +280,15 @@ impl RustPackageLayout {
             return Some(self.main_tree());
         }
         let own = self.own_target_roots(dir);
+        let library = self.library_in(dir);
         if let Some((_, discovered)) = self.target_dirs.iter().find(|(target, _)| target == dir) {
             let mut roots = if *discovered {
                 stems_in_dir.get(dir).cloned().unwrap_or_default()
             } else {
                 Vec::new()
             };
-            for root in &own {
+            let declared_roots = with_library(own, library);
+            for root in &declared_roots {
                 if !roots.contains(root) {
                     roots.push(root.clone());
                 }
@@ -279,7 +298,7 @@ impl RustPackageLayout {
                 roots,
                 is_src: false,
                 discovers_roots: *discovered,
-                declared_roots: own,
+                declared_roots,
                 unbuilt_files: Vec::new(),
                 unmodeled_roots: self.unmodeled_roots_in(dir),
             });
@@ -299,21 +318,34 @@ impl RustPackageLayout {
                 roots.push(main);
             }
         }
-        for root in &own {
+        if roots.is_empty() && own.is_empty() {
+            // The library alone roots no tree: its modules are placed only beside another root.
+            return None;
+        }
+        let declared_roots = with_library(own, library);
+        for root in &declared_roots {
             if !roots.contains(root) {
                 roots.push(root.clone());
             }
         }
-        (!roots.is_empty()).then(|| RustCrateTree {
+        Some(RustCrateTree {
             module_dir: dir.to_string(),
             roots,
             is_src: false,
             discovers_roots: false,
-            declared_roots: own,
+            declared_roots,
             unbuilt_files: Vec::new(),
             unmodeled_roots: Vec::new(),
         })
     }
+}
+
+/// `roots` followed by `library` unless it is one of them already.
+fn with_library(mut roots: Vec<String>, library: Option<String>) -> Vec<String> {
+    if let Some(library) = library.filter(|library| !roots.contains(library)) {
+        roots.push(library);
+    }
+    roots
 }
 
 /// The module tree of one or more crates: the directory their modules live in and the crate root
@@ -366,14 +398,14 @@ impl RustUsePath {
         if module.is_empty() {
             self.tree.roots.clone()
         } else {
-            let dir = format!(
-                "{}/{}",
-                self.tree.module_dir,
-                module
+            // `module_dir` is `""` for a tree at the repository root.
+            let dir = join_dir(
+                &self.tree.module_dir,
+                &module
                     .iter()
                     .map(|segment| module_name(segment))
                     .collect::<Vec<_>>()
-                    .join("/")
+                    .join("/"),
             );
             vec![format!("{dir}/mod"), dir]
         }
@@ -474,7 +506,7 @@ fn strip_dir<'p>(path: &'p str, dir: &str) -> Option<&'p str> {
     path.strip_prefix(dir)?.strip_prefix('/')
 }
 
-fn join_dir(dir: &str, name: &str) -> String {
+pub(crate) fn join_dir(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
     } else {
@@ -831,5 +863,66 @@ mod tests {
         // A root outside the package names no tree.
         assert_eq!(layout.crate_tree("crates/app/build", &indexed), None);
         assert_eq!(layout.crate_tree("crates/shared/main", &indexed), None);
+    }
+
+    #[test]
+    fn a_library_root_outside_src_is_a_root_of_a_tree_another_root_shares() {
+        let bin_beside = CargoTargets {
+            roots: vec![PathBuf::from("crates/app/main.rs")],
+            not_autodiscovered: Vec::new(),
+        };
+        let layout = RustPackageLayout::new(
+            Path::new("crates/app"),
+            Some(Path::new("crates/app/lib.rs")),
+            &bin_beside,
+        );
+        let tree = layout
+            .crate_tree("crates/app/util", &HashMap::new())
+            .expect("the binary roots a tree beside it");
+        assert_eq!(tree.roots, vec!["crates/app/main", "crates/app/lib"]);
+        assert_eq!(tree.declared_roots, tree.roots);
+        // Crate-name paths are still not followed into it.
+        assert!(!layout.places_all_roots());
+        assert_eq!(
+            map_rust_crate_name_path(&layout, "app", "app::util::f"),
+            None
+        );
+
+        // Alone in its directory, or beside a root in another one, it roots no tree.
+        for targets in [
+            CargoTargets::default(),
+            CargoTargets {
+                roots: vec![PathBuf::from("crates/app/tools/main.rs")],
+                not_autodiscovered: Vec::new(),
+            },
+        ] {
+            let layout = RustPackageLayout::new(
+                Path::new("crates/app"),
+                Some(Path::new("crates/app/lib.rs")),
+                &targets,
+            );
+            assert_eq!(
+                layout.crate_tree("crates/app/util", &HashMap::new()),
+                None,
+                "{targets:?}"
+            );
+        }
+
+        // Beside a discovered `<dir>/<name>/main.rs` it is that tree's root too.
+        let layout = RustPackageLayout::new(
+            Path::new(""),
+            Some(Path::new("examples/demo/lib.rs")),
+            &CargoTargets::default(),
+        );
+        let indexed = stems_in_dir(&["examples/demo/main", "examples/demo/lib"]);
+        assert_eq!(
+            layout
+                .crate_tree("examples/demo/scene", &indexed)
+                .map(|tree| tree.roots),
+            Some(vec![
+                "examples/demo/main".to_string(),
+                "examples/demo/lib".to_string()
+            ])
+        );
     }
 }

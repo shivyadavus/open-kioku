@@ -1107,6 +1107,48 @@
       "notes": "Regression case (#544): `[[bin]] path = \"src/cli.rs\"` is a crate root, so `crate::util::target_fn()` from it proves an edge to `src/util.rs`, which only that root declares."
     },
     {
+      "id": "ci-rust-calls-54-lib_path_beside_bin_path_shared_module",
+      "fixture_id": "ci/ri3/rust/calls/lib_path_beside_bin_path_shared_module",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:lib_path_beside_bin_path_shared_module:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "lib_path_beside_bin_path_shared_module",
+      "notes": "Regression case (#561): `[lib] path = \"lib.rs\"` and `[[bin]] path = \"main.rs\"` both declare `mod util;`, so `crate::target_fn()` in `util.rs` names the library's `target_fn` in one crate and the binary's in the other; no edge may be proven to either."
+    },
+    {
+      "id": "ci-rust-calls-55-lib_path_beside_bin_path_library_module",
+      "fixture_id": "ci/ri3/rust/calls/lib_path_beside_bin_path_library_module",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:lib_path_beside_bin_path_library_module:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "lib_path_beside_bin_path_library_module",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:lib_path_beside_bin_path_library_module:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#561): with `[lib] path = \"lib.rs\"` beside `[[bin]] path = \"main.rs\"`, `util.rs` is declared by the library alone, so `crate::target_fn()` there proves an edge to the library's `target_fn`."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",

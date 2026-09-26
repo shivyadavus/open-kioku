@@ -1,6 +1,6 @@
 use crate::rust_use_path::{
-    map_rust_crate_name_path, map_rust_module_file, map_rust_use_path, module_name, RustCrateTree,
-    RustPackageLayout, RustUsePath,
+    join_dir, map_rust_crate_name_path, map_rust_module_file, map_rust_use_path, module_name,
+    RustCrateTree, RustPackageLayout, RustUsePath,
 };
 use open_kioku_core::{
     File, FileId, ImportSite, Language, ModuleDeclarationSite, ScopeId, ScopeKind, SymbolId,
@@ -385,11 +385,7 @@ impl<'a> RustModuleTree<'a> {
 
 /// The extension-less path of the file `path` was mapped from, for a file below its crate root.
 fn importer_stem(path: &RustUsePath) -> String {
-    format!(
-        "{}/{}",
-        path.tree.module_dir,
-        path.importer_module.join("/")
-    )
+    join_dir(&path.tree.module_dir, &path.importer_module.join("/"))
 }
 
 fn rust_file_stem(path: &Path) -> Option<String> {
@@ -2037,6 +2033,101 @@ mod tests {
                 unread_roots: 1,
                 withheld_files: 1,
             }
+        );
+    }
+
+    #[test]
+    fn a_library_root_outside_src_beside_a_target_root_shares_that_roots_module_tree() {
+        // `[lib] path = "lib.rs"` beside `[[bin]] path = "main.rs"`: both declare `util`, so
+        // `crate::helper` in `util.rs` is the library's `helper` in one crate and the binary's in
+        // the other. `libonly.rs` is the library's alone.
+        let files = ["lib.rs", "main.rs", "util.rs", "libonly.rs"].map(source_file);
+        let mut project = rust_project(&[("", Some("lib.rs"))]);
+        project.roots[0].cargo_targets = CargoTargets {
+            roots: vec![PathBuf::from("main.rs")],
+            not_autodiscovered: Vec::new(),
+        };
+        let declarations = vec![
+            mod_decl("lib.rs", "util"),
+            mod_decl("lib.rs", "libonly"),
+            mod_decl("main.rs", "util"),
+        ];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let placements = modules.module_placements();
+
+        let util = &placements[&FileId::new("file:util.rs")];
+        assert_eq!(util.crate_roots, vec!["main", "lib"]);
+        assert_eq!(util.module, Some(vec!["util".to_string()]));
+        let libonly = &placements[&FileId::new("file:libonly.rs")];
+        assert_eq!(libonly.crate_roots, vec!["lib"]);
+        assert_eq!(libonly.module, Some(vec!["libonly".to_string()]));
+        assert_eq!(
+            placements[&FileId::new("file:lib.rs")].crate_roots,
+            vec!["lib"]
+        );
+
+        let symbols = open_kioku_resolution::SymbolIndex::build(vec![
+            rust_symbol("lib.rs", "helper"),
+            rust_symbol("main.rs", "helper"),
+        ]);
+        let mut registry = ImportRegistry::default();
+        for site in [
+            rust_use_site("util.rs", "crate::helper", "helper", None),
+            rust_use_site("libonly.rs", "crate::helper", "helper", None),
+        ] {
+            registry.insert_unresolved_site(&site);
+        }
+        registry.resolve_rust_imports(&symbols, &scopes, &modules);
+        assert_eq!(bound_target(&registry, "util.rs", "helper"), None);
+        assert_eq!(
+            bound_target(&registry, "libonly.rs", "helper").as_deref(),
+            Some("symbol:lib.rs:helper")
+        );
+        // Crate-name paths still cannot be followed into a library root outside `src/`.
+        assert_eq!(modules.placement_gaps().unplaced_packages, 1);
+
+        // With no other crate root beside it the library roots no tree, as before.
+        let alone = rust_project(&[("", Some("lib.rs"))]);
+        let alone = RustModuleTree::new(&files, &alone, &declarations, &scopes);
+        assert!(alone.module_placements().is_empty());
+    }
+
+    #[test]
+    fn modules_below_a_crate_tree_at_the_repository_root_are_placed() {
+        // The package is the repository root, so the module tree of `lib.rs` and `main.rs` is
+        // `""`: `lib.rs`'s `pub mod tools;` is `tools/mod.rs`, whose `pub mod inner;` is
+        // `tools/inner.rs`.
+        let files = ["lib.rs", "main.rs", "tools/mod.rs", "tools/inner.rs"].map(source_file);
+        let mut project = rust_project(&[("", Some("lib.rs"))]);
+        project.roots[0].cargo_targets = CargoTargets {
+            roots: vec![PathBuf::from("main.rs")],
+            not_autodiscovered: Vec::new(),
+        };
+        let declarations = vec![
+            mod_decl("lib.rs", "tools"),
+            mod_decl("tools/mod.rs", "inner"),
+        ];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let placements = modules.module_placements();
+
+        let inner = &placements[&FileId::new("file:tools/inner.rs")];
+        assert_eq!(inner.crate_dir, "");
+        assert_eq!(inner.crate_roots, vec!["lib"]);
+        assert_eq!(
+            inner.module,
+            Some(vec!["tools".to_string(), "inner".to_string()])
+        );
+
+        let symbols =
+            open_kioku_resolution::SymbolIndex::build(vec![rust_symbol("tools/mod.rs", "t")]);
+        let mut registry = ImportRegistry::default();
+        registry.insert_unresolved_site(&rust_use_site("lib.rs", "crate::tools::t", "t", None));
+        registry.resolve_rust_imports(&symbols, &scopes, &modules);
+        assert_eq!(
+            bound_target(&registry, "lib.rs", "t").as_deref(),
+            Some("symbol:tools/mod.rs:t")
         );
     }
 
