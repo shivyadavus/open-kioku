@@ -222,17 +222,30 @@ fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Reports the Rust packages whose crate root the module tree cannot place, whose module-path
-/// `CALLS` edges are left unresolved. Paths are not named: a skipped root may be a secret-like one.
-fn unplaced_rust_packages_note(count: usize) -> Option<QualityNote> {
-    (count > 0).then(|| {
-        QualityNote::new(
+/// Reports the Rust files whose module-path `CALLS` edges are left unresolved because the index
+/// cannot tell which crate they belong to. Paths are not named: a skipped root may be a
+/// secret-like one.
+fn rust_placement_notes(gaps: imports::RustPlacementGaps) -> Vec<QualityNote> {
+    let mut notes = Vec::new();
+    if gaps.unplaced_packages > 0 {
+        notes.push(QualityNote::new(
             QualityNoteKind::RelationshipResolution,
             format!(
-                "{count} Rust package(s) have indexed source files in a crate module tree with no crate root the index can place (for example a `lib.rs` or `main.rs` that was not indexed, a `[lib] path` outside `src/`, or a crate whose only root is a `[[bin]] path` target); `crate::`, `self::` and `super::` call paths into other files there are left unresolved"
+                "{} Rust package(s) have indexed source files in a crate module tree with no crate root the index can place (for example a `lib.rs` or `main.rs` that was not indexed, or a `[lib] path` or target `path` outside the module trees the index follows); `crate::`, `self::` and `super::` call paths into other files there are left unresolved",
+                gaps.unplaced_packages
             ),
-        )
-    })
+        ));
+    }
+    if gaps.withheld_files > 0 {
+        notes.push(QualityNote::new(
+            QualityNoteKind::RelationshipResolution,
+            format!(
+                "{} Rust crate root(s) in `src/` were not indexed or are in a module tree the index does not follow, so {} source file(s) there that no indexed crate root declares may belong to them; `crate::` call paths in those files are left unresolved",
+                gaps.unread_roots, gaps.withheld_files
+            ),
+        ));
+    }
+    notes
 }
 
 fn attach_resolution_quality(quality: &mut IndexQuality, report: Option<ResolutionQualityReport>) {
@@ -723,9 +736,17 @@ impl Indexer {
             &project_model,
             &module_declarations,
             &scope_index,
+        )
+        // A redacted skip names no path. Only secret-like paths are redacted, so a skipped crate
+        // root goes unseen here only when its file is named like key material (`id_rsa.rs`).
+        .with_unindexed_files(
+            skipped_paths
+                .iter()
+                .filter(|skipped| skipped.safe_to_show)
+                .map(|skipped| skipped.path.as_path()),
         );
         scope_index.record_rust_module_placements(rust_modules.module_placements());
-        let unplaced_rust_packages = rust_modules.unplaced_package_count();
+        let rust_placement_gaps = rust_modules.placement_gaps();
         import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
         // Import bindings and file-level import edges follow the same declared module tree, and
         // `rust_modules` borrows the project model that moves into `semantic_repo` below.
@@ -1205,7 +1226,7 @@ impl Indexer {
         };
         let mut resolver_quality_notes = resolver_report.quality_notes.clone();
         resolver_quality_notes.extend(registry_report.quality_notes);
-        resolver_quality_notes.extend(unplaced_rust_packages_note(unplaced_rust_packages));
+        resolver_quality_notes.extend(rust_placement_notes(rust_placement_gaps));
         let mut mode_notes = mode_quality_notes(mode);
         mode_notes.extend(resolver_quality_notes);
         mode_notes.extend(git_history.quality_notes.iter().cloned());

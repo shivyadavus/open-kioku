@@ -23,6 +23,46 @@ pub struct ProjectRoot {
     /// with `[lib] path`; `None` means the default `src/lib.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_root: Option<PathBuf>,
+    /// The binary, integration test, example and bench crate roots a Rust package's manifest
+    /// names, and the target kinds whose auto-discovery it turns off.
+    #[serde(default, skip_serializing_if = "CargoTargets::is_empty")]
+    pub cargo_targets: CargoTargets,
+}
+
+/// What a Cargo manifest says about its package's non-library targets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CargoTargets {
+    /// Repository-relative crate root files of the `[[bin]]`, `[[test]]`, `[[example]]` and
+    /// `[[bench]]` targets whose `path` is set, and of those a target kind with auto-discovery
+    /// turned off names without one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<PathBuf>,
+    /// Target kinds whose files Cargo does not discover (`autobins = false`, `autotests = false`,
+    /// `autoexamples = false`, `autobenches = false`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_autodiscovered: Vec<CargoTargetKind>,
+}
+
+impl CargoTargets {
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty() && self.not_autodiscovered.is_empty()
+    }
+
+    /// Whether Cargo discovers the crate roots of `kind` from the package's file layout.
+    pub fn autodiscovers(&self, kind: CargoTargetKind) -> bool {
+        !self.not_autodiscovered.contains(&kind)
+    }
+}
+
+/// A kind of Cargo target other than the library. Cargo's target kinds are a closed set, so the
+/// enum is exhaustive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CargoTargetKind {
+    Bin,
+    Test,
+    Example,
+    Bench,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
