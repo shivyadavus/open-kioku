@@ -17,6 +17,31 @@ SQLite stores metadata:
 
 `replace_index` writes a complete metadata index inside one transaction for crash-safe replacement. Graph writes use a separate transactional `replace_graph` call. Most tables store query columns plus the full JSON domain object; `graph_edges` and `call_sites` do not — see [Compact graph tables](#compact-graph-tables).
 
+### Deleted content
+
+Every re-index deletes rows: `ok index` replaces all of them, `ok watch` replaces the changed
+files', and a path the policy excludes after it was indexed (a new `[paths] deny` glob, a
+secret-like name) loses its rows on the next run. The bundled SQLite is built without
+`SQLITE_SECURE_DELETE`, and by default it leaves a deleted row's bytes in place: in the page
+it was removed from, in pages moved to the free list, and in the unallocated space of a free
+page it later reuses. `freelist_count` does not measure that; a page still in use can hold
+them. `SqliteStore` therefore opens every connection with `PRAGMA secure_delete = ON`, which
+overwrites deleted content with zeros in the same transaction as the delete (#553).
+
+A database an earlier version wrote may already hold such bytes, including a path denied
+before this change. The store records in `schema_meta` (`deleted_content_zeroed_v1`) that a
+file holds none: it is set when `SqliteStore` creates the file and after a successful
+`VACUUM`. `ok index` and `ok watch` rewrite a database without it once, with `VACUUM` and a
+truncating WAL checkpoint, after publishing the manifest; a failure (another connection
+reading blocks the checkpoint) is reported on stderr and leaves the marker unset, so the next
+run retries it. The rewrite costs one pass over the database, with free disk space about its
+size while it runs, once per database; later runs skip it. An older Open Kioku writing to a
+marked database deletes without zeroing and leaves the marker in place, so a later run does
+not rewrite it; after running an older version over an index, delete `.ok/` and re-index. `VACUUM`
+and zeroing rewrite the file's blocks; neither can scrub blocks the filesystem has already
+freed, such as a deleted write-ahead log's, a copy-on-write filesystem's old extents, or an
+SSD's spare area.
+
 ## Compact graph tables
 
 `graph_edges` and `call_sites` are the two largest tables in a real index, and until
@@ -236,11 +261,13 @@ copy of the artifact:
   afterwards; the manifest published after the search index is rebuilt is written into new
   pages. The cost is one rewrite of the staged database, with free disk space of about twice
   its size while it runs (the rewritten copy and the rollback journal). A `--quality best`
-  artifact from which nothing is removed skips it. As with the pre-redaction compaction,
-  `VACUUM` cannot scrub blocks the filesystem has already freed, such as the deleted rollback
-  journal's. `ok index` itself does not compact after a full rebuild, so a path denied after
-  it was indexed stays readable in the free pages of the index `ok index` writes until they
-  are reused.
+  artifact from which nothing is removed, and whose database records that its deleted content
+  was zeroed (see [Deleted content](#deleted-content)), skips it; one without that record is
+  compacted whatever its free-page count, because an exporter that deleted rows without
+  zeroing them can leave their bytes in pages still in use. The withheld manifest is deleted
+  with `secure_delete` on, so a skipped compaction does not leave it behind. As with the
+  pre-redaction compaction, `VACUUM` cannot scrub blocks the filesystem has already freed,
+  such as the deleted rollback journal's.
 
 The published manifest carries the result as `snapshot`: `imported_from_commit`,
 `local_commit`, `relation` (`same_commit`, `related` or `foreign`), `commits_behind`,
