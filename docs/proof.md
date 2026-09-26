@@ -44,8 +44,8 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | --- | ---: |
 | Mode | `full` |
 | Analysis semantics | `Compatible` |
-| Stored semantics fingerprint | `51838cb68b6006005f773a0357ef1be07002a4a0376b999cf455173e80683370` |
-| Current semantics fingerprint | `51838cb68b6006005f773a0357ef1be07002a4a0376b999cf455173e80683370` |
+| Stored semantics fingerprint | `4c500d10fc3e2e9e0835473807a0d1d24f28f968452b7d73e30d91f6737dfa99` |
+| Current semantics fingerprint | `4c500d10fc3e2e9e0835473807a0d1d24f28f968452b7d73e30d91f6737dfa99` |
 | Graph rebuild required | `false` |
 | Files | 5 |
 | Symbols | 8 |
@@ -182,7 +182,7 @@ Quality notes (204): scip: 1, symbol_registry_caveat: 138, symbol_registry_unres
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
 | `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-26 19:08:28.855424 UTC |
 | `pass` | `graph` | relationship graph present |
-| `pass` | `analysis-semantics` | compatible; fingerprint 51838cb68b6006005f773a0357ef1be07002a4a0376b999cf455173e80683370 |
+| `pass` | `analysis-semantics` | compatible; fingerprint 4c500d10fc3e2e9e0835473807a0d1d24f28f968452b7d73e30d91f6737dfa99 |
 | `pass` | `generations` | legacy layout (adopts the generation layout on the next `ok index`) |
 | `pass` | `semantic-lifecycle` | semantic search is disabled in ok.toml (explicit local opt-in) |
 | `warn` | `quality` | SCIP exact references unavailable; 2 tests, 5 imports indexed |

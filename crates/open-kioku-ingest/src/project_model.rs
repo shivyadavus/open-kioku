@@ -1,5 +1,7 @@
 use open_kioku_core::Language;
-pub use open_kioku_semantic_model::{ModuleInfo, PathAlias, ProjectModel, ProjectRoot};
+pub use open_kioku_semantic_model::{
+    CargoTargetKind, CargoTargets, ModuleInfo, PathAlias, ProjectModel, ProjectRoot,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -166,11 +168,7 @@ fn cargo_library_path(content: &str) -> Option<String> {
         if key.trim() != "path" {
             continue;
         }
-        let quoted = value.trim();
-        let Some(quote) = quoted.chars().next().filter(|ch| matches!(ch, '"' | '\'')) else {
-            continue;
-        };
-        let Some((path, _)) = quoted[1..].split_once(quote) else {
+        let Some(path) = toml_string(value) else {
             continue;
         };
         let path = path.trim_start_matches("./");
@@ -179,6 +177,145 @@ fn cargo_library_path(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// A TOML basic or literal string value, without its quotes; `None` for any other value.
+fn toml_string(value: &str) -> Option<&str> {
+    let quoted = value.trim();
+    let quote = quoted
+        .chars()
+        .next()
+        .filter(|ch| matches!(ch, '"' | '\''))?;
+    quoted[1..].split_once(quote).map(|(text, _)| text)
+}
+
+/// One `[[bin]]`, `[[test]]`, `[[example]]` or `[[bench]]` table of a Cargo manifest.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CargoTargetTable {
+    name: Option<String>,
+    path: Option<String>,
+}
+
+/// The target tables of a Cargo manifest by kind, the kinds whose auto-discovery `[package]`
+/// turns off, and the package name. Only the table-per-target form is read: an inline array
+/// (`bin = [{ ... }]`) names no root here.
+fn cargo_target_tables(
+    content: &str,
+) -> (
+    Vec<(CargoTargetKind, CargoTargetTable)>,
+    Vec<CargoTargetKind>,
+    Option<String>,
+) {
+    let mut tables = Vec::<(CargoTargetKind, CargoTargetTable)>::new();
+    let mut not_autodiscovered = Vec::new();
+    let mut package_name = None;
+    let mut in_package = false;
+    let mut in_target = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line.starts_with("[package]");
+            let kind = match line.split(']').next() {
+                Some("[[bin") => Some(CargoTargetKind::Bin),
+                Some("[[test") => Some(CargoTargetKind::Test),
+                Some("[[example") => Some(CargoTargetKind::Example),
+                Some("[[bench") => Some(CargoTargetKind::Bench),
+                _ => None,
+            };
+            in_target = kind.is_some();
+            if let Some(kind) = kind {
+                tables.push((kind, CargoTargetTable::default()));
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if in_package {
+            let kind = match key {
+                "autobins" => CargoTargetKind::Bin,
+                "autotests" => CargoTargetKind::Test,
+                "autoexamples" => CargoTargetKind::Example,
+                "autobenches" => CargoTargetKind::Bench,
+                "name" => {
+                    package_name = toml_string(value).map(str::to_string);
+                    continue;
+                }
+                _ => continue,
+            };
+            let value = value.split('#').next().unwrap_or_default().trim();
+            if value == "false" && !not_autodiscovered.contains(&kind) {
+                not_autodiscovered.push(kind);
+            }
+        } else if in_target {
+            let Some((_, table)) = tables.last_mut() else {
+                continue;
+            };
+            let Some(text) = toml_string(value) else {
+                continue;
+            };
+            match key {
+                "name" => table.name = Some(text.to_string()),
+                "path" => table.path = Some(text.trim_start_matches("./").to_string()),
+                _ => {}
+            }
+        }
+    }
+    (tables, not_autodiscovered, package_name)
+}
+
+/// The non-library targets of the package whose manifest is in `package_dir`. A target's crate
+/// root is its `path`; one without a `path` is Cargo's default for its name, which is only
+/// recorded where auto-discovery of its kind is off, since discovery finds it otherwise.
+fn cargo_targets(content: &str, package_dir: &Path, repo_root: &Path) -> CargoTargets {
+    let (tables, not_autodiscovered, package_name) = cargo_target_tables(content);
+    let mut roots = Vec::new();
+    for (kind, table) in tables {
+        let root = match (table.path, table.name) {
+            (Some(path), _) if !path.is_empty() => Some(package_dir.join(path)),
+            (_, Some(name)) if not_autodiscovered.contains(&kind) => {
+                default_target_root(package_dir, kind, &name, package_name.as_deref())
+            }
+            _ => None,
+        };
+        let Some(root) = root else {
+            continue;
+        };
+        let root = repo_relative_path(&root, repo_root);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    CargoTargets {
+        roots,
+        not_autodiscovered,
+    }
+}
+
+/// The crate root Cargo infers for a target named `name` without a `path`: `src/main.rs` for a
+/// binary named after its package, then `<dir>/<name>.rs` and `<dir>/<name>/main.rs`, whichever
+/// exists first.
+fn default_target_root(
+    package_dir: &Path,
+    kind: CargoTargetKind,
+    name: &str,
+    package_name: Option<&str>,
+) -> Option<PathBuf> {
+    let dir = match kind {
+        CargoTargetKind::Bin => "src/bin",
+        CargoTargetKind::Test => "tests",
+        CargoTargetKind::Example => "examples",
+        CargoTargetKind::Bench => "benches",
+    };
+    let main = (kind == CargoTargetKind::Bin && package_name == Some(name))
+        .then(|| package_dir.join("src/main.rs"));
+    main.into_iter()
+        .chain([
+            package_dir.join(dir).join(format!("{name}.rs")),
+            package_dir.join(dir).join(name).join("main.rs"),
+        ])
+        .find(|root| root.is_file())
 }
 
 fn repo_relative_path(path: &Path, repo_root: &Path) -> PathBuf {
@@ -202,6 +339,7 @@ fn push_project_root(
             .collect(),
         package_name,
         library_root: None,
+        cargo_targets: Default::default(),
     });
 }
 
@@ -241,6 +379,9 @@ fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
                                 .as_deref()
                                 .and_then(cargo_library_path)
                                 .map(|library| root.path.join(library));
+                            if let Some(content) = content.as_deref() {
+                                root.cargo_targets = cargo_targets(content, current, repo_root);
+                            }
                         }
                     }
                     "go.mod" => {
@@ -462,5 +603,42 @@ mod tests {
             Some("lib.rs")
         );
         assert_eq!(cargo_library_path("[[bin]]\npath = \"src/cli.rs\"\n"), None);
+    }
+
+    #[test]
+    fn rust_roots_carry_the_target_roots_a_manifest_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in ["src/main.rs", "tests/smoke/main.rs", "benches/speed.rs"] {
+            let path = dir.path().join("crates/app").join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "fn main() {}\n").unwrap();
+        }
+        std::fs::write(
+            dir.path().join("crates/app/Cargo.toml"),
+            "[package]\nname = \"app\"\nautobins = false # only named ones\nautotests = false\nautobenches = true\n\n[[bin]]\nname = \"app\"\n\n[[bin]]\nname = \"cli\"\npath = \"./src/cli.rs\"\n\n[[example]]\npath = 'demo/main.rs'\n\n[[test]]\nname = \"smoke\"\n\n[[test]]\nname = \"missing\"\n\n[[bench]]\nname = \"speed\"\n\n[dependencies]\npath = \"not-a-target\"\n",
+        )
+        .unwrap();
+
+        let model = ProjectModel::discover(dir.path());
+        let app = model
+            .nearest_root_for(Path::new("crates/app/src/main.rs"), Language::Rust)
+            .expect("the package is a Rust project root");
+        assert_eq!(
+            app.cargo_targets,
+            CargoTargets {
+                // A named binary without `path` is `src/main.rs` when named after the package;
+                // a test named without `path` is found where Cargo looks, and one that is not
+                // there, and a bench whose kind Cargo still discovers, name no root.
+                roots: vec![
+                    PathBuf::from("crates/app/src/main.rs"),
+                    PathBuf::from("crates/app/src/cli.rs"),
+                    PathBuf::from("crates/app/demo/main.rs"),
+                    PathBuf::from("crates/app/tests/smoke/main.rs"),
+                ],
+                not_autodiscovered: vec![CargoTargetKind::Bin, CargoTargetKind::Test],
+            }
+        );
+        assert!(!app.cargo_targets.autodiscovers(CargoTargetKind::Bin));
+        assert!(app.cargo_targets.autodiscovers(CargoTargetKind::Example));
     }
 }
