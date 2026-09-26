@@ -44,8 +44,8 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | --- | ---: |
 | Mode | `full` |
 | Analysis semantics | `Compatible` |
-| Stored semantics fingerprint | `da3855278eb517fd5c14b7556748e38302473947b40e5a1ea5cc1cb41fce3ceb` |
-| Current semantics fingerprint | `da3855278eb517fd5c14b7556748e38302473947b40e5a1ea5cc1cb41fce3ceb` |
+| Stored semantics fingerprint | `51838cb68b6006005f773a0357ef1be07002a4a0376b999cf455173e80683370` |
+| Current semantics fingerprint | `51838cb68b6006005f773a0357ef1be07002a4a0376b999cf455173e80683370` |
 | Graph rebuild required | `false` |
 | Files | 5 |
 | Symbols | 8 |
@@ -59,7 +59,7 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | SCIP exact references | 0 |
 | Static analysis facts | 34 |
 
-Indexed at `2026-09-25 18:10:45.421474 UTC`.
+Indexed at `2026-09-26 19:08:28.855424 UTC`.
 
 Build systems: `cargo`.
 
@@ -180,9 +180,9 @@ Quality notes (204): scip: 1, symbol_registry_caveat: 138, symbol_registry_unres
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
-| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-25 18:10:45.421474 UTC |
+| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-26 19:08:28.855424 UTC |
 | `pass` | `graph` | relationship graph present |
-| `pass` | `analysis-semantics` | compatible; fingerprint da3855278eb517fd5c14b7556748e38302473947b40e5a1ea5cc1cb41fce3ceb |
+| `pass` | `analysis-semantics` | compatible; fingerprint 51838cb68b6006005f773a0357ef1be07002a4a0376b999cf455173e80683370 |
 | `pass` | `generations` | legacy layout (adopts the generation layout on the next `ok index`) |
 | `pass` | `semantic-lifecycle` | semantic search is disabled in ok.toml (explicit local opt-in) |
 | `warn` | `quality` | SCIP exact references unavailable; 2 tests, 5 imports indexed |
@@ -298,8 +298,8 @@ Impact target: src/auth.rs
 Risk: low (0.21)
 
 Direct impacts (3):
-  src/lib.rs:7 (7.89)
   tests/auth_flow.rs:4 (5.36)
+  src/lib.rs:7 (2.99)
   ok.toml:81 (0.70)
 ```
 
@@ -379,9 +379,9 @@ Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation cand
 
 ### Section References
 
-- `boundary`: `document:README.md:1-3, region:adjacent-unit:ok.toml:1-80, region:adjacent-unit:src/auth.rs:12-16, region:adjacent-unit:src/auth.rs:17-23, region:adjacent-unit:src/auth.rs:3-6, region:adjacent-unit:src/lib.rs:1-2, region:adjacent-unit:src/lib.rs:3-6, search:README.md:1-3:1, search:README.md:1-3:2, search:ok.toml:1-147:0, search:ok.toml:1-147:1, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4, search:src/auth.rs:3-23:0, search:src/auth.rs:3-23:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:1-12:0, search:src/lib.rs:1-12:1, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4`
+- `boundary`: `document:README.md:1-3, region:adjacent-unit:ok.toml:1-80, region:adjacent-unit:src/auth.rs:12-16, region:adjacent-unit:src/auth.rs:17-23, region:adjacent-unit:src/auth.rs:3-6, region:adjacent-unit:src/lib.rs:1-2, region:adjacent-unit:src/lib.rs:3-6, search:README.md:1-3:1, search:README.md:1-3:2, search:ok.toml:1-147:0, search:ok.toml:1-147:1, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:src/auth.rs:3-23:0, search:src/auth.rs:3-23:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-12:0, search:src/lib.rs:1-12:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3`
 - `history`: `none`
-- `impact`: `230cfac07e26bff70c633f088134b95b1ae4eed87fb3d89dd62136178d180f71, 797c391f41bcb9d28cdff235a68958cc47fa0630d1f2a071dec90a7a9588bf3c, abf2fb2ec505b44f17b260d57342d783859ef3db9db48c9db7b699665c7d14a2, impact:src/auth.rs, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4`
+- `impact`: `230cfac07e26bff70c633f088134b95b1ae4eed87fb3d89dd62136178d180f71, 797c391f41bcb9d28cdff235a68958cc47fa0630d1f2a071dec90a7a9588bf3c, abf2fb2ec505b44f17b260d57342d783859ef3db9db48c9db7b699665c7d14a2, impact:src/auth.rs, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3`
 - `negative_evidence`: `negative:exact_references:token-no-explicit-exact-symbol-reference-or-scip, negative:history:token-no-churn-ownership-similar-change-reviewer-or, negative:runtime:token-no-runtime-trace-incident-or-error-artifact`
 - `primary_context`: `document:README.md:1-3, region:adjacent-unit:ok.toml:1-80, region:adjacent-unit:src/auth.rs:12-16, region:adjacent-unit:src/auth.rs:17-23, region:adjacent-unit:src/auth.rs:3-6, region:adjacent-unit:src/lib.rs:1-2, region:adjacent-unit:src/lib.rs:3-6, search:README.md:1-3:1, search:README.md:1-3:2, search:ok.toml:1-147:0, search:ok.toml:1-147:1, search:src/auth.rs:3-23:0, search:src/auth.rs:3-23:1, search:src/lib.rs:1-12:0, search:src/lib.rs:1-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1`
 - `validation`: `314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
@@ -436,15 +436,15 @@ Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation cand
 
 ## Impact Candidates
 
-- `src/lib.rs`:7-12: pub fn handle_login(user_id: &str) -> String {
-  - score: `7.886`; signals: `bm25_relevance` +7.836, `query_variant_boost` +0.050
-  - evidence: `search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1`
 - `tests/auth_flow.rs`:4-7: assert!(auth::validate_token(&token));
   - score: `5.362`; signals: `bm25_relevance` +5.312, `query_variant_boost` +0.050
-  - evidence: `search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4`
+  - evidence: `search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3`
+- `src/lib.rs`:7-12: auth::issue_token(&context, 3600)
+  - score: `2.992`; signals: `bm25_relevance` +2.942, `query_variant_boost` +0.050
+  - evidence: `search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1`
 - `ok.toml`:81-147: [ranking]
   - score: `0.702`; signals: `bm25_relevance` +0.652, `query_variant_boost` +0.050
-  - evidence: `search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4`
+  - evidence: `search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3`
 
 ## Runtime Signals
 
@@ -524,14 +524,14 @@ Forbidden patterns:
 
 Boundary expansion:
 - Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or history analysis.
-  - required evidence refs: `document:README.md:1-3, region:adjacent-unit:ok.toml:1-80, region:adjacent-unit:src/auth.rs:12-16, region:adjacent-unit:src/auth.rs:17-23, region:adjacent-unit:src/auth.rs:3-6, region:adjacent-unit:src/lib.rs:1-2, region:adjacent-unit:src/lib.rs:3-6, search:README.md:1-3:1, search:README.md:1-3:2, search:ok.toml:1-147:0, search:ok.toml:1-147:1, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4, search:src/auth.rs:3-23:0, search:src/auth.rs:3-23:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:1-12:0, search:src/lib.rs:1-12:1, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4`
+  - required evidence refs: `document:README.md:1-3, region:adjacent-unit:ok.toml:1-80, region:adjacent-unit:src/auth.rs:12-16, region:adjacent-unit:src/auth.rs:17-23, region:adjacent-unit:src/auth.rs:3-6, region:adjacent-unit:src/lib.rs:1-2, region:adjacent-unit:src/lib.rs:3-6, search:README.md:1-3:1, search:README.md:1-3:2, search:ok.toml:1-147:0, search:ok.toml:1-147:1, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:src/auth.rs:3-23:0, search:src/auth.rs:3-23:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-12:0, search:src/lib.rs:1-12:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3`
 
 Signal hooks:
 - architecture: `ok architecture summary, ok architecture violations, ok architecture policy check`
 - ownership: `CODEOWNERS, git_history`
 - co-change: `similar_change_overlap, historical_prs`
 
-Boundary evidence: `document:README.md:1-3, region:adjacent-unit:ok.toml:1-80, region:adjacent-unit:src/auth.rs:12-16, region:adjacent-unit:src/auth.rs:17-23, region:adjacent-unit:src/auth.rs:3-6, region:adjacent-unit:src/lib.rs:1-2, region:adjacent-unit:src/lib.rs:3-6, search:README.md:1-3:1, search:README.md:1-3:2, search:ok.toml:1-147:0, search:ok.toml:1-147:1, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4, search:src/auth.rs:3-23:0, search:src/auth.rs:3-23:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:1-12:0, search:src/lib.rs:1-12:1, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4`
+Boundary evidence: `document:README.md:1-3, region:adjacent-unit:ok.toml:1-80, region:adjacent-unit:src/auth.rs:12-16, region:adjacent-unit:src/auth.rs:17-23, region:adjacent-unit:src/auth.rs:3-6, region:adjacent-unit:src/lib.rs:1-2, region:adjacent-unit:src/lib.rs:3-6, search:README.md:1-3:1, search:README.md:1-3:2, search:ok.toml:1-147:0, search:ok.toml:1-147:1, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:src/auth.rs:3-23:0, search:src/auth.rs:3-23:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-12:0, search:src/lib.rs:1-12:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3`
 
 ## Recommended Next Steps
 
