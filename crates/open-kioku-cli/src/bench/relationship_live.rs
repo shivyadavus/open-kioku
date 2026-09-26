@@ -1012,6 +1012,55 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // `main.rs` is skipped (`.okignore`), so nothing indexed says `cli.rs` is its module
+        // alone; `crate::target_fn` there is the binary's, never the library's (#554).
+        "skipped_binary_root_crate_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (".okignore", "src/main.rs\n"),
+                ("src/lib.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/main.rs",
+                    "mod cli;\n\nfn target_fn() {}\n\nfn main() {\n    cli::caller_fn();\n}\n",
+                ),
+                (
+                    "src/cli.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // No crate root declares `src/bin/tool/sub.rs`: `tool.rs`'s `mod sub;` would be
+        // `src/bin/sub.rs`, so its `crate::` is no binary's (#554).
+        "undeclared_binary_module_crate_import" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub fn l() {}\n"),
+                ("src/bin/tool.rs", "pub fn target_fn() {}\n\nfn main() {}\n"),
+                (
+                    "src/bin/tool/sub.rs",
+                    "use crate::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `[[bin]] path = "src/cli.rs"` is a crate root whose `mod util;` places `src/util.rs`
+        // (#544).
+        "bin_path_target_module_path" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"cli\"\npath = \"src/cli.rs\"\n",
+                ),
+                ("src/lib.rs", "pub fn l() {}\n"),
+                (
+                    "src/cli.rs",
+                    "mod util;\n\npub fn caller_fn() {\n    crate::util::target_fn();\n}\n\nfn main() {}\n",
+                ),
+                ("src/util.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![
@@ -1364,19 +1413,32 @@ fn require_fixture_source_files_indexed(
     fixture: &[(PathBuf, String)],
     snapshot: &open_kioku_ingest::IndexSnapshot,
 ) -> anyhow::Result<()> {
-    let missing = fixture
+    // A fixture that lists a source file in `.okignore` needs discovery to skip exactly that
+    // file, and to index every other one.
+    let ignored = fixture
         .iter()
-        .map(|(path, _)| path)
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "rs" || extension == "py")
-        })
-        .filter(|path| !snapshot.files.iter().any(|file| &file.path == *path))
-        .map(|path| path.display().to_string())
+        .filter(|(path, _)| path == Path::new(".okignore"))
+        .flat_map(|(_, content)| content.lines().map(PathBuf::from))
         .collect::<Vec<_>>();
+    let indexed = |path: &Path| snapshot.files.iter().any(|file| file.path == path);
+    let mut missing = Vec::new();
+    for (path, _) in fixture {
+        if !path
+            .extension()
+            .is_some_and(|extension| extension == "rs" || extension == "py")
+        {
+            continue;
+        }
+        let skipped = ignored.contains(path);
+        if skipped == indexed(path)
+            || (skipped && !snapshot.skipped_paths.iter().any(|entry| entry.path == *path))
+        {
+            missing.push(path.display().to_string());
+        }
+    }
     if !missing.is_empty() {
         anyhow::bail!(
-            "case {} did not index fixture file(s): {}",
+            "case {} did not index, or did not skip as its `.okignore` says, fixture file(s): {}",
             case.id,
             missing.join(", ")
         );
