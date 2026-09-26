@@ -143,247 +143,7 @@
         },
         "id": "search:src/main.rs:1-7:2",
         "indexed_at": "<TIMESTAMP>",
-        "message": "query variant `function` matched local index",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 7,
-            "start": 1
-          },
-          "path": "src/main.rs"
-        },
-        "id": "search:src/main.rs:1-7:3",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "expanded task query `function` matched indexed search",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 7,
-            "start": 1
-          },
-          "path": "src/main.rs"
-        },
-        "id": "search:src/main.rs:1-7:4",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "query variant `subtract OR function` matched local index",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 7,
-            "start": 1
-          },
-          "path": "src/main.rs"
-        },
-        "id": "search:src/main.rs:1-7:5",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "expanded task query `subtract function` matched indexed search",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 7,
-            "start": 1
-          },
-          "path": "src/main.rs"
-        },
-        "id": "search:src/main.rs:1-7:6",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "query variant `function OR next` matched local index",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 7,
-            "start": 1
-          },
-          "path": "src/main.rs"
-        },
-        "id": "search:src/main.rs:1-7:7",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "expanded task query `function next` matched indexed search",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 7,
-            "start": 1
-          },
-          "path": "src/main.rs"
-        },
-        "id": "search:src/main.rs:1-7:8",
-        "indexed_at": "<TIMESTAMP>",
         "message": "region extended to adjacent chunk (lines 1-4)",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 6,
-            "start": 2
-          },
-          "path": "src/routes.rs"
-        },
-        "id": "search:src/routes.rs:2-6:0",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "BM25 lexical match from local Tantivy index",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 6,
-            "start": 2
-          },
-          "path": "src/routes.rs"
-        },
-        "id": "search:src/routes.rs:2-6:1",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "query variant `add OR subtract OR function OR next OR to OR add` matched local index",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 6,
-            "start": 2
-          },
-          "path": "src/routes.rs"
-        },
-        "id": "search:src/routes.rs:2-6:2",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "query variant `function` matched local index",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 6,
-            "start": 2
-          },
-          "path": "src/routes.rs"
-        },
-        "id": "search:src/routes.rs:2-6:3",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "expanded task query `function` matched indexed search",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 6,
-            "start": 2
-          },
-          "path": "src/routes.rs"
-        },
-        "id": "search:src/routes.rs:2-6:4",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "query variant `subtract OR function` matched local index",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 6,
-            "start": 2
-          },
-          "path": "src/routes.rs"
-        },
-        "id": "search:src/routes.rs:2-6:5",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "expanded task query `subtract function` matched indexed search",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 6,
-            "start": 2
-          },
-          "path": "src/routes.rs"
-        },
-        "id": "search:src/routes.rs:2-6:6",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "query variant `function OR next` matched local index",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 6,
-            "start": 2
-          },
-          "path": "src/routes.rs"
-        },
-        "id": "search:src/routes.rs:2-6:7",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "expanded task query `function next` matched indexed search",
-        "source": "open-kioku-search",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 6,
-            "start": 2
-          },
-          "path": "src/routes.rs"
-        },
-        "id": "search:src/routes.rs:2-6:8",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "region extended to adjacent chunk (lines 4-6)",
         "source": "open-kioku-search",
         "source_type": "lexical",
         "symbol_id": "<ID>"
@@ -437,23 +197,8 @@
     "evidence_by_section": {
       "boundary": [
         "region:adjacent-unit:src/main.rs:1-4",
-        "region:adjacent-unit:src/routes.rs:4-6",
         "search:src/main.rs:1-7:0",
-        "search:src/main.rs:1-7:1",
-        "search:src/main.rs:1-7:2",
-        "search:src/main.rs:1-7:3",
-        "search:src/main.rs:1-7:4",
-        "search:src/main.rs:1-7:5",
-        "search:src/main.rs:1-7:6",
-        "search:src/main.rs:1-7:7",
-        "search:src/routes.rs:2-6:0",
-        "search:src/routes.rs:2-6:1",
-        "search:src/routes.rs:2-6:2",
-        "search:src/routes.rs:2-6:3",
-        "search:src/routes.rs:2-6:4",
-        "search:src/routes.rs:2-6:5",
-        "search:src/routes.rs:2-6:6",
-        "search:src/routes.rs:2-6:7"
+        "search:src/main.rs:1-7:1"
       ],
       "history": [],
       "impact": [
@@ -469,23 +214,8 @@
       ],
       "primary_context": [
         "region:adjacent-unit:src/main.rs:1-4",
-        "region:adjacent-unit:src/routes.rs:4-6",
         "search:src/main.rs:1-7:0",
-        "search:src/main.rs:1-7:1",
-        "search:src/main.rs:1-7:2",
-        "search:src/main.rs:1-7:3",
-        "search:src/main.rs:1-7:4",
-        "search:src/main.rs:1-7:5",
-        "search:src/main.rs:1-7:6",
-        "search:src/main.rs:1-7:7",
-        "search:src/routes.rs:2-6:0",
-        "search:src/routes.rs:2-6:1",
-        "search:src/routes.rs:2-6:2",
-        "search:src/routes.rs:2-6:3",
-        "search:src/routes.rs:2-6:4",
-        "search:src/routes.rs:2-6:5",
-        "search:src/routes.rs:2-6:6",
-        "search:src/routes.rs:2-6:7"
+        "search:src/main.rs:1-7:1"
       ],
       "validation": []
     },
@@ -648,23 +378,11 @@
         "evidence": [
           "BM25 lexical match from local Tantivy index",
           "query variant `add OR subtract OR function OR next OR to OR add` matched local index",
-          "query variant `function` matched local index",
-          "expanded task query `function` matched indexed search",
-          "query variant `subtract OR function` matched local index",
-          "expanded task query `subtract function` matched indexed search",
-          "query variant `function OR next` matched local index",
-          "expanded task query `function next` matched indexed search",
           "region extended to adjacent chunk (lines 1-4)"
         ],
         "evidence_refs": [
           "search:src/main.rs:1-7:0",
           "search:src/main.rs:1-7:1",
-          "search:src/main.rs:1-7:2",
-          "search:src/main.rs:1-7:3",
-          "search:src/main.rs:1-7:4",
-          "search:src/main.rs:1-7:5",
-          "search:src/main.rs:1-7:6",
-          "search:src/main.rs:1-7:7",
           "region:adjacent-unit:src/main.rs:1-4"
         ],
         "line_range": {
@@ -702,12 +420,6 @@
           {
             "contribution": 0.0,
             "evidence_ids": [
-              "search:src/main.rs:1-4:1",
-              "search:src/main.rs:1-4:2",
-              "search:src/main.rs:1-4:4",
-              "search:src/main.rs:1-4:5",
-              "search:src/main.rs:1-4:6",
-              "search:src/main.rs:1-4:7",
               "search:src/main.rs:5-7:0",
               "search:src/main.rs:5-7:1"
             ],
@@ -721,13 +433,7 @@
             "contribution": 0.0,
             "evidence_ids": [
               "search:src/main.rs:5-7:0",
-              "search:src/main.rs:5-7:1",
-              "search:src/main.rs:1-4:1",
-              "search:src/main.rs:1-4:2",
-              "search:src/main.rs:1-4:4",
-              "search:src/main.rs:1-4:5",
-              "search:src/main.rs:1-4:6",
-              "search:src/main.rs:1-4:7"
+              "search:src/main.rs:5-7:1"
             ],
             "normalized_value": 0.0,
             "rationale": "adjusted component total to match surfaced score: tantivy hybrid lexical match",
@@ -754,160 +460,23 @@
           "signature": "fn(a: i32, b: i32) i32",
           "visibility": "public"
         }
-      },
-      {
-        "confidence": 0.0,
-        "evidence": [
-          "BM25 lexical match from local Tantivy index",
-          "query variant `add OR subtract OR function OR next OR to OR add` matched local index",
-          "query variant `function` matched local index",
-          "expanded task query `function` matched indexed search",
-          "query variant `subtract OR function` matched local index",
-          "expanded task query `subtract function` matched indexed search",
-          "query variant `function OR next` matched local index",
-          "expanded task query `function next` matched indexed search",
-          "region extended to adjacent chunk (lines 4-6)"
-        ],
-        "evidence_refs": [
-          "search:src/routes.rs:2-6:0",
-          "search:src/routes.rs:2-6:1",
-          "search:src/routes.rs:2-6:2",
-          "search:src/routes.rs:2-6:3",
-          "search:src/routes.rs:2-6:4",
-          "search:src/routes.rs:2-6:5",
-          "search:src/routes.rs:2-6:6",
-          "search:src/routes.rs:2-6:7",
-          "region:adjacent-unit:src/routes.rs:4-6"
-        ],
-        "line_range": {
-          "end": 6,
-          "start": 2
-        },
-        "match_reason": "tantivy hybrid lexical match",
-        "path": "src/routes.rs",
-        "score": 0.0,
-        "score_breakdown": [
-          {
-            "contribution": 0.0,
-            "evidence_ids": [
-              "search:src/routes.rs:2-3:0",
-              "search:src/routes.rs:2-3:1"
-            ],
-            "normalized_value": 0.0,
-            "rationale": "BM25 score from local Tantivy index",
-            "raw_value": 0.0,
-            "signal": "bm25_relevance",
-            "weight": 0.0
-          },
-          {
-            "contribution": 0.0,
-            "evidence_ids": [
-              "search:src/routes.rs:2-3:0",
-              "search:src/routes.rs:2-3:1"
-            ],
-            "normalized_value": 0.0,
-            "rationale": "query variant, path, symbol, or graph-node boost applied to lexical result",
-            "raw_value": 0.0,
-            "signal": "query_variant_boost",
-            "weight": 0.0
-          },
-          {
-            "contribution": 0.0,
-            "evidence_ids": [
-              "search:src/routes.rs:2-3:0",
-              "search:src/routes.rs:2-3:1",
-              "search:src/routes.rs:2-3:2",
-              "search:src/routes.rs:2-3:3",
-              "search:src/routes.rs:2-3:4",
-              "search:src/routes.rs:2-3:5",
-              "search:src/routes.rs:2-3:6",
-              "search:src/routes.rs:2-3:7"
-            ],
-            "normalized_value": 0.0,
-            "rationale": "source rank 2 with Heuristic authority: fusion_profile=rrf_measured_v1; production lexical index ranked this file",
-            "raw_value": 0.0,
-            "signal": "retrieval_rrf:lexical",
-            "weight": 0.0
-          },
-          {
-            "contribution": 0.0,
-            "evidence_ids": [
-              "search:src/routes.rs:2-3:0",
-              "search:src/routes.rs:2-3:1",
-              "search:src/routes.rs:2-3:2",
-              "search:src/routes.rs:2-3:3",
-              "search:src/routes.rs:2-3:4",
-              "search:src/routes.rs:2-3:5",
-              "search:src/routes.rs:2-3:6",
-              "search:src/routes.rs:2-3:7"
-            ],
-            "normalized_value": 0.0,
-            "rationale": "adjusted component total to match surfaced score: tantivy hybrid lexical match",
-            "raw_value": 0.0,
-            "signal": "score_reconciliation",
-            "weight": 0.0
-          }
-        ],
-        "snippet": "pub async fn orders_route() {}\n\npub async fn call_orders_route() {\n    let _ = reqwest::get(\"https://example.com/v1/orders\").await;\n}",
-        "symbol": {
-          "confidence": "high",
-          "file_id": "<ID>",
-          "id": "a100f28a2ccf7c7c5f67a4d17ab54e3467bef98693563618d033a55422a9a021",
-          "kind": "function",
-          "language": "rust",
-          "name": "orders_route",
-          "provenance": "tree_sitter",
-          "qualified_name": "src::routes::orders_route",
-          "range": {
-            "end": 2,
-            "start": 2
-          },
-          "scope_id": "src/routes.rs:scope:file:0",
-          "signature": "fn()",
-          "visibility": "public"
-        }
       }
     ],
     "recommended_change_boundary": {
       "allowed_files": [
-        "src/main.rs",
-        "src/routes.rs"
+        "src/main.rs"
       ],
       "allowed_rules": [
         {
           "evidence_refs": [
             "region:adjacent-unit:src/main.rs:1-4",
             "search:src/main.rs:1-7:0",
-            "search:src/main.rs:1-7:1",
-            "search:src/main.rs:1-7:2",
-            "search:src/main.rs:1-7:3",
-            "search:src/main.rs:1-7:4",
-            "search:src/main.rs:1-7:5",
-            "search:src/main.rs:1-7:6",
-            "search:src/main.rs:1-7:7"
+            "search:src/main.rs:1-7:1"
           ],
           "path": "src/main.rs",
           "reason": "primary context matched the requested edit intent",
           "symbols": [
             "src::main::add"
-          ]
-        },
-        {
-          "evidence_refs": [
-            "region:adjacent-unit:src/routes.rs:4-6",
-            "search:src/routes.rs:2-6:0",
-            "search:src/routes.rs:2-6:1",
-            "search:src/routes.rs:2-6:2",
-            "search:src/routes.rs:2-6:3",
-            "search:src/routes.rs:2-6:4",
-            "search:src/routes.rs:2-6:5",
-            "search:src/routes.rs:2-6:6",
-            "search:src/routes.rs:2-6:7"
-          ],
-          "path": "src/routes.rs",
-          "reason": "primary context matched the requested edit intent",
-          "symbols": [
-            "src::routes::orders_route"
           ]
         }
       ],
@@ -916,46 +485,16 @@
       "caution_rules": [],
       "evidence_refs": [
         "region:adjacent-unit:src/main.rs:1-4",
-        "region:adjacent-unit:src/routes.rs:4-6",
         "search:src/main.rs:1-7:0",
-        "search:src/main.rs:1-7:1",
-        "search:src/main.rs:1-7:2",
-        "search:src/main.rs:1-7:3",
-        "search:src/main.rs:1-7:4",
-        "search:src/main.rs:1-7:5",
-        "search:src/main.rs:1-7:6",
-        "search:src/main.rs:1-7:7",
-        "search:src/routes.rs:2-6:0",
-        "search:src/routes.rs:2-6:1",
-        "search:src/routes.rs:2-6:2",
-        "search:src/routes.rs:2-6:3",
-        "search:src/routes.rs:2-6:4",
-        "search:src/routes.rs:2-6:5",
-        "search:src/routes.rs:2-6:6",
-        "search:src/routes.rs:2-6:7"
+        "search:src/main.rs:1-7:1"
       ],
       "expansion_requirements": [
         {
           "reason": "Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or history analysis.",
           "required_evidence_refs": [
             "region:adjacent-unit:src/main.rs:1-4",
-            "region:adjacent-unit:src/routes.rs:4-6",
             "search:src/main.rs:1-7:0",
-            "search:src/main.rs:1-7:1",
-            "search:src/main.rs:1-7:2",
-            "search:src/main.rs:1-7:3",
-            "search:src/main.rs:1-7:4",
-            "search:src/main.rs:1-7:5",
-            "search:src/main.rs:1-7:6",
-            "search:src/main.rs:1-7:7",
-            "search:src/routes.rs:2-6:0",
-            "search:src/routes.rs:2-6:1",
-            "search:src/routes.rs:2-6:2",
-            "search:src/routes.rs:2-6:3",
-            "search:src/routes.rs:2-6:4",
-            "search:src/routes.rs:2-6:5",
-            "search:src/routes.rs:2-6:6",
-            "search:src/routes.rs:2-6:7"
+            "search:src/main.rs:1-7:1"
           ]
         }
       ],
@@ -1097,23 +636,6 @@
         "scope_id": "src/main.rs:scope:file:0",
         "signature": "fn(a: i32, b: i32) i32",
         "visibility": "public"
-      },
-      {
-        "confidence": "high",
-        "file_id": "<ID>",
-        "id": "a100f28a2ccf7c7c5f67a4d17ab54e3467bef98693563618d033a55422a9a021",
-        "kind": "function",
-        "language": "rust",
-        "name": "orders_route",
-        "provenance": "tree_sitter",
-        "qualified_name": "src::routes::orders_route",
-        "range": {
-          "end": 2,
-          "start": 2
-        },
-        "scope_id": "src/routes.rs:scope:file:0",
-        "signature": "fn()",
-        "visibility": "public"
       }
     ],
     "risk": {
@@ -1147,7 +669,7 @@
         "weight": 0.0
       }
     ],
-    "summary": "Found 2 primary context item(s), 0 direct impact candidate(s), 0 validation candidate(s), 0 history signal(s), 0 repo memory fact(s); risk is medium.",
+    "summary": "Found 1 primary context item(s), 0 direct impact candidate(s), 0 validation candidate(s), 0 history signal(s), 0 repo memory fact(s); risk is medium.",
     "task": "add a subtract function next to add",
     "tool_calls": [
       {
