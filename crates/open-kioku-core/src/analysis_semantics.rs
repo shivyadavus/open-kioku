@@ -33,7 +33,11 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// a manifest's `[[bin]]`, `[[test]]`, `[[example]]` or `[[bench]]` table names (or that
 /// `autobins = false` and its peers leave out) is followed; v8 indexes hold `CALLS` edges from a
 /// skipped `main.rs`'s modules into the library, and none through a `[[bin]] path` root's modules.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v9";
+/// v10: a `[lib] path` outside `src/` in a directory where another followed crate root keeps its
+/// modules is a crate root of that module tree too, so a module both declare belongs to both
+/// crates; v9 indexes hold `CALLS` edges from such a shared module into the other root's item, and
+/// none from a module only that library declares.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v10";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
