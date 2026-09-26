@@ -363,7 +363,13 @@ fn rust_module_member_names(
             .map(|root| format!("{root}::{callee}"))
             .collect()
     } else {
-        let module = format!("{}::{}", placement.crate_dir, module.join("::"));
+        // `crate_dir` is empty for a module tree at the repository root.
+        let module = [placement.crate_dir.as_str()]
+            .into_iter()
+            .filter(|dir| !dir.is_empty())
+            .chain(module.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("::");
         vec![
             format!("{module}::{callee}"),
             format!("{module}::mod::{callee}"),
@@ -843,6 +849,22 @@ mod tests {
             crate_roots: roots.iter().map(|root| root.to_string()).collect(),
             module: module.map(|module| module.iter().map(|name| name.to_string()).collect()),
         }
+    }
+
+    #[test]
+    fn rust_module_symbol_names_of_a_tree_at_the_repository_root_have_no_leading_separator() {
+        // A package at the repository root with `[lib] path = "lib.rs"` beside
+        // `[[bin]] path = "main.rs"` keeps its modules in `""`: `tools/mod.rs` is `tools::mod`.
+        let root = placement("", &["lib"], Some(&[]));
+        assert_eq!(
+            rust_crate_path_member_names(&root, "crate::tools", "t").unwrap(),
+            vec!["tools::mod::t".to_string(), "tools::t".to_string()]
+        );
+        let inner = placement("", &["lib"], Some(&["tools", "inner"]));
+        assert_eq!(
+            rust_outside_member_names(&inner, 1, &[], "t").unwrap(),
+            vec!["tools::mod::t".to_string(), "tools::t".to_string()]
+        );
     }
 
     #[test]

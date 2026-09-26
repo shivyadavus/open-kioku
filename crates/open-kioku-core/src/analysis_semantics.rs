@@ -35,8 +35,10 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// skipped `main.rs`'s modules into the library, and none through a `[[bin]] path` root's modules.
 /// v10: a `[lib] path` outside `src/` in a directory where another followed crate root keeps its
 /// modules is a crate root of that module tree too, so a module both declare belongs to both
-/// crates; v9 indexes hold `CALLS` edges from such a shared module into the other root's item, and
-/// none from a module only that library declares.
+/// crates; and a module path in a package at the repository root reaches the modules below its
+/// crate roots; v9 indexes hold `CALLS` edges from such a shared module into the other root's item,
+/// none from a module only that library declares, and none through a nested module of a module
+/// tree at the repository root.
 pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v10";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax

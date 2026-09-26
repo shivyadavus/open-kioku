@@ -398,14 +398,14 @@ impl RustUsePath {
         if module.is_empty() {
             self.tree.roots.clone()
         } else {
-            let dir = format!(
-                "{}/{}",
-                self.tree.module_dir,
-                module
+            // `module_dir` is `""` for a tree at the repository root.
+            let dir = join_dir(
+                &self.tree.module_dir,
+                &module
                     .iter()
                     .map(|segment| module_name(segment))
                     .collect::<Vec<_>>()
-                    .join("/")
+                    .join("/"),
             );
             vec![format!("{dir}/mod"), dir]
         }
@@ -506,7 +506,7 @@ fn strip_dir<'p>(path: &'p str, dir: &str) -> Option<&'p str> {
     path.strip_prefix(dir)?.strip_prefix('/')
 }
 
-fn join_dir(dir: &str, name: &str) -> String {
+pub(crate) fn join_dir(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
     } else {
