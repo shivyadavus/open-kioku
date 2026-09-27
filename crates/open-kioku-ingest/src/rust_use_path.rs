@@ -12,7 +12,7 @@
 
 use open_kioku_semantic_model::{CargoTargetKind, CargoTargets, ProjectRoot};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::Path;
 
 /// Where a Rust package keeps the module trees of its crates.
@@ -588,7 +588,7 @@ pub(crate) fn map_rust_crate_name_path(
 }
 
 /// The largest crate root [`read_module_declarations`] reads; a larger one is left unread.
-const MAX_SCANNED_ROOT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SCANNED_ROOT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// [`scan_module_declarations`] of the file at `path`. `None` when it is not a regular file,
 /// cannot be read, or is over [`MAX_SCANNED_ROOT_BYTES`].
@@ -601,28 +601,33 @@ pub(crate) fn read_module_declarations(path: &Path) -> Option<HashSet<String>> {
     if file.metadata().ok()?.len() > MAX_SCANNED_ROOT_BYTES {
         return None;
     }
-    scan_module_declarations(BufReader::new(file.take(MAX_SCANNED_ROOT_BYTES)))
+    let mut bytes = Vec::new();
+    file.take(MAX_SCANNED_ROOT_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    scan_module_declarations(&String::from_utf8_lossy(&bytes))
 }
 
-/// The module names a Rust crate root declares, read line by line without parsing the file:
-/// `mod name;` and `mod name {`, whatever visibility precedes them. Such a line inside an inline
-/// module, a macro body or a block comment is read too, which only adds names. `None` when the
-/// lines cannot tell: a `mod` whose name is not on its line or is a macro variable
-/// (`mod $name;`), a `path` attribute that may sit on a `mod` item, which mounts a module file
-/// the name does not spell, or an `include!` that may bring in declarations of its own. A module
-/// a macro declares without writing `mod` in this file is not seen.
-pub(crate) fn scan_module_declarations(reader: impl BufRead) -> Option<HashSet<String>> {
+/// The module names a Rust crate root declares, read from its text without parsing it: `mod
+/// name;` and `mod name {`, whatever visibility precedes them, once comments and the contents of
+/// string and character literals are removed. Such an item inside an inline module or a macro
+/// body is read too, which only adds names. A name missed would let a file the root compiles be
+/// read as another crate's alone, so the scan gives `None` wherever the text could hide one: a
+/// `mod` followed by anything but a name and then `;` or `{` on its line (`mod $name;`, the name
+/// or the `;` on the next line), a `path` attribute that may sit on a `mod` item, which mounts a
+/// module file the name does not spell, an `include!` that may bring in declarations of its own,
+/// or a literal or block comment left open. A module a macro declares without writing `mod` in
+/// this file is not seen.
+pub(crate) fn scan_module_declarations(source: &str) -> Option<HashSet<String>> {
+    let code = strip_comments_and_literals(source)?;
+    if code.contains("include!") {
+        return None;
+    }
     let mut names = HashSet::new();
     // The text since the last line that ended an item or opened a block, where the attributes of
     // the next item are written.
     let mut attributes = String::new();
-    for line in reader.split(b'\n') {
-        let line = line.ok()?;
-        let line = String::from_utf8_lossy(&line);
-        let code = line.split("//").next().unwrap_or_default();
-        if code.contains("include!") {
-            return None;
-        }
+    for code in code.lines() {
         let mut from = 0;
         while let Some(found) = code[from..].find("mod") {
             let at = from + found;
@@ -635,26 +640,20 @@ pub(crate) fn scan_module_declarations(reader: impl BufRead) -> Option<HashSet<S
                 // `pub mod` with its name on the next line.
                 None => return None,
                 Some(ch) if ch.is_whitespace() => {}
-                Some(_) => continue,
+                // `mod_x`, `modern`: another word.
+                Some(ch) if ch == '_' || ch.is_alphanumeric() => continue,
+                Some(_) => return None,
             }
             let rest = code[from..].trim_start();
-            if rest.is_empty() || rest.starts_with('$') {
-                return None;
-            }
             let ident = rest.strip_prefix("r#").unwrap_or(rest);
             let end = ident
                 .find(|ch: char| ch != '_' && !ch.is_alphanumeric())
                 .unwrap_or(ident.len());
             let (name, tail) = ident.split_at(end);
-            if name.is_empty() {
-                continue;
-            }
-            let tail = tail.trim();
-            if tail.is_empty() {
+            // `mod $name;`, a name on the next line, or anything else after the name: the
+            // declaration cannot be read, and may name a module.
+            if name.is_empty() || !tail.trim_start().starts_with([';', '{']) {
                 return None;
-            }
-            if !tail.starts_with([';', '{']) {
-                continue;
             }
             if has_path_attribute(&attributes) || has_path_attribute(&code[..at]) {
                 return None;
@@ -669,6 +668,110 @@ pub(crate) fn scan_module_declarations(reader: impl BufRead) -> Option<HashSet<S
         }
     }
     Some(names)
+}
+
+/// `source` with its comments removed and the contents of its string and character literals
+/// emptied (`"http://x"` is `""`), so a `//` or `mod` inside a literal is not read as code. A
+/// block comment becomes one space, however many lines it spans, so one between `mod name` and
+/// `;` is not in the way. `None` for a literal or block comment left open.
+fn strip_comments_and_literals(source: &str) -> Option<String> {
+    let chars = source.chars().collect::<Vec<_>>();
+    let is_ident = |ch: char| ch == '_' || ch.is_alphanumeric();
+    let mut code = String::with_capacity(source.len());
+    let mut at = 0;
+    while at < chars.len() {
+        let ch = chars[at];
+        let next = chars.get(at + 1).copied();
+        let prev = at.checked_sub(1).map(|index| chars[index]);
+        if ch == '/' && next == Some('/') {
+            let end = chars[at..]
+                .iter()
+                .position(|ch| *ch == '\n')
+                .map_or(chars.len(), |offset| at + offset);
+            at = end;
+        } else if ch == '/' && next == Some('*') {
+            let mut depth = 0usize;
+            let mut index = at;
+            loop {
+                match (chars.get(index), chars.get(index + 1)) {
+                    (Some('/'), Some('*')) => {
+                        depth += 1;
+                        index += 2;
+                    }
+                    (Some('*'), Some('/')) => {
+                        depth -= 1;
+                        index += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    (Some(_), _) => index += 1,
+                    (None, _) => return None,
+                }
+            }
+            code.push(' ');
+            at = index;
+        } else if ch == 'r'
+            && !prev.is_some_and(|prev| {
+                is_ident(prev) && !(prev == 'b' && !(at >= 2 && is_ident(chars[at - 2])))
+            })
+            && matches!(next, Some('"' | '#'))
+        {
+            // A raw string `r"..."` or `r#"..."#` (`br` too); `r#name` is a raw identifier.
+            let hashes = chars[at + 1..].iter().take_while(|ch| **ch == '#').count();
+            if chars.get(at + 1 + hashes) != Some(&'"') {
+                code.push(ch);
+                at += 1;
+                continue;
+            }
+            let body = at + 2 + hashes;
+            let close = (body..chars.len()).find(|index| {
+                chars[*index] == '"'
+                    && chars[index + 1..]
+                        .iter()
+                        .take(hashes)
+                        .filter(|ch| **ch == '#')
+                        .count()
+                        == hashes
+            })?;
+            code.push_str("\"\"");
+            at = close + 1 + hashes;
+        } else if ch == '"' {
+            let mut index = at + 1;
+            loop {
+                match chars.get(index) {
+                    Some('\\') => index += 2,
+                    Some('"') => break,
+                    Some(_) => index += 1,
+                    None => return None,
+                }
+            }
+            code.push_str("\"\"");
+            at = index + 1;
+        } else if ch == '\'' {
+            // A character literal (`'"'`, `'\''`), or else a lifetime or label (`'a`).
+            let end = match (next, chars.get(at + 2)) {
+                (Some('\\'), _) => (at + 2..chars.len().min(at + 12))
+                    .find(|index| chars[*index] == '\'' && *index > at + 2),
+                (Some(_), Some('\'')) => Some(at + 2),
+                _ => None,
+            };
+            match end {
+                Some(end) => {
+                    code.push_str("' '");
+                    at = end + 1;
+                }
+                None => {
+                    code.push(ch);
+                    at += 1;
+                }
+            }
+        } else {
+            code.push(ch);
+            at += 1;
+        }
+    }
+    Some(code)
 }
 
 /// Whether `text` holds the word `path` followed by `=`, as a `path` attribute does, directly or
@@ -1119,7 +1222,7 @@ mod tests {
     }
 
     fn scanned(source: &str) -> Option<Vec<String>> {
-        scan_module_declarations(source.as_bytes()).map(|names| {
+        scan_module_declarations(source).map(|names| {
             let mut names = names.into_iter().collect::<Vec<_>>();
             names.sort();
             names
@@ -1145,6 +1248,21 @@ mod tests {
             scanned("fn main() {\n    let path = 1;\n}\nmod cli;\n"),
             Some(vec!["cli".to_string()])
         );
+        // A `//` inside a string and a comment before the `;` hide no declaration (#576).
+        let both = Some(vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            scanned("const U: &str = \"http://x\"; mod b;\nmod a;\n"),
+            both
+        );
+        assert_eq!(scanned("mod b /* note */;\nmod a;\n"), both);
+        assert_eq!(scanned("mod b /* a\n note */;\nmod a;\n"), both);
+        // Literals and comments declare nothing, and a quote in one opens no string.
+        assert_eq!(
+            scanned(
+                "let s = \"mod x;\"; // mod y;\n/* mod z;\n /* nested */ */\nlet r = r#\"mod q; \"quoted\" \"#;\nlet c = '\"'; let e = '\\''; fn f<'a>(x: &'a str) {}\nmod a;\n"
+            ),
+            Some(vec!["a".to_string()])
+        );
     }
 
     #[test]
@@ -1157,6 +1275,11 @@ mod tests {
             "mod cli\n{\n}\n",
             "macro_rules! m { ($name:ident) => { mod $name; } }\n",
             "include!(\"mods.rs\");\n",
+            // Whatever follows the name where `;` or `{` should be, a comment aside.
+            "mod b // note\n;\n",
+            "mod b = x;\n",
+            "mod b /* open\n",
+            "let s = \"open\nmod b;\n",
         ] {
             assert_eq!(scanned(source), None, "{source}");
         }
