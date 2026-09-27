@@ -87,6 +87,9 @@ pub struct SemanticStatus {
     pub model_artifact_sha256: Option<String>,
     pub dimensions: usize,
     pub distance: String,
+    /// Vectors the generation's vector index holds. A generation pruned of removed paths has
+    /// no vector index until `ok semantic index` rebuilds it, so it reports 0 here and 0
+    /// `indexed_count`; the embeddings it keeps for that rebuild are named in `notes`.
     pub vector_count: usize,
     pub indexed_count: usize,
     pub stale_count: usize,
@@ -278,11 +281,11 @@ impl<'a> SemanticIndexManager<'a> {
         let source_stale = manifest
             .as_ref()
             .is_some_and(|manifest| !self.source_generation_compatible(manifest));
-        let stale = pruned.is_some()
-            || manifest
-                .as_ref()
-                .map(|manifest| !self.compatible(manifest))
-                .unwrap_or(false);
+        let incompatible = manifest
+            .as_ref()
+            .map(|manifest| !self.compatible(manifest))
+            .unwrap_or(false);
+        let stale = pruned.is_some() || incompatible;
         let mut rebuild_reasons = Vec::new();
         if corrupt {
             rebuild_reasons.push("semantic index is corrupt or incomplete".to_string());
@@ -294,13 +297,20 @@ impl<'a> SemanticIndexManager<'a> {
             );
             notes.push(reason.clone());
             rebuild_reasons.push(reason);
+            // `vector_count` reads 0 below: with no vector index nothing is searchable, and
+            // what is kept is embeddings for the rebuild to reuse.
+            if let Some(kept) = marker.kept_embeddings {
+                notes.push(format!(
+                    "no vector index until rebuilt; {kept} cached embedding(s) are kept for `ok semantic index` to reuse"
+                ));
+            }
         }
         if source_stale {
             rebuild_reasons.push(
                 "authoritative index generation changed since the last semantic rebuild"
                     .to_string(),
             );
-        } else if stale {
+        } else if incompatible {
             rebuild_reasons
                 .push("semantic configuration changed since the last semantic rebuild".to_string());
         }
@@ -309,7 +319,7 @@ impl<'a> SemanticIndexManager<'a> {
                 "semantic index is stale for the current authoritative index generation; rebuild semantic index"
                     .into(),
             );
-        } else if stale {
+        } else if incompatible {
             notes.push("semantic index manifest is stale for the current semantic config".into());
         }
         if corrupt {
@@ -321,6 +331,12 @@ impl<'a> SemanticIndexManager<'a> {
             .map(|value| value.backend.clone())
             .unwrap_or_else(|| self.config.backend.clone());
         let ann_active = backend_is_ann(&resolved_backend) && ready;
+        // A pruned generation has no vector index, whatever an earlier prune wrote to stats.
+        let (vector_count, indexed_count) = if pruned.is_some() {
+            (0, 0)
+        } else {
+            (stats.vector_count, stats.indexed_count)
+        };
         SemanticStatus {
             state: if corrupt {
                 "corrupt"
@@ -347,16 +363,15 @@ impl<'a> SemanticIndexManager<'a> {
                 .and_then(|value| value.model_artifact_sha256.clone()),
             dimensions: self.config.dimensions,
             distance: self.config.distance.clone(),
-            vector_count: stats.vector_count,
-            indexed_count: stats.indexed_count,
+            vector_count,
+            indexed_count,
             stale_count: stats.stale_count,
             failed_count: stats.failed_count,
             disk_usage_bytes: dir_size(&current),
             current_dir: current,
             rebuild_required: !rebuild_reasons.is_empty(),
             last_rebuilt_at: manifest.as_ref().map(|value| value.created_at.clone()),
-            stale_ratio: (stats.vector_count > 0)
-                .then(|| stats.stale_count as f64 / stats.vector_count as f64),
+            stale_ratio: (vector_count > 0).then(|| stats.stale_count as f64 / vector_count as f64),
             rebuild_reasons,
             manifest,
             notes,
@@ -1314,6 +1329,17 @@ struct PrunedMarker {
     removed_targets: usize,
     removed_paths: usize,
     pruned_at: String,
+    /// Set once every file of the generation has been rewritten. A marker without it (written
+    /// first, or by a build before it was recorded) means a run may have stopped between
+    /// replacing `ids.json` and `embeddings.cache`, so the next prune reconciles the cache with
+    /// the ids even when `ids.json` holds nothing to remove (#585).
+    #[serde(default)]
+    complete: bool,
+    /// Embeddings the generation keeps for `ok semantic index` to reuse; it has no vector
+    /// index, so these are not searchable vectors. Absent on a marker written before this was
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kept_embeddings: Option<usize>,
 }
 
 /// Removes from the semantic vector store every target whose path is not among `indexed_files`,
@@ -1396,6 +1422,11 @@ impl std::fmt::Display for GenerationPruneFailure {
 
 /// Rewrites one generation without the targets outside `embedded_paths`, returning how many
 /// targets and paths it removed, or `None` when it held none.
+///
+/// A generation whose marker is incomplete is also reconciled when `ids.json` holds nothing to
+/// remove: an earlier run may have replaced `ids.json` and stopped before `embeddings.cache`,
+/// whose entries for the removed targets carry their vectors and ids. Only then is the cache
+/// read without a removal, so a generation that needs nothing costs one read of `ids.json`.
 fn prune_generation(
     generation: &Path,
     embedded_paths: &HashSet<PathBuf>,
@@ -1407,7 +1438,8 @@ fn prune_generation(
     let (kept, removed): (Vec<_>, Vec<_>) = targets
         .into_iter()
         .partition(|target| embedded_paths.contains(&target.path));
-    if removed.is_empty() {
+    let interrupted = pruned_marker(generation).filter(|marker| !marker.complete);
+    if removed.is_empty() && interrupted.is_none() {
         return Ok(None);
     }
     let removed_paths = removed
@@ -1436,37 +1468,52 @@ fn prune_generation(
         *counts.entry(target.kind.clone()).or_default() += 1;
     }
     let cached = cache.entries.len();
+    // The vector index is removed below, so stats count no searchable vector; the kept
+    // embeddings are recorded in the marker for status to report beside the rebuild reason.
+    // The manifest keeps a population for the compatibility check, which resolves the backend
+    // from it: 0 would read as a configuration change on an `auto` backend.
     manifest.vector_count = cached;
     manifest.target_counts = counts;
-    stats.vector_count = cached;
-    stats.indexed_count = cached;
-    stats.failed_count = kept.len().saturating_sub(cached);
+    stats.vector_count = 0;
+    stats.indexed_count = 0;
+    stats.stale_count = 0;
+    stats.failed_count = 0;
+    // Finishing an interrupted run keeps what that run removed as the reason for the rebuild.
+    let mut marker = match interrupted {
+        Some(marker) if removed.is_empty() => marker,
+        _ => PrunedMarker {
+            removed_targets: removed.len(),
+            removed_paths,
+            pruned_at: Utc::now().to_rfc3339(),
+            complete: false,
+            kept_embeddings: None,
+        },
+    };
+    marker.kept_embeddings = Some(cached);
 
     let mut rewrite = || -> Result<()> {
-        // First, so that from here on the generation reads as pruned and stale, never corrupt.
-        replace_json(
-            generation,
-            PRUNED_MARKER,
-            &PrunedMarker {
-                removed_targets: removed.len(),
-                removed_paths,
-                pruned_at: Utc::now().to_rfc3339(),
-            },
-        )?;
+        // First, so that from here on the generation reads as pruned and stale, never corrupt,
+        // and an interruption leaves an incomplete marker for the next run to finish.
+        marker.complete = false;
+        replace_json(generation, PRUNED_MARKER, &marker)?;
         for artifact in ["index.json", "index.usearch", "index.meta.json"] {
             match fs::remove_file(generation.join(artifact)) {
                 Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
                 _ => {}
             }
         }
-        replace_json(generation, "ids.json", &kept)?;
+        if !removed.is_empty() {
+            replace_json(generation, "ids.json", &kept)?;
+        }
         replace_json(generation, "embeddings.cache", &cache)?;
         replace_json(generation, "manifest.json", &manifest)?;
         stats.disk_usage_bytes = dir_size(generation);
-        replace_json(generation, "stats.json", &stats)
+        replace_json(generation, "stats.json", &stats)?;
+        marker.complete = true;
+        replace_json(generation, PRUNED_MARKER, &marker)
     };
     rewrite().map_err(GenerationPruneFailure::Rewrite)?;
-    Ok(Some((removed.len(), removed_paths)))
+    Ok((!removed.is_empty()).then_some((removed.len(), removed_paths)))
 }
 
 /// Writes `value` beside `name` and renames it over it, so the file is either the old or the

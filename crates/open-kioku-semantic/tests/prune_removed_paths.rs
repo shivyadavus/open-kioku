@@ -188,6 +188,19 @@ fn prune_after_removal(backend: &str, remaining: Option<File>) {
             .any(|reason| reason.contains("1 target(s) for 1 path(s) the index no longer holds")),
         "{status:?}"
     );
+    // It has no vector index to count; the kept embedding is named, for the rebuild.
+    assert_eq!(
+        (status.vector_count, status.indexed_count),
+        (0, 0),
+        "{status:?}"
+    );
+    assert!(
+        status
+            .notes
+            .iter()
+            .any(|note| note.contains("1 cached embedding(s) are kept")),
+        "{status:?}"
+    );
     assert!(manager.search("payroll formula", 5).is_err());
     // A second pass finds nothing left to remove.
     assert!(
@@ -299,6 +312,58 @@ fn an_interrupted_prune_is_finished_by_the_next_run() {
         vector_files_holding(repo, "zebra_payroll_marker"),
         Vec::<PathBuf>::new()
     );
+}
+
+fn cache_entries(generation: &Path) -> usize {
+    let cache: serde_json::Value =
+        serde_json::from_slice(&fs::read(generation.join("embeddings.cache")).unwrap()).unwrap();
+    cache["entries"].as_object().unwrap().len()
+}
+
+/// A run stopped after replacing `ids.json` and before `embeddings.cache` leaves the removed
+/// targets' cache entries (their ids, hashes and vectors) behind, and `ids.json` then holds
+/// nothing to remove. The marker written first is incomplete until every file is rewritten, so
+/// the next run still finishes the cache (#585).
+#[test]
+fn a_prune_stopped_between_ids_and_cache_is_finished_by_the_next_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+    let config = semantic_config("exact-flat");
+    built_store_then_removal(repo, &store, &config);
+    let current = repo.join(".ok/vectors/current");
+    let unpruned_cache = fs::read(current.join("embeddings.cache")).unwrap();
+    assert_eq!(cache_entries(&current), 2);
+    let files = store.list_files(usize::MAX, 0).unwrap();
+    prune_vector_store(repo, &files).unwrap();
+    assert_eq!(cache_entries(&current), 1);
+    // As a kill after `ids.json` was replaced, before the cache and the completed marker were.
+    fs::write(current.join("embeddings.cache"), &unpruned_cache).unwrap();
+    let marker_path = current.join("pruned.json");
+    let mut marker: serde_json::Value =
+        serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+    marker["complete"] = serde_json::Value::Bool(false);
+    fs::write(&marker_path, marker.to_string()).unwrap();
+
+    let pruned = prune_vector_store(repo, &files).unwrap();
+
+    assert_eq!(pruned.removed_targets, 0, "{pruned:?}");
+    assert_eq!(cache_entries(&current), 1);
+    let marker: serde_json::Value =
+        serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+    assert_eq!(marker["complete"], true, "{marker}");
+    // The rebuild reason still names what the interrupted run removed.
+    let status = SemanticIndexManager::new(repo, &store, &config).status();
+    assert!(
+        status
+            .rebuild_reasons
+            .iter()
+            .any(|reason| reason.contains("1 target(s) for 1 path(s)")),
+        "{status:?}"
+    );
+    // A completed prune is not reconciled again: the cache is left unread.
+    fs::write(current.join("embeddings.cache"), "not json").unwrap();
+    assert!(prune_vector_store(repo, &files).unwrap().is_empty());
 }
 
 /// `previous` is what an interrupted promotion leaves: with `current` gone it is recovered
