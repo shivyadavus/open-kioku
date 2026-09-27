@@ -1371,6 +1371,57 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // `main.rs` is skipped (`.okignore`) and may declare `mod a;` too, but `a/inner.rs` is
+        // the same file in every crate that declares `a`, so `self::inner::target_fn()` in `a.rs`
+        // names one function (#576).
+        "skipped_binary_root_self_path_below_shared_module" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (".okignore", "src/main.rs\n"),
+                ("src/lib.rs", "mod a;\n\npub fn helper() {}\n"),
+                ("src/main.rs", "mod a;\n\nfn main() {}\n"),
+                (
+                    "src/a.rs",
+                    "mod inner;\n\npub fn caller_fn() {\n    self::inner::target_fn();\n}\n",
+                ),
+                ("src/a/inner.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // The same layout, from `mod tests` in `a.rs`: `super` leaves the block for `a`, and the
+        // path ends below it (#576).
+        "skipped_binary_root_super_path_below_shared_module" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (".okignore", "src/main.rs\n"),
+                ("src/lib.rs", "mod a;\n\npub fn helper() {}\n"),
+                ("src/main.rs", "mod a;\n\nfn main() {}\n"),
+                (
+                    "src/a.rs",
+                    "mod inner;\n\n#[cfg(test)]\nmod tests {\n    fn caller_fn() {\n        super::inner::target_fn();\n    }\n}\n",
+                ),
+                ("src/a/inner.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // An integration test mounts the library's `sub/mod.rs` with `#[path]`, so rustc compiles
+        // the `sub/child.rs` it declares into the test crate too (#576).
+        "path_mounted_mod_rs_child_shared_with_test_crate" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sub;\n\npub fn target_fn() {}\n"),
+                ("src/sub/mod.rs", "mod child;\n"),
+                (
+                    "src/sub/child.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
+                (
+                    "tests/it.rs",
+                    "#[path = \"../src/sub/mod.rs\"]\nmod sub;\n\nfn target_fn() {}\n\n#[test]\nfn t() {}\n",
+                ),
+            ],
+            false,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![

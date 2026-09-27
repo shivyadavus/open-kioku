@@ -166,6 +166,12 @@ pub struct RustModulePlacement {
     /// A `crate::`, `self::` or `super::` path written in it names an item of each crate, so none
     /// is read from it; a path from one of `crate_roots` still ends in it.
     pub in_other_crates: bool,
+    /// Every crate that may compile the file mounts it at the place `module` spells, so the
+    /// module files below it are the same files in each crate: a `self::` or `super::` path that
+    /// ends below the file's own module names the same item wherever the file is compiled, and is
+    /// read even when `in_other_crates` is set. Not so for a file another crate mounts with
+    /// `#[path]` (other than a `mod.rs`), whose `mod` items that crate reads from its directory.
+    pub own_subtree_in_every_crate: bool,
 }
 
 /// What the `mod` item a module symbol names turned out to be.

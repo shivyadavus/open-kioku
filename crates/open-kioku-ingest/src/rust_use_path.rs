@@ -11,7 +11,8 @@
 //! a mapped path is only a candidate until the caller checks the `mod` declarations.
 
 use open_kioku_semantic_model::{CargoTargetKind, CargoTargets, ProjectRoot};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::Path;
 
 /// Where a Rust package keeps the module trees of its crates.
@@ -398,6 +399,9 @@ pub(crate) struct RustUsePath {
     /// The path is `self::`/`super::`, so it is only as sound as `importer_module`, which a
     /// `#[path]` declaration or a missing `mod` declaration makes wrong.
     pub(crate) relative: bool,
+    /// The path is `self::` with no `super`, so it names the importer's own module or one below
+    /// it, which is the same file in every crate that compiles the importer at the same place.
+    pub(crate) within_importer: bool,
     /// Extension-less path of the crate root the importer is, when it is that root file itself.
     pub(crate) importer_root: Option<String>,
 }
@@ -453,12 +457,14 @@ pub(crate) fn map_rust_use_path(
         _ => return None,
     };
     let mut rest = parts.peekable();
+    let mut climbs = first == "super";
     while rest.peek() == Some(&"super") {
         if first == "crate" {
             return None;
         }
         rest.next();
         segments.pop()?;
+        climbs = true;
     }
     let rest = rest.collect::<Vec<_>>();
     let last = rest.len().checked_sub(1)?;
@@ -471,6 +477,7 @@ pub(crate) fn map_rust_use_path(
     Some(RustUsePath {
         segments: segments.into_iter().map(str::to_string).collect(),
         relative: first != "crate",
+        within_importer: first == "self" && !climbs,
         ..file
     })
 }
@@ -496,6 +503,7 @@ pub(crate) fn map_rust_module_file(tree: &RustCrateTree, file: &Path) -> Option<
         segments: Vec::new(),
         importer_module: module.into_iter().map(str::to_string).collect(),
         relative: false,
+        within_importer: false,
         importer_root,
     })
 }
@@ -573,8 +581,207 @@ pub(crate) fn map_rust_crate_name_path(
         segments: rest.into_iter().map(str::to_string).collect(),
         importer_module: Vec::new(),
         relative: false,
+        within_importer: false,
         // A crate name names the library crate, whichever file writes the path.
         importer_root: Some(library),
+    })
+}
+
+/// The largest crate root [`read_module_declarations`] reads; a larger one is left unread.
+const MAX_SCANNED_ROOT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// [`scan_module_declarations`] of the file at `path`. `None` when it is not a regular file,
+/// cannot be read, or is over [`MAX_SCANNED_ROOT_BYTES`].
+pub(crate) fn read_module_declarations(path: &Path) -> Option<HashSet<String>> {
+    // Discovery follows no symlink, and neither does this.
+    if !std::fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_SCANNED_ROOT_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SCANNED_ROOT_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    scan_module_declarations(&String::from_utf8_lossy(&bytes))
+}
+
+/// The module names a Rust crate root declares, read from its text without parsing it: `mod
+/// name;` and `mod name {`, whatever visibility precedes them, once comments and the contents of
+/// string and character literals are removed. Such an item inside an inline module or a macro
+/// body is read too, which only adds names. A name missed would let a file the root compiles be
+/// read as another crate's alone, so the scan gives `None` wherever the text could hide one: a
+/// `mod` followed by anything but a name and then `;` or `{` on its line (`mod $name;`, the name
+/// or the `;` on the next line), a `path` attribute that may sit on a `mod` item, which mounts a
+/// module file the name does not spell, an `include!` that may bring in declarations of its own,
+/// or a literal or block comment left open. A module a macro declares without writing `mod` in
+/// this file is not seen.
+pub(crate) fn scan_module_declarations(source: &str) -> Option<HashSet<String>> {
+    let code = strip_comments_and_literals(source)?;
+    if code.contains("include!") {
+        return None;
+    }
+    let mut names = HashSet::new();
+    // The text since the last line that ended an item or opened a block, where the attributes of
+    // the next item are written.
+    let mut attributes = String::new();
+    for code in code.lines() {
+        let mut from = 0;
+        while let Some(found) = code[from..].find("mod") {
+            let at = from + found;
+            from = at + "mod".len();
+            let before = code[..at].chars().next_back();
+            if before.is_some_and(|ch| ch == '_' || ch == '#' || ch.is_alphanumeric()) {
+                continue;
+            }
+            match code[from..].chars().next() {
+                // `pub mod` with its name on the next line.
+                None => return None,
+                Some(ch) if ch.is_whitespace() => {}
+                // `mod_x`, `modern`: another word.
+                Some(ch) if ch == '_' || ch.is_alphanumeric() => continue,
+                Some(_) => return None,
+            }
+            let rest = code[from..].trim_start();
+            let ident = rest.strip_prefix("r#").unwrap_or(rest);
+            let end = ident
+                .find(|ch: char| ch != '_' && !ch.is_alphanumeric())
+                .unwrap_or(ident.len());
+            let (name, tail) = ident.split_at(end);
+            // `mod $name;`, a name on the next line, or anything else after the name: the
+            // declaration cannot be read, and may name a module.
+            if name.is_empty() || !tail.trim_start().starts_with([';', '{']) {
+                return None;
+            }
+            if has_path_attribute(&attributes) || has_path_attribute(&code[..at]) {
+                return None;
+            }
+            names.insert(name.to_string());
+        }
+        if code.trim_end().ends_with([';', '{', '}']) {
+            attributes.clear();
+        } else {
+            attributes.push_str(code);
+            attributes.push('\n');
+        }
+    }
+    Some(names)
+}
+
+/// `source` with its comments removed and the contents of its string and character literals
+/// emptied (`"http://x"` is `""`), so a `//` or `mod` inside a literal is not read as code. A
+/// block comment becomes one space, however many lines it spans, so one between `mod name` and
+/// `;` is not in the way. `None` for a literal or block comment left open.
+fn strip_comments_and_literals(source: &str) -> Option<String> {
+    let chars = source.chars().collect::<Vec<_>>();
+    let is_ident = |ch: char| ch == '_' || ch.is_alphanumeric();
+    let mut code = String::with_capacity(source.len());
+    let mut at = 0;
+    while at < chars.len() {
+        let ch = chars[at];
+        let next = chars.get(at + 1).copied();
+        let prev = at.checked_sub(1).map(|index| chars[index]);
+        if ch == '/' && next == Some('/') {
+            let end = chars[at..]
+                .iter()
+                .position(|ch| *ch == '\n')
+                .map_or(chars.len(), |offset| at + offset);
+            at = end;
+        } else if ch == '/' && next == Some('*') {
+            let mut depth = 0usize;
+            let mut index = at;
+            loop {
+                match (chars.get(index), chars.get(index + 1)) {
+                    (Some('/'), Some('*')) => {
+                        depth += 1;
+                        index += 2;
+                    }
+                    (Some('*'), Some('/')) => {
+                        depth -= 1;
+                        index += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    (Some(_), _) => index += 1,
+                    (None, _) => return None,
+                }
+            }
+            code.push(' ');
+            at = index;
+        } else if ch == 'r'
+            && !prev.is_some_and(|prev| {
+                is_ident(prev) && !(prev == 'b' && !(at >= 2 && is_ident(chars[at - 2])))
+            })
+            && matches!(next, Some('"' | '#'))
+        {
+            // A raw string `r"..."` or `r#"..."#` (`br` too); `r#name` is a raw identifier.
+            let hashes = chars[at + 1..].iter().take_while(|ch| **ch == '#').count();
+            if chars.get(at + 1 + hashes) != Some(&'"') {
+                code.push(ch);
+                at += 1;
+                continue;
+            }
+            let body = at + 2 + hashes;
+            let close = (body..chars.len()).find(|index| {
+                chars[*index] == '"'
+                    && chars[index + 1..]
+                        .iter()
+                        .take(hashes)
+                        .filter(|ch| **ch == '#')
+                        .count()
+                        == hashes
+            })?;
+            code.push_str("\"\"");
+            at = close + 1 + hashes;
+        } else if ch == '"' {
+            let mut index = at + 1;
+            loop {
+                match chars.get(index) {
+                    Some('\\') => index += 2,
+                    Some('"') => break,
+                    Some(_) => index += 1,
+                    None => return None,
+                }
+            }
+            code.push_str("\"\"");
+            at = index + 1;
+        } else if ch == '\'' {
+            // A character literal (`'"'`, `'\''`), or else a lifetime or label (`'a`).
+            let end = match (next, chars.get(at + 2)) {
+                (Some('\\'), _) => (at + 2..chars.len().min(at + 12))
+                    .find(|index| chars[*index] == '\'' && *index > at + 2),
+                (Some(_), Some('\'')) => Some(at + 2),
+                _ => None,
+            };
+            match end {
+                Some(end) => {
+                    code.push_str("' '");
+                    at = end + 1;
+                }
+                None => {
+                    code.push(ch);
+                    at += 1;
+                }
+            }
+        } else {
+            code.push(ch);
+            at += 1;
+        }
+    }
+    Some(code)
+}
+
+/// Whether `text` holds the word `path` followed by `=`, as a `path` attribute does, directly or
+/// through `cfg_attr`.
+fn has_path_attribute(text: &str) -> bool {
+    text.match_indices("path").any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        !before.is_some_and(|ch| ch == '_' || ch.is_alphanumeric())
+            && text[at + "path".len()..].trim_start().starts_with('=')
+            && !text[at + "path".len()..].trim_start().starts_with("==")
     })
 }
 
@@ -1012,5 +1219,69 @@ mod tests {
             normalize_path("a/./b//c/../d.rs").as_deref(),
             Some("a/b/d.rs")
         );
+    }
+
+    fn scanned(source: &str) -> Option<Vec<String>> {
+        scan_module_declarations(source).map(|names| {
+            let mut names = names.into_iter().collect::<Vec<_>>();
+            names.sort();
+            names
+        })
+    }
+
+    #[test]
+    fn a_crate_roots_mod_lines_name_the_modules_it_declares() {
+        assert_eq!(
+            scanned(
+                "//! mod doc;\nuse std::fmt; // mod note;\npub(crate) mod cli;\n#[cfg(test)]\nmod tests {\n    mod nested;\n}\nmod r#type;\nfn model() { let modulo = 1; }\n"
+            ),
+            Some(vec![
+                "cli".to_string(),
+                "nested".to_string(),
+                "tests".to_string(),
+                "type".to_string(),
+            ])
+        );
+        assert_eq!(scanned("fn main() {}\n"), Some(Vec::new()));
+        // A `path` binding elsewhere is no attribute on a `mod`.
+        assert_eq!(
+            scanned("fn main() {\n    let path = 1;\n}\nmod cli;\n"),
+            Some(vec!["cli".to_string()])
+        );
+        // A `//` inside a string and a comment before the `;` hide no declaration (#576).
+        let both = Some(vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            scanned("const U: &str = \"http://x\"; mod b;\nmod a;\n"),
+            both
+        );
+        assert_eq!(scanned("mod b /* note */;\nmod a;\n"), both);
+        assert_eq!(scanned("mod b /* a\n note */;\nmod a;\n"), both);
+        // Literals and comments declare nothing, and a quote in one opens no string.
+        assert_eq!(
+            scanned(
+                "let s = \"mod x;\"; // mod y;\n/* mod z;\n /* nested */ */\nlet r = r#\"mod q; \"quoted\" \"#;\nlet c = '\"'; let e = '\\''; fn f<'a>(x: &'a str) {}\nmod a;\n"
+            ),
+            Some(vec!["a".to_string()])
+        );
+    }
+
+    #[test]
+    fn mod_lines_that_cannot_tell_what_a_root_declares_read_as_unknown() {
+        for source in [
+            "#[path = \"other.rs\"]\nmod cli;\n",
+            "#[cfg_attr(unix,\n    path = \"unix.rs\")]\nmod sys;\n",
+            "#[path = \"x.rs\"] mod cli;\n",
+            "pub mod\n    cli;\n",
+            "mod cli\n{\n}\n",
+            "macro_rules! m { ($name:ident) => { mod $name; } }\n",
+            "include!(\"mods.rs\");\n",
+            // Whatever follows the name where `;` or `{` should be, a comment aside.
+            "mod b // note\n;\n",
+            "mod b = x;\n",
+            "mod b /* open\n",
+            "let s = \"open\nmod b;\n",
+        ] {
+            assert_eq!(scanned(source), None, "{source}");
+        }
     }
 }
