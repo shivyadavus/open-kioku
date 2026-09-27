@@ -131,7 +131,7 @@ impl TantivySearchIndex {
             .collect::<HashMap<_, _>>();
         let order = document_order(chunks, graph_nodes, &files_by_id, &symbols_by_id);
         for (rank, &entry) in order.iter().enumerate() {
-            let (mut document, symbol) = match entry {
+            let (mut document, symbol, file) = match entry {
                 DocumentEntry::Chunk(index) => {
                     let chunk = &chunks[index];
                     let Some(file) = files_by_id.get(chunk.file_id.0.as_str()) else {
@@ -152,7 +152,7 @@ impl TantivySearchIndex {
                         self.fields.file_json => serde_json::to_string(file)?,
                         self.fields.symbol_json => symbol_json,
                     );
-                    (document, symbol)
+                    (document, symbol, *file)
                 }
                 DocumentEntry::GraphNode(index) => {
                     let node = &graph_nodes[index];
@@ -184,11 +184,11 @@ impl TantivySearchIndex {
                         self.fields.file_json => serde_json::to_string(file)?,
                         self.fields.symbol_json => symbol_json,
                     );
-                    (document, symbol)
+                    (document, symbol, file)
                 }
             };
             if let (Some(symbol_text), Some(symbol)) = (self.fields.symbol_text, symbol) {
-                document.add_text(symbol_text, symbol_search_text(symbol));
+                document.add_text(symbol_text, symbol_search_text(symbol, file));
             }
             if let Some(order_key) = self.fields.order_key {
                 document.add_u64(order_key, rank as u64);
@@ -583,22 +583,29 @@ fn schema() -> Schema {
 /// Indexed field holding a chunk's symbol as code vocabulary; see `symbol_search_text`.
 const SYMBOL_TEXT_FIELD: &str = "symbol_text";
 
-/// The words a query can match a symbol by: its name, qualified name and signature, the parts
-/// of the record that are the repository's own identifiers and code.
+/// The words a query can match a symbol by: its name, qualified name and signature, and the
+/// path of the file that declares it. These are the repository's own identifiers and code.
 ///
 /// The rest of the record is stored-only (#569). It used to be indexed as the serialized JSON,
 /// so its keys and enum values (`visibility`, `private`, `confidence`, `high`, `language`,
 /// `rust`, `kind`, `function`, `provenance`, `tree_sitter`) were terms in nearly every chunk
 /// that had a symbol: "private key handling" matched every private Rust item, and a change to
-/// stored visibility moved BM25 document lengths and so the ranking of unrelated queries. The
-/// scope id, a path plus scope-kind words, repeated what `path` already indexes, and ids are
-/// 64-character hashes the tokenizer drops.
-fn symbol_search_text(symbol: &Symbol) -> String {
+/// stored visibility moved BM25 document lengths and so the ranking of unrelated queries. Ids
+/// are 64-character hashes the tokenizer drops.
+///
+/// The declaring path is the part of the record's scope id that is code vocabulary; its
+/// scope-kind and ordinal words are not. Qualified names here are derived from the path too,
+/// so a symbol's directory and file words count twice, as they did through the scope id.
+/// Measured on the development split of a 10k-file Java corpus, leaving the path out cost two
+/// of 51 `issue_to_code` cases their gold file in the top 20.
+fn symbol_search_text(symbol: &Symbol, file: &File) -> String {
     let mut text = format!("{}\n{}", symbol.name, symbol.qualified_name);
     if let Some(signature) = &symbol.signature {
         text.push('\n');
         text.push_str(signature);
     }
+    text.push('\n');
+    text.push_str(&file.path.to_string_lossy());
     text
 }
 
