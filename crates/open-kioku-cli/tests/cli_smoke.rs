@@ -8216,7 +8216,20 @@ fn snapshot_export_fast_copies_one_committed_state_while_a_writer_commits() {
     }
 
     let expanded = temp.path().join("expanded.sqlite");
-    for _ in 0..3 {
+    // Three exports must overlap a commit. Whether one does is up to the scheduler: an export
+    // takes about a tenth of a second, and a loaded runner can leave the writer thread off the
+    // CPU for that long. An export that saw no commit is still checked below, and repeated;
+    // a writer that stopped is a failure, with the error it stopped on.
+    let (mut overlapped, mut attempts) = (0, 0);
+    while overlapped < 3 {
+        attempts += 1;
+        assert!(
+            attempts <= 10,
+            "only {overlapped} of {} exports overlapped a commit; the writer committed {} \
+             batches in all",
+            attempts - 1,
+            committed.load(Ordering::SeqCst)
+        );
         let before = committed.load(Ordering::SeqCst);
         let exported: serde_json::Value = serde_json::from_str(&run({
             let mut command = ok();
@@ -8229,10 +8242,13 @@ fn snapshot_export_fast_copies_one_committed_state_while_a_writer_commits() {
             command
         }))
         .unwrap();
-        assert!(
-            committed.load(Ordering::SeqCst) > before,
-            "the writer must commit while the export runs for this test to mean anything"
-        );
+        if writer.is_finished() {
+            let stopped = writer.join().unwrap();
+            panic!("the writer stopped while exports ran: {stopped:?}");
+        }
+        if committed.load(Ordering::SeqCst) > before {
+            overlapped += 1;
+        }
         assert_eq!(exported["quality"], "fast", "{exported}");
         assert_eq!(exported["metadata"]["compression_level"], 1, "{exported}");
 
