@@ -29,6 +29,12 @@ pub struct SymbolRegistry {
     pub by_module: HashMap<String, Vec<SymbolId>>,
     pub import_resolutions: Vec<ImportResolution>,
     by_file_imports: HashMap<FileId, Vec<usize>>,
+    /// Symbols of each file by the names a token can match them under (`symbol_matches_token`):
+    /// the simple name and the last segment of the qualified name, in `by_file` order. An
+    /// import resolved to a file is read through this for every token of the importing file's
+    /// chunks, so it must not scan the target file's symbols per token: a Rust crate root reached
+    /// by thousands of cross-crate imports defines thousands of symbols.
+    by_file_token: HashMap<(FileId, String), Vec<SymbolId>>,
     by_name_suffix: HashMap<String, Vec<SymbolId>>,
     qualified_name_normalized: HashMap<String, String>,
 }
@@ -425,6 +431,7 @@ impl SymbolRegistry {
             by_module: HashMap::new(),
             import_resolutions: import_resolutions.to_vec(),
             by_file_imports: HashMap::new(),
+            by_file_token: HashMap::new(),
             by_name_suffix: HashMap::new(),
             qualified_name_normalized: HashMap::new(),
         };
@@ -452,6 +459,20 @@ impl SymbolRegistry {
                 .entry(symbol.file_id.clone())
                 .or_default()
                 .push(symbol.id.clone());
+            let last_segment = symbol
+                .qualified_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(&symbol.qualified_name);
+            for key in [symbol.name.as_str(), last_segment] {
+                let ids = registry
+                    .by_file_token
+                    .entry((symbol.file_id.clone(), key.to_string()))
+                    .or_default();
+                if ids.last() != Some(&symbol.id) {
+                    ids.push(symbol.id.clone());
+                }
+            }
             registry
                 .by_module
                 .entry(module_name(&symbol.qualified_name))
@@ -530,10 +551,16 @@ impl SymbolRegistry {
                     }
                 }
             } else if let Some(file_id) = &import.target_file {
+                // A token spelling a path can match a qualified-name suffix of several segments,
+                // which the per-name index does not key.
+                let ids = if token.contains(':') {
+                    self.by_file.get(file_id)
+                } else {
+                    self.by_file_token
+                        .get(&(file_id.clone(), token.to_string()))
+                };
                 candidates.extend(
-                    self.by_file
-                        .get(file_id)
-                        .into_iter()
+                    ids.into_iter()
                         .flatten()
                         .filter_map(|id| self.by_id.get(id))
                         .filter(|symbol| symbol_matches_token(symbol, token))
