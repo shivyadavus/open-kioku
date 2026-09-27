@@ -78,7 +78,12 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// v19: a `#[path]` attribute inside a `#[path]`-mounted file's module subtree, each alternative
 /// of a `cfg_attr(.., path = ..)` included, mounts its file into the mounting crate too. Earlier
 /// indexes hold `CALLS` edges from a `crate::` path in such a file into one crate's item.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v19";
+/// v20: a Rust trait `impl` whose trait no repository symbol answers is an external resolution
+/// when the index shows the trait is defined outside the repository: named through the standard
+/// library, a dependency the package's manifest places outside the repository (registry, git, or a
+/// `path` leaving it), or, unimported, the standard prelude. Earlier indexes count those
+/// `IMPLEMENTS` as unresolved.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v20";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

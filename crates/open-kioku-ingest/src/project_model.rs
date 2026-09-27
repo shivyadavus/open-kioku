@@ -1,12 +1,14 @@
 use crate::rust_use_path::normalize_path;
-use open_kioku_core::Language;
+use open_kioku_core::{File, FileId, Language};
+use open_kioku_semantic_model::CargoImporter;
 pub use open_kioku_semantic_model::{
-    CargoDependency, CargoDependencyKind, CargoManifest, CargoTargetKind, CargoTargets, ModuleInfo,
-    PathAlias, ProjectModel, ProjectRoot,
+    CargoDependency, CargoDependencyKind, CargoExternalDependency, CargoManifest, CargoTargetKind,
+    CargoTargets, ModuleInfo, PathAlias, ProjectModel, ProjectRoot,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub trait ProjectModelDiscovery {
     fn discover(repo_root: &Path) -> ProjectModel;
@@ -400,6 +402,7 @@ fn cargo_manifest(dir: &Path, table: &toml::Table, manifests: &CargoTables) -> C
             .map(|workspace| workspace_members(workspace, dir))
             .unwrap_or_default(),
         dependencies: Vec::new(),
+        external_dependencies: Vec::new(),
     };
     let workspace_root = cargo_workspace_root(dir, package, manifests);
     let mut read = |scope: &toml::Table, target_specific: bool| {
@@ -411,6 +414,15 @@ fn cargo_manifest(dir: &Path, table: &toml::Table, manifests: &CargoTables) -> C
                 let Some(mut dependency) =
                     cargo_path_dependency(dir, key, value, kind, workspace_root.as_ref())
                 else {
+                    if cargo_dependency_is_external(dir, key, value, workspace_root.as_ref()) {
+                        let external = CargoExternalDependency {
+                            crate_name: key.replace('-', "_"),
+                            kind,
+                        };
+                        if !manifest.external_dependencies.contains(&external) {
+                            manifest.external_dependencies.push(external);
+                        }
+                    }
                     continue;
                 };
                 dependency.target_specific = target_specific;
@@ -494,6 +506,81 @@ fn cargo_path_dependency(
         target_specific: false,
         inherited,
     })
+}
+
+/// The crates outside the repository each Rust file can name by crate name: those its package's
+/// manifest declares visible to it and places outside the repository (see
+/// [`ProjectModel::rust_external_dependency`]). A build script at the package root sees the build
+/// dependencies, every other file the normal and dev ones. Shared by every file of one package
+/// and importer kind; a file whose package declares none is left out.
+pub(crate) fn rust_external_crate_names(
+    project: &ProjectModel,
+    files: &[File],
+) -> HashMap<FileId, Arc<BTreeSet<String>>> {
+    let mut by_package = HashMap::<(&Path, CargoImporter), Arc<BTreeSet<String>>>::new();
+    let mut names = HashMap::new();
+    for file in files.iter().filter(|file| file.language == Language::Rust) {
+        let Some(root) = project.nearest_root_for(&file.path, Language::Rust) else {
+            continue;
+        };
+        let Some(manifest) = root.cargo_manifest.as_ref() else {
+            continue;
+        };
+        let build_script = file.path.file_name().is_some_and(|name| name == "build.rs")
+            && file.path.parent() == Some(root.path.as_path());
+        let kind = if build_script {
+            CargoImporter::BuildScript
+        } else {
+            CargoImporter::Crate
+        };
+        let crates = by_package
+            .entry((root.path.as_path(), kind))
+            .or_insert_with(|| {
+                Arc::new(
+                    manifest
+                        .external_dependencies
+                        .iter()
+                        .map(|dependency| dependency.crate_name.as_str())
+                        .filter(|name| project.rust_external_dependency(root, name, kind))
+                        .map(str::to_string)
+                        .collect(),
+                )
+            })
+            .clone();
+        if !crates.is_empty() {
+            names.insert(file.id.clone(), crates);
+        }
+    }
+    names
+}
+
+/// Whether a dependency table entry places the dependency outside the repository: it names no
+/// `path` (a registry or git dependency), or its `path` leaves the repository. An inherited entry
+/// the workspace does not declare is placed nowhere the index can tell.
+fn cargo_dependency_is_external(
+    dir: &Path,
+    key: &str,
+    value: &toml::Value,
+    workspace: Option<&(PathBuf, &toml::Table)>,
+) -> bool {
+    let inherited = value
+        .get("workspace")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    let (base, entry) = if inherited {
+        let Some((workspace_dir, entry)) =
+            workspace.and_then(|(dir, dependencies)| Some((dir.as_path(), dependencies.get(key)?)))
+        else {
+            return false;
+        };
+        (workspace_dir, entry)
+    } else {
+        (dir, value)
+    };
+    match entry.get("path").and_then(toml::Value::as_str) {
+        None => true,
+        Some(path) => normalize_path(&join_slash(base, path)).is_none(),
+    }
 }
 
 /// `path`, relative to the repository-relative `dir`, joined with `/` separators.
@@ -975,6 +1062,32 @@ mod tests {
                 (Some("sys"), "sys", "crates/sys".into(), Normal, false, true),
             ]
         );
+        // A registry dependency, one inherited from the workspace, and a `path` leaving the
+        // repository are outside it; a `path` to a directory without a manifest is not known to be.
+        assert_eq!(
+            app.external_dependencies,
+            vec![
+                CargoExternalDependency {
+                    crate_name: "outside".into(),
+                    kind: Normal,
+                },
+                CargoExternalDependency {
+                    crate_name: "serde".into(),
+                    kind: Normal,
+                },
+            ]
+        );
+        assert!(model.rust_external_dependency(root("crates/app"), "serde", CargoImporter::Crate));
+        assert!(!model.rust_external_dependency(
+            root("crates/app"),
+            "serde",
+            CargoImporter::BuildScript
+        ));
+        assert!(!model.rust_external_dependency(
+            root("crates/app"),
+            "engine_core",
+            CargoImporter::Crate
+        ));
         assert!(!app.proc_macro);
         let macros = root("crates/macros").cargo_manifest.as_ref().unwrap();
         assert!(macros.proc_macro);

@@ -3,7 +3,7 @@ use open_kioku_core::{
     Symbol, SymbolId,
 };
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
@@ -138,6 +138,8 @@ pub struct ScopeIndex {
     rust_module_placements: HashMap<FileId, RustModulePlacement>,
     /// The library crates each Rust file can name by crate name, by that name.
     rust_crate_names: HashMap<FileId, Arc<RustCrateNames>>,
+    /// The crates outside the repository each Rust file can name by crate name.
+    rust_external_crates: HashMap<FileId, Arc<BTreeSet<String>>>,
 }
 
 /// The library crates code of one crate names by crate name: the dependencies its package's
@@ -263,6 +265,26 @@ impl ScopeIndex {
         crate_name: &str,
     ) -> Option<&RustModulePlacement> {
         self.rust_crate_names.get(file)?.get(crate_name)
+    }
+
+    /// Records which crates outside the repository each Rust file names by crate name: the
+    /// dependencies its package's manifest places outside the repository.
+    pub fn record_rust_external_crates(&mut self, names: HashMap<FileId, Arc<BTreeSet<String>>>) {
+        self.rust_external_crates.extend(names);
+    }
+
+    /// Whether `crate_name` in `file` names a crate outside the repository: the standard library's
+    /// `std`, `core` or `alloc`, or a dependency the file's package places outside the repository,
+    /// unless a crate of the repository answers to the name.
+    pub(crate) fn rust_names_external_crate(&self, file: &FileId, crate_name: &str) -> bool {
+        if self.rust_named_crate(file, crate_name).is_some() {
+            return false;
+        }
+        matches!(crate_name, "std" | "core" | "alloc")
+            || self
+                .rust_external_crates
+                .get(file)
+                .is_some_and(|crates| crates.contains(crate_name))
     }
 
     /// Whether the declared module tree places `file` at its path in a crate of `placement`.
