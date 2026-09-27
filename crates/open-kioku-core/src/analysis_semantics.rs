@@ -98,7 +98,11 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// generic arguments, so `impl<'a> Engine<'a>` and `impl<T> Wrapper<T>` link their methods and
 /// trait implementations to the file's `Engine` and `Wrapper`. A v7 index keys them under the
 /// written type, `Engine<'a>`, which names no symbol, so calls to them stay unresolved.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v8";
+/// v9: a Rust trait `impl` member's bound also reads a `self::`, `super::` or `crate::` path to a
+/// trait or type declared in the same file, and sees an implementing `&T`, `&mut T`, `Box<T>`,
+/// `Rc<T>` or `Arc<T>` as `T`; a v8 index records `impl Store for &Hidden` and
+/// `impl crate::Cache for Gen<u8>` members as public.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v9";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 
