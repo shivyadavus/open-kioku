@@ -282,6 +282,11 @@ impl<'a> ImpactEngine<'a> {
             ));
         }
         if let Some((workspace, dependents)) = &rust_packages {
+            if let Some(reason) = &dependents.not_measured {
+                reasons.push(format!(
+                    "downstream crates were not measured: {reason}; an absent crate-import impact is not evidence that no other crate depends on this file"
+                ));
+            }
             if dependents.importing_files > 0 {
                 reasons.push(format!(
                     "{} file(s) in {} package(s) import public items of this file by crate path; {} further file(s) of those packages name an imported item",
@@ -1576,8 +1581,10 @@ pub fn is_lexical_impact_result(result: &SearchResult) -> bool {
 /// Which Rust files a change to one package can reach through Cargo: that package and the
 /// packages that depend on it. A Rust file in another package, or in none, has no Cargo
 /// dependency path to the change, so a lexical match there is read as a shared word rather than
-/// a dependent. Coupling Cargo does not see (a harness that runs a built binary and parses its
-/// output) is not followed; the pruned count and a sample of paths stay in the risk reasons.
+/// a dependent. A procedural-macro package is never pruned: the code its macros emit belongs to
+/// the crates that use them, whatever direction the dependency runs. Coupling Cargo does not see
+/// (a harness that runs a built binary and parses its output) is not followed; the pruned count
+/// and a sample of paths stay in the risk reasons.
 struct RustReachability<'a> {
     workspace: &'a CargoWorkspace,
     package: usize,
@@ -1592,7 +1599,9 @@ impl RustReachability<'_> {
             return true;
         }
         match self.workspace.membership(path) {
-            Membership::Package(package) => self.reachable.contains(&package),
+            Membership::Package(package) => {
+                self.reachable.contains(&package) || self.workspace.is_proc_macro(package)
+            }
             Membership::Outside => false,
             Membership::Unknown => true,
         }

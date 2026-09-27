@@ -46,6 +46,9 @@ struct CargoPackage {
     lib_crate: String,
     /// Repository-relative root file of the library crate.
     lib_root: PathBuf,
+    /// `[lib] proc-macro = true`: the crate's macros expand into code of the crates that use
+    /// them, so it can name a crate it does not depend on.
+    proc_macro: bool,
     /// Package name of each dependency, with the crate name this package writes for it when the
     /// manifest renames it (`alias = { package = "real-name" }`); `None` means the dependency's
     /// own library crate name.
@@ -167,6 +170,13 @@ impl CargoWorkspace {
         Membership::Unknown
     }
 
+    /// Whether `index` is a procedural-macro crate. Cargo puts it upstream of the crates that use
+    /// its macros, but the code it emits (`quote! { ::engine::Engine::new() }`) is theirs, so a
+    /// change it names can reach it against the dependency direction.
+    pub(crate) fn is_proc_macro(&self, index: usize) -> bool {
+        self.packages[index].proc_macro
+    }
+
     pub(crate) fn package_name(&self, index: usize) -> &str {
         &self.packages[index].name
     }
@@ -243,6 +253,10 @@ fn parse_package(
 ) -> Option<CargoPackage> {
     let name = table.get("package")?.get("name")?.as_str()?.to_string();
     let lib = table.get("lib");
+    let proc_macro = lib
+        .and_then(|lib| lib.get("proc-macro").or_else(|| lib.get("proc_macro")))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
     let lib_crate = lib
         .and_then(|lib| lib.get("name"))
         .and_then(toml::Value::as_str)
@@ -292,6 +306,7 @@ fn parse_package(
         name,
         lib_crate,
         lib_root,
+        proc_macro,
         dependencies,
     })
 }
@@ -326,6 +341,18 @@ pub(crate) struct CrateDependents {
     pub(crate) packages: usize,
     /// Candidate use-site files past [`MAX_CRATE_USE_SCAN_FILES`], not read.
     pub(crate) unscanned_files: usize,
+    /// Why no downstream crate was looked for, when none was: an empty result is then absence of
+    /// measurement, not absence of dependents.
+    pub(crate) not_measured: Option<String>,
+}
+
+impl CrateDependents {
+    fn not_measured(reason: impl Into<String>) -> Self {
+        Self {
+            not_measured: Some(reason.into()),
+            ..Self::default()
+        }
+    }
 }
 
 /// Files that import a public item the changed file defines through its crate's name, and files
@@ -334,9 +361,10 @@ pub(crate) struct CrateDependents {
 /// An importer is found from its own stored `use` row, in a package whose manifest declares the
 /// dependency, naming a public top-level item the changed file defines: the path is the crate name
 /// that package uses for it, the file's module path, and the item. A use site is weaker: an
-/// identifier equal to an imported name in another file of an importing package, outside comments
-/// and string literals and not after a `.`, where that package defines no item of the same name
-/// and the file imports no item of that name from elsewhere. It covers what an import row cannot
+/// identifier equal to an imported name in another file of an importing package, outside comments,
+/// string and character literals, not after a `.`, and not the tail of a path that starts with
+/// another crate, where that package defines no item of the same name and the file imports no
+/// item of that name from elsewhere. It covers what an import row cannot
 /// show, such as a file `include!`d into the crate root that imports the item, or a sibling
 /// module reaching it through `super::*`.
 ///
@@ -349,11 +377,31 @@ pub(crate) fn crate_dependent_impacts(
     target_file: &File,
     target_symbols: &[Symbol],
 ) -> Result<CrateDependents> {
-    let Membership::Package(package) = workspace.membership(&target_file.path) else {
-        return Ok(CrateDependents::default());
+    let package = match workspace.membership(&target_file.path) {
+        Membership::Package(package) => package,
+        Membership::Outside => {
+            return Ok(CrateDependents::not_measured(
+                "the file is under a Cargo workspace manifest but in none of its members, so no package compiles it",
+            ))
+        }
+        Membership::Unknown => {
+            return Ok(CrateDependents::not_measured(
+                "no indexed, readable Cargo.toml says which package compiles the file",
+            ))
+        }
     };
-    let Some(module_path) = workspace.library_module_path(package, &target_file.path) else {
-        return Ok(CrateDependents::default());
+    // A package with only binaries has no library crate for another crate to import.
+    let library_indexed = files
+        .iter()
+        .any(|file| file.path == workspace.packages[package].lib_root);
+    let module_path = workspace
+        .library_module_path(package, &target_file.path)
+        .filter(|_| library_indexed);
+    let Some(module_path) = module_path else {
+        return Ok(CrateDependents::not_measured(format!(
+            "the file is not a module of an indexed library crate of `{}` (a binary, test, bench, example or build target, or a package with no library), which other crates cannot import; a library module it is included into is not traced",
+            workspace.packages[package].name
+        )));
     };
     let items = target_symbols
         .iter()
@@ -366,7 +414,9 @@ pub(crate) fn crate_dependent_impacts(
         .map(|symbol| symbol.name.as_str())
         .collect::<BTreeSet<_>>();
     if items.is_empty() {
-        return Ok(CrateDependents::default());
+        return Ok(CrateDependents::not_measured(
+            "the file defines no public top-level item another crate could import by name",
+        ));
     }
     // Membership is read once per Rust file, not once per file per dependent package.
     let rust_files = files
@@ -465,6 +515,9 @@ pub(crate) fn crate_dependent_impacts(
         if names.is_empty() {
             continue;
         }
+        let Some(dependency_crate) = workspace.crate_name_in(dependent_package, package) else {
+            continue;
+        };
         let mut candidates = rust_files
             .values()
             .filter(|(file, membership)| {
@@ -500,18 +553,35 @@ pub(crate) fn crate_dependent_impacts(
             let mut uses = 0usize;
             let mut first = None::<(u32, String, String)>;
             for chunk in &chunks {
-                for (offset, line) in chunk.text.lines().enumerate() {
-                    for token in code_identifiers(line) {
-                        if let Some(name) = own_names.get(token) {
-                            uses += 1;
-                            if first.is_none() {
-                                first = Some((
-                                    chunk.range.start + offset as u32,
-                                    (*name).to_string(),
-                                    line.trim().chars().take(240).collect(),
-                                ));
-                            }
-                        }
+                // A chunk starts at an item, where no string or comment is open, so the scan
+                // restarts per chunk and carries its state across the chunk's lines.
+                for identifier in code_identifiers(&chunk.text) {
+                    let Some(name) = own_names.get(identifier.name) else {
+                        continue;
+                    };
+                    // `other_crate::Name` is another crate's item; only a path through the
+                    // name this package gives the dependency reaches the changed file.
+                    if identifier
+                        .path_head
+                        .is_some_and(|head| head != dependency_crate)
+                    {
+                        continue;
+                    }
+                    uses += 1;
+                    if first.is_none() {
+                        first = Some((
+                            chunk.range.start + identifier.line as u32,
+                            (*name).to_string(),
+                            chunk
+                                .text
+                                .lines()
+                                .nth(identifier.line)
+                                .unwrap_or_default()
+                                .trim()
+                                .chars()
+                                .take(240)
+                                .collect(),
+                        ));
                     }
                 }
             }
@@ -633,56 +703,188 @@ fn imported_item<'a>(
     }
 }
 
-/// Identifiers a line uses as code: outside `//` comments and string literals, and not the
-/// member of a `receiver.` (a method or field of some other type).
-fn code_identifiers(line: &str) -> Vec<&str> {
+/// An identifier used as code, with the 0-based line of the text it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodeIdentifier<'a> {
+    line: usize,
+    name: &'a str,
+    /// First segment of the path the identifier ends, when it follows `::`: `a` for
+    /// `a::b::Name`. `None` for a bare name or a path's own first segment.
+    path_head: Option<&'a str>,
+}
+
+/// Identifiers a text uses as code: outside line and block comments, string, raw string and
+/// character literals, and not the member of a `receiver.` (a method or field of some other type).
+/// String and comment state carries across lines, so a multi-line string's continuation lines
+/// are not read as code.
+fn code_identifiers(text: &str) -> Vec<CodeIdentifier<'_>> {
+    let bytes = text.as_bytes();
     let mut identifiers = Vec::new();
-    let bytes = line.as_bytes();
-    let mut in_string = false;
-    let mut index = 0;
+    let mut line = 0usize;
+    let mut index = 0usize;
+    // The path the previous identifier started or continued, and whether `::` followed it.
+    let mut path_head = None::<&str>;
+    let mut after_path_separator = false;
+    let mut after_dot = false;
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let count_lines =
+        |from: usize, to: usize| bytes[from..to].iter().filter(|b| **b == b'\n').count();
     while index < bytes.len() {
         let byte = bytes[index];
-        if in_string {
-            match byte {
-                b'\\' => index += 1,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            index += 1;
-            continue;
-        }
-        if byte == b'"' {
-            in_string = true;
-            index += 1;
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            break;
-        }
-        if byte.is_ascii_alphabetic() || byte == b'_' {
-            let start = index;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
-            {
+        match byte {
+            b'\n' => {
+                line += 1;
                 index += 1;
             }
-            let after_dot = line[..start].trim_end().ends_with('.');
-            if !after_dot {
-                identifiers.push(&line[start..index]);
+            b' ' | b'\t' | b'\r' => index += 1,
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
             }
-            continue;
-        }
-        if byte.is_ascii_digit() {
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
-            {
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let start = index;
+                let mut depth = 0usize;
+                while index < bytes.len() {
+                    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        depth -= 1;
+                        index += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+                line += count_lines(start, index);
+                path_head = None;
+                after_path_separator = false;
+                after_dot = false;
+            }
+            b'"' => {
+                let start = index;
+                index = skip_string(bytes, index + 1, 0);
+                line += count_lines(start, index);
+                path_head = None;
+                after_path_separator = false;
+                after_dot = false;
+            }
+            b'\'' => {
+                // A character literal ('x', '\n', '"', '\u{1F600}'); otherwise a lifetime.
+                let end = if bytes.get(index + 1) == Some(&b'\\') {
+                    bytes[index + 2..]
+                        .iter()
+                        .position(|b| *b == b'\'' || *b == b'\n')
+                        .map(|offset| index + 2 + offset)
+                        .filter(|end| bytes[*end] == b'\'')
+                } else {
+                    let width = text[index + 1..].chars().next().map_or(0, char::len_utf8);
+                    let close = index + 1 + width;
+                    (width > 0 && bytes.get(close) == Some(&b'\'')).then_some(close)
+                };
+                index = end.map_or(index + 1, |end| end + 1);
+                path_head = None;
+                after_path_separator = false;
+                after_dot = false;
+            }
+            b':' if bytes.get(index + 1) == Some(&b':') => {
+                after_path_separator = true;
+                after_dot = false;
+                index += 2;
+            }
+            b'.' => {
+                after_dot = true;
+                after_path_separator = false;
+                path_head = None;
                 index += 1;
             }
-            continue;
+            _ if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                while index < bytes.len() && is_ident(bytes[index]) {
+                    index += 1;
+                }
+                let word = &text[start..index];
+                // `r"…"`, `r#"…"#`, `b"…"`, `br#"…"#`: a raw or byte string, not an identifier.
+                if matches!(word, "r" | "b" | "br")
+                    && matches!(bytes.get(index), Some(b'"') | Some(b'#'))
+                {
+                    let raw = word != "b";
+                    let hashes = bytes[index..].iter().take_while(|b| **b == b'#').count();
+                    if bytes.get(index + hashes) == Some(&b'"') && (raw || hashes == 0) {
+                        let open = index;
+                        index = skip_string(
+                            bytes,
+                            index + hashes + 1,
+                            if raw { hashes + 1 } else { 0 },
+                        );
+                        line += count_lines(open, index);
+                        path_head = None;
+                        after_path_separator = false;
+                        after_dot = false;
+                        continue;
+                    }
+                }
+                let continues_path = after_path_separator && path_head.is_some();
+                if !after_dot {
+                    identifiers.push(CodeIdentifier {
+                        line,
+                        name: word,
+                        path_head: if continues_path { path_head } else { None },
+                    });
+                }
+                if !continues_path {
+                    path_head = Some(word);
+                }
+                after_path_separator = false;
+                after_dot = false;
+            }
+            _ if byte.is_ascii_digit() => {
+                while index < bytes.len() && is_ident(bytes[index]) {
+                    index += 1;
+                }
+                path_head = None;
+                after_path_separator = false;
+                after_dot = false;
+            }
+            _ => {
+                // A leading `::` (`::engine::Name`) opens a path whose head is the next word.
+                path_head = None;
+                after_path_separator = false;
+                after_dot = false;
+                index += 1;
+            }
         }
-        index += 1;
     }
     identifiers
+}
+
+/// The index just past a string whose body starts at `index`. `raw_hashes` is 0 for an escaped
+/// string, or one more than the number of `#`s of a raw string, which ignores escapes and ends at
+/// `"` followed by that many `#`s. An unterminated string runs to the end of the text.
+fn skip_string(bytes: &[u8], mut index: usize, raw_hashes: usize) -> usize {
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if raw_hashes == 0 => index += 2,
+            b'"' => {
+                let hashes = raw_hashes.saturating_sub(1);
+                let closes = bytes[index + 1..]
+                    .iter()
+                    .take(hashes)
+                    .filter(|b| **b == b'#')
+                    .count()
+                    == hashes;
+                if closes {
+                    return (index + 1 + hashes).min(bytes.len());
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    bytes.len()
 }
 
 /// Production dependents first; within each, an importer before a use site, and more import
@@ -888,13 +1090,61 @@ mod tests {
         assert!(imported_item("engine::builder::Missing", "engine", &module, &items).is_none());
     }
 
+    fn names(text: &str) -> Vec<(usize, &str, Option<&str>)> {
+        code_identifiers(text)
+            .into_iter()
+            .map(|identifier| (identifier.line, identifier.name, identifier.path_head))
+            .collect()
+    }
+
     #[test]
     fn code_identifiers_skip_comments_strings_and_members() {
         assert_eq!(
-            code_identifiers(r#"let x = Engine::new("Engine \" Engine").run(); // Engine"#),
-            vec!["let", "x", "Engine", "new"]
+            names(r#"let x = Engine::new("Engine \" Engine").run(); // Engine"#),
+            vec![
+                (0, "let", None),
+                (0, "x", None),
+                (0, "Engine", None),
+                (0, "new", Some("Engine"))
+            ]
         );
-        assert_eq!(code_identifiers("value.Engine + 2u8"), vec!["value"]);
+        assert_eq!(
+            names("value.Engine + 2u8 /* Engine */"),
+            vec![(0, "value", None)]
+        );
+    }
+
+    #[test]
+    fn code_identifiers_carry_string_and_char_state_across_lines() {
+        let text = "let s = \"first\n  Engine in prose\n\";\nlet q = '\"'; Engine::new();\nlet r = r#\"a \" Engine\n\"#; let l: &'a str = x;\n";
+        let found = names(text);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|(_, name, _)| *name == "Engine")
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![(3, "Engine", None)],
+            "{found:?}"
+        );
+        // A lifetime is not a character literal: the code after it is still read.
+        assert!(found.contains(&(5, "str", None)), "{found:?}");
+    }
+
+    #[test]
+    fn a_path_through_another_crate_names_its_head() {
+        assert_eq!(
+            names("other_cfg::Config::default(); ::engine::Config::new(); Config"),
+            vec![
+                (0, "other_cfg", None),
+                (0, "Config", Some("other_cfg")),
+                (0, "default", Some("other_cfg")),
+                (0, "engine", None),
+                (0, "Config", Some("engine")),
+                (0, "new", Some("engine")),
+                (0, "Config", None),
+            ]
+        );
     }
 
     #[test]
