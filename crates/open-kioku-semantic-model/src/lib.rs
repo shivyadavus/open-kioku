@@ -27,6 +27,88 @@ pub struct ProjectRoot {
     /// names, and the target kinds whose auto-discovery it turns off.
     #[serde(default, skip_serializing_if = "CargoTargets::is_empty")]
     pub cargo_targets: CargoTargets,
+    /// What a Rust package's manifest declares about the package itself and the packages it
+    /// depends on, when the manifest parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_manifest: Option<CargoManifest>,
+}
+
+/// A parsed `Cargo.toml`: its package, its workspace, and the dependencies it declares on other
+/// packages of the repository.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CargoManifest {
+    /// `[package] name`; `None` for a virtual workspace manifest, which declares no package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    /// `[lib] proc-macro = true`: the library is a procedural-macro crate, whose macros expand
+    /// into code of the crates that use them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proc_macro: bool,
+    /// The manifest has a `[workspace]` table.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub workspace: bool,
+    /// Repository-relative path prefixes of the workspace's `members`, each glob cut at its first
+    /// wildcard; a literal member ends in `/`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_members: Vec<String>,
+    /// Dependencies on packages whose manifests are in the repository, found through a `path`
+    /// (directly, or from `[workspace.dependencies]` for `name.workspace = true`). A registry or
+    /// git dependency names no directory here and is left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<CargoDependency>,
+}
+
+/// One dependency of a Rust package on another package of the repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CargoDependency {
+    /// The name the dependent's code writes the dependency's crate under, with `-` read as `_`:
+    /// the key of a renamed dependency (`alias = { package = "real" }`), otherwise the
+    /// dependency's library crate name. `None` while the dependency's own manifest has not been
+    /// read, and for one whose directory holds no discovered manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crate_name: Option<String>,
+    /// The key the dependency table writes, which is the package name unless it renames one.
+    pub key: String,
+    /// The package the dependency names: `package = "..."`, or the key.
+    pub package: String,
+    /// Repository-relative directory of the dependency's manifest, keyed by path rather than
+    /// package name: two workspaces may each have a package of one name.
+    pub manifest_dir: PathBuf,
+    pub kind: CargoDependencyKind,
+    /// Declared under `[target.'cfg(...)'.*dependencies]`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub target_specific: bool,
+    /// Declared with `workspace = true` and read from the workspace's `[workspace.dependencies]`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inherited: bool,
+}
+
+impl CargoDependency {
+    /// Whether code of the crate rooted at `importer` can name this dependency: a build script
+    /// only its build dependencies, every other crate of the package its normal and dev ones
+    /// (`#[cfg(test)]` code of the library and binaries included).
+    pub fn visible_to(&self, importer: CargoImporter) -> bool {
+        match importer {
+            CargoImporter::BuildScript => self.kind == CargoDependencyKind::Build,
+            CargoImporter::Crate => self.kind != CargoDependencyKind::Build,
+        }
+    }
+}
+
+/// Which dependency table declared a dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CargoDependencyKind {
+    Normal,
+    Dev,
+    Build,
+}
+
+/// The kind of crate a file compiled into, as far as which dependencies it can name goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CargoImporter {
+    BuildScript,
+    Crate,
 }
 
 /// What a Cargo manifest says about its package's non-library targets.
@@ -111,6 +193,39 @@ impl ProjectModel {
 
         best.map(|(root, _)| root)
     }
+
+    /// The Rust package whose manifest is in `dir`, repository-relative.
+    pub fn rust_root_at(&self, dir: &std::path::Path) -> Option<&ProjectRoot> {
+        self.roots
+            .iter()
+            .find(|root| root.language == Language::Rust && root.path == dir)
+    }
+
+    /// The package `crate_name` names in code of `importer`'s package, when that package declares
+    /// exactly one dependency visible to `kind` under that name and its manifest is in the
+    /// repository. Two declarations of one name pointing at different directories name neither.
+    pub fn rust_dependency(
+        &self,
+        importer: &ProjectRoot,
+        crate_name: &str,
+        kind: CargoImporter,
+    ) -> Option<&ProjectRoot> {
+        let manifest = importer.cargo_manifest.as_ref()?;
+        let mut dirs = manifest
+            .dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency.visible_to(kind) && dependency.crate_name.as_deref() == Some(crate_name)
+            })
+            .map(|dependency| dependency.manifest_dir.as_path())
+            .collect::<Vec<_>>();
+        dirs.sort();
+        dirs.dedup();
+        match dirs.as_slice() {
+            [dir] => self.rust_root_at(dir),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -137,6 +252,9 @@ pub enum ImportBindingRule {
     ModuleKey,
     /// A Rust `use` path followed through declared file modules from the importer's crate root.
     RustModulePath,
+    /// A Rust `use` path through a crate name that reaches its item only by following `pub use`
+    /// re-exports of that crate's modules.
+    RustReexport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

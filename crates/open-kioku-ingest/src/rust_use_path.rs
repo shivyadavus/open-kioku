@@ -184,7 +184,8 @@ impl RustPackageLayout {
         self.library.is_some() && self.unmodeled_roots.is_empty()
     }
 
-    fn library_stem(&self) -> Option<String> {
+    /// The extension-less library crate root in `src_root`, when the layout follows the library.
+    pub(crate) fn library_stem(&self) -> Option<String> {
         Some(format!("{}/{}", self.src_root, self.library.as_deref()?))
     }
 

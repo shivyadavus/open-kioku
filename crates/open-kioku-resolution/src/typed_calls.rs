@@ -26,6 +26,11 @@ pub(crate) fn resolve_typed_receiver_outcome(
         ctx.bindings
             .resolve_before(&call.scope_id, lookup_name, &call.range, ctx.scopes)
     else {
+        if ctx.language == Language::Rust && !through_self_field {
+            if let Some(outcome) = resolve_rust_crate_name_outcome(call, ctx, lookup_name) {
+                return outcome;
+            }
+        }
         return imported_receiver_outcome(call, ctx, lookup_name);
     };
 
@@ -176,6 +181,9 @@ fn resolve_rust_qualified_module_outcome(
     receiver: &str,
 ) -> Option<ResolutionOutcome> {
     let receiver = receiver.trim();
+    if let Some(outcome) = resolve_rust_crate_name_outcome(call, ctx, receiver) {
+        return Some(outcome);
+    }
     // A file another crate may compile too is read against no one crate.
     let placement = ctx
         .scopes
@@ -222,7 +230,17 @@ fn resolve_rust_qualified_module_outcome(
     if targets.is_empty() {
         return None;
     }
+    Some(rust_module_path_outcome(call, ctx, targets, strategy))
+}
 
+/// The candidates a Rust module path reached, each proven by the call site, the module path and
+/// the qualified name it spells.
+fn rust_module_path_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    targets: Vec<SymbolId>,
+    strategy: RustModulePathStrategy,
+) -> ResolutionOutcome {
     let (message, module_strategy, member_strategy) = match strategy {
         RustModulePathStrategy::CrateQualified => (
             "candidate from exact Rust crate-qualified module path",
@@ -233,6 +251,11 @@ fn resolve_rust_qualified_module_outcome(
             "candidate declared by the module of this file that the Rust path names",
             "rust_module_scope_path",
             "rust_module_scope_member",
+        ),
+        RustModulePathStrategy::CrateName => (
+            "candidate from exact Rust path through a crate name the caller's package declares",
+            "rust_crate_name_module",
+            "rust_crate_name_member",
         ),
     };
     let candidate_count = targets.len();
@@ -270,7 +293,36 @@ fn resolve_rust_qualified_module_outcome(
             candidate
         })
         .collect();
-    Some(evaluate_candidates(&GraphEdgeType::Calls, candidates))
+    evaluate_candidates(&GraphEdgeType::Calls, candidates)
+}
+
+/// A Rust call through a path whose first segment is a crate name the caller's package declares,
+/// read from that library crate's root and ending only in a file placed in that crate. The parser
+/// cannot tell `engine::run()` from `engine.run()` by the receiver alone, so this is also tried
+/// for a lowercase receiver no local binding names.
+pub(crate) fn resolve_rust_crate_name_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    receiver: &str,
+) -> Option<ResolutionOutcome> {
+    let (names, crate_placement) = rust_crate_name_member_names(call, ctx, receiver.trim())?;
+    let mut targets = rust_qualified_targets(ctx, &names);
+    targets.retain(|target| {
+        ctx.symbols.get(target).is_some_and(|symbol| {
+            ctx.scopes
+                .is_placed_in_crate_of(&symbol.file_id, crate_placement)
+        })
+    });
+    normalize_symbol_ids(&mut targets);
+    if targets.is_empty() {
+        return None;
+    }
+    Some(rust_module_path_outcome(
+        call,
+        ctx,
+        targets,
+        RustModulePathStrategy::CrateName,
+    ))
 }
 
 /// How a Rust module path reached its candidates.
@@ -279,6 +331,46 @@ enum RustModulePathStrategy {
     CrateQualified,
     /// Items a module scope of this file declares.
     ModuleScope,
+    /// Qualified names the path spells in the library crate its first segment names: a
+    /// dependency the caller's package declares, or that package's own library.
+    CrateName,
+}
+
+/// Qualified names of `callee` in the module a path through a crate name reaches, and the
+/// library crate it starts in: `engine::plan::f()` where the caller's package declares `engine`.
+/// The first segment names that crate only when nothing of this file does: an explicit import of
+/// the name, or an item of it in lexical scope, such as a module, shadows the crate. A glob
+/// importing a module of that name from another file is not seen.
+fn rust_crate_name_member_names<'c>(
+    call: &CallSite,
+    ctx: &ResolutionContext<'c>,
+    receiver: &str,
+) -> Option<(Vec<String>, &'c RustModulePlacement)> {
+    let mut segments = receiver.split("::").map(str::trim);
+    let first = segments.next()?;
+    let placement = ctx.scopes.rust_named_crate(ctx.file_id, first)?;
+    let explicitly_imported = ctx
+        .repository
+        .imports
+        .by_file_local_name
+        .get(&(ctx.file_id.clone(), first.to_string()))
+        .is_some_and(|bindings| bindings.iter().any(|binding| !binding.is_glob));
+    if explicitly_imported
+        || crate::context::nearest_lexical_items(ctx, &call.scope_id, first, |_| true).is_some()
+    {
+        return None;
+    }
+    let mut module = Vec::new();
+    for segment in segments {
+        if matches!(segment, "" | "self" | "super" | "crate") {
+            return None;
+        }
+        module.push(rust_module_name(segment).to_string());
+    }
+    Some((
+        rust_module_member_names(placement, &module, &call.callee_name),
+        placement,
+    ))
 }
 
 fn rust_qualified_targets(ctx: &ResolutionContext<'_>, names: &[String]) -> Vec<SymbolId> {
@@ -1521,6 +1613,17 @@ mod tests {
         placements: Vec<(&str, RustModulePlacement)>,
         test: impl FnOnce(&ResolutionContext<'_>) -> T,
     ) -> T {
+        with_rust_crates(caller, items, placements, Vec::new(), test)
+    }
+
+    /// [`with_rust_files`] where the caller names the library crates `crates` by crate name.
+    fn with_rust_crates<T>(
+        caller: &str,
+        items: &[(&str, &str)],
+        placements: Vec<(&str, RustModulePlacement)>,
+        crates: Vec<(&str, RustModulePlacement)>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
         let caller_id = FileId::new(format!("file:{caller}"));
         let mut scopes = ScopeIndex::build(vec![Scope {
             id: ScopeId::new("scope:worker"),
@@ -1540,6 +1643,18 @@ mod tests {
                 .into_iter()
                 .map(|(path, placement)| (FileId::new(format!("file:{path}")), placement))
                 .collect(),
+        );
+        scopes.record_rust_crate_names(
+            [(
+                caller_id.clone(),
+                std::sync::Arc::new(
+                    crates
+                        .into_iter()
+                        .map(|(name, placement)| (name.to_string(), placement))
+                        .collect(),
+                ),
+            )]
+            .into(),
         );
         let symbols = items
             .iter()
@@ -1613,6 +1728,96 @@ mod tests {
         // the path could be read against.
         with_rust_files("crates/a/tests/it.rs", &items, placements, |ctx| {
             let call = module_path_call("scope:worker", "crate::util", "f");
+            assert_eq!(proven_target(ctx, &call), None);
+        });
+    }
+
+    #[test]
+    fn rust_paths_through_a_declared_crate_name_resolve_in_that_crates_library() {
+        // `crates/app` declares `engine`; a second workspace has an `engine` of its own, and
+        // `engine`'s `plan` module is declared by its library, `stray` by nothing.
+        let engine = |module: &[&str]| {
+            placement(
+                "crates::engine::src",
+                &["crates::engine::src::lib"],
+                Some(module),
+            )
+        };
+        let other = |module: &[&str]| {
+            placement(
+                "other::engine::src",
+                &["other::engine::src::lib"],
+                Some(module),
+            )
+        };
+        let items = [
+            ("crates::engine::src::lib::run", "crates/engine/src/lib.rs"),
+            (
+                "crates::engine::src::plan::build",
+                "crates/engine/src/plan.rs",
+            ),
+            (
+                "crates::engine::src::stray::build",
+                "crates/engine/src/stray.rs",
+            ),
+            (
+                "other::engine::src::plan::build",
+                "other/engine/src/plan.rs",
+            ),
+        ];
+        let placements = vec![
+            ("crates/engine/src/lib.rs", engine(&[])),
+            ("crates/engine/src/plan.rs", engine(&["plan"])),
+            (
+                "crates/engine/src/stray.rs",
+                placement("crates::engine::src", &["crates::engine::src::lib"], None),
+            ),
+            ("other/engine/src/lib.rs", other(&[])),
+            ("other/engine/src/plan.rs", other(&["plan"])),
+        ];
+        let crates = vec![("engine", engine(&[]))];
+        with_rust_crates(
+            "crates/app/src/main.rs",
+            &items,
+            placements.clone(),
+            crates,
+            |ctx| {
+                // The parser reads a lowercase path receiver as a value: `engine::run()` and
+                // `engine.run()` both have receiver `engine`. Both kinds reach the crate.
+                let at = |receiver: &str, callee: &str| {
+                    let module =
+                        proven_target(ctx, &module_path_call("scope:worker", receiver, callee));
+                    let value = CallSite {
+                        receiver_kind: ReceiverKind::Value,
+                        ..module_path_call("scope:worker", receiver, callee)
+                    };
+                    assert_eq!(module, proven_target(ctx, &value), "`{receiver}::{callee}`");
+                    module
+                };
+                assert_eq!(
+                    at("engine", "run").as_deref(),
+                    Some("crates::engine::src::lib::run")
+                );
+                assert_eq!(
+                    at("engine::plan", "build").as_deref(),
+                    Some("crates::engine::src::plan::build")
+                );
+                assert_eq!(
+                    at("engine::stray", "build"),
+                    None,
+                    "not placed in the crate"
+                );
+                assert_eq!(at("engine::super", "run"), None);
+            },
+        );
+        // A package that declares no `engine` names no crate by it.
+        with_rust_files("crates/nodep/src/lib.rs", &items, placements, |ctx| {
+            let call = module_path_call("scope:worker", "engine::plan", "build");
+            assert_eq!(proven_target(ctx, &call), None);
+            let call = CallSite {
+                receiver_kind: ReceiverKind::Value,
+                ..module_path_call("scope:worker", "engine", "run")
+            };
             assert_eq!(proven_target(ctx, &call), None);
         });
     }

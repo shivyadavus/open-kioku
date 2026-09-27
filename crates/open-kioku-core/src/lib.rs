@@ -2146,6 +2146,10 @@ pub struct ImportSite {
     pub bindings: Vec<ImportedName>,
     pub is_glob: bool,
     pub is_type_only: bool,
+    /// A Rust `pub use`, which makes what it imports nameable through the importing module from
+    /// other crates. A restricted `pub(crate) use` is not one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reexported: bool,
     pub range: SourceRange,
 }
 

@@ -1,7 +1,10 @@
+use crate::rust_use_path::normalize_path;
 use open_kioku_core::Language;
 pub use open_kioku_semantic_model::{
-    CargoTargetKind, CargoTargets, ModuleInfo, PathAlias, ProjectModel, ProjectRoot,
+    CargoDependency, CargoDependencyKind, CargoManifest, CargoTargetKind, CargoTargets, ModuleInfo,
+    PathAlias, ProjectModel, ProjectRoot,
 };
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +21,9 @@ impl ProjectModelDiscovery for ProjectModel {
             return model;
         }
 
-        walk_discover(repo_root, repo_root, &mut model);
+        let mut manifests = HashMap::new();
+        walk_discover(repo_root, repo_root, &mut model, &mut manifests);
+        read_cargo_manifests(&mut model, &manifests);
         model
     }
 
@@ -318,6 +323,221 @@ fn default_target_root(
         .find(|root| root.is_file())
 }
 
+/// Dependency tables of a manifest, or of one `[target.'cfg(...)']` table, and their kinds.
+const CARGO_DEPENDENCY_TABLES: [(&str, CargoDependencyKind); 5] = [
+    ("dependencies", CargoDependencyKind::Normal),
+    ("dev-dependencies", CargoDependencyKind::Dev),
+    ("dev_dependencies", CargoDependencyKind::Dev),
+    ("build-dependencies", CargoDependencyKind::Build),
+    ("build_dependencies", CargoDependencyKind::Build),
+];
+
+/// Reads what each parsed Cargo manifest declares into its Rust root, then names each
+/// dependency's crate once every package's library name is known. A root whose manifest did not
+/// parse keeps `cargo_manifest: None`, which proves nothing about its package.
+fn read_cargo_manifests(model: &mut ProjectModel, manifests: &CargoTables) {
+    for root in model
+        .roots
+        .iter_mut()
+        .filter(|root| root.language == Language::Rust)
+    {
+        if let Some(table) = manifests.get(&root.path) {
+            root.cargo_manifest = Some(cargo_manifest(&root.path, table, manifests));
+        }
+    }
+    let library_names = model
+        .roots
+        .iter()
+        .filter(|root| root.language == Language::Rust)
+        .map(|root| {
+            let package = root
+                .cargo_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.package.as_deref());
+            let library = root.package_name.as_deref().or(package);
+            (
+                root.path.clone(),
+                library.map(|name| name.replace('-', "_")),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for manifest in model
+        .roots
+        .iter_mut()
+        .filter_map(|root| root.cargo_manifest.as_mut())
+    {
+        for dependency in &mut manifest.dependencies {
+            // Only a dependency whose directory holds a manifest names a crate of the repository.
+            let Some(library) = library_names.get(&dependency.manifest_dir) else {
+                continue;
+            };
+            dependency.crate_name = if dependency.key != dependency.package {
+                Some(dependency.key.replace('-', "_"))
+            } else {
+                library.clone()
+            };
+        }
+    }
+}
+
+/// What the manifest in `dir` declares. Dependencies are kept only when a `path` places them in
+/// the repository; `name.workspace = true` reads the entry of the workspace that holds `dir`.
+fn cargo_manifest(dir: &Path, table: &toml::Table, manifests: &CargoTables) -> CargoManifest {
+    let package = table.get("package");
+    let workspace = table.get("workspace").and_then(toml::Value::as_table);
+    let mut manifest = CargoManifest {
+        package: package
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+        proc_macro: table
+            .get("lib")
+            .and_then(|lib| lib.get("proc-macro").or_else(|| lib.get("proc_macro")))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
+        workspace: workspace.is_some(),
+        workspace_members: workspace
+            .map(|workspace| workspace_members(workspace, dir))
+            .unwrap_or_default(),
+        dependencies: Vec::new(),
+    };
+    let workspace_root = cargo_workspace_root(dir, package, manifests);
+    let mut read = |scope: &toml::Table, target_specific: bool| {
+        for (section, kind) in CARGO_DEPENDENCY_TABLES {
+            let Some(entries) = scope.get(section).and_then(toml::Value::as_table) else {
+                continue;
+            };
+            for (key, value) in entries {
+                let Some(mut dependency) =
+                    cargo_path_dependency(dir, key, value, kind, workspace_root.as_ref())
+                else {
+                    continue;
+                };
+                dependency.target_specific = target_specific;
+                if dependency.manifest_dir != dir && !manifest.dependencies.contains(&dependency) {
+                    manifest.dependencies.push(dependency);
+                }
+            }
+        }
+    };
+    read(table, false);
+    if let Some(targets) = table.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values().filter_map(toml::Value::as_table) {
+            read(target, true);
+        }
+    }
+    manifest
+}
+
+/// The workspace a package inherits `workspace = true` entries from: the directory
+/// `[package] workspace` names, else the nearest manifest at or above `dir` with a `[workspace]`
+/// table, with that table's `[workspace.dependencies]`.
+fn cargo_workspace_root<'t>(
+    dir: &Path,
+    package: Option<&toml::Value>,
+    manifests: &'t CargoTables,
+) -> Option<(PathBuf, &'t toml::Table)> {
+    let explicit = package
+        .and_then(|package| package.get("workspace"))
+        .and_then(toml::Value::as_str);
+    let workspace_dir = match explicit {
+        Some(path) => PathBuf::from(normalize_path(&join_slash(dir, path))?),
+        None => dir
+            .ancestors()
+            .find(|ancestor| {
+                manifests
+                    .get(*ancestor)
+                    .is_some_and(|table| table.contains_key("workspace"))
+            })?
+            .to_path_buf(),
+    };
+    let dependencies = manifests
+        .get(&workspace_dir)?
+        .get("workspace")?
+        .get("dependencies")?
+        .as_table()?;
+    Some((workspace_dir, dependencies))
+}
+
+/// One dependency table entry, when it places the dependency in the repository.
+fn cargo_path_dependency(
+    dir: &Path,
+    key: &str,
+    value: &toml::Value,
+    kind: CargoDependencyKind,
+    workspace: Option<&(PathBuf, &toml::Table)>,
+) -> Option<CargoDependency> {
+    let inherited = value
+        .get("workspace")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    let (base, entry) = if inherited {
+        let (workspace_dir, dependencies) = workspace?;
+        (workspace_dir.as_path(), dependencies.get(key)?)
+    } else {
+        (dir, value)
+    };
+    let path = entry.get("path").and_then(toml::Value::as_str)?;
+    // A path leaving the repository names no manifest the index holds.
+    let manifest_dir = PathBuf::from(normalize_path(&join_slash(base, path))?);
+    let package = entry
+        .get("package")
+        .and_then(toml::Value::as_str)
+        .unwrap_or(key)
+        .to_string();
+    Some(CargoDependency {
+        crate_name: None,
+        key: key.to_string(),
+        package,
+        manifest_dir,
+        kind,
+        target_specific: false,
+        inherited,
+    })
+}
+
+/// `path`, relative to the repository-relative `dir`, joined with `/` separators.
+fn join_slash(dir: &Path, path: &str) -> String {
+    let dir = dir.to_string_lossy().replace('\\', "/");
+    let path = path.replace('\\', "/");
+    if dir.is_empty() {
+        path
+    } else {
+        format!("{dir}/{path}")
+    }
+}
+
+/// Repository-relative path prefixes of a workspace's `members`, each glob cut at its first
+/// wildcard, and a literal member ending in `/`.
+fn workspace_members(workspace: &toml::Table, dir: &Path) -> Vec<String> {
+    workspace
+        .get("members")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .filter_map(|member| {
+            let prefix = member.split(['*', '?', '[']).next().unwrap_or(member);
+            let joined = join_slash(dir, prefix.trim_end_matches('/'));
+            let normal = normalize_path(&joined)?;
+            if normal.is_empty() {
+                // The workspace root itself is a member: every path is below it.
+                return Some(normal);
+            }
+            Some(if member.contains(['*', '?', '[']) {
+                // `crates/*` keeps its separator; `crates/app-*` keeps its partial name.
+                if prefix.ends_with('/') {
+                    format!("{normal}/")
+                } else {
+                    normal
+                }
+            } else {
+                format!("{normal}/")
+            })
+        })
+        .collect()
+}
+
 fn repo_relative_path(path: &Path, repo_root: &Path) -> PathBuf {
     path.strip_prefix(repo_root).unwrap_or(path).to_path_buf()
 }
@@ -340,10 +560,20 @@ fn push_project_root(
         package_name,
         library_root: None,
         cargo_targets: Default::default(),
+        cargo_manifest: None,
     });
 }
 
-fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
+/// Parsed `Cargo.toml` tables by repository-relative manifest directory, kept while discovery
+/// runs: a dependency inherited from a workspace is read from the workspace's manifest.
+type CargoTables = HashMap<PathBuf, toml::Table>;
+
+fn walk_discover(
+    current: &Path,
+    repo_root: &Path,
+    model: &mut ProjectModel,
+    manifests: &mut CargoTables,
+) {
     let entries = match fs::read_dir(current) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -360,7 +590,7 @@ fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
             {
                 continue;
             }
-            walk_discover(&path, repo_root, model);
+            walk_discover(&path, repo_root, model, manifests);
         } else if path.is_file() {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 match file_name {
@@ -381,6 +611,10 @@ fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
                                 .map(|library| root.path.join(library));
                             if let Some(content) = content.as_deref() {
                                 root.cargo_targets = cargo_targets(content, current, repo_root);
+                                // A manifest that is not TOML declares nothing this reads.
+                                if let Ok(table) = content.parse::<toml::Table>() {
+                                    manifests.insert(root.path.clone(), table);
+                                }
                             }
                         }
                     }
@@ -640,5 +874,151 @@ mod tests {
         );
         assert!(!app.cargo_targets.autodiscovers(CargoTargetKind::Bin));
         assert!(app.cargo_targets.autodiscovers(CargoTargetKind::Example));
+    }
+
+    #[test]
+    fn rust_roots_carry_the_dependencies_their_manifests_place_in_the_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, content: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\", \"tools/gen\"]\n\n[workspace.dependencies]\nengine = { path = \"crates/engine\" }\nmacros = { package = \"engine-macros\", path = \"crates/macros\" }\nserde = \"1\"\n",
+        );
+        write(
+            "crates/engine/Cargo.toml",
+            "[package]\nname = \"engine\"\n\n[lib]\nname = \"engine_core\"\n",
+        );
+        write(
+            "crates/macros/Cargo.toml",
+            "[package]\nname = \"engine-macros\"\n\n[lib]\nproc-macro = true\n",
+        );
+        write(
+            "crates/app/Cargo.toml",
+            "[package]\nname = \"app\"\n\n[dependencies]\nengine.workspace = true\nmacros = { workspace = true }\nserde = { workspace = true }\nlocal = { path = \"../../vendored/local\", package = \"local-lib\" }\noutside = { path = \"../../../elsewhere\" }\n\n[dev-dependencies]\nfixtures = { path = \"../fixtures\" }\n\n[build-dependencies]\ngen = { path = \"../../tools/gen\" }\n\n[target.'cfg(unix)'.dependencies]\nsys = { path = \"../sys\" }\n",
+        );
+        write(
+            "crates/fixtures/Cargo.toml",
+            "[package]\nname = \"fixtures\"\n",
+        );
+        write("crates/sys/Cargo.toml", "[package]\nname = \"sys\"\n");
+        write("tools/gen/Cargo.toml", "[package]\nname = \"gen\"\n");
+        // A second workspace with a package of the same name is a different package.
+        write("other/Cargo.toml", "[workspace]\nmembers = [\"engine\"]\n");
+        write("other/engine/Cargo.toml", "[package]\nname = \"engine\"\n");
+        write("broken/Cargo.toml", "[package\nname = \"broken\"\n");
+
+        let model = ProjectModel::discover(dir.path());
+        let root = |path: &str| {
+            model
+                .rust_root_at(Path::new(path))
+                .unwrap_or_else(|| panic!("{path} is a Rust root"))
+        };
+        let app = root("crates/app").cargo_manifest.as_ref().unwrap();
+        let summary = app
+            .dependencies
+            .iter()
+            .map(|dependency| {
+                (
+                    dependency.crate_name.as_deref(),
+                    dependency.package.as_str(),
+                    dependency.manifest_dir.to_string_lossy().into_owned(),
+                    dependency.kind,
+                    dependency.inherited,
+                    dependency.target_specific,
+                )
+            })
+            .collect::<Vec<_>>();
+        use CargoDependencyKind::{Build, Dev, Normal};
+        assert_eq!(
+            summary,
+            vec![
+                // Named by the dependency's library, not its package or table key.
+                (
+                    Some("engine_core"),
+                    "engine",
+                    "crates/engine".into(),
+                    Normal,
+                    true,
+                    false
+                ),
+                // A path to a directory discovery does not model names no crate.
+                (
+                    None,
+                    "local-lib",
+                    "vendored/local".into(),
+                    Normal,
+                    false,
+                    false
+                ),
+                // A rename in the workspace table is the name the code writes.
+                (
+                    Some("macros"),
+                    "engine-macros",
+                    "crates/macros".into(),
+                    Normal,
+                    true,
+                    false
+                ),
+                (
+                    Some("fixtures"),
+                    "fixtures",
+                    "crates/fixtures".into(),
+                    Dev,
+                    false,
+                    false
+                ),
+                (Some("gen"), "gen", "tools/gen".into(), Build, false, false),
+                (Some("sys"), "sys", "crates/sys".into(), Normal, false, true),
+            ]
+        );
+        assert!(!app.proc_macro);
+        let macros = root("crates/macros").cargo_manifest.as_ref().unwrap();
+        assert!(macros.proc_macro);
+
+        let workspace = root("").cargo_manifest.as_ref().unwrap();
+        assert!(workspace.workspace);
+        assert_eq!(workspace.package, None);
+        assert_eq!(workspace.workspace_members, vec!["crates/", "tools/gen/"]);
+        assert_eq!(
+            root("other")
+                .cargo_manifest
+                .as_ref()
+                .unwrap()
+                .workspace_members,
+            vec!["other/engine/"]
+        );
+        assert_eq!(root("broken").cargo_manifest, None);
+
+        let app_root = root("crates/app");
+        use open_kioku_semantic_model::CargoImporter::{BuildScript, Crate};
+        let dependency = |name: &str, kind| {
+            model
+                .rust_dependency(app_root, name, kind)
+                .map(|root| root.path.to_string_lossy().into_owned())
+        };
+        assert_eq!(
+            dependency("engine_core", Crate).as_deref(),
+            Some("crates/engine")
+        );
+        assert_eq!(
+            dependency("engine", Crate),
+            None,
+            "the package name is not the crate name"
+        );
+        assert_eq!(
+            dependency("fixtures", Crate).as_deref(),
+            Some("crates/fixtures")
+        );
+        assert_eq!(
+            dependency("gen", Crate),
+            None,
+            "a build dependency is the build script's"
+        );
+        assert_eq!(dependency("gen", BuildScript).as_deref(), Some("tools/gen"));
+        assert_eq!(dependency("engine_core", BuildScript), None);
     }
 }

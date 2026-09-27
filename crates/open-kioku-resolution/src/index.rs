@@ -3,7 +3,8 @@ use open_kioku_core::{
     Symbol, SymbolId,
 };
 use smallvec::SmallVec;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub struct SymbolIndex {
@@ -135,7 +136,14 @@ pub struct ScopeIndex {
     modules_with_children: HashSet<ScopeId>,
     /// Where the declared module tree places each Rust file of a crate's module tree.
     rust_module_placements: HashMap<FileId, RustModulePlacement>,
+    /// The library crates each Rust file can name by crate name, by that name.
+    rust_crate_names: HashMap<FileId, Arc<RustCrateNames>>,
 }
+
+/// The library crates code of one crate names by crate name: the dependencies its package's
+/// manifest declares on packages of the repository, and its own package's library. Each is placed
+/// as its library crate root is, with `module` the crate root's.
+pub type RustCrateNames = BTreeMap<String, RustModulePlacement>;
 
 /// Where a Rust file of a package's module tree sits, for paths the resolver spells from file
 /// paths as tree-sitter spells qualified names (`crates/app/src/auth.rs` is `crates::app::src::auth`).
@@ -234,6 +242,21 @@ impl ScopeIndex {
     /// Where `file` sits in its crate's module tree, when it is recorded.
     pub(crate) fn rust_module_placement(&self, file: &FileId) -> Option<&RustModulePlacement> {
         self.rust_module_placements.get(file)
+    }
+
+    /// Records which library crates each Rust file names by crate name. A path through one of
+    /// those names is read from that crate's root.
+    pub fn record_rust_crate_names(&mut self, names: HashMap<FileId, Arc<RustCrateNames>>) {
+        self.rust_crate_names.extend(names);
+    }
+
+    /// The library crate `file` names `crate_name`, when it names one of the repository.
+    pub(crate) fn rust_named_crate(
+        &self,
+        file: &FileId,
+        crate_name: &str,
+    ) -> Option<&RustModulePlacement> {
+        self.rust_crate_names.get(file)?.get(crate_name)
     }
 
     /// Whether the declared module tree places `file` at its path in a crate of `placement`.

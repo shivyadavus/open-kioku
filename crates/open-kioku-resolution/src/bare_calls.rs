@@ -111,6 +111,16 @@ pub(crate) fn resolve_bare_call_outcome(
                 "rust_item_import",
                 "bare call candidate from a Rust item import bound by its module path",
             )
+        } else if bindings.iter().all(|binding| {
+            matches!(
+                binding.rule,
+                ImportBindingRule::RustModulePath | ImportBindingRule::RustReexport
+            )
+        }) {
+            (
+                "rust_reexported_item_import",
+                "bare call candidate from a Rust item import bound through a crate's `pub use` re-export",
+            )
         } else {
             (
                 "explicit_import",

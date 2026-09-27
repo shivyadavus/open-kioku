@@ -753,8 +753,10 @@ impl Indexer {
                 .iter()
                 .filter(|skipped| skipped.safe_to_show)
                 .map(|skipped| skipped.path.as_path()),
-        );
+        )
+        .with_reexports(&import_sites);
         scope_index.record_rust_module_placements(rust_modules.module_placements());
+        scope_index.record_rust_crate_names(rust_modules.crate_names());
         let rust_placement_gaps = rust_modules.placement_gaps();
         import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
         // Import bindings and file-level import edges follow the same declared module tree, and

@@ -1623,6 +1623,7 @@ fn extract_import(
             bindings,
             is_glob,
             is_type_only: false,
+            reexported: false,
             range,
         });
     }
@@ -1750,6 +1751,7 @@ fn extract_rust_use(
     let mut leaves = Vec::new();
     collect_rust_use_leaves(argument, source, "", &mut leaves);
     let range = node_source_range(node);
+    let reexported = rust_visibility(node) == Visibility::Public;
     for leaf in leaves {
         let bindings = if leaf.is_glob {
             Vec::new()
@@ -1768,6 +1770,7 @@ fn extract_rust_use(
             bindings,
             is_glob: leaf.is_glob,
             is_type_only: false,
+            reexported,
             range: range.clone(),
         });
     }
@@ -2619,6 +2622,10 @@ mod ri3_rust_use_import_site_tests {
         assert!(sites[0].bindings.is_empty());
         assert_eq!(sites[1].source, "self::auth::issue_token");
         assert_eq!(sites[1].bindings, vec![name("issue_token", "issue_token")]);
+        // Only an unrestricted `pub use` lets other crates name what it imports.
+        assert!(!sites[0].reexported);
+        assert!(sites[1].reexported);
+        assert!(!rust_import_sites("use crate::auth::issue_token;\n")[0].reexported);
     }
 }
 
