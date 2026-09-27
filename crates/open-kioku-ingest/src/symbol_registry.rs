@@ -1357,7 +1357,8 @@ fn regex_may_start(before: &str) -> bool {
     let Some(last) = before.chars().next_back() else {
         return true;
     };
-    if "(,=:[!&|?{};+-*%<>~^".contains(last) {
+    // Not `<`: in JSX `</Tag>` closes an element, and a regex after `<` is rare enough to lose.
+    if "(,=:[!&|?{};+-*%>~^".contains(last) {
         return true;
     }
     let word = before
@@ -2179,6 +2180,33 @@ mod tests {
                 "{text}"
             );
         }
+        // A JSX closing tag opens no regex: the names after it on the line are still code.
+        let jsx_symbols = vec![
+            symbol("color", "ui", "color", "ui::color", SymbolKind::Variable),
+            symbol(
+                "org",
+                "ui",
+                "organizationName",
+                "ui::organizationName",
+                SymbolKind::Variable,
+            ),
+        ];
+        let report = resolve_symbol_edges(
+            &[chunk_in(
+                Language::TypeScript,
+                r#"<Text bold>Org:</Text> <Text color="white">{organizationName}</Text>"#,
+            )],
+            &jsx_symbols,
+            &[],
+            false,
+            None,
+        );
+        let mut jsx_targets = targets(&report)
+            .into_iter()
+            .map(|(target, _, _)| target)
+            .collect::<Vec<_>>();
+        jsx_targets.sort();
+        assert_eq!(jsx_targets, vec!["ui::color", "ui::organizationName"]);
         // A `/` after an operand divides, and a call between two of them is code.
         let report = resolve_symbol_edges(
             &[chunk_in(
