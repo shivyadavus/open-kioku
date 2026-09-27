@@ -223,6 +223,14 @@ impl ContextHandleStore {
     /// connection mutex is poisoned, or a deserialization error if the
     /// stored JSON row cannot be decoded.
     pub fn retrieve(&self, handle: &ContextHandleId) -> Result<Option<RetrievedContext>> {
+        Ok(self.load(handle)?.map(|stored| RetrievedContext {
+            handle: stored.handle,
+            original: stored.original,
+            created_at: stored.created_at,
+        }))
+    }
+
+    fn load(&self, handle: &ContextHandleId) -> Result<Option<StoredContext>> {
         let conn = self
             .connection
             .lock()
@@ -238,7 +246,47 @@ impl ContextHandleStore {
         let Some(raw) = raw else {
             return Ok(None);
         };
-        let stored: StoredContext = serde_json::from_str(&raw)?;
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+
+    /// [`Self::retrieve`] for a reader serving the text: a handle whose original was read from
+    /// a file `indexed` says the published index no longer holds (deleted, or excluded by the
+    /// policy since the handle was stored) is refused with an error that carries neither its
+    /// text nor its path. `ok index` deletes such handles after it publishes, but a run killed
+    /// or blocked between the two would otherwise leave them served (#585). A row with no
+    /// recorded file cannot be checked and is refused the same way, as the prune deletes it;
+    /// test handles name a test rather than a file and are served.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::retrieve`], plus [`OkError::Index`] for a refused handle and any error
+    /// `indexed` returns.
+    pub fn retrieve_indexed(
+        &self,
+        handle: &ContextHandleId,
+        indexed: impl Fn(&Path) -> Result<bool>,
+    ) -> Result<Option<RetrievedContext>> {
+        let Some(stored) = self.load(handle)? else {
+            return Ok(None);
+        };
+        let source = handle_source(
+            &stored.handle.kind,
+            stored.path.clone(),
+            stored.handle.file_range.as_ref(),
+        );
+        let held = match source {
+            HandleSource::File(path) => indexed(&path)?,
+            HandleSource::NoFile => true,
+            HandleSource::Unknown => false,
+        };
+        if !held {
+            return Err(OkError::Index(format!(
+                "context handle `{}` quotes a file the index no longer holds (deleted, or \
+                 excluded by the index policy since the handle was stored), so its text is \
+                 withheld; run `ok index` to delete such handles and build a new compressed pack",
+                handle.0
+            )));
+        }
         Ok(Some(RetrievedContext {
             handle: stored.handle,
             original: stored.original,
@@ -469,22 +517,37 @@ fn stable_hash(value: &str, len: usize) -> String {
         .collect()
 }
 
+/// Where a stored original was read from.
+enum HandleSource {
+    File(PathBuf),
+    /// A test handle, which names a test rather than a file.
+    NoFile,
+    /// A row written before paths were recorded, with no file range to read one from.
+    Unknown,
+}
+
+fn handle_source(
+    kind: &str,
+    path: Option<PathBuf>,
+    file_range: Option<&FileRange>,
+) -> HandleSource {
+    match path.or_else(|| file_range.map(|range| range.path.to_path_buf())) {
+        Some(path) => HandleSource::File(path),
+        None if kind == "test" => HandleSource::NoFile,
+        None => HandleSource::Unknown,
+    }
+}
+
 /// Whether a stored row still describes a file the index holds; see
 /// [`ContextHandleStore::prune_removed_paths`].
 fn handle_path_still_indexed(kind: &str, json: &str, indexed_paths: &HashSet<PathBuf>) -> bool {
     let Ok(stored) = serde_json::from_str::<StoredContext>(json) else {
         return false;
     };
-    let path = stored.path.or_else(|| {
-        stored
-            .handle
-            .file_range
-            .as_ref()
-            .map(|range| range.path.to_path_buf())
-    });
-    match path {
-        Some(path) => indexed_paths.contains(&path),
-        None => kind == "test",
+    match handle_source(kind, stored.path, stored.handle.file_range.as_ref()) {
+        HandleSource::File(path) => indexed_paths.contains(&path),
+        HandleSource::NoFile => true,
+        HandleSource::Unknown => false,
     }
 }
 
@@ -650,6 +713,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A reader serving handles refuses one quoting a file the index no longer holds, with or
+    /// without a line range, even before a prune has deleted it, and says nothing of its text
+    /// or path; a handle whose file is held is served as before (#585).
+    #[test]
+    fn retrieve_indexed_refuses_a_handle_whose_file_the_index_no_longer_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ContextHandleStore::open_repo(dir.path()).unwrap();
+        let compressed = store
+            .compress_pack(&pack(vec![
+                result(
+                    "src/invoice.rs",
+                    Some(LineRange { start: 1, end: 3 }),
+                    "pub fn render_invoice_total() {}",
+                ),
+                result(
+                    "src/payroll.rs",
+                    Some(LineRange { start: 1, end: 3 }),
+                    "pub fn zebra_payroll_marker() {}",
+                ),
+                result("config/payroll.toml", None, "okapi_rate_marker = 3"),
+            ]))
+            .unwrap();
+        let handle = |needle: &str| {
+            compressed
+                .handles
+                .iter()
+                .find(|handle| handle.summary.contains(needle))
+                .unwrap()
+                .id
+                .clone()
+        };
+        let indexed = |path: &Path| Ok(path == Path::new("src/invoice.rs"));
+
+        let kept = store
+            .retrieve_indexed(&handle("render_invoice_total"), indexed)
+            .unwrap()
+            .unwrap();
+        assert!(kept.original.contains("render_invoice_total"));
+        for removed in ["zebra_payroll_marker", "okapi_rate_marker"] {
+            let err = store
+                .retrieve_indexed(&handle(removed), indexed)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("no longer holds"), "{err}");
+            assert!(!err.contains(removed) && !err.contains("payroll"), "{err}");
+            // The row is still stored: only a prune deletes it.
+            assert!(store.retrieve(&handle(removed)).unwrap().is_some());
+        }
+        assert!(store
+            .retrieve_indexed(&ContextHandleId::new("ctx:unknown"), indexed)
+            .unwrap()
+            .is_none());
     }
 
     /// A row written before paths were recorded is judged by its file range, and one with no

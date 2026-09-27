@@ -1025,9 +1025,15 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Command::RetrieveContext { handle } => {
             // An unknown handle is an error, as it is for MCP `retrieve_context`: `null`
-            // under `--json` read as an empty snippet.
+            // under `--json` read as an empty snippet. A handle quoting a file the published
+            // index no longer holds is refused, whether or not a prune has deleted it yet.
+            let index = open_store(&repo)?;
             let retrieved = ContextHandleStore::open_repo_existing(&repo)?
-                .map(|store| store.retrieve(&ContextHandleId::new(&handle)))
+                .map(|store| {
+                    store.retrieve_indexed(&ContextHandleId::new(&handle), |path| {
+                        Ok(index.get_file_by_path(path)?.is_some())
+                    })
+                })
                 .transpose()?
                 .flatten()
                 .ok_or_else(|| {

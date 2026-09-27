@@ -782,8 +782,14 @@ async fn dispatch(
             // An unknown handle is an error, not `null`: a null answer reads as an empty
             // snippet, and the handle either came from this repository's compressed pack
             // or it did not.
+            // A handle quoting a file the published index no longer holds is refused, whether
+            // or not a prune has deleted it yet (#585).
             let retrieved = ContextHandleStore::open_repo_existing(repo)?
-                .map(|store| store.retrieve(&ContextHandleId::new(handle)))
+                .map(|handles| {
+                    handles.retrieve_indexed(&ContextHandleId::new(handle), |path| {
+                        Ok(store.get_file_by_path(path)?.is_some())
+                    })
+                })
                 .transpose()?
                 .flatten()
                 .ok_or_else(|| {

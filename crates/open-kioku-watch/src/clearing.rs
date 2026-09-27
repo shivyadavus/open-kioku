@@ -44,6 +44,20 @@ impl PathsBefore {
     }
 }
 
+impl PathsBefore {
+    /// Whether the rows written since [`PathsBefore::read`] dropped a path the store indexed
+    /// then, or whether that cannot be told (an earlier run that never published). Such a run
+    /// owes the derived stores a prune, which a writer records in the manifest it publishes,
+    /// before the prune runs, so a run killed between the two stays reported (#585).
+    pub fn dropped_indexed_path(&self, store: &SqliteStore) -> Result<bool> {
+        if !self.published && !self.indexed.is_empty() {
+            return Ok(true);
+        }
+        let (indexed, _) = store.repository_paths()?;
+        Ok(!self.indexed.is_subset(&indexed))
+    }
+}
+
 /// How many times each entry the security rules produced appears among a run's skipped paths,
 /// keyed as the manifest records it: a secret-like path withheld by redaction is recorded as
 /// `[redacted]`, so those are counted together. Held in memory only; nothing here is written.

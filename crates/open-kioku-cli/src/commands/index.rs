@@ -122,14 +122,16 @@ fn index_repo_with_config(
         Err(_) => true,
     };
     snapshot.manifest.quality.pending_deleted_content_clearing = compaction_owed;
-    // A prune an earlier run left pending stays reported until the one below succeeds; an
-    // unreadable previous manifest leaves it unknown, so it is owed.
+    // Owed until the prune after publication succeeds when this run dropped a path, so a run
+    // killed before that prune stays reported rather than leaving the derived stores serving
+    // the path's text under a clean status; a prune an earlier run left pending stays owed;
+    // and an unreadable previous manifest leaves it unknown, so it is owed.
     snapshot.manifest.quality.pending_derived_store_pruning = match &previous_manifest {
         Ok(previous) => previous
             .as_ref()
             .is_some_and(|previous| previous.quality.pending_derived_store_pruning),
         Err(_) => true,
-    };
+    } || paths_before.dropped_indexed_path(&store).unwrap_or(true);
     report_index_stage(&reporter, "graph", "building dependency graph".to_string());
     let graph = InMemoryGraph::from_index_with_resolved_relationships(
         &snapshot.files,

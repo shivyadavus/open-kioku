@@ -285,3 +285,70 @@ fn watch_records_a_failed_prune_apart_and_stops_pruning_once_one_succeeds() {
     edit("gamma_watch_token");
     assert!(interrupted_build.exists(), "a settled prune ran again");
 }
+
+/// An event that drops a path publishes its manifest with the prune recorded as owed, before
+/// the prune runs, so a watcher killed in between (here, a prune waiting on a reader of the
+/// context store) leaves it reported rather than a clean status over stores still quoting the
+/// path (#585).
+#[test]
+fn watch_records_the_prune_an_event_owes_before_running_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().to_path_buf();
+    initialize_repo(&repo);
+    reindex_repo(&repo).unwrap();
+    let mut config = semantic_config(&repo);
+    config.semantic.enabled = false;
+    write_config(&repo, &config);
+    // A row the prune must delete, so it waits for the reader below.
+    open_kioku_context_compress::ContextHandleStore::open_repo(&repo).unwrap();
+    let reader = rusqlite::Connection::open(repo.join(".ok/context.sqlite")).unwrap();
+    reader
+        .execute(
+            "INSERT INTO context_handles(id, kind, created_at, json) VALUES('ctx:legacy', 'primary', '', '{}')",
+            [],
+        )
+        .unwrap();
+    assert!(!quality(&repo).pending_derived_store_pruning);
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM context_handles", [], |row| row.get(0))
+        .unwrap();
+
+    let billing = repo.join("src/billing.rs");
+    fs::remove_file(&billing).unwrap();
+    let event = {
+        let repo = repo.clone();
+        std::thread::spawn(move || reindex_repo_after_changes(&repo, [billing.as_path()]))
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut recorded_while_pruning = false;
+    while !event.is_finished() && std::time::Instant::now() < deadline {
+        let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
+        let published =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .ok()
+                })
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok());
+        if published
+            .is_some_and(|manifest| manifest["quality"]["pending_derived_store_pruning"] == true)
+        {
+            recorded_while_pruning = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    reader.execute_batch("COMMIT").unwrap();
+    let status = event.join().unwrap().unwrap();
+
+    assert_eq!(status.deleted_files, 1);
+    assert!(
+        recorded_while_pruning,
+        "the owed prune was not recorded before it ran"
+    );
+    assert!(!quality(&repo).pending_derived_store_pruning);
+}

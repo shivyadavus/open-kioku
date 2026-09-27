@@ -334,10 +334,19 @@ pub fn reindex_repo_after_changes<'a>(
             || previous_manifest
                 .as_ref()
                 .is_some_and(|previous| previous.quality.pending_deleted_content_clearing);
-        // Reported until a prune succeeds, which this event may not attempt (below).
-        snapshot.manifest.quality.pending_derived_store_pruning = previous_manifest
-            .as_ref()
-            .is_some_and(|previous| previous.quality.pending_derived_store_pruning);
+        // Owed by an event that dropped a path, recorded before the prune it runs after
+        // publication (below) so a watcher killed in between stays reported; and reported
+        // until a prune succeeds, which a later event may not attempt. A partial update drops
+        // only the paths it deleted.
+        let dropped = if partial {
+            deleted_file_count > 0 || compaction_owed
+        } else {
+            paths_before.dropped_indexed_path(&store).unwrap_or(true)
+        };
+        snapshot.manifest.quality.pending_derived_store_pruning = dropped
+            || previous_manifest
+                .as_ref()
+                .is_some_and(|previous| previous.quality.pending_derived_store_pruning);
         // Published last: every component the manifest describes is in place by now.
         store.put_manifest(&snapshot.manifest)
     };
@@ -395,7 +404,6 @@ pub fn reindex_repo_after_changes<'a>(
         compaction_owed && !compacted,
         compaction_owed || compacted,
     )?;
-    maintain_semantic_index(root, &store, &config);
     // Only a run that removed a path owes this; a partial update that only changed files
     // skips reading the vector store on every event. A prune an earlier run left pending is
     // not a reason either: like a pending compaction it is retried by the next `ok index` or
@@ -404,6 +412,7 @@ pub fn reindex_repo_after_changes<'a>(
     if !partial || deleted_file_count > 0 || compaction_owed {
         prune_derived_stores(root, &store, &mut snapshot.manifest)?;
     }
+    maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
         files: snapshot.manifest.file_count,
@@ -466,10 +475,12 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     )
     .unwrap_or(true);
     snapshot.manifest.quality.pending_deleted_content_clearing = compaction_owed;
-    // Reported until the prune below succeeds.
+    // Owed by a run that dropped a path, and reported until the prune below succeeds; see
+    // `reindex_repo_after_changes`.
     snapshot.manifest.quality.pending_derived_store_pruning = previous_manifest
         .as_ref()
-        .is_some_and(|previous| previous.quality.pending_derived_store_pruning);
+        .is_some_and(|previous| previous.quality.pending_derived_store_pruning)
+        || paths_before.dropped_indexed_path(&store).unwrap_or(true);
     let graph_nodes = replace_graph_from_snapshot(&store, &snapshot)?;
     rebuild_disk_index_with_graph(
         default_index_dir(root),
@@ -502,8 +513,8 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         compaction_owed && !compacted,
         true,
     )?;
-    maintain_semantic_index(root, &store, &config);
     prune_derived_stores(root, &store, &mut snapshot.manifest)?;
+    maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
         files: snapshot.manifest.file_count,
@@ -516,8 +527,9 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     })
 }
 
-/// After the semantic refresh, which already leaves removed paths out when it succeeds, so
-/// this finds nothing to do then; see [`derived`]. A failure is recorded in the manifest.
+/// Before the semantic refresh: settling the prune rewrites the manifest, which the refresh
+/// fingerprints, so a refresh run first would read as stale at once. The refresh then builds
+/// from what the prune kept. See [`derived`]. A failure is recorded in the manifest.
 fn prune_derived_stores(
     root: &Path,
     store: &SqliteStore,

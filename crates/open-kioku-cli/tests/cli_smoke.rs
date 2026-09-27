@@ -8879,6 +8879,157 @@ fn index_records_a_failed_prune_as_outstanding_instead_of_failing() {
     assert_eq!(named(&doctor_checks(repo), "derived_stores"), None);
 }
 
+/// `ok index` publishes, then prunes the derived stores. A run killed in between, here while
+/// a reader holds the context store so the prune waits, must neither leave status and doctor
+/// clean nor let `ok retrieve-context` serve a handle quoting the file it dropped: the manifest
+/// records the prune as owed before it is published, and retrieval checks the published index
+/// itself (#585).
+#[test]
+fn index_killed_before_its_prune_reports_it_and_serves_no_dropped_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let marker = "zebra_payroll_marker";
+    fs::create_dir_all(repo.join("src/payroll")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn render_invoice_total() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/payroll/rates.rs"),
+        format!("pub fn {marker}() -> u32 {{ 7 }}\n"),
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let compressed: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "context", "--compressed", marker]);
+        command
+    }))
+    .unwrap();
+    let handle = compressed["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|handle| handle["summary"].as_str().unwrap().contains(marker))
+        .unwrap_or_else(|| panic!("a handle quotes `{marker}`: {compressed}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Resolved on every read: a run may publish a new generation.
+    let indexed_at = || -> Option<String> {
+        let db = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+        let conn =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .ok()?;
+        conn.busy_timeout(std::time::Duration::from_secs(5)).ok()?;
+        let json: String = conn
+            .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .ok()?;
+        let manifest: serde_json::Value = serde_json::from_str(&json).ok()?;
+        manifest["indexed_at"].as_str().map(str::to_string)
+    };
+    let before = indexed_at().unwrap();
+
+    let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    fs::write(
+        repo.join("ok.toml"),
+        config.replacen("deny = [\n", "deny = [\n    \"src/payroll/**\",\n", 1),
+    )
+    .unwrap();
+    let reader = rusqlite::Connection::open(repo.join(".ok/context.sqlite")).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM context_handles", [], |row| row.get(0))
+        .unwrap();
+    let mut child = ok()
+        .arg("index")
+        .arg(repo)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    loop {
+        if indexed_at().is_some_and(|now| now != before) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the run never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // Published; the prune waits on the reader (up to 30 s), so it has not deleted anything.
+    child.kill().unwrap();
+    child.wait().unwrap();
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    let stored = rusqlite::Connection::open(repo.join(".ok/context.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM context_handles WHERE id = ?1",
+            [&handle],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 1, "the killed run's prune did not run");
+
+    let status = status_json(repo);
+    assert_eq!(
+        status["quality"]["pending_derived_store_pruning"], true,
+        "{status}"
+    );
+    let (stdout, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["retrieve-context", &handle]);
+        command
+    });
+    assert!(stderr.contains("no longer holds"), "{stderr}");
+    assert!(
+        !stdout.contains(marker) && !stderr.contains(marker),
+        "{stdout}{stderr}"
+    );
+
+    // The next run prunes, and settles the record.
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let status = status_json(repo);
+    assert!(
+        status["quality"]["pending_derived_store_pruning"].is_null(),
+        "{status}"
+    );
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["retrieve-context", &handle]);
+        command
+    });
+    assert!(stderr.contains("no context handle"), "{stderr}");
+}
+
 fn assert_secrets_absent(label: &str, haystack: &str, secrets: &[&str]) {
     let lowered = haystack.to_ascii_lowercase();
     for secret in secrets {
