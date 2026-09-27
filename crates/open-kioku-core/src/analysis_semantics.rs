@@ -62,7 +62,13 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// indexes hold no `IMPORTS` edge, import binding or `CALLS` edge across crates, and no binding
 /// for a path through the importer's own crate name. A call path or a call through an imported
 /// module never ends in a module symbol.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v15";
+/// v16 (the change v15 calls v14; it landed after v15): the symbol-registry pass matches by name
+/// alone only a plain name: not an attribute (a Java annotation matches types only), a member
+/// access (unless its receiver names the symbol's package or type), a field name or a local the
+/// chunk binds, nor a path or import that leads elsewhere (`std::mem::take`, `use anyhow::Result;`);
+/// and it reads Python f-string fields as code. v15 indexes hold unique-name edges from those
+/// tokens and none from f-string fields.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v16";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
