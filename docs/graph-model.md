@@ -92,6 +92,16 @@ smallest; `ambiguity` and `quality_notes` are sorted unions. A file node's `sour
 therefore the smallest source among the facts that point at it, such as the lexically first
 `git-history:<commits>` source, not a claim about which commit is most relevant.
 
+Several writes can describe one edge too: every call site of a caller in a callee, or an
+analysis fact and a resolved relationship for the same pair. The edge keeps one representative
+`evidence`, chosen by the highest source rank and confidence, then the earliest site (path,
+then line; evidence with a site before evidence without one), then the smaller evidence
+source and id, so the line an edge shows is its earliest call site among the strongest
+evidence and does not move when node identity changes. `call_sites`, `reference_sites` and
+relationship proofs are unions of every write and the evidence message a sorted union of
+their lines. The representative's own properties and provenance fields are kept; a field it
+leaves unset takes the smallest value any write gave, as for nodes.
+
 All of these fields are backward-compatible serde defaults on the wire: an MCP or
 `--json` consumer that has not seen a field still deserializes, and the serialized shape of
 a `GraphEdge` is unchanged by the 4.0 storage work.

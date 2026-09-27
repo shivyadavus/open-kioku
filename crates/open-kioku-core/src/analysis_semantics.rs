@@ -66,7 +66,11 @@ pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-reso
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
-pub const GRAPH_EMISSION_SEMANTICS_VERSION: &str = "ri3-graph-emission-v2";
+/// v3: an edge several writes describe keeps the evidence at its earliest site among the
+/// strongest writes, and a field that evidence's write leaves unset takes the smallest value any
+/// write gave; v2 kept the evidence with the smallest id, a hash of the edge's target node, and
+/// filled unset fields from whichever write was folded first.
+pub const GRAPH_EMISSION_SEMANTICS_VERSION: &str = "ri3-graph-emission-v3";
 pub const EXACT_INDEX_INGESTION_SEMANTICS_VERSION: &str = "exact-occurrence-v1";
 pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1";
 /// v2: test targets are callables with a test annotation in the attribute stack above them,

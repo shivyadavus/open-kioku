@@ -5,7 +5,7 @@
     "analysis_semantics": {
       "descriptor": {
         "exact_index_ingestion_version": "exact-occurrence-v1",
-        "graph_emission_version": "ri3-graph-emission-v2",
+        "graph_emission_version": "ri3-graph-emission-v3",
         "language_adapter_versions": {
           "go": "ri3-language-semantics-v1",
           "java": "ri3-language-semantics-v1",
@@ -28,16 +28,16 @@
         "stable_identity_version": "stable-identity-v2",
         "version": 1
       },
-      "fingerprint": "fec0b8f1083cef94b7468f4727fb581faec52a6ed7e3353f3be648f15e04f02c"
+      "fingerprint": "455d33e82c9ed03f7b012eb65bb92b837cfec0f932027bdb2c9b2eacc4ddb826"
     },
     "analysis_semantics_status": {
       "affected_components": [],
       "affected_languages": [],
-      "current_fingerprint": "fec0b8f1083cef94b7468f4727fb581faec52a6ed7e3353f3be648f15e04f02c",
+      "current_fingerprint": "455d33e82c9ed03f7b012eb65bb92b837cfec0f932027bdb2c9b2eacc4ddb826",
       "reasons": [],
       "recommended_action": "none",
       "status": "compatible",
-      "stored_fingerprint": "fec0b8f1083cef94b7468f4727fb581faec52a6ed7e3353f3be648f15e04f02c"
+      "stored_fingerprint": "455d33e82c9ed03f7b012eb65bb92b837cfec0f932027bdb2c9b2eacc4ddb826"
     },
     "chunk_count": 1,
     "coverage": null,
