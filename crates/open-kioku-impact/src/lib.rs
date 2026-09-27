@@ -140,8 +140,8 @@ impl<'a> ImpactEngine<'a> {
         let mut omitted_direct_exact = 0;
         let mut omitted_direct_imports = 0;
         let mut omitted_direct_import_uses = 0;
-        // Rust package structure answers what the graph cannot: which downstream crates import
-        // this file's public items, and which lexical matches no dependency path can reach.
+        // The Rust package model and import resolutions indexing stored answer which downstream
+        // crates import this file, and which lexical matches no dependency path can reach.
         let rust_packages = match &file {
             Some(file) if file.language == open_kioku_core::Language::Rust => {
                 let files = self.store.list_files(usize::MAX, 0)?;
@@ -293,6 +293,20 @@ impl<'a> ImpactEngine<'a> {
                     dependents.importing_files, dependents.packages, dependents.use_files
                 ));
             }
+            if dependents.unresolved_imports > 0 || dependents.unchecked_import_files > 0 {
+                reasons.push(format!(
+                    "{} `use` declaration(s) naming this file's crate in its package or its dependents resolved to no file{}; an importer of this file may be among them",
+                    dependents.unresolved_imports,
+                    if dependents.unchecked_import_files > 0 {
+                        format!(
+                            ", and {} further file(s) holding such declarations were not checked (scan cap reached)",
+                            dependents.unchecked_import_files
+                        )
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
             if dependents.unscanned_files > 0 {
                 reasons.push(format!(
                     "{} file(s) of importing packages were not read for uses of the imported items (scan cap reached)",
@@ -308,9 +322,9 @@ impl<'a> ImpactEngine<'a> {
                         .collect::<Vec<_>>()
                         .join(", ");
                     reasons.push(format!(
-                        "{} lexical match(es) left out: Rust files in no workspace package, or in packages with no Cargo dependency path to `{}` (e.g. {sample})",
+                        "{} lexical match(es) left out: Rust files in no workspace package, or in packages with no Cargo dependency path to {} (e.g. {sample})",
                         unreachable_lexical.len(),
-                        workspace.package_name(reachability.package)
+                        workspace.package_label(reachability.package)
                     ));
                 }
             }
@@ -1358,10 +1372,11 @@ enum DirectImpactKind {
 }
 
 /// Which tier an impact ranks in before its score is read. Only an exact reference is
-/// repository truth. A crate import is the importer's own `use` row naming the changed file's
-/// item through its crate name, in a package declaring that dependency: a source fact, though no
-/// resolver proved it, so it ranks below exact references and above everything statistical or
-/// lexical, with the name uses in the importing packages it attributes. Co-change is statistical
+/// repository truth. A crate import is a `use` row written through a crate name that the import
+/// resolver resolved to the changed file, following the dependency the importer's package
+/// declares: a proven file-level import, not a reference to one of the file's symbols, so it ranks
+/// below exact references and above everything statistical or lexical, with the name uses in the
+/// importing packages it attributes. Co-change is statistical
 /// history, and runtime and service-boundary
 /// impacts are lexical hits corroborated by a runtime fact or a matching static route or
 /// channel string: evidence that a dependency is likely, not that one exists. All four rank
