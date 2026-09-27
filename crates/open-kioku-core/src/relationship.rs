@@ -390,16 +390,25 @@ fn confidence_rank(confidence: Confidence) -> u8 {
     }
 }
 
-/// Evidence tier a bounded window ranks an edge by: 2 proven, 1 corroborating, 0 heuristic.
+/// The highest tier [`graph_edge_window_tier`] returns.
+pub const GRAPH_EDGE_WINDOW_TIER_MAX: u8 = 3;
+
+/// Evidence tier a bounded window ranks an edge by, strongest first:
 ///
-/// Relationship edges take the tier of their effective [`relationship_authority`], recomputed
-/// from their typed proofs. Containment edges (`CONTAINS`, `DEFINES`) resolve no name: they
-/// record where an extracted symbol lives, so no proof policy applies to them. One extracted by a
-/// parser or an index (tree-sitter, SCIP, LSP) ranks with proven edges; one from the regex
-/// fallback or another heuristic extractor is a guess about where a symbol is, and ranks as
-/// heuristic. Every other edge, proofless or statistical (`SIMILAR_TO`, `SEMANTICALLY_RELATED`,
-/// a symbol-registry name match), is heuristic.
-fn window_tier(edge: &GraphEdge) -> u8 {
+/// - 3: a relationship proven by its typed proofs ([`RelationshipAuthority::Authoritative`]).
+/// - 2: parsed containment. `CONTAINS` and `DEFINES` resolve no name — they record where an
+///   extracted symbol lives — so no proof policy applies to them. One extracted by a parser or an
+///   index (tree-sitter, SCIP, LSP) is a fact, but not a dependency: it ranks below every proven
+///   relationship, so a file with many symbols cannot push a proven import or dependent out of its
+///   own window, and above everything unproven.
+/// - 1: a corroborated relationship.
+/// - 0: heuristic — proofless or statistical edges (`SIMILAR_TO`, `SEMANTICALLY_RELATED`, a
+///   symbol-registry name match), and containment from the regex fallback, which is a guess
+///   about where a symbol is.
+///
+/// Only an edge that carries typed relationship proofs, or a `CONTAINS`/`DEFINES` edge, can rank
+/// above 0; the SQLite store relies on that to skip proof decoding for the rest.
+pub fn graph_edge_window_tier(edge: &GraphEdge) -> u8 {
     match edge.edge_type {
         GraphEdgeType::Contains | GraphEdgeType::Defines => {
             if edge.evidence.source_type.is_exact_reference_source() {
@@ -409,33 +418,46 @@ fn window_tier(edge: &GraphEdge) -> u8 {
             }
         }
         _ => match edge.relationship_authority() {
-            RelationshipAuthority::Authoritative => 2,
+            RelationshipAuthority::Authoritative => GRAPH_EDGE_WINDOW_TIER_MAX,
             RelationshipAuthority::Corroborating => 1,
             RelationshipAuthority::Heuristic => 0,
         },
     }
 }
 
-/// Order a set of graph edges the way every bounded edge window keeps them: proven edges first,
-/// then corroborating, then heuristic (see [`window_tier`]); within a tier stronger evidence
-/// confidence first; then edge id.
+/// Sort key of one edge in window order: see [`sort_graph_edges_for_window`]. Smaller sorts first.
+pub fn graph_edge_window_key(
+    edge: &GraphEdge,
+) -> (std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, String) {
+    graph_edge_window_key_with_tier(edge, graph_edge_window_tier(edge))
+}
+
+/// [`graph_edge_window_key`] for an edge whose tier the caller already computed.
+pub fn graph_edge_window_key_with_tier(
+    edge: &GraphEdge,
+    tier: u8,
+) -> (std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, String) {
+    (
+        std::cmp::Reverse(tier),
+        std::cmp::Reverse(confidence_rank(edge.evidence.confidence)),
+        edge.id.0.clone(),
+    )
+}
+
+/// Order a set of graph edges the way every bounded edge window keeps them: by evidence tier
+/// ([`graph_edge_window_tier`]: proven relationships, then parsed containment, then
+/// corroborated, then heuristic); within a tier stronger evidence confidence first; then edge id.
 ///
 /// A window that truncates by edge id alone lets whichever edges happen to hash low fill it, so
 /// a heuristic edge could displace a proven one from a node's neighbourhood. Sorting rather than
 /// reserving slots keeps every prefix tier-ordered, so any `limit` a caller picks cuts the
-/// weakest edges. Confidence only orders edges within one tier — a confident heuristic edge never
-/// outranks a proven one — and the edge id makes the order total and independent of insertion
-/// order.
+/// lowest-ranked edges. Confidence only orders edges within one tier — a confident heuristic edge
+/// never outranks a proven one — and the edge id makes the order total and independent of
+/// insertion order.
 pub fn sort_graph_edges_for_window(edges: &mut [GraphEdge]) {
     // The tier parses the typed proofs, so it is computed once per edge rather than per
     // comparison.
-    edges.sort_by_cached_key(|edge| {
-        (
-            std::cmp::Reverse(window_tier(edge)),
-            std::cmp::Reverse(confidence_rank(edge.evidence.confidence)),
-            edge.id.0.clone(),
-        )
-    });
+    edges.sort_by_cached_key(graph_edge_window_key);
 }
 
 /// Reusable typed filter for callers that need authority-aware relationship reads.
@@ -530,8 +552,9 @@ mod tests {
             ),
         ];
         edges.last_mut().unwrap().edge_type = GraphEdgeType::DerivedFrom;
-        // A parsed containment edge resolves no name, so it ranks with proven edges; the same
-        // edge from the regex fallback is a guess and ranks with heuristic ones.
+        // A parsed containment edge is a fact but not a dependency: below every proven
+        // relationship, above everything unproven. The same edge from the regex fallback is a
+        // guess and ranks with heuristic ones.
         let mut defines = windowed("x-defines", Vec::new(), Confidence::High);
         defines.edge_type = GraphEdgeType::Defines;
         defines.evidence.source_type = EvidenceSourceType::TreeSitter;
@@ -549,8 +572,8 @@ mod tests {
         assert_eq!(
             order,
             [
-                "x-defines",
                 "z-proven",
+                "x-defines",
                 "y-corroborated",
                 "d-ambiguous-binding",
                 "b-heuristic-high",
