@@ -109,11 +109,12 @@ impl PathMount {
     fn may_mount(&self, stem: &str) -> bool {
         match self {
             Self::File(file) => file == stem,
+            // At least one module directory lies between the declaring file's directory and
+            // the file, so `x.rs` beside the declaring file is not the one mounted.
             Self::Below { dir, file } => strip_dir(stem, dir).is_some_and(|below| {
-                below == file
-                    || below
-                        .strip_suffix(file.as_str())
-                        .is_some_and(|prefix| prefix.ends_with('/'))
+                below
+                    .strip_suffix(file.as_str())
+                    .is_some_and(|prefix| prefix.ends_with('/'))
             }),
             Self::Unknown => true,
         }
@@ -2508,6 +2509,34 @@ mod tests {
         let placements = modules.module_placements();
         assert!(placements[&FileId::new("file:src/process/imp.rs")].in_other_crates);
         assert!(!placements[&FileId::new("file:src/util.rs")].in_other_crates);
+
+        // `mod a { #[path = "x.rs"] mod b; }` in `main.rs` mounts `src/a/x.rs`, not the
+        // library's `src/x.rs` beside `main.rs`.
+        let nested_files = [
+            "src/lib.rs",
+            "src/main.rs",
+            "src/x.rs",
+            "src/a/mod.rs",
+            "src/a/x.rs",
+        ]
+        .map(source_file);
+        let block_scopes = open_kioku_resolution::ScopeIndex::build(vec![inline_module_scope(
+            "scope:main:a",
+            "src/main.rs",
+        )]);
+        let nested = vec![
+            mod_decl("src/lib.rs", "x"),
+            mod_decl("src/lib.rs", "a"),
+            mod_decl("src/a/mod.rs", "x"),
+            ModuleDeclarationSite {
+                scope_id: Some(ScopeId::new("scope:main:a")),
+                ..path_decl("src/main.rs", "b", &["x.rs"])
+            },
+        ];
+        let modules = RustModuleTree::new(&nested_files, &project, &nested, &block_scopes);
+        let placements = modules.module_placements();
+        assert!(placements[&FileId::new("file:src/a/x.rs")].in_other_crates);
+        assert!(!placements[&FileId::new("file:src/x.rs")].in_other_crates);
 
         // A `#[path]` the index cannot read may mount any file of the package outside its crate.
         let mut declarations = own;
