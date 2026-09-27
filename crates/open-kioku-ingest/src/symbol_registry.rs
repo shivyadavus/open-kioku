@@ -93,6 +93,9 @@ struct TokenUse {
     role: TokenRole,
     /// Rust: the segment before `::` when the token ends a path (`mem` of `std::mem::take`).
     qualifier: Option<String>,
+    /// A member's receiver when it is a plain name, outside an import line: `structs` of
+    /// `structs.NewCheckID(..)`, `Constants` of `Constants.ACCESS_KEY`.
+    receiver: Option<String>,
 }
 
 /// What a token's place in the code says it can name, beyond its spelling (#582). Only a `Name`
@@ -602,6 +605,37 @@ impl SymbolRegistry {
                     .resolve_unique_project_name(chunk, token, &fields)
                     .unwrap_or_else(|| unresolved("no field candidate matched a field name"));
             }
+            TokenRole::Attribute if chunk.language == Language::Java => {
+                // A Java annotation names a type: `@Retries.RetryRaw` may name the repository's
+                // `Retries`, never a method or field of that name.
+                let types = |symbol: &Symbol| {
+                    matches!(symbol.kind, SymbolKind::Class | SymbolKind::Interface)
+                        && admits(symbol)
+                };
+                return self
+                    .resolve_unique_project_name(chunk, token, &types)
+                    .unwrap_or_else(|| {
+                        unresolved(TokenRole::Attribute.withheld_reason().unwrap_or_default())
+                    });
+            }
+            TokenRole::Member => {
+                // A receiver that names where the candidate is defined is evidence a bare
+                // member lacks: Go's `structs.NewCheckID`, Java's `Constants.ACCESS_KEY`.
+                // A lowercase Java receiver is a variable, whose name may match a package's.
+                let receiver = token_use.receiver.as_deref().filter(|receiver| {
+                    chunk.language != Language::Java || receiver.starts_with(char::is_uppercase)
+                });
+                let Some(receiver) = receiver else {
+                    return unresolved(TokenRole::Member.withheld_reason().unwrap_or_default());
+                };
+                let owned =
+                    |symbol: &Symbol| admits(symbol) && segment_locates(self, receiver, symbol);
+                return self
+                    .resolve_unique_project_name(chunk, token, &owned)
+                    .unwrap_or_else(|| {
+                        unresolved(TokenRole::Member.withheld_reason().unwrap_or_default())
+                    });
+            }
             role => {
                 return unresolved(role.withheld_reason().unwrap_or_default());
             }
@@ -681,7 +715,12 @@ impl SymbolRegistry {
             let bindings = model.file_imports(&chunk.file_id, token);
             !bindings.is_empty()
                 && bindings.iter().all(|binding| {
+                    // A Java static import keeps its keyword: `static org.x.Constants.NAME`.
                     let source = binding.source_module.as_str();
+                    let source = source
+                        .strip_prefix("static ")
+                        .unwrap_or(source)
+                        .trim_start();
                     let root = source
                         .split([':', '.', '/'])
                         .find(|segment| !segment.is_empty())
@@ -1272,10 +1311,7 @@ fn push_code_token(
         return;
     }
     let role = context.word(line, token.clone(), line_index);
-    let qualifier = (*language == Language::Rust)
-        .then(|| path_qualifier(&line[..token.start]))
-        .flatten();
-    push_token_use(uses, text, line, token.end, line_index, role, qualifier);
+    push_token_use(uses, language, line, token, line_index, role);
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1285,6 +1321,7 @@ enum Dialect {
     Script,
     Python,
     Java,
+    Go,
     Other,
 }
 
@@ -1307,6 +1344,7 @@ enum Word {
     Mut,
     Move,
     As,
+    Var,
     /// Java: a capitalized name or primitive type, before a declared name.
     Type,
     Other,
@@ -1318,7 +1356,8 @@ impl Word {
             "mut" => Word::Mut,
             "move" => Word::Move,
             "as" => Word::As,
-            "int" | "long" | "short" | "byte" | "char" | "boolean" | "float" | "double" | "var" => {
+            "var" => Word::Var,
+            "int" | "long" | "short" | "byte" | "char" | "boolean" | "float" | "double" => {
                 Word::Type
             }
             _ if text.starts_with(char::is_uppercase) => Word::Type,
@@ -1354,6 +1393,16 @@ struct TokenContext {
     /// The bracket depth of an open binding pattern: Rust `let`, `for` and closure parameters,
     /// JavaScript `const`, `let` and `var`, Python `for`, `lambda` and `as`.
     pattern: Option<usize>,
+    /// The open pattern is a `let`, `const` or `var`, whose names are bound only once the
+    /// statement's value is: in `let path = path.join(..);` the second `path` is not the local.
+    pattern_defers: bool,
+    /// Bindings not yet in effect, by index into `bindings`, with the bracket depth of their
+    /// statement.
+    deferred: Vec<(usize, usize)>,
+    /// The 1-based line being read.
+    line_number: u32,
+    /// Where a deferred binding's own name stands.
+    binding_sites: Vec<(u32, u32)>,
     /// Python: a `def` whose parameter list has not opened yet, then that list's depth.
     def_pending: bool,
     def_params: Option<usize>,
@@ -1370,6 +1419,7 @@ impl TokenContext {
             Language::TypeScript | Language::JavaScript => Dialect::Script,
             Language::Python => Dialect::Python,
             Language::Java => Dialect::Java,
+            Language::Go => Dialect::Go,
             _ => Dialect::Other,
         };
         Self {
@@ -1380,6 +1430,10 @@ impl TokenContext {
             annotation: Annotation::None,
             previous_word: None,
             pattern: None,
+            pattern_defers: false,
+            deferred: Vec::new(),
+            line_number: 0,
+            binding_sites: Vec::new(),
             def_pending: false,
             def_params: None,
             assignment_end: None,
@@ -1388,9 +1442,18 @@ impl TokenContext {
     }
 
     fn start_line(&mut self, line: &str) {
+        self.line_number += 1;
+        // A Python or JavaScript statement may end with its line; a Rust one ends at its `;`.
+        if self.dialect != Dialect::Rust {
+            self.bind_deferred(0);
+        }
         self.hash = 0;
         self.annotation = Annotation::None;
         self.assignment_end = None;
+        if self.dialect == Dialect::Go {
+            self.pattern = None;
+            self.assignment_end = go_short_declaration_end(line);
+        }
         if self.dialect == Dialect::Python {
             // A Python statement ends with its line unless a bracket is open.
             if self.brackets.is_empty() {
@@ -1456,6 +1519,10 @@ impl TokenContext {
                     // `impl Trait for Type {`: the body is no pattern.
                     self.pattern = None;
                 }
+                if ch == '{' {
+                    // `if let Some(x) = x {`: the block sees the local.
+                    self.bind_deferred(idx as u32 + 1);
+                }
                 self.brackets.push(bracket);
                 if ch == '(' && self.def_pending {
                     self.def_pending = false;
@@ -1481,7 +1548,10 @@ impl TokenContext {
                     self.pattern = None;
                 }
             }
-            ';' => self.pattern = None,
+            ';' => {
+                self.pattern = None;
+                self.bind_deferred(idx as u32 + 1);
+            }
             '|' if self.dialect == Dialect::Rust => {
                 let depth = self.brackets.len();
                 if self.pattern == Some(depth) {
@@ -1493,6 +1563,7 @@ impl TokenContext {
                     // A `|` where an operand goes opens a closure's parameters; after an operand
                     // it is an or.
                     self.pattern = Some(depth);
+                    self.pattern_defers = false;
                 }
             }
             ':' if self.dialect == Dialect::Python && self.pattern == Some(self.brackets.len()) => {
@@ -1543,14 +1614,41 @@ impl TokenContext {
                     && after.starts_with('=')
                     && !after.starts_with("==")
             }
+            // A composite literal's `Key: value`; `case X:` follows a word, not an entry.
+            Dialect::Go => {
+                colon_follows
+                    && !after.starts_with(":=")
+                    && matches!(innermost, Some(Bracket::Brace { .. }))
+                    && starts_entry(&['{', ','])
+            }
             Dialect::Java | Dialect::Other => false,
         };
         if !member && self.binds(text, before, after, colon_follows, token.end) {
-            self.bindings.push((
-                text.to_string(),
-                line_index as u32 + 1,
-                token.start as u32 + 1,
-            ));
+            let depth = self.brackets.len();
+            let defer = match self.dialect {
+                Dialect::Rust | Dialect::Script => {
+                    self.pattern_defers && self.pattern.is_some_and(|start| depth >= start)
+                }
+                Dialect::Python => {
+                    self.assignment_end.is_some_and(|at| token.end <= at) && depth == 0
+                }
+                Dialect::Go => self.assignment_end.is_some_and(|at| token.end <= at),
+                Dialect::Java | Dialect::Other => false,
+            };
+            if defer {
+                let statement_depth = self.pattern.unwrap_or(depth);
+                self.deferred.push((self.bindings.len(), statement_depth));
+                self.bindings.push((text.to_string(), u32::MAX, u32::MAX));
+                // The name it declares is no use of anything else.
+                self.binding_sites
+                    .push((line_index as u32 + 1, token.start as u32 + 1));
+            } else {
+                self.bindings.push((
+                    text.to_string(),
+                    line_index as u32 + 1,
+                    token.start as u32 + 1,
+                ));
+            }
         }
         self.after_word(text);
         if in_attribute {
@@ -1599,12 +1697,18 @@ impl TokenContext {
                 (in_pattern && !after.starts_with(['(', '.'])) || param || target
             }
             Dialect::Java => {
-                let typed = self.previous_word == Some(Word::Type)
+                let typed = matches!(self.previous_word, Some(Word::Type | Word::Var))
                     || (self.last_punct.is_some_and(|ch| ch == '>' || ch == ']')
                         && after.starts_with(['=', ';']));
                 let ends = after.starts_with([';', ',', ')', ':'])
                     || (after.starts_with('=') && !after.starts_with("=="));
                 lowercase && typed && ends
+            }
+            Dialect::Go => {
+                let declared = self.assignment_end.is_some_and(|at| end <= at);
+                let var = self.pattern.is_some_and(|start| depth >= start)
+                    && self.previous_word == Some(Word::Var);
+                declared || var
             }
             Dialect::Other => false,
         }
@@ -1615,7 +1719,11 @@ impl TokenContext {
         match (self.dialect, text) {
             (Dialect::Rust, "let" | "for")
             | (Dialect::Script, "const" | "let" | "var")
-            | (Dialect::Python, "for" | "lambda" | "as") => self.pattern = Some(depth),
+            | (Dialect::Python, "for" | "lambda" | "as")
+            | (Dialect::Go, "var") => {
+                self.pattern = Some(depth);
+                self.pattern_defers = matches!(text, "let" | "const" | "var");
+            }
             (Dialect::Rust | Dialect::Python, "in") | (Dialect::Script, "of" | "in")
                 if self.pattern == Some(depth) =>
             {
@@ -1632,6 +1740,24 @@ impl TokenContext {
         }
         self.previous_word = Some(Word::of(text));
         self.last_punct = None;
+    }
+
+    /// Puts the deferred bindings whose statement ends here in effect from `column` of this
+    /// line (0 at the start of a line).
+    fn bind_deferred(&mut self, column: u32) {
+        let depth = self.brackets.len();
+        let line = self.line_number;
+        let bindings = &mut self.bindings;
+        self.deferred.retain(|(index, statement_depth)| {
+            if *statement_depth < depth {
+                return true;
+            }
+            if let Some(binding) = bindings.get_mut(*index) {
+                binding.1 = line;
+                binding.2 = column;
+            }
+            false
+        });
     }
 
     /// Marks each plain name the chunk bound as a local at or before its use. A Java call is
@@ -1657,7 +1783,10 @@ impl TokenContext {
             }
             let bound = first_bound
                 .get(token_use.token.as_str())
-                .is_some_and(|at| *at <= (token_use.line, token_use.column));
+                .is_some_and(|at| *at <= (token_use.line, token_use.column))
+                || self
+                    .binding_sites
+                    .contains(&(token_use.line, token_use.column));
             if bound {
                 token_use.role = TokenRole::Local;
             }
@@ -1713,6 +1842,24 @@ fn rust_field_brace(before: &str) -> bool {
         '&' => !lead.ends_with("&&"),
         _ => false,
     }
+}
+
+/// Where a Go line's short variable declaration (`x := ...`, `a, b := ...`, also after `if`, `for`
+/// or `switch`) puts its `:=`, when every word before it is a target name.
+fn go_short_declaration_end(line: &str) -> Option<usize> {
+    let end = line.find(":=")?;
+    let targets = line[..end].trim();
+    let targets = ["} else if ", "for ", "if ", "switch "]
+        .iter()
+        .find_map(|keyword| targets.strip_prefix(keyword))
+        .unwrap_or(targets);
+    let names = targets.split(',').all(|target| {
+        let target = target.trim();
+        !target.is_empty()
+            && target.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+            && !target.starts_with(|ch: char| ch.is_ascii_digit())
+    });
+    names.then_some(end)
 }
 
 /// Where a Python line's plain assignment (`a = ...`, `a, b = ...`, `a: int = ...`) puts its `=`
@@ -2069,7 +2216,11 @@ impl CodeLexer {
                 }
             }
             LexState::FormatStr { quote, triple, raw } => {
-                if rest[0] == b'\\' && !raw {
+                if rest.starts_with(b"\\N{") && !raw {
+                    // A named escape, `\N{BULLET}`, is text.
+                    let close = rest.iter().position(|byte| *byte == b'}');
+                    LexStep::Advance(close.map_or(rest.len(), |idx| idx + 1))
+                } else if rest[0] == b'\\' && !raw {
                     LexStep::Advance(2.min(rest.len()))
                 } else if triple && rest.starts_with(&[quote; 3]) {
                     LexStep::Pop(3)
@@ -2268,16 +2419,23 @@ fn in_language_family(chunk: &CodeChunk, candidates: Vec<Symbol>) -> Vec<Symbol>
 
 fn push_token_use(
     uses: &mut Vec<TokenUse>,
-    token: &str,
+    language: &Language,
     line: &str,
-    token_end: usize,
+    range: Range<usize>,
     line_index: usize,
     role: TokenRole,
-    qualifier: Option<String>,
 ) {
+    let token = &line[range.clone()];
+    let token_end = range.end;
     if is_keyword_or_literal(token) || token.len() < 2 {
         return;
     }
+    let qualifier = (*language == Language::Rust)
+        .then(|| path_qualifier(&line[..range.start]))
+        .flatten();
+    let receiver = (role == TokenRole::Member)
+        .then(|| member_receiver(line, range.start))
+        .flatten();
     let is_call = line[token_end..]
         .chars()
         .find(|ch| !ch.is_whitespace())
@@ -2298,7 +2456,36 @@ fn push_token_use(
         bare,
         role,
         qualifier,
+        receiver,
     });
+}
+
+/// The plain name before the `.` of a member at `start`: a word not itself a member or the
+/// result of a call or index, and not `self`, `this`, `super` or `cls`. `None` on an import or
+/// package line, whose dotted path names modules rather than members.
+fn member_receiver(line: &str, start: usize) -> Option<String> {
+    let statement = line.trim_start();
+    if ["import ", "from ", "package ", "use ", "pub use "]
+        .iter()
+        .any(|keyword| statement.starts_with(keyword))
+    {
+        return None;
+    }
+    let before = line[..start].trim_end();
+    let before = before
+        .strip_suffix("?.")
+        .or_else(|| before.strip_suffix('.'))?
+        .trim_end();
+    let word_start = before
+        .rfind(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+        .map_or(0, |idx| idx + 1);
+    let word = &before[word_start..];
+    let head = !before[..word_start].trim_end().ends_with(['.', '?']);
+    (head
+        && !word.is_empty()
+        && !word.starts_with(|ch: char| ch.is_ascii_digit())
+        && !matches!(word, "self" | "this" | "super" | "cls" | "Self"))
+    .then(|| word.to_string())
 }
 
 /// The path segment a Rust token is the tail of: `mem` before `take` in `std::mem::take(..)`.
@@ -2324,7 +2511,11 @@ fn segment_locates(registry: &SymbolRegistry, segment: &str, symbol: &Symbol) ->
                 .zip(segment.bytes())
                 .all(|(a, b)| a == b || (a == b'-' && b == b'_'))
     };
-    symbol.qualified_name.split("::").any(same)
+    let path = symbol
+        .qualified_name
+        .rsplit_once("::")
+        .map_or("", |(path, _)| path);
+    path.split("::").any(same)
         || symbol
             .parent_symbol_id
             .as_ref()
@@ -3200,10 +3391,27 @@ mod tests {
             .message
             .contains("caveat for `test` via unresolved: attribute or annotation name")));
 
-        let symbols = unique_functions(Language::Java, &["Override", "Inject", "helper"]);
-        let text = "@Override\npublic void run(@Inject Foo foo) { helper(); }";
+        let mut symbols = unique_functions(Language::Java, &["Override", "Inject", "helper"]);
+        let text = "@Override\npublic void run(@Inject Foo foo) { helper(); }\n@Retries.Raw";
         let report = resolve_text(Language::Java, text, &symbols);
         assert_eq!(line_targets(&report), vec![call("util::helper", 2)]);
+
+        // A Java annotation names a type, so a repository annotation type is its target.
+        symbols.push(with_language(
+            symbol(
+                "retries",
+                "retries",
+                "Retries",
+                "org::Retries",
+                SymbolKind::Class,
+            ),
+            Language::Java,
+        ));
+        let report = resolve_text(Language::Java, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("util::helper", 2), reference("org::Retries", 3)]
+        );
 
         // A Python `@` that does not start its line multiplies matrices.
         let symbols = unique_functions(Language::Python, &["cached", "weights"]);
@@ -3440,6 +3648,15 @@ mod tests {
         symbols: &[Symbol],
         imports: &[(&str, &str)],
     ) -> RegistryReport {
+        resolve_with_imports_in(Language::Rust, text, symbols, imports)
+    }
+
+    fn resolve_with_imports_in(
+        language: Language,
+        text: &str,
+        symbols: &[Symbol],
+        imports: &[(&str, &str)],
+    ) -> RegistryReport {
         let mut repository = SemanticRepository::new();
         for (local, source) in imports {
             repository
@@ -3451,7 +3668,11 @@ mod tests {
                     file_id: FileId::new("entry"),
                     scope_id: ScopeId::new("entry:scope"),
                     local_name: local.to_string(),
-                    imported_name: source.rsplit("::").next().unwrap_or(source).to_string(),
+                    imported_name: source
+                        .rsplit(['.', ':'])
+                        .next()
+                        .unwrap_or(source)
+                        .to_string(),
                     source_module: source.to_string(),
                     resolved_module: None,
                     target_file: None,
@@ -3478,7 +3699,7 @@ mod tests {
             &inheritance,
         );
         resolve_symbol_edges(
-            &[chunk_in(Language::Rust, text)],
+            &[chunk_in(language, text)],
             symbols,
             &[],
             false,
@@ -3527,5 +3748,254 @@ mod tests {
         // Without the import model the registry does not know what the file binds.
         let report = resolve_text(Language::Rust, text, &symbols);
         assert_eq!(line_targets(&report).len(), 3);
+    }
+
+    fn symbol_in(
+        language: Language,
+        id: &str,
+        name: &str,
+        qualified: &str,
+        kind: SymbolKind,
+    ) -> Symbol {
+        with_language(symbol(id, id, name, qualified, kind), language)
+    }
+
+    #[test]
+    fn a_java_static_import_of_a_repository_member_is_not_from_outside() {
+        let symbols = vec![
+            symbol_in(
+                Language::Java,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Java,
+                "key",
+                "ACCESS_KEY",
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                SymbolKind::Field,
+            ),
+        ];
+        let text = "String key = ACCESS_KEY;";
+        let report = resolve_with_imports_in(
+            Language::Java,
+            text,
+            &symbols,
+            &[("ACCESS_KEY", "static org.example.Constants.ACCESS_KEY")],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![reference(
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                1
+            )]
+        );
+
+        // A static import from a library still leads outside the repository.
+        let report = resolve_with_imports_in(
+            Language::Java,
+            text,
+            &symbols,
+            &[("ACCESS_KEY", "static com.vendor.Keys.ACCESS_KEY")],
+        );
+        assert_eq!(line_targets(&report), vec![]);
+    }
+
+    #[test]
+    fn a_member_matches_by_name_where_its_receiver_names_the_symbols_place() {
+        let symbols = vec![
+            symbol_in(
+                Language::Go,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Go,
+                "new-check",
+                "NewCheckID",
+                "agent::structs::checks::NewCheckID",
+                SymbolKind::Function,
+            ),
+        ];
+        let text = "id := structs.NewCheckID(name)\nother := check.NewCheckID(name)";
+        let report = resolve_text(Language::Go, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("agent::structs::checks::NewCheckID", 1)]
+        );
+
+        let symbols = vec![
+            symbol_in(
+                Language::Java,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Java,
+                "key",
+                "ACCESS_KEY",
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                SymbolKind::Field,
+            ),
+        ];
+        let text = "String a = Constants.ACCESS_KEY;\nString b = config.ACCESS_KEY;\nimport org.example.Constants.ACCESS_KEY;\nString c = example.ACCESS_KEY;";
+        let report = resolve_text(Language::Java, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![reference(
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                1
+            )]
+        );
+
+        // A receiver that is itself a member, a call result or `self` says nothing.
+        let symbols = vec![
+            symbol_in(
+                Language::Python,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Python,
+                "fmt",
+                "format_size",
+                "pkg::utils::misc::format_size",
+                SymbolKind::Function,
+            ),
+        ];
+        let text = "a = misc.format_size(1)\nb = self.misc.format_size(1)\nc = misc().format_size(1)\nimport pkg.misc.format_size";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("pkg::utils::misc::format_size", 1)]
+        );
+    }
+
+    #[test]
+    fn a_type_qualifier_matches_only_that_types_members() {
+        let mut symbols = vec![
+            rust_symbol("caller", "entry", "main", "app::main"),
+            symbol_in(
+                Language::Rust,
+                "file",
+                "File",
+                "core::lib::File",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Rust,
+                "scope-kind",
+                "ScopeKind",
+                "core::lib::ScopeKind",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Rust,
+                "store",
+                "Store",
+                "db::lib::Store",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Rust,
+                "cache",
+                "Cache",
+                "db::lib::Cache",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Rust,
+                "open",
+                "open",
+                "db::lib::open",
+                SymbolKind::Method,
+            ),
+        ];
+        symbols
+            .iter_mut()
+            .find(|symbol| symbol.id.0 == "open")
+            .expect("the method")
+            .parent_symbol_id = Some(SymbolId::new("store"));
+        let text = "let kind = ScopeKind::File;\nlet cache = Cache::open(dir);\nlet store = Store::open(dir);";
+        let report = resolve_text(Language::Rust, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                reference("core::lib::ScopeKind", 1),
+                reference("db::lib::Cache", 2),
+                reference("db::lib::Store", 3),
+                call("db::lib::open", 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_let_binds_its_name_only_after_its_value() {
+        let symbols = unique_functions(Language::Rust, &["config"]);
+        let text = "let config = config(dir);\nuse_it(config);";
+        let report = resolve_text(Language::Rust, text, &symbols);
+        assert_eq!(line_targets(&report), vec![call("util::config", 1)]);
+
+        let symbols = unique_functions(Language::Python, &["config"]);
+        let text = "config = config(path)\nuse_it(config)";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(line_targets(&report), vec![call("util::config", 1)]);
+    }
+
+    #[test]
+    fn a_named_escape_in_an_f_string_is_text() {
+        let symbols = unique_functions(Language::Python, &["BULLET", "item"]);
+        let text = "line = f\"\\N{BULLET} {item}\"";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(line_targets(&report), vec![reference("util::item", 1)]);
+    }
+
+    #[test]
+    fn go_composite_literal_keys_and_short_declarations_are_not_matched_by_name_alone() {
+        let symbols = vec![
+            symbol_in(
+                Language::Go,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Go,
+                "ports",
+                "ports",
+                "topology::ports",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Go,
+                "reason",
+                "Reason",
+                "gate::Reason",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Go,
+                "limit",
+                "parseLimit",
+                "api::parseLimit",
+                SymbolKind::Function,
+            ),
+            symbol_in(Language::Go, "kind", "Kind", "api::Kind", SymbolKind::Class),
+        ];
+        let text = "ports := []string{\"8500\"}\nuse(ports)\nresp := Response{\n    Reason: \"x\",\n}\nif err := parseLimit(req); err != nil {\n}\nswitch k {\ncase Kind:\n}";
+        let report = resolve_text(Language::Go, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("api::parseLimit", 6), reference("api::Kind", 9)]
+        );
     }
 }
