@@ -17,6 +17,7 @@ open-kioku-errors = { version = "4.0.0", path = "../open-kioku-errors" }
 open-kioku-evidence = { version = "4.0.0", path = "../open-kioku-evidence" }
 open-kioku-search-regex = { version = "4.0.0", path = "../open-kioku-search-regex" }
 open-kioku-storage = { version = "4.0.0", path = "../open-kioku-storage" }
+toml.workspace = true
 [dev-dependencies]
 open-kioku-config = { version = "4.0.0", path = "../open-kioku-config" }
 open-kioku-graph = { version = "4.0.0", path = "../open-kioku-graph" }

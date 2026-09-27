@@ -12,6 +12,9 @@ use open_kioku_storage::{GraphStore, HistoryStore, MetadataStore, SearchIndex};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+mod cargo;
+use cargo::{CargoWorkspace, Membership, CRATE_IMPORT_SIGNAL, CRATE_IMPORT_USE_SIGNAL};
+
 /// Bounded number of changed-file symbols used to seed relationship-edge impact discovery.
 const RELATIONSHIP_IMPACT_SYMBOL_SEEDS: usize = 16;
 /// Bounded neighbor fan-out per seed node.
@@ -135,6 +138,37 @@ impl<'a> ImpactEngine<'a> {
         let mut exact_reference_sources = Vec::new();
         let mut omitted_direct = 0;
         let mut omitted_direct_exact = 0;
+        let mut omitted_direct_imports = 0;
+        let mut omitted_direct_import_uses = 0;
+        // Rust package structure answers what the graph cannot: which downstream crates import
+        // this file's public items, and which lexical matches no dependency path can reach.
+        let rust_packages = match &file {
+            Some(file) if file.language == open_kioku_core::Language::Rust => {
+                let files = self.store.list_files(usize::MAX, 0)?;
+                let workspace = CargoWorkspace::load(self.store, &files)?;
+                let dependents = cargo::crate_dependent_impacts(
+                    self.store,
+                    &workspace,
+                    &files,
+                    file,
+                    &target_symbols,
+                )?;
+                Some((workspace, dependents))
+            }
+            _ => None,
+        };
+        let reachability = match (&rust_packages, &file) {
+            (Some((workspace, _)), Some(file)) => match workspace.membership(&file.path) {
+                Membership::Package(package) => Some(RustReachability {
+                    workspace,
+                    package,
+                    reachable: workspace.dependents_closure(package),
+                }),
+                _ => None,
+            },
+            _ => None,
+        };
+        let mut unreachable_lexical = std::collections::BTreeSet::new();
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
             exact_reference_count = direct.len();
@@ -169,7 +203,20 @@ impl<'a> ImpactEngine<'a> {
                         .filter(|result| result.path != file.path),
                 );
             }
+            if let Some((_, dependents)) = &rust_packages {
+                direct.extend(dependents.results.iter().cloned());
+            }
             direct = group_direct_impacts(dedupe_results(direct));
+            if let Some(reachability) = &reachability {
+                direct.retain(|result| {
+                    let keep = direct_impact_kind(result) != DirectImpactKind::Lexical
+                        || reachability.may_depend(&result.path);
+                    if !keep {
+                        unreachable_lexical.insert(result.path.clone());
+                    }
+                    keep
+                });
+            }
             direct.sort_by(compare_impact_results);
             // Exact references rank first, so any cut here is one only when they alone
             // overflow the cap; that is counted separately so it cannot pass unnoticed.
@@ -178,6 +225,13 @@ impl<'a> ImpactEngine<'a> {
                 .skip(MAX_DIRECT_IMPACTS)
                 .filter(|result| result.is_exact_reference())
                 .count();
+            for result in direct.iter().skip(MAX_DIRECT_IMPACTS) {
+                match direct_impact_kind(result) {
+                    DirectImpactKind::CrateImport => omitted_direct_imports += 1,
+                    DirectImpactKind::CrateImportUse => omitted_direct_import_uses += 1,
+                    _ => {}
+                }
+            }
             omitted_direct = cap_impacts(&mut direct, MAX_DIRECT_IMPACTS);
             direct
         } else {
@@ -195,14 +249,24 @@ impl<'a> ImpactEngine<'a> {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if indirect_stem.is_empty() || indirect_stem.len() < 3 {
+            // A Rust crate or module root's stem names no dependent: searching `lib` matched
+            // every crate root in a workspace.
+            if indirect_stem.len() < 3 || matches!(indirect_stem, "lib" | "mod" | "main") {
                 continue;
             }
             let second = search(indirect_stem, 10)?;
             for result in second {
-                if result.path != path && !direct_paths.contains(&result.path) {
-                    indirect.push(result);
+                if result.path == path || direct_paths.contains(&result.path) {
+                    continue;
                 }
+                if reachability
+                    .as_ref()
+                    .is_some_and(|reachability| !reachability.may_depend(&result.path))
+                {
+                    unreachable_lexical.insert(result.path.clone());
+                    continue;
+                }
+                indirect.push(result);
             }
         }
         indirect.sort_by(compare_impact_results);
@@ -217,6 +281,40 @@ impl<'a> ImpactEngine<'a> {
                 "{exact_reference_count} exact indexed symbol reference(s) found in {exact_reference_files} file(s)"
             ));
         }
+        if let Some((workspace, dependents)) = &rust_packages {
+            if let Some(reason) = &dependents.not_measured {
+                reasons.push(format!(
+                    "downstream crates were not measured: {reason}; an absent crate-import impact is not evidence that no other crate depends on this file"
+                ));
+            }
+            if dependents.importing_files > 0 {
+                reasons.push(format!(
+                    "{} file(s) in {} package(s) import public items of this file by crate path; {} further file(s) of those packages name an imported item",
+                    dependents.importing_files, dependents.packages, dependents.use_files
+                ));
+            }
+            if dependents.unscanned_files > 0 {
+                reasons.push(format!(
+                    "{} file(s) of importing packages were not read for uses of the imported items (scan cap reached)",
+                    dependents.unscanned_files
+                ));
+            }
+            if let Some(reachability) = &reachability {
+                if !unreachable_lexical.is_empty() {
+                    let sample = unreachable_lexical
+                        .iter()
+                        .take(3)
+                        .map(|path| format!("`{}`", path.display()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    reasons.push(format!(
+                        "{} lexical match(es) left out: Rust files in no workspace package, or in packages with no Cargo dependency path to `{}` (e.g. {sample})",
+                        unreachable_lexical.len(),
+                        workspace.package_name(reachability.package)
+                    ));
+                }
+            }
+        }
         if direct.len() > 10 {
             reasons.push("many lexical dependents reference this file or its symbols".into());
         }
@@ -224,7 +322,7 @@ impl<'a> ImpactEngine<'a> {
         // were cut so a short list is not read as the whole blast radius.
         if omitted_direct > 0 {
             reasons.push(format!(
-                "{omitted_direct} further direct impact(s) omitted beyond the {MAX_DIRECT_IMPACTS}-entry cap, {omitted_direct_exact} of them exact-reference entries; heuristic entries are cut before any exact reference"
+                "{omitted_direct} further direct impact(s) omitted beyond the {MAX_DIRECT_IMPACTS}-entry cap, {omitted_direct_exact} of them exact-reference entries, {omitted_direct_imports} crate-import entries and {omitted_direct_import_uses} imported-name uses; exact references are cut last, then crate imports and imported-name uses"
             ));
         }
         if omitted_indirect > 0 {
@@ -1251,6 +1349,8 @@ const GIT_COCHANGE_MATCH_REASON: &str = "historical git co-change with target fi
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DirectImpactKind {
     ExactReference,
+    CrateImport,
+    CrateImportUse,
     CoChange,
     Runtime,
     ServiceBoundary,
@@ -1258,15 +1358,19 @@ enum DirectImpactKind {
 }
 
 /// Which tier an impact ranks in before its score is read. Only an exact reference is
-/// repository truth. Co-change is statistical history, and runtime and service-boundary
+/// repository truth. A crate import is the importer's own `use` row naming the changed file's
+/// item through its crate name, in a package declaring that dependency: a source fact, though no
+/// resolver proved it, so it ranks below exact references and above everything statistical or
+/// lexical, with the name uses in the importing packages it attributes. Co-change is statistical
+/// history, and runtime and service-boundary
 /// impacts are lexical hits corroborated by a runtime fact or a matching static route or
 /// channel string: evidence that a dependency is likely, not that one exists. All four rank
 /// together, by score.
 fn impact_authority_tier(result: &SearchResult) -> u8 {
-    if result.is_exact_reference() {
-        0
-    } else {
-        1
+    match direct_impact_kind(result) {
+        DirectImpactKind::ExactReference => 0,
+        DirectImpactKind::CrateImport | DirectImpactKind::CrateImportUse => 1,
+        _ => 2,
     }
 }
 
@@ -1279,6 +1383,10 @@ fn direct_impact_kind(result: &SearchResult) -> DirectImpactKind {
     };
     if result.is_exact_reference() {
         DirectImpactKind::ExactReference
+    } else if has_signal(CRATE_IMPORT_SIGNAL) {
+        DirectImpactKind::CrateImport
+    } else if has_signal(CRATE_IMPORT_USE_SIGNAL) {
+        DirectImpactKind::CrateImportUse
     } else if result.match_reason == GIT_COCHANGE_MATCH_REASON {
         DirectImpactKind::CoChange
     } else if has_signal("runtime_corroboration") {
@@ -1458,11 +1566,46 @@ fn stronger_exact_provenance(
         .max_by_key(exact_reference_authority)
 }
 
-/// Whether a direct impact was reached only through lexical search, not through an exact
-/// reference, a co-change, a runtime fact or a service-boundary fact. Consumers bound how many
-/// of these widen an edit boundary; the structural kinds are admitted without that bound.
+/// Whether a direct impact was reached only through a name match: lexical search, or an
+/// identifier in a package that imports the name from the changed file. Not an exact reference,
+/// a crate import row, a co-change, a runtime fact or a service-boundary fact. Consumers bound
+/// how many of these widen an edit boundary; the structural kinds are admitted without that
+/// bound.
 pub fn is_lexical_impact_result(result: &SearchResult) -> bool {
-    direct_impact_kind(result) == DirectImpactKind::Lexical
+    matches!(
+        direct_impact_kind(result),
+        DirectImpactKind::Lexical | DirectImpactKind::CrateImportUse
+    )
+}
+
+/// Which Rust files a change to one package can reach through Cargo: that package and the
+/// packages that depend on it. A Rust file in another package, or in none, has no Cargo
+/// dependency path to the change, so a lexical match there is read as a shared word rather than
+/// a dependent. A procedural-macro package is never pruned: the code its macros emit belongs to
+/// the crates that use them, whatever direction the dependency runs. Coupling Cargo does not see
+/// (a harness that runs a built binary and parses its output) is not followed; the pruned count
+/// and a sample of paths stay in the risk reasons.
+struct RustReachability<'a> {
+    workspace: &'a CargoWorkspace,
+    package: usize,
+    reachable: std::collections::BTreeSet<usize>,
+}
+
+impl RustReachability<'_> {
+    /// False only when the manifests prove the path unreachable; an unknown membership and any
+    /// file that is not Rust source keep their match.
+    fn may_depend(&self, path: &Path) -> bool {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            return true;
+        }
+        match self.workspace.membership(path) {
+            Membership::Package(package) => {
+                self.reachable.contains(&package) || self.workspace.is_proc_macro(package)
+            }
+            Membership::Outside => false,
+            Membership::Unknown => true,
+        }
+    }
 }
 
 fn occurrence_result(
@@ -3743,10 +3886,12 @@ mod tests {
         fn rank(kind: DirectImpactKind) -> usize {
             match kind {
                 DirectImpactKind::ExactReference => 0,
-                DirectImpactKind::CoChange => 1,
-                DirectImpactKind::Runtime => 2,
-                DirectImpactKind::ServiceBoundary => 3,
-                DirectImpactKind::Lexical => 4,
+                DirectImpactKind::CrateImport => 1,
+                DirectImpactKind::CrateImportUse => 2,
+                DirectImpactKind::CoChange => 3,
+                DirectImpactKind::Runtime => 4,
+                DirectImpactKind::ServiceBoundary => 5,
+                DirectImpactKind::Lexical => 6,
             }
         }
         let mut kinds = [
@@ -3754,12 +3899,14 @@ mod tests {
             DirectImpactKind::ServiceBoundary,
             DirectImpactKind::Runtime,
             DirectImpactKind::CoChange,
+            DirectImpactKind::CrateImportUse,
+            DirectImpactKind::CrateImport,
             DirectImpactKind::ExactReference,
         ];
         kinds.sort();
         assert_eq!(
             kinds.iter().copied().map(rank).collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4]
+            vec![0, 1, 2, 3, 4, 5, 6]
         );
     }
 
