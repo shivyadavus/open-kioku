@@ -1093,6 +1093,61 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // `[lib] path = "src/../lib.rs"` is the `lib.rs` beside `[[bin]] path = "main.rs"`, so
+        // the layout of `lib_path_beside_bin_path_shared_module` holds (#572).
+        "normalised_lib_path_beside_bin_path_shared_module" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/../lib.rs\"\n\n[[bin]]\nname = \"app\"\npath = \"main.rs\"\n",
+                ),
+                ("lib.rs", "mod util;\n\npub fn target_fn() {}\n"),
+                (
+                    "main.rs",
+                    "mod util;\n\nfn target_fn() {}\n\nfn main() {\n    util::caller_fn();\n}\n",
+                ),
+                (
+                    "util.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `lib.rs` is skipped (`.okignore`) and declares `mod util;` as `main.rs` does, so
+        // `crate::target_fn` in `util.rs` is the library's in one crate (#572).
+        "skipped_library_root_shared_module" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (".okignore", "src/lib.rs\n"),
+                ("src/lib.rs", "mod util;\n\npub fn target_fn() {}\n"),
+                (
+                    "src/main.rs",
+                    "mod util;\n\nfn target_fn() {}\n\nfn main() {\n    util::caller_fn();\n}\n",
+                ),
+                (
+                    "src/util.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `main.rs` mounts the library's `util.rs` with `#[path]`, so it is compiled into both
+        // crates (#572).
+        "path_mount_shared_with_library_module" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod util;\n\npub fn target_fn() {}\n"),
+                (
+                    "src/main.rs",
+                    "#[path = \"util.rs\"]\nmod u2;\n\nfn target_fn() {}\n\nfn main() {\n    u2::caller_fn();\n}\n",
+                ),
+                (
+                    "src/util.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![

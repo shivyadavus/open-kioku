@@ -1149,6 +1149,54 @@
       "notes": "Regression case (#561): with `[lib] path = \"lib.rs\"` beside `[[bin]] path = \"main.rs\"`, `util.rs` is declared by the library alone, so `crate::target_fn()` there proves an edge to the library's `target_fn`."
     },
     {
+      "id": "ci-rust-calls-56-normalised_lib_path_beside_bin_path_shared_module",
+      "fixture_id": "ci/ri3/rust/calls/normalised_lib_path_beside_bin_path_shared_module",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:normalised_lib_path_beside_bin_path_shared_module:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "normalised_lib_path_beside_bin_path_shared_module",
+      "notes": "Regression case (#572): `[lib] path = \"src/../lib.rs\"` is the `lib.rs` beside `[[bin]] path = \"main.rs\"`, and both declare `mod util;`, so `crate::target_fn()` in `util.rs` names a different function in each crate; no edge may be proven to either."
+    },
+    {
+      "id": "ci-rust-calls-57-skipped_library_root_shared_module",
+      "fixture_id": "ci/ri3/rust/calls/skipped_library_root_shared_module",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:skipped_library_root_shared_module:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "skipped_library_root_shared_module",
+      "notes": "Regression case (#572): `src/lib.rs` is not indexed (`.okignore`) and, like `src/main.rs`, declares `mod util;`, so `crate::target_fn()` in `src/util.rs` must not prove an edge to the binary's `target_fn`."
+    },
+    {
+      "id": "ci-rust-calls-58-path_mount_shared_with_library_module",
+      "fixture_id": "ci/ri3/rust/calls/path_mount_shared_with_library_module",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:path_mount_shared_with_library_module:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "path_mount_shared_with_library_module",
+      "notes": "Regression case (#572): `src/lib.rs` declares `mod util;` and `src/main.rs` mounts the same file with `#[path = \"util.rs\"] mod u2;`, so `crate::target_fn()` in `src/util.rs` names a different function in each crate; no edge may be proven to either."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",

@@ -176,7 +176,11 @@ fn resolve_rust_qualified_module_outcome(
     receiver: &str,
 ) -> Option<ResolutionOutcome> {
     let receiver = receiver.trim();
-    let placement = ctx.scopes.rust_module_placement(ctx.file_id);
+    // A file another crate may compile too is read against no one crate.
+    let placement = ctx
+        .scopes
+        .rust_module_placement(ctx.file_id)
+        .filter(|placement| !placement.in_other_crates);
     let (mut targets, strategy) = if receiver == "crate" || receiver.starts_with("crate::") {
         let names = rust_crate_path_member_names(placement?, receiver, &call.callee_name)?;
         (
@@ -848,6 +852,7 @@ mod tests {
             crate_dir: crate_dir.into(),
             crate_roots: roots.iter().map(|root| root.to_string()).collect(),
             module: module.map(|module| module.iter().map(|name| name.to_string()).collect()),
+            in_other_crates: false,
         }
     }
 
@@ -1353,6 +1358,7 @@ mod tests {
                 name: name.into(),
                 has_body,
                 has_path_attribute: false,
+                path_attributes: Vec::new(),
                 range: range(line),
             };
             scopes.record_module_declarations(&[
@@ -1608,6 +1614,39 @@ mod tests {
         with_rust_files("crates/a/tests/it.rs", &items, placements, |ctx| {
             let call = module_path_call("scope:worker", "crate::util", "f");
             assert_eq!(proven_target(ctx, &call), None);
+        });
+    }
+
+    #[test]
+    fn rust_module_paths_are_not_read_from_a_file_another_crate_may_compile() {
+        // `main.rs` declares `util`, and `lib.rs`, which the index could not read, may too:
+        // `crate::helper` in `util.rs` would be the library's `helper` in that crate (#572).
+        let bin = |module: &[&str]| placement("src", &["src::main"], Some(module));
+        let shared = RustModulePlacement {
+            in_other_crates: true,
+            ..bin(&["util"])
+        };
+        let items = [
+            ("src::main::helper", "src/main.rs"),
+            ("src::util::u", "src/util.rs"),
+            ("src::util::inner::f", "src/util/inner.rs"),
+        ];
+        let placements = vec![
+            ("src/main.rs", bin(&[])),
+            ("src/util.rs", shared.clone()),
+            ("src/util/inner.rs", bin(&["util", "inner"])),
+        ];
+        with_rust_files("src/util.rs", &items, placements.clone(), |ctx| {
+            let at = |receiver: &str, callee: &str| {
+                proven_target(ctx, &module_path_call("scope:worker", receiver, callee))
+            };
+            assert_eq!(at("crate", "helper"), None);
+            assert_eq!(at("self::inner", "f"), None);
+        });
+        // The binary's own paths still end in it.
+        with_rust_files("src/main.rs", &items, placements, |ctx| {
+            let call = module_path_call("scope:worker", "crate::util", "u");
+            assert_eq!(proven_target(ctx, &call).as_deref(), Some("src::util::u"));
         });
     }
 

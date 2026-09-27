@@ -2187,6 +2187,10 @@ pub struct ModuleDeclarationSite {
     pub name: String,
     pub has_body: bool,
     pub has_path_attribute: bool,
+    /// The file paths the item's `path` attributes name, as written, including one set through
+    /// `cfg_attr`. Empty when `has_path_attribute` is set but no string literal could be read.
+    #[serde(default)]
+    pub path_attributes: Vec<String>,
     pub range: SourceRange,
 }
 
