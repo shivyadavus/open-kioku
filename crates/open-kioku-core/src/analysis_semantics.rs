@@ -75,7 +75,10 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// or binding from such a `self::`/`super::` path, none from a module file a size-skipped root
 /// does not declare, and `CALLS` edges from a `crate::` path in a module file below a mounted
 /// `mod.rs` into one crate's item.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v17";
+/// v19: a `#[path]` attribute inside a `#[path]`-mounted file's module subtree, each alternative
+/// of a `cfg_attr(.., path = ..)` included, mounts its file into the mounting crate too. Earlier
+/// indexes hold `CALLS` edges from a `crate::` path in such a file into one crate's item.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v19";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
