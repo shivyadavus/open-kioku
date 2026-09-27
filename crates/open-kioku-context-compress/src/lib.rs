@@ -38,6 +38,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
+
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// SQLite-backed store that maps context handle ids to their original text.
 ///
@@ -96,6 +99,9 @@ impl ContextHandleStore {
                 .map_err(|err| OkError::Storage(format!("create context dir: {err}")))?;
         }
         let connection = Connection::open(path).map_err(storage_err)?;
+        // A `retrieve_context` read or a `compress_pack` write overlapping an index run's
+        // pruning waits for it rather than failing it; the index store waits as long.
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(storage_err)?;
         let store = Self {
             connection: Mutex::new(connection),
         };
@@ -692,5 +698,34 @@ mod tests {
             &indexed
         ));
         assert!(!handle_path_still_indexed("primary", "not json", &indexed));
+    }
+
+    /// A reader holding the database when an index run prunes is waited out instead of
+    /// failing the prune with "database is locked". Held past rusqlite's default 5 s busy
+    /// timeout, which is what the store's own timeout replaces.
+    #[test]
+    fn prune_removed_paths_waits_for_a_reader_holding_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ContextHandleStore::open_repo(dir.path()).unwrap();
+        store
+            .compress_pack(&pack(vec![result(
+                "src/payroll.rs",
+                Some(LineRange { start: 1, end: 3 }),
+                "pub fn zebra_payroll_marker() {}",
+            )]))
+            .unwrap();
+        let reader = Connection::open(default_context_path(dir.path())).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let rows: i64 = reader
+            .query_row("SELECT COUNT(*) FROM context_handles", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        let released = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            reader.execute_batch("COMMIT").unwrap();
+        });
+
+        assert_eq!(store.prune_removed_paths(&HashSet::new()).unwrap(), 1);
+        released.join().unwrap();
     }
 }
