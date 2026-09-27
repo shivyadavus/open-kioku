@@ -81,8 +81,10 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// v20: a Rust trait `impl` whose trait no repository symbol answers is an external resolution
 /// when the index shows the trait is defined outside the repository: named through the standard
 /// library, a dependency the package's manifest places outside the repository (registry, git, or a
-/// `path` leaving it), or, unimported, the standard prelude. Earlier indexes count those
-/// `IMPLEMENTS` as unresolved.
+/// `path` leaving it), or, unimported, the standard prelude. A method call on a Rust binding
+/// annotated with a generic type or a reference (`w: &Wrapper<u8>`, `x: &mut Foo`) is typed by
+/// the annotation's path without its generic arguments. Earlier indexes count those `IMPLEMENTS`
+/// as unresolved and hold none of those `CALLS` edges.
 pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v20";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
@@ -123,7 +125,10 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// trait or type declared in the same file, and sees an implementing `&T`, `&mut T`, `Box<T>`,
 /// `Rc<T>` or `Arc<T>` as `T`; a v8 index records `impl Store for &Hidden` and
 /// `impl crate::Cache for Gen<u8>` members as public.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v9";
+/// v10: a Rust closure is a scope, so its typed parameters bind in the closure alone; a v9 index
+/// records `|ctx: &mut Ring|` in the enclosing block, where it types a `ctx` used after the
+/// closure.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v10";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

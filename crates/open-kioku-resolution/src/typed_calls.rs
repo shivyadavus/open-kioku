@@ -49,6 +49,11 @@ pub(crate) fn binding_receiver_type(
         .map(str::trim)
         .filter(|declared| !declared.is_empty())
     {
+        let declared = if ctx.language == Language::Rust {
+            rust_annotated_receiver_type(declared).unwrap_or(declared)
+        } else {
+            declared
+        };
         return Some((declared.to_string(), true));
     }
     let inferred = binding
@@ -57,6 +62,68 @@ pub(crate) fn binding_receiver_type(
         .map(str::trim)
         .filter(|inferred| !inferred.is_empty())?;
     Some(inferred_receiver_type(ctx, scope_id, inferred))
+}
+
+/// The type whose members a method call on a Rust binding annotated `annotation` reaches: the
+/// annotation's path without its generic arguments, seen through references. `x: Foo<u8>`,
+/// `w: &Wrapper<u8>` and `m: &'a mut Foo` are a `Foo`, a `Wrapper` and a `Foo`; generic arguments
+/// pick an instantiation of the type, not another type. `v: Vec<Foo>` is a `Vec`, never a `Foo`.
+/// `None` for any other form, such as a tuple, slice, pointer, trait object or `impl Trait`.
+fn rust_annotated_receiver_type(annotation: &str) -> Option<&str> {
+    let mut rest = annotation.trim();
+    while let Some(referent) = rest.strip_prefix('&') {
+        rest = referent.trim_start();
+        if let Some(lifetime) = rest.strip_prefix('\'') {
+            let end = lifetime.find(char::is_whitespace)?;
+            rest = lifetime[end..].trim_start();
+        }
+        if let Some(referent) = rest.strip_prefix("mut ") {
+            rest = referent.trim_start();
+        }
+    }
+    // The parser drops a parameter's leading `&`, leaving `mut Foo` for `&mut Foo`.
+    if let Some(referent) = rest.strip_prefix("mut ") {
+        rest = referent.trim_start();
+    }
+    let path = match rest.find('<') {
+        Some(open) => {
+            let arguments = rest[open..].trim_end();
+            if !arguments.ends_with('>') || !angle_brackets_close_at_end(arguments) {
+                return None;
+            }
+            rest[..open].trim_end()
+        }
+        None => rest,
+    };
+    let body = path.strip_prefix("::").unwrap_or(path);
+    let plain = !body.is_empty()
+        && body.split("::").all(|segment| {
+            let segment = segment.strip_prefix("r#").unwrap_or(segment);
+            !segment.is_empty() && segment.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+        });
+    plain.then_some(path)
+}
+
+/// Whether the `<` opening `arguments` is closed by its last character, so nothing follows the
+/// generic arguments: `<u8>` but not `<u8> + Send` or `<A>::B<C>`.
+fn angle_brackets_close_at_end(arguments: &str) -> bool {
+    let mut depth = 0usize;
+    for (index, ch) in arguments.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                let Some(next) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next;
+                if depth == 0 {
+                    return index + ch.len_utf8() == arguments.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The type an initializer gives its binding, and whether the index proves it.
@@ -1136,6 +1203,15 @@ mod tests {
     }
 
     fn with_context<T>(symbols: Vec<Symbol>, test: impl FnOnce(&ResolutionContext<'_>) -> T) -> T {
+        with_annotated_context("Service", symbols, test)
+    }
+
+    /// As [`with_context`], with the binding `svc` annotated `declared_type`.
+    fn with_annotated_context<T>(
+        declared_type: &str,
+        symbols: Vec<Symbol>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
         let file_id = FileId::new("file:src/lib.rs");
         let scopes = ScopeIndex::build(vec![Scope {
             id: ScopeId::new("scope:file"),
@@ -1155,7 +1231,7 @@ mod tests {
             file_id: file_id.clone(),
             scope_id: ScopeId::new("scope:file"),
             name: "svc".into(),
-            declared_type: Some("Service".into()),
+            declared_type: Some(declared_type.into()),
             inferred_type: None,
             range: SourceRange {
                 start_line: 10,
@@ -1181,6 +1257,77 @@ mod tests {
             semantics,
         );
         test(&context)
+    }
+
+    #[test]
+    fn rust_annotated_receiver_types_drop_generic_arguments_and_references() {
+        for (annotation, expected) in [
+            ("Service", Some("Service")),
+            ("Service<u8>", Some("Service")),
+            ("&Service<u8>", Some("Service")),
+            ("&'a mut Service<'a, T>", Some("Service")),
+            ("mut Service", Some("Service")),
+            ("&&Service", Some("Service")),
+            ("net::Service<Vec<u8>>", Some("net::Service")),
+            ("Vec<Service>", Some("Vec")),
+            ("&dyn Service", None),
+            ("impl Service", None),
+            ("[Service; 2]", None),
+            ("(Service, u8)", None),
+            ("*const Service", None),
+            ("Service<u8> + Send", None),
+            ("<Service as Run>::Output", None),
+            ("Service<fn() -> u8>", None),
+        ] {
+            assert_eq!(
+                rust_annotated_receiver_type(annotation),
+                expected,
+                "{annotation}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_generic_and_reference_annotations_type_their_receiver() {
+        for annotation in [
+            "Service<u8>",
+            "&Service<u8>",
+            "&'a mut Service",
+            "mut Service",
+        ] {
+            with_annotated_context(
+                annotation,
+                vec![
+                    type_symbol("symbol:type:Service", "Service"),
+                    method_symbol("symbol:method:Service.run", "symbol:type:Service"),
+                ],
+                |ctx| match resolve_typed_receiver_outcome(&call(), ctx) {
+                    ResolutionOutcome::Proven { candidate } => {
+                        assert_eq!(candidate.target_symbol_id.0, "symbol:method:Service.run");
+                        assert!(candidate
+                            .proofs
+                            .iter()
+                            .any(|proof| proof.kind == RelationshipProofKind::ReceiverType));
+                    }
+                    other => panic!("`{annotation}` should prove the call, got {other:?}"),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn rust_annotation_of_a_container_does_not_type_the_receiver_as_its_element() {
+        with_annotated_context(
+            "Vec<Service>",
+            vec![
+                type_symbol("symbol:type:Service", "Service"),
+                method_symbol("symbol:method:Service.run", "symbol:type:Service"),
+            ],
+            |ctx| match resolve_typed_receiver_outcome(&call(), ctx) {
+                ResolutionOutcome::Unresolved { candidates, .. } => assert!(candidates.is_empty()),
+                other => panic!("`Vec<Service>` is no `Service`, got {other:?}"),
+            },
+        );
     }
 
     #[test]
