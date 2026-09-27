@@ -1661,14 +1661,13 @@ fn validate_snapshot_metadata(metadata: &SnapshotMetadata) -> anyhow::Result<Vec
     }
     // Importing an older store would open cleanly and then answer relationship questions from
     // graph tables the compact reader had to discard. Refuse it here, where the message can
-    // name the fix, rather than importing something that only looks complete. A compact store
-    // older than this binary is upgraded in place when the import opens it.
-    if metadata.sqlite_user_version < SQLITE_COMPACT_GRAPH_SCHEMA_VERSION {
+    // name the fix, rather than importing something that only looks complete.
+    if metadata.sqlite_user_version < SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION {
         anyhow::bail!(
             "snapshot sqlite user_version {} predates the compact graph storage introduced in \
              user_version {}; re-export the snapshot from a rebuilt index (`ok index`)",
             metadata.sqlite_user_version,
-            SQLITE_COMPACT_GRAPH_SCHEMA_VERSION
+            SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION
         );
     }
     let mut warnings = Vec::new();

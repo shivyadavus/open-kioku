@@ -521,44 +521,154 @@ mod tests {
         edge
     }
 
-    /// Stores persist this rank and recompute it only when the version changes, so the table and
-    /// the version are pinned together: a change to either without the other fails here.
+    /// Stores persist this rank and recompute it only when the version changes, so the rank of
+    /// every shape of edge is pinned with the version: a change to the tiers, to which sources
+    /// count as parsed containment, to how an authority class maps to a tier, or to how
+    /// confidence orders edges fails here unless the version moves with it.
+    ///
+    /// The expected tier is spelled out rather than computed through the functions under test.
+    /// The authority policy itself is versioned with the analysis semantics, whose change forces
+    /// a full rebuild and so a fresh rank for every edge; this pins how each class it can return
+    /// ranks.
     #[test]
     fn window_rank_table_is_pinned_to_its_version() {
-        let ranked = |tier: &str, confidence: Confidence| {
-            let mut edge = edge(GraphEdgeType::Imports, Vec::new());
-            match tier {
-                "proven" => edge
-                    .set_relationship_proofs(vec![proof(RelationshipProofKind::ImportBinding, 1)])
-                    .unwrap(),
-                "containment" => {
-                    edge.edge_type = GraphEdgeType::Contains;
-                    edge.evidence.source_type = EvidenceSourceType::TreeSitter;
+        const SOURCES: [EvidenceSourceType; 11] = [
+            EvidenceSourceType::TreeSitter,
+            EvidenceSourceType::Scip,
+            EvidenceSourceType::Lsp,
+            EvidenceSourceType::Regex,
+            EvidenceSourceType::Lexical,
+            EvidenceSourceType::Semantic,
+            EvidenceSourceType::Runtime,
+            EvidenceSourceType::GitHistory,
+            EvidenceSourceType::StaticAnalysis,
+            EvidenceSourceType::ExternalIntegration,
+            EvidenceSourceType::Heuristic,
+        ];
+        const CONFIDENCES: [Confidence; 4] = [
+            Confidence::Exact,
+            Confidence::High,
+            Confidence::Medium,
+            Confidence::Low,
+        ];
+        let relationship_types = [
+            GraphEdgeType::References,
+            GraphEdgeType::UsesType,
+            GraphEdgeType::Calls,
+            GraphEdgeType::Implements,
+            GraphEdgeType::Extends,
+            GraphEdgeType::Imports,
+            GraphEdgeType::DependsOn,
+            GraphEdgeType::ExposesEndpoint,
+            GraphEdgeType::CallsEndpoint,
+            GraphEdgeType::ReadsConfig,
+            GraphEdgeType::WritesConfig,
+            GraphEdgeType::ReadsTable,
+            GraphEdgeType::WritesTable,
+            GraphEdgeType::PublishesEvent,
+            GraphEdgeType::ConsumesEvent,
+            GraphEdgeType::Tests,
+            GraphEdgeType::TestCovers,
+            GraphEdgeType::Validates,
+            GraphEdgeType::OwnedBy,
+            GraphEdgeType::ChangedBy,
+            GraphEdgeType::FailedIn,
+            GraphEdgeType::BelongsTo,
+            GraphEdgeType::MentionedIn,
+            GraphEdgeType::RelatedToTicket,
+            GraphEdgeType::SimilarTo,
+            GraphEdgeType::SemanticallyRelated,
+            GraphEdgeType::DerivedFrom,
+        ];
+        let proof_sets: Vec<Vec<RelationshipProof>> = vec![
+            Vec::new(),
+            vec![proof(RelationshipProofKind::ImportBinding, 1)],
+            vec![proof(RelationshipProofKind::ImportBinding, 2)],
+            vec![proof(RelationshipProofKind::QualifiedName, 1)],
+            vec![proof(RelationshipProofKind::DeclaredOrigin, 1)],
+            vec![
+                proof(RelationshipProofKind::ExactCallSite, 1),
+                proof(RelationshipProofKind::SameScopeDefinition, 1),
+            ],
+            vec![
+                proof(RelationshipProofKind::ImportBinding, 1),
+                proof(RelationshipProofKind::QualifiedName, 1),
+            ],
+            vec![
+                proof(RelationshipProofKind::InheritanceBinding, 1),
+                proof(RelationshipProofKind::TraitOrInterfaceBinding, 1),
+            ],
+            vec![proof(RelationshipProofKind::ModuleOrPackageBinding, 1)],
+        ];
+        let expected_rank =
+            |tier: u8, confidence_index: usize| (3 - tier) * 4 + confidence_index as u8;
+        let mut checked = 0;
+        for (confidence_index, confidence) in CONFIDENCES.into_iter().enumerate() {
+            // Containment: parsed from a parser or index is tier 2, anything else is heuristic,
+            // whatever proofs the edge carries.
+            for edge_type in [GraphEdgeType::Contains, GraphEdgeType::Defines] {
+                for source in SOURCES {
+                    for proofs in &proof_sets {
+                        let mut containment = edge(edge_type.clone(), proofs.clone());
+                        containment.evidence.source_type = source.clone();
+                        containment.evidence.confidence = confidence;
+                        let parsed = matches!(
+                            source,
+                            EvidenceSourceType::TreeSitter
+                                | EvidenceSourceType::Scip
+                                | EvidenceSourceType::Lsp
+                        );
+                        assert_eq!(
+                            (
+                                GRAPH_EDGE_WINDOW_RANK_VERSION,
+                                graph_edge_window_rank(&containment)
+                            ),
+                            (
+                                1,
+                                expected_rank(if parsed { 2 } else { 0 }, confidence_index)
+                            ),
+                            "{edge_type:?} from {source:?} at {confidence:?}: a change to the \
+                             window rank must bump GRAPH_EDGE_WINDOW_RANK_VERSION"
+                        );
+                        checked += 1;
+                    }
                 }
-                "corroborated" => edge
-                    .set_relationship_proofs(vec![proof(RelationshipProofKind::QualifiedName, 1)])
-                    .unwrap(),
-                _ => {}
             }
-            edge.evidence.confidence = confidence;
-            graph_edge_window_rank(&edge)
-        };
-        let mut table = Vec::new();
-        for tier in ["proven", "containment", "corroborated", "heuristic"] {
-            for confidence in [
-                Confidence::Exact,
-                Confidence::High,
-                Confidence::Medium,
-                Confidence::Low,
-            ] {
-                table.push(ranked(tier, confidence));
+            // Relationships: the authority class decides the tier, and the source does not.
+            let mut classes = BTreeSet::new();
+            for edge_type in &relationship_types {
+                for source in SOURCES {
+                    for proofs in &proof_sets {
+                        let mut relationship = edge(edge_type.clone(), proofs.clone());
+                        relationship.evidence.source_type = source.clone();
+                        relationship.evidence.confidence = confidence;
+                        let authority = relationship.relationship_authority();
+                        classes.insert(format!("{authority:?}"));
+                        let tier = match authority {
+                            RelationshipAuthority::Authoritative => 3,
+                            RelationshipAuthority::Corroborating => 1,
+                            RelationshipAuthority::Heuristic => 0,
+                        };
+                        assert_eq!(
+                            (
+                                GRAPH_EDGE_WINDOW_RANK_VERSION,
+                                graph_edge_window_rank(&relationship)
+                            ),
+                            (1, expected_rank(tier, confidence_index)),
+                            "{edge_type:?} {authority:?} from {source:?} at {confidence:?}: a \
+                             change to the window rank must bump GRAPH_EDGE_WINDOW_RANK_VERSION"
+                        );
+                        checked += 1;
+                    }
+                }
             }
+            assert_eq!(
+                classes.len(),
+                3,
+                "every authority class must be exercised: {classes:?}"
+            );
         }
-        assert_eq!(
-            (GRAPH_EDGE_WINDOW_RANK_VERSION, table),
-            (1, (0..16).collect::<Vec<u8>>()),
-            "a change to graph_edge_window_rank must bump GRAPH_EDGE_WINDOW_RANK_VERSION"
-        );
+        assert_eq!(checked, 4 * (2 + 27) * 11 * 9);
     }
 
     #[test]

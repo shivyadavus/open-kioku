@@ -23,12 +23,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const SQLITE_HISTORY_SCHEMA_VERSION: i64 = 1;
-/// 5: `graph_edges.window_rank` and the rank indexes. A binary that reads version 4 would write
-/// edges without a rank into such a file, so it refuses it as newer.
-pub const SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION: i64 = 5;
-/// The first layout whose graph tables a writer's open migrates in place rather than discarding
-/// (4: graph edges and call sites as typed columns). An index from 4 on is upgraded on open.
-pub const SQLITE_COMPACT_GRAPH_SCHEMA_VERSION: i64 = 4;
+pub const SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION: i64 = 4;
 const SQLITE_GRAPH_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
 const SQLITE_SUPPORTED_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -159,6 +154,7 @@ impl SqliteStore {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                 | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
                 | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            StoreOpener::Writer,
         )
     }
 
@@ -169,7 +165,9 @@ impl SqliteStore {
     /// read-only MCP session or `ok search` left an empty `.ok/index.sqlite` behind, which
     /// every later read reported as a legacy index awaiting rebuild rather than as a
     /// repository nobody had indexed. The connection is still read-write: `initialize` runs
-    /// the idempotent schema statements and the legacy-layout reset records its marker.
+    /// the idempotent schema statements and the legacy-layout reset records its marker. It does
+    /// not rank graph edges or build their rank indexes, which only [`open`](Self::open) does:
+    /// until then bounded edge reads decode and sort, with the same answers.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if !path.is_file() {
@@ -181,6 +179,7 @@ impl SqliteStore {
         Self::open_with_flags(
             path.to_path_buf(),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            StoreOpener::Reader,
         )
     }
 
@@ -298,9 +297,247 @@ impl SqliteStore {
         })
     }
 
-    fn open_with_flags(path: PathBuf, flags: rusqlite::OpenFlags) -> Result<Self> {
+    fn initialize_as(&self, opener: StoreOpener) -> Result<()> {
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        ensure_supported_sqlite_schema(&conn)?;
+        let created_here = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(storage_err)?
+            == 0;
+        reset_legacy_graph_storage(&mut conn)?;
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS manifests (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS manifest_withdrawals (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              reason TEXT NOT NULL,
+              withdrawn_at TEXT NOT NULL
+            );
+            -- Publishing a manifest ends a withdrawal whichever binary publishes it, including
+            -- one that does not know this table, so a reason can never outlive its index.
+            CREATE TRIGGER IF NOT EXISTS manifest_insert_ends_withdrawal
+              AFTER INSERT ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
+            CREATE TRIGGER IF NOT EXISTS manifest_update_ends_withdrawal
+              AFTER UPDATE ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
+            CREATE TABLE IF NOT EXISTS files (
+              id TEXT PRIMARY KEY,
+              path TEXT NOT NULL UNIQUE,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS symbols (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              qualified_name TEXT NOT NULL,
+              file_id TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+            CREATE INDEX IF NOT EXISTS idx_symbols_name_nocase ON symbols(name COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_symbols_qualified_name ON symbols(qualified_name);
+            CREATE TABLE IF NOT EXISTS chunks (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              start_line INTEGER NOT NULL,
+              end_line INTEGER NOT NULL,
+              text TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
+            CREATE TABLE IF NOT EXISTS document_sections (
+              path TEXT NOT NULL,
+              start_line INTEGER NOT NULL,
+              end_line INTEGER NOT NULL,
+              content_hash TEXT NOT NULL,
+              json TEXT NOT NULL,
+              PRIMARY KEY(path, start_line, end_line)
+            );
+            CREATE INDEX IF NOT EXISTS idx_document_sections_path
+              ON document_sections(path, start_line);
+            CREATE INDEX IF NOT EXISTS idx_document_sections_hash
+              ON document_sections(content_hash);
+            CREATE TABLE IF NOT EXISTS tests (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tests_file ON tests(file_id);
+            CREATE TABLE IF NOT EXISTS imports (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              imported TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_id);
+            CREATE TABLE IF NOT EXISTS occurrences (
+              id TEXT PRIMARY KEY,
+              symbol_id TEXT NOT NULL,
+              file_id TEXT NOT NULL,
+              is_definition INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_occurrences_symbol ON occurrences(symbol_id);
+            CREATE INDEX IF NOT EXISTS idx_occurrences_file ON occurrences(file_id);
+            CREATE TABLE IF NOT EXISTS analysis_facts (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              source_type TEXT NOT NULL,
+              target TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_analysis_facts_file ON analysis_facts(file_id);
+            CREATE INDEX IF NOT EXISTS idx_analysis_facts_source ON analysis_facts(source_type);
+            CREATE INDEX IF NOT EXISTS idx_analysis_facts_target ON analysis_facts(target);
+            CREATE TABLE IF NOT EXISTS vector_targets (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              target_kind TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              vector_id INTEGER NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_vector_targets_file ON vector_targets(file_id);
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+              cache_key TEXT PRIMARY KEY,
+              target_id TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS semantic_index_runs (
+              id TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              vector_count INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS semantic_coverage (
+              id TEXT PRIMARY KEY,
+              target_kind TEXT NOT NULL,
+              indexed_count INTEGER NOT NULL,
+              stale_count INTEGER NOT NULL,
+              failed_count INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS graph_nodes (
+              id TEXT PRIMARY KEY,
+              label TEXT NOT NULL,
+              node_type TEXT DEFAULT '',
+              file_id TEXT DEFAULT '',
+              symbol_id TEXT DEFAULT '',
+              evidence_available BOOLEAN DEFAULT 0,
+              freshness INTEGER DEFAULT 0,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS graph_strings (
+              sid INTEGER PRIMARY KEY,
+              vhash INTEGER NOT NULL,
+              value TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_strings_vhash ON graph_strings(vhash);
+            CREATE TABLE IF NOT EXISTS graph_edges (
+              id TEXT PRIMARY KEY,
+              from_sid INTEGER NOT NULL,
+              to_sid INTEGER NOT NULL,
+              edge_type TEXT NOT NULL,
+              confidence TEXT NOT NULL DEFAULT '',
+              source_type TEXT NOT NULL DEFAULT '',
+              source_sid INTEGER,
+              freshness INTEGER NOT NULL DEFAULT 0,
+              ev_id TEXT NOT NULL DEFAULT '',
+              ev_path_sid INTEGER,
+              ev_line_start INTEGER,
+              ev_line_end INTEGER,
+              ev_symbol_sid INTEGER,
+              ev_message_sid INTEGER,
+              ev_indexed_at_sid INTEGER,
+              extra_sid INTEGER,
+              window_rank INTEGER NOT NULL DEFAULT -1
+            );
+
+            CREATE TABLE IF NOT EXISTS scopes (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              parent_id TEXT,
+              owner_symbol_id TEXT,
+              kind TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_scopes_file ON scopes(file_id);
+
+            CREATE TABLE IF NOT EXISTS bindings (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              scope_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_bindings_lookup ON bindings(file_id, scope_id, name);
+
+            CREATE TABLE IF NOT EXISTS call_site_strings (
+              sid INTEGER PRIMARY KEY,
+              vhash INTEGER NOT NULL,
+              value TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_call_site_strings_vhash ON call_site_strings(vhash);
+            CREATE TABLE IF NOT EXISTS call_sites (
+              id_sid INTEGER PRIMARY KEY,
+              file_sid INTEGER NOT NULL,
+              scope_sid INTEGER NOT NULL,
+              caller_sid INTEGER,
+              callee_sid INTEGER NOT NULL,
+              receiver_sid INTEGER,
+              receiver_kind TEXT NOT NULL DEFAULT 'Unknown',
+              start_line INTEGER NOT NULL,
+              start_column INTEGER NOT NULL,
+              end_line INTEGER NOT NULL DEFAULT 0,
+              end_column INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_sid);
+            CREATE INDEX IF NOT EXISTS idx_call_sites_name ON call_sites(callee_sid);
+            CREATE INDEX IF NOT EXISTS idx_call_sites_file ON call_sites(file_sid);
+
+            CREATE TABLE IF NOT EXISTS relationship_evidence (
+              id TEXT PRIMARY KEY,
+              edge_id TEXT NOT NULL,
+              source_type TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_relationship_evidence_edge ON relationship_evidence(edge_id);
+            "#,
+        )
+        .map_err(storage_err)?;
+        migrate_history_schema(&mut conn)?;
+        migrate_graph_schema(&mut conn, opener)?;
+        // Every writer this file will see clears excluded content as it removes it, so nothing
+        // it holds needs the one-time compaction an older file does.
+        if created_here {
+            set_schema_meta_flag(&conn, EXCLUDED_CONTENT_CLEARED_FLAG)?;
+        }
+        Ok(())
+    }
+
+    fn open_with_flags(
+        path: PathBuf,
+        flags: rusqlite::OpenFlags,
+        writer: StoreOpener,
+    ) -> Result<Self> {
         let store = Self::connect(path, flags)?;
-        store.initialize()?;
+        store.initialize_as(writer)?;
         Ok(store)
     }
 
@@ -1059,237 +1296,7 @@ impl SqliteStore {
 
 impl MetadataStore for SqliteStore {
     fn initialize(&self) -> Result<()> {
-        let mut conn = self
-            .connection
-            .lock()
-            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        ensure_supported_sqlite_schema(&conn)?;
-        let created_here = conn
-            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map_err(storage_err)?
-            == 0;
-        reset_legacy_graph_storage(&mut conn)?;
-        conn.execute_batch(
-            r#"
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE IF NOT EXISTS manifests (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS manifest_withdrawals (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              reason TEXT NOT NULL,
-              withdrawn_at TEXT NOT NULL
-            );
-            -- Publishing a manifest ends a withdrawal whichever binary publishes it, including
-            -- one that does not know this table, so a reason can never outlive its index.
-            CREATE TRIGGER IF NOT EXISTS manifest_insert_ends_withdrawal
-              AFTER INSERT ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
-            CREATE TRIGGER IF NOT EXISTS manifest_update_ends_withdrawal
-              AFTER UPDATE ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
-            CREATE TABLE IF NOT EXISTS files (
-              id TEXT PRIMARY KEY,
-              path TEXT NOT NULL UNIQUE,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS symbols (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              qualified_name TEXT NOT NULL,
-              file_id TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
-            CREATE INDEX IF NOT EXISTS idx_symbols_name_nocase ON symbols(name COLLATE NOCASE);
-            CREATE INDEX IF NOT EXISTS idx_symbols_qualified_name ON symbols(qualified_name);
-            CREATE TABLE IF NOT EXISTS chunks (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              start_line INTEGER NOT NULL,
-              end_line INTEGER NOT NULL,
-              text TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
-            CREATE TABLE IF NOT EXISTS document_sections (
-              path TEXT NOT NULL,
-              start_line INTEGER NOT NULL,
-              end_line INTEGER NOT NULL,
-              content_hash TEXT NOT NULL,
-              json TEXT NOT NULL,
-              PRIMARY KEY(path, start_line, end_line)
-            );
-            CREATE INDEX IF NOT EXISTS idx_document_sections_path
-              ON document_sections(path, start_line);
-            CREATE INDEX IF NOT EXISTS idx_document_sections_hash
-              ON document_sections(content_hash);
-            CREATE TABLE IF NOT EXISTS tests (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_tests_file ON tests(file_id);
-            CREATE TABLE IF NOT EXISTS imports (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              imported TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_id);
-            CREATE TABLE IF NOT EXISTS occurrences (
-              id TEXT PRIMARY KEY,
-              symbol_id TEXT NOT NULL,
-              file_id TEXT NOT NULL,
-              is_definition INTEGER NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_occurrences_symbol ON occurrences(symbol_id);
-            CREATE INDEX IF NOT EXISTS idx_occurrences_file ON occurrences(file_id);
-            CREATE TABLE IF NOT EXISTS analysis_facts (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              source_type TEXT NOT NULL,
-              target TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_analysis_facts_file ON analysis_facts(file_id);
-            CREATE INDEX IF NOT EXISTS idx_analysis_facts_source ON analysis_facts(source_type);
-            CREATE INDEX IF NOT EXISTS idx_analysis_facts_target ON analysis_facts(target);
-            CREATE TABLE IF NOT EXISTS vector_targets (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              target_kind TEXT NOT NULL,
-              content_hash TEXT NOT NULL,
-              vector_id INTEGER NOT NULL,
-              model TEXT NOT NULL,
-              dimensions INTEGER NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_vector_targets_file ON vector_targets(file_id);
-            CREATE TABLE IF NOT EXISTS embedding_cache (
-              cache_key TEXT PRIMARY KEY,
-              target_id TEXT NOT NULL,
-              content_hash TEXT NOT NULL,
-              model TEXT NOT NULL,
-              dimensions INTEGER NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS semantic_index_runs (
-              id TEXT PRIMARY KEY,
-              status TEXT NOT NULL,
-              model TEXT NOT NULL,
-              dimensions INTEGER NOT NULL,
-              vector_count INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS semantic_coverage (
-              id TEXT PRIMARY KEY,
-              target_kind TEXT NOT NULL,
-              indexed_count INTEGER NOT NULL,
-              stale_count INTEGER NOT NULL,
-              failed_count INTEGER NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS graph_nodes (
-              id TEXT PRIMARY KEY,
-              label TEXT NOT NULL,
-              node_type TEXT DEFAULT '',
-              file_id TEXT DEFAULT '',
-              symbol_id TEXT DEFAULT '',
-              evidence_available BOOLEAN DEFAULT 0,
-              freshness INTEGER DEFAULT 0,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS graph_strings (
-              sid INTEGER PRIMARY KEY,
-              vhash INTEGER NOT NULL,
-              value TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_graph_strings_vhash ON graph_strings(vhash);
-            CREATE TABLE IF NOT EXISTS graph_edges (
-              id TEXT PRIMARY KEY,
-              from_sid INTEGER NOT NULL,
-              to_sid INTEGER NOT NULL,
-              edge_type TEXT NOT NULL,
-              confidence TEXT NOT NULL DEFAULT '',
-              source_type TEXT NOT NULL DEFAULT '',
-              source_sid INTEGER,
-              freshness INTEGER NOT NULL DEFAULT 0,
-              ev_id TEXT NOT NULL DEFAULT '',
-              ev_path_sid INTEGER,
-              ev_line_start INTEGER,
-              ev_line_end INTEGER,
-              ev_symbol_sid INTEGER,
-              ev_message_sid INTEGER,
-              ev_indexed_at_sid INTEGER,
-              extra_sid INTEGER,
-              window_rank INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS scopes (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              parent_id TEXT,
-              owner_symbol_id TEXT,
-              kind TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_scopes_file ON scopes(file_id);
-
-            CREATE TABLE IF NOT EXISTS bindings (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              scope_id TEXT NOT NULL,
-              name TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_bindings_lookup ON bindings(file_id, scope_id, name);
-
-            CREATE TABLE IF NOT EXISTS call_site_strings (
-              sid INTEGER PRIMARY KEY,
-              vhash INTEGER NOT NULL,
-              value TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_call_site_strings_vhash ON call_site_strings(vhash);
-            CREATE TABLE IF NOT EXISTS call_sites (
-              id_sid INTEGER PRIMARY KEY,
-              file_sid INTEGER NOT NULL,
-              scope_sid INTEGER NOT NULL,
-              caller_sid INTEGER,
-              callee_sid INTEGER NOT NULL,
-              receiver_sid INTEGER,
-              receiver_kind TEXT NOT NULL DEFAULT 'Unknown',
-              start_line INTEGER NOT NULL,
-              start_column INTEGER NOT NULL,
-              end_line INTEGER NOT NULL DEFAULT 0,
-              end_column INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_sid);
-            CREATE INDEX IF NOT EXISTS idx_call_sites_name ON call_sites(callee_sid);
-            CREATE INDEX IF NOT EXISTS idx_call_sites_file ON call_sites(file_sid);
-
-            CREATE TABLE IF NOT EXISTS relationship_evidence (
-              id TEXT PRIMARY KEY,
-              edge_id TEXT NOT NULL,
-              source_type TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_relationship_evidence_edge ON relationship_evidence(edge_id);
-            "#,
-        )
-        .map_err(storage_err)?;
-        migrate_history_schema(&mut conn)?;
-        migrate_graph_schema(&mut conn)?;
-        // Every writer this file will see clears excluded content as it removes it, so nothing
-        // it holds needs the one-time compaction an older file does.
-        if created_here {
-            set_schema_meta_flag(&conn, EXCLUDED_CONTENT_CLEARED_FLAG)?;
-        }
-        Ok(())
+        self.initialize_as(StoreOpener::Writer)
     }
 
     fn put_manifest(&self, manifest: &IndexManifest) -> Result<()> {
@@ -5065,7 +5072,19 @@ fn clear_schema_meta_flag(conn: &Connection, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
+/// Who is opening a store, which decides whether the open may rank every graph edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreOpener {
+    /// `SqliteStore::open`: `ok index`, `ok init`, `ok watch`, snapshot import. About to write,
+    /// so it brings the edge window ranks and their indexes up to date first.
+    Writer,
+    /// `SqliteStore::open_existing`: status and other surfaces that only read. Ranking a large
+    /// index is a long write nobody asked for, so they leave the ranks as they are, and bounded
+    /// reads decode and sort until a writer has ranked them.
+    Reader,
+}
+
+fn migrate_graph_schema(conn: &mut Connection, opener: StoreOpener) -> Result<()> {
     // Add columns to graph_nodes. If any column was actually added, the table was genuinely
     // pre-migration and the backfill must run regardless of the marker.
     let mut columns_added = false;
@@ -5078,7 +5097,9 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
     ] {
         columns_added |= add_column_if_not_exists(conn, stmt)?;
     }
-    migrate_graph_edge_window_ranks(conn)?;
+    if opener == StoreOpener::Writer {
+        migrate_graph_edge_window_ranks(conn)?;
+    }
 
     // The backfill full-scans both graph tables, so it must run once per store, not on every
     // open. Before the marker existed it also re-matched rows whose optional columns are
@@ -5088,8 +5109,13 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
         set_schema_meta_flag(conn, GRAPH_QUERY_COLUMNS_FLAG)?;
     }
 
-    // Add indexes (idempotent via IF NOT EXISTS; shared with bulk replace_graph rebuilds)
-    for (_, ddl) in GRAPH_INDEXES {
+    // Add indexes (idempotent via IF NOT EXISTS; shared with bulk replace_graph rebuilds). The
+    // rank indexes are the writer's: an index whose ranks a writer has not brought up to date may
+    // not have the column, and building them is as long a write as ranking.
+    for (name, ddl) in GRAPH_INDEXES {
+        if opener == StoreOpener::Reader && name.ends_with("_rank") {
+            continue;
+        }
         conn.execute(ddl, []).map_err(storage_err)?;
     }
 
@@ -5109,35 +5135,53 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
 /// matches this binary's version, and fall back to decoding and sorting otherwise.
 const GRAPH_EDGE_WINDOW_RANK_KEY: &str = "graph_edge_window_rank_version";
 
-/// Give every edge row the window rank of this binary's rank function: add the column to an
-/// index written before it existed, and recompute it when the rank function's version changed.
+/// Trigger that withdraws the recorded rank version when a row arrives without a rank.
 ///
-/// The column, the ranks and the recorded version commit together, so a reader never sees a
-/// recorded version over rows it does not describe. A migrated table takes a default only
-/// because SQLite adds a `NOT NULL` column with one; the one insert names the column, and every
-/// row is ranked here before the version is recorded.
+/// Every insert this crate makes names `window_rank`. One that does not — an Open Kioku from
+/// before window ranks writing to an index this version has ranked — gets the column's `-1`
+/// default, and a reader that trusted the recorded version would order that row first and cut
+/// its window by edge id again. The trigger lives in the file, so it fires for any writer: from
+/// that insert on, bounded reads decode and sort, until the next writer's open of this version
+/// ranks every row and records the version again.
+const GRAPH_EDGES_UNRANKED_TRIGGER: &str = "\
+CREATE TRIGGER IF NOT EXISTS graph_edges_unranked_insert AFTER INSERT ON graph_edges \
+WHEN NEW.window_rank < 0 \
+BEGIN DELETE FROM schema_meta WHERE key = 'graph_edge_window_rank_version'; END";
+
+/// Bring every edge row's window rank up to this binary's rank function, in one transaction: add
+/// the column to an index written before it existed, install [`GRAPH_EDGES_UNRANKED_TRIGGER`],
+/// drop the endpoint indexes the rank indexes replaced (an older writer recreates them), and,
+/// when the recorded version is missing or differs, rank every row and record the version.
+///
+/// The column, trigger, ranks and version commit together, and the version is recorded only
+/// over rows it describes: an open killed partway leaves the file as it was, and any later insert
+/// without a rank withdraws the version. `user_version` is not raised. An older Open Kioku keeps
+/// reading and writing the file — its reads name their columns, and its writes only switch
+/// ranked reads off until this version's next writer open — rather than being locked out of it.
 fn migrate_graph_edge_window_ranks(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction().map_err(storage_err)?;
     let added = !has_column(&tx, "graph_edges", "window_rank")?;
     if added {
         tx.execute(
-            "ALTER TABLE graph_edges ADD COLUMN window_rank INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE graph_edges ADD COLUMN window_rank INTEGER NOT NULL DEFAULT -1",
             [],
         )
         .map_err(storage_err)?;
-        for name in RETIRED_GRAPH_INDEXES {
-            tx.execute(&format!("DROP INDEX IF EXISTS {name}"), [])
-                .map_err(storage_err)?;
-        }
+    }
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .map_err(storage_err)?;
+    tx.execute(GRAPH_EDGES_UNRANKED_TRIGGER, [])
+        .map_err(storage_err)?;
+    for name in RETIRED_GRAPH_INDEXES {
+        tx.execute(&format!("DROP INDEX IF EXISTS {name}"), [])
+            .map_err(storage_err)?;
     }
     let current = open_kioku_core::GRAPH_EDGE_WINDOW_RANK_VERSION.to_string();
     if added || stored_window_rank_version(&tx)?.as_deref() != Some(current.as_str()) {
         rank_graph_edges(&tx)?;
-        tx.execute(
-            "CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-            [],
-        )
-        .map_err(storage_err)?;
         tx.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES(?1, ?2)",
             params![GRAPH_EDGE_WINDOW_RANK_KEY, current],
@@ -5164,9 +5208,15 @@ fn stored_window_rank_version(conn: &Connection) -> Result<Option<String>> {
 }
 
 /// Whether every `graph_edges.window_rank` was computed by this binary's rank function, so SQL
-/// may order and limit by it. `false` for an index no writer of this version has opened yet:
-/// the read surfaces open without migrating, and such an index is read by decoding every edge.
+/// may order and limit by it. `false` for an index no writer of this version has ranked, and for
+/// one an older writer has added rows to since: the read surfaces open without ranking, and such
+/// an index is read by decoding every edge.
 fn window_ranks_current(conn: &Connection) -> Result<bool> {
+    // The version is only recorded with the column, but a table dropped and recreated by a writer
+    // that does not know it would leave the version behind.
+    if !has_column(conn, "graph_edges", "window_rank")? {
+        return Ok(false);
+    }
     Ok(stored_window_rank_version(conn)?.as_deref()
         == Some(
             open_kioku_core::GRAPH_EDGE_WINDOW_RANK_VERSION
@@ -5178,7 +5228,8 @@ fn window_ranks_current(conn: &Connection) -> Result<bool> {
 /// Recompute `window_rank` for every edge row, a page of edges at a time in id order so memory
 /// stays bounded on a large index.
 ///
-/// A row that cannot be decoded keeps the rank it has. Every read that reaches it fails with the
+/// A row that cannot be decoded keeps the rank it has (`-1` if it never had one, which orders it
+/// first). Every read that reaches it fails with the
 /// row's own error, which is the report a damaged row must produce; failing here would instead
 /// refuse the writer's open, and with it the `ok index` that repairs the row.
 fn rank_graph_edges(tx: &Transaction<'_>) -> Result<()> {
@@ -9242,13 +9293,10 @@ mod tests {
         }
     }
 
-    /// An index written before window ranks existed keeps answering through the read-only
-    /// surfaces, which open without migrating, and the next writer's open ranks it in place: the
-    /// column, the ranks, the recorded version, the rank indexes and the schema version.
-    #[test]
-    fn an_index_from_before_window_ranks_is_read_then_ranked_on_the_next_writer_open() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("index.sqlite");
+    /// The hub fixture of [`fuzzed_hub_edges`], written by this version and then put back in the
+    /// layout a version-4 writer leaves: no rank column, trigger, rank indexes or recorded rank
+    /// version, and the endpoint indexes the rank indexes replaced. Returns the edges it holds.
+    fn write_pre_rank_index(path: &std::path::Path) -> Vec<GraphEdge> {
         let mut next = {
             let mut seed: u64 = 7;
             move |bound: u64| {
@@ -9274,21 +9322,22 @@ mod tests {
             });
         }
         {
-            let store = SqliteStore::open(&path).unwrap();
+            let store = SqliteStore::open(path).unwrap();
             store.put_manifest(&make_manifest()).unwrap();
             store.replace_graph(&nodes, &edges).unwrap();
         }
         // Put the file back in the layout a version-4 writer left: no rank column, no rank
         // indexes, the endpoint indexes they replaced, no recorded rank version.
         {
-            let conn = Connection::open(&path).unwrap();
+            let conn = Connection::open(path).unwrap();
             for (name, _) in GRAPH_INDEXES {
                 if name.ends_with("_rank") {
                     conn.execute(&format!("DROP INDEX {name}"), []).unwrap();
                 }
             }
             conn.execute_batch(
-                "ALTER TABLE graph_edges DROP COLUMN window_rank;
+                "DROP TRIGGER graph_edges_unranked_insert;
+                 ALTER TABLE graph_edges DROP COLUMN window_rank;
                  CREATE INDEX idx_graph_edges_from ON graph_edges(from_sid);
                  CREATE INDEX idx_graph_edges_to ON graph_edges(to_sid);
                  CREATE INDEX idx_graph_edges_from_type ON graph_edges(from_sid, edge_type);
@@ -9298,18 +9347,32 @@ mod tests {
             )
             .unwrap();
         }
-        let indexes = |conn: &Connection| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT name FROM sqlite_master WHERE type = 'index' \
-                     AND tbl_name = 'graph_edges' AND name LIKE 'idx_%' ORDER BY name",
-                )
-                .unwrap();
-            stmt.query_map([], |row| row.get::<_, String>(0))
-                .unwrap()
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap()
-        };
+        edges
+    }
+
+    /// The `idx_` indexes of `graph_edges`, by name.
+    fn graph_edge_indexes(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'index' \
+                 AND tbl_name = 'graph_edges' AND name LIKE 'idx_%' ORDER BY name",
+            )
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// An index written before window ranks existed keeps answering through the read-only
+    /// surfaces, which open without migrating, and the next writer's open ranks it in place: the
+    /// column, the ranks, the recorded version and the rank indexes, with `user_version` left
+    /// where it was so an older Open Kioku can still open the file.
+    #[test]
+    fn an_index_from_before_window_ranks_is_read_then_ranked_on_the_next_writer_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let edges = write_pre_rank_index(&path);
 
         // A read-only surface serves it as it is, decoding and sorting.
         let probe = SqliteStore::open_for_probe(&path).unwrap();
@@ -9330,7 +9393,7 @@ mod tests {
                 .unwrap();
             assert_eq!(version, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION);
             assert_eq!(
-                indexes(&conn),
+                graph_edge_indexes(&conn),
                 [
                     "idx_graph_edges_from_rank",
                     "idx_graph_edges_from_type_rank",
@@ -9378,6 +9441,149 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         assert!(window_ranks_current(&store.connection.lock().unwrap()).unwrap());
         assert_windows_match_full_sort(&store, &edges, "re-ranked");
+    }
+
+    /// Every stored rank equals the core rank of the edge with that id.
+    fn assert_persisted_ranks(conn: &Connection, edges: &[GraphEdge]) {
+        let mut stmt = conn
+            .prepare("SELECT id, window_rank FROM graph_edges ORDER BY id")
+            .unwrap();
+        let stored = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let mut expected = edges
+            .iter()
+            .map(|edge| {
+                (
+                    edge.id.0.clone(),
+                    i64::from(open_kioku_core::graph_edge_window_rank(edge)),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(stored, expected);
+    }
+
+    /// A read-only open (`ok status`, `ok doctor`) of an index from before window ranks neither
+    /// ranks it nor builds the rank indexes: that long write is the next writer's, and until then
+    /// reads decode and sort. A writer's open killed before its transaction commits leaves the
+    /// file as it was, with no version recorded over unranked rows.
+    #[test]
+    fn only_a_writer_open_ranks_an_index_and_an_interrupted_one_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let edges = write_pre_rank_index(&path);
+
+        let store = SqliteStore::open_existing(&path).unwrap();
+        {
+            let conn = store.connection.lock().unwrap();
+            assert!(!has_column(&conn, "graph_edges", "window_rank").unwrap());
+            assert!(!graph_edge_indexes(&conn)
+                .iter()
+                .any(|name| name.ends_with("_rank")));
+        }
+        assert_windows_match_full_sort(&store, &edges, "read-only open");
+        drop(store);
+
+        // The rank transaction, cut off before its commit.
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(
+                "ALTER TABLE graph_edges ADD COLUMN window_rank INTEGER NOT NULL DEFAULT -1;
+                 UPDATE graph_edges SET window_rank = 0 WHERE rowid % 2 = 0;
+                 INSERT OR REPLACE INTO schema_meta(key, value)
+                 VALUES('graph_edge_window_rank_version', '1');",
+            )
+            .unwrap();
+            std::mem::forget(tx);
+        }
+        let probe = SqliteStore::open_for_probe(&path).unwrap();
+        {
+            let conn = probe.connection.lock().unwrap();
+            assert!(!has_column(&conn, "graph_edges", "window_rank").unwrap());
+            assert!(!window_ranks_current(&conn).unwrap());
+        }
+        assert_windows_match_full_sort(&probe, &edges, "interrupted rank transaction");
+    }
+
+    /// An Open Kioku from before window ranks can still write to a ranked index. Its inserts
+    /// name no rank, so they take the `-1` default, and the trigger withdraws the recorded
+    /// version with them: reads stop trusting the column at once, rather than ordering those rows
+    /// first, and the next writer's open of this version ranks every row again. The file is also
+    /// in the state a writer killed after the rank transaction but before the rank indexes were
+    /// built leaves, with the endpoint indexes an older writer recreates.
+    #[test]
+    fn an_unranked_insert_withdraws_the_rank_version_until_the_next_writer_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let edges = write_pre_rank_index(&path);
+        drop(SqliteStore::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (name, _) in GRAPH_INDEXES {
+                if name.ends_with("_rank") {
+                    conn.execute(&format!("DROP INDEX {name}"), []).unwrap();
+                }
+            }
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_sid);
+                 CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_sid);
+                 INSERT INTO graph_edges(id, from_sid, to_sid, edge_type, confidence,
+                   source_type, source_sid, freshness, ev_id, ev_path_sid, ev_line_start,
+                   ev_line_end, ev_symbol_sid, ev_message_sid, ev_indexed_at_sid, extra_sid)
+                 SELECT 'old-' || id, from_sid, to_sid, edge_type, confidence, source_type,
+                   source_sid, freshness, ev_id, ev_path_sid, ev_line_start, ev_line_end,
+                   ev_symbol_sid, ev_message_sid, ev_indexed_at_sid, extra_sid
+                 FROM graph_edges;",
+            )
+            .unwrap();
+        }
+        let mut all = edges.clone();
+        all.extend(edges.iter().map(|edge| {
+            let mut copy = edge.clone();
+            copy.id = EdgeId::new(format!("old-{}", edge.id.0));
+            copy
+        }));
+
+        let probe = SqliteStore::open_for_probe(&path).unwrap();
+        {
+            let conn = probe.connection.lock().unwrap();
+            assert!(!window_ranks_current(&conn).unwrap());
+            let unranked: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM graph_edges WHERE window_rank < 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(unranked as usize, edges.len());
+        }
+        assert_windows_match_full_sort(&probe, &all, "after an unranked insert");
+        drop(probe);
+
+        let store = SqliteStore::open(&path).unwrap();
+        {
+            let conn = store.connection.lock().unwrap();
+            assert!(window_ranks_current(&conn).unwrap());
+            assert_persisted_ranks(&conn, &all);
+            assert_eq!(
+                graph_edge_indexes(&conn),
+                [
+                    "idx_graph_edges_from_rank",
+                    "idx_graph_edges_from_type_rank",
+                    "idx_graph_edges_source_type",
+                    "idx_graph_edges_to_rank",
+                    "idx_graph_edges_to_type_rank",
+                    "idx_graph_edges_type",
+                ]
+            );
+        }
+        assert_windows_match_full_sort(&store, &all, "re-ranked after an unranked insert");
     }
 
     /// A window read holds its own read transaction when the connection has none, ends it, and
