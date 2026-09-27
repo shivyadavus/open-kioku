@@ -192,6 +192,9 @@ fn render_status_markdown(
         if manifest.quality.pending_pre_redaction_compaction {
             out.push_str("| Pre-redaction bytes | clearing outstanding; run `ok index` |\n");
         }
+        if let Some(caveat) = deleted_content_caveat(&manifest.quality) {
+            out.push_str(&format!("| Deleted content | {caveat} |\n"));
+        }
         if let Some(snapshot) = &manifest.snapshot {
             out.push_str(&format!(
                 "| Imported snapshot | {} |\n",
@@ -1482,6 +1485,16 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                 let (check, step) = redaction_check(quality);
                 checks.push(check);
                 next_steps.extend(step);
+                if let Some(caveat) = deleted_content_caveat(quality) {
+                    checks.push(DoctorCheck {
+                        name: "deleted_content",
+                        status: CheckStatus::Warn,
+                        message: caveat.to_string(),
+                    });
+                    next_steps.push(
+                        "Deleted content: run `ok index .` while no MCP server or `ok watch` holds a read open, so the database is compacted and its write-ahead log truncated.".into(),
+                    );
+                }
                 if let Some(snapshot) = &manifest.snapshot {
                     let (check, step) = snapshot_check(snapshot);
                     checks.push(check);
@@ -1621,6 +1634,17 @@ fn doctor_report(repo: &Path) -> DoctorReport {
         coverage,
         next_steps,
     }
+}
+
+/// What `ok index`, `ok status`, and `ok doctor` say while an index run's clearing of the
+/// rows it deleted has not completed (#553); `None` once it has.
+fn deleted_content_caveat(quality: &open_kioku_core::IndexQuality) -> Option<&'static str> {
+    quality.pending_deleted_content_clearing.then_some(
+        "deleted content may remain until compaction succeeds: rows an index run removed, such \
+         as a path the policy excluded after it was indexed, can still be read from the \
+         database file or its write-ahead log; run `ok index` with no other Open Kioku process \
+         reading the index",
+    )
 }
 
 /// The redaction count as `ok index`, `ok status`, and `ok doctor` print it.

@@ -2071,6 +2071,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             redacted_files: input.redacted_files,
             // Set by the run that publishes this manifest, from the index it replaces.
             pending_pre_redaction_compaction: false,
+            pending_deleted_content_clearing: false,
             quality_notes,
         }
     } else {
@@ -2108,6 +2109,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             redacted_files: input.redacted_files,
             // Set by the run that publishes this manifest, from the index it replaces.
             pending_pre_redaction_compaction: false,
+            pending_deleted_content_clearing: false,
             quality_notes,
         }
     };

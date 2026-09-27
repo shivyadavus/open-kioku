@@ -127,6 +127,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     "redaction: {}",
                     redaction_summary(&snapshot.manifest.quality)
                 );
+                if let Some(caveat) = deleted_content_caveat(&snapshot.manifest.quality) {
+                    println!("deleted content: {caveat}");
+                }
                 if let Some(scip) = &snapshot.scip {
                     println!(
                         "SCIP: mode {:?}, imported {} index(es), {} exact references",
@@ -296,6 +299,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     "Redaction: {}",
                     redaction_summary(&manifest.quality)
                 );
+                if let Some(caveat) = deleted_content_caveat(&manifest.quality) {
+                    println!("Deleted content: {caveat}");
+                }
                 if let Some(snapshot) = &manifest.snapshot {
                     println!("Snapshot: {}", snapshot_provenance_summary(snapshot));
                 }

@@ -18,6 +18,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+pub mod clearing;
+
+use clearing::ClearingScope;
+
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +120,7 @@ pub fn reindex_repo_after_changes<'a>(
     let previous_manifest = store.manifest()?;
     let previous_files = store.list_files(usize::MAX, 0)?;
     let previous_documents = store.document_sections()?;
+    let paths_before = clearing::PathsBefore::read(&store)?;
     if previous_manifest.is_some() {
         let compatibility =
             analysis_semantics_compatibility(previous_manifest.as_ref(), &snapshot.manifest);
@@ -278,7 +283,9 @@ pub fn reindex_repo_after_changes<'a>(
     } else {
         persist_full_snapshot(&store, &snapshot)?;
     }
-    let finish = || -> Result<()> {
+    // Whether this run owes a compaction, decided once its rows are written.
+    let mut compaction_owed = false;
+    let mut finish = || -> Result<()> {
         if partial {
             let changed_documents =
                 changed_document_paths(&previous_documents, &snapshot.document_sections)
@@ -312,6 +319,19 @@ pub fn reindex_repo_after_changes<'a>(
                 graph_nodes,
             )?;
         }
+        compaction_owed = clearing::compaction_owed(
+            root,
+            &config,
+            &store,
+            &paths_before,
+            previous_manifest.as_ref(),
+            ClearingScope::Incremental,
+        )
+        .unwrap_or(true);
+        snapshot.manifest.quality.pending_deleted_content_clearing = compaction_owed
+            || previous_manifest
+                .as_ref()
+                .is_some_and(|previous| previous.quality.pending_deleted_content_clearing);
         // Published last: every component the manifest describes is in place by now.
         store.put_manifest(&snapshot.manifest)
     };
@@ -344,6 +364,7 @@ pub fn reindex_repo_after_changes<'a>(
     }
     // A partial update is refused over an index written before secret-value redaction, so it
     // was replaced in full above; its unredacted rows linger in free pages until compacted.
+    let mut compacted = false;
     if !partial
         && previous_manifest
             .as_ref()
@@ -351,6 +372,7 @@ pub fn reindex_repo_after_changes<'a>(
     {
         match compact_pre_redaction_bytes(root, &store) {
             Ok(()) => {
+                compacted = true;
                 snapshot.manifest.quality.pending_pre_redaction_compaction = false;
                 store.put_manifest(&snapshot.manifest)?;
             }
@@ -359,6 +381,14 @@ pub fn reindex_repo_after_changes<'a>(
             ),
         }
     }
+    // Only what this event owes: a compaction owed by an earlier run is left to the next
+    // `ok index` or watcher start, so a failing one is not retried on every file event.
+    finish_clearing(
+        &store,
+        &mut snapshot.manifest,
+        compaction_owed && !compacted,
+        compaction_owed || compacted,
+    )?;
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
@@ -379,6 +409,21 @@ fn compact_pre_redaction_bytes(root: &Path, store: &SqliteStore) -> Result<()> {
     store.vacuum()
 }
 
+/// Clear deleted rows after the manifest is published and record the outcome in it; see
+/// [`clearing`]. A failure is reported, never fatal: the index itself is correct.
+fn finish_clearing(
+    store: &SqliteStore,
+    manifest: &mut open_kioku_core::IndexManifest,
+    compact: bool,
+    resolved: bool,
+) -> Result<()> {
+    let outcome = clearing::clear_deleted_content(store, compact);
+    if let Err(err) = &outcome {
+        eprintln!("watch: {}", clearing::clearing_failure_message(err));
+    }
+    clearing::record_clearing(store, manifest, &outcome, resolved)
+}
+
 fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     let root = root.as_ref();
     let started = Instant::now();
@@ -388,14 +433,24 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     let store = SqliteStore::open(
         open_kioku_storage::generations::resolve_index_location(root).sqlite_path(),
     )?;
-    let compact_after_publish = store
-        .manifest()
-        .ok()
-        .flatten()
+    let previous_manifest = store.manifest().ok().flatten();
+    let compact_after_publish = previous_manifest
+        .as_ref()
         .is_some_and(|previous| previous.needs_pre_redaction_compaction());
     snapshot.manifest.quality.pending_pre_redaction_compaction = compact_after_publish;
+    let paths_before = clearing::PathsBefore::read(&store)?;
     persist_full_snapshot(&store, &snapshot)?;
     store.put_history_snapshot(&history)?;
+    let compaction_owed = clearing::compaction_owed(
+        root,
+        &config,
+        &store,
+        &paths_before,
+        previous_manifest.as_ref(),
+        ClearingScope::Full,
+    )
+    .unwrap_or(true);
+    snapshot.manifest.quality.pending_deleted_content_clearing = compaction_owed;
     let graph_nodes = replace_graph_from_snapshot(&store, &snapshot)?;
     rebuild_disk_index_with_graph(
         default_index_dir(root),
@@ -409,9 +464,11 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     // Bytes written before secret-value redaction linger until cleared. The manifest is
     // published either way and carries the work as outstanding, so a reader holding the
     // database delays this to the next run rather than failing one.
+    let mut compacted = false;
     if compact_after_publish {
         match compact_pre_redaction_bytes(root, &store) {
             Ok(()) => {
+                compacted = true;
                 snapshot.manifest.quality.pending_pre_redaction_compaction = false;
                 store.put_manifest(&snapshot.manifest)?;
             }
@@ -420,6 +477,12 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
             ),
         }
     }
+    finish_clearing(
+        &store,
+        &mut snapshot.manifest,
+        compaction_owed && !compacted,
+        true,
+    )?;
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {

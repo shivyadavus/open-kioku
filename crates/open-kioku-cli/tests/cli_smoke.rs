@@ -2414,6 +2414,194 @@ fn deny_internal_vault(repo: &std::path::Path) {
     .unwrap();
 }
 
+/// A vault file whose names appear nowhere else, long enough that its rows span several pages.
+fn vault_fixture_repo() -> tempfile::TempDir {
+    let probes = (0..3000)
+        .map(|n| format!("    sealing_probe_{n:04}();\n"))
+        .collect::<String>();
+    let keys = format!(
+        "pub struct KeyAnchored;\n\npub fn rotate_sealed_material() -> u32 {{\n    \
+         derive_sealing_key();\n{probes}    seal_inner()\n}}\n\nfn seal_inner() -> u32 {{\n    \
+         7\n}}\n"
+    );
+    snapshot_fixture_repo_with(&[
+        ("src/main.rs", "fn main() {\n    println!(\"ready\");\n}\n"),
+        ("internal/vault/keys.rs", keys.as_str()),
+    ])
+}
+
+const VAULT_ONLY_NAMES: [&str; 5] = [
+    "vault::",
+    "rotate_sealed_material",
+    "seal_inner",
+    "derive_sealing_key",
+    "sealing_probe_",
+];
+
+fn index_repo_stderr(repo: &std::path::Path) -> String {
+    run_ok_with_stderr({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    })
+    .1
+}
+
+/// A path denied after it was indexed leaves nothing on disk that names it once `ok index`
+/// rebuilds (#553): SQLite would otherwise keep its deleted rows in free pages, and in the
+/// unused space of pages it reuses, until they happen to be overwritten. The run that removed
+/// it compacts; a run that removes nothing does not.
+#[test]
+fn index_after_a_path_is_denied_leaves_none_of_its_content_on_disk() {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    let before = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(holds(&before, needle), "the first index lacks `{needle}`");
+    }
+
+    deny_internal_vault(repo);
+    let stderr = index_repo_stderr(repo);
+    assert!(stderr.contains("compacting the database"), "{stderr}");
+    let bytes = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(!holds(&bytes, needle), "the rebuilt index holds `{needle}`");
+    }
+
+    let again = index_repo_stderr(repo);
+    assert!(!again.contains("compacting the database"), "{again}");
+}
+
+/// The usual setup keeps the index open in another process (an MCP server) across `ok index`
+/// runs. A connection that is open but not reading does not stop the log from being emptied,
+/// and until it is, the log holds the pages as the first run wrote them and the database file
+/// the pages the log has since replaced (#553).
+#[test]
+fn index_after_a_path_is_denied_leaves_nothing_while_another_connection_holds_the_index() {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    let reader = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+    let count = |reader: &rusqlite::Connection| -> i64 {
+        reader
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert!(count(&reader) > 0);
+    // A second run while the reader is open, so the log is not removed at exit.
+    index_repo_stderr(repo);
+    assert!(count(&reader) > 0);
+
+    deny_internal_vault(repo);
+    index_repo_stderr(repo);
+    assert!(count(&reader) > 0);
+    let bytes = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(!holds(&bytes, needle), "the rebuilt index holds `{needle}`");
+    }
+    drop(reader);
+}
+
+/// A database an earlier version wrote deleted rows without clearing them, so it can already
+/// hold a path it excluded before this version, where no row names that path any more and
+/// nothing this run removes points at it. The first `ok index` compacts it once and records
+/// that, and later runs do not compact it again (#553).
+#[test]
+fn index_compacts_once_a_database_an_earlier_version_left_deleted_rows_in() {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    leave_unzeroed_free_pages(repo, "quartz_earlier_residue ", false);
+    assert!(holds(&index_bytes(repo), "quartz_earlier_residue"));
+
+    let stderr = index_repo_stderr(repo);
+    assert!(stderr.contains("compacting the database"), "{stderr}");
+    assert!(!holds(&index_bytes(repo), "quartz_earlier_residue"));
+    let marked: i64 = rusqlite::Connection::open(active_index_db(repo))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM schema_meta WHERE key = 'excluded_content_cleared_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marked, 1);
+
+    let again = index_repo_stderr(repo);
+    assert!(!again.contains("compacting the database"), "{again}");
+}
+
+/// A clearing that did not complete is recorded in the manifest, reported by `ok status` and
+/// `ok doctor`, and retried by the next `ok index`, which reports it settled (#553).
+#[test]
+fn an_unfinished_clearing_is_reported_until_ok_index_completes_it() {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    {
+        let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+        let manifest: String = conn
+            .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        assert!(manifest["quality"]
+            .get("pending_deleted_content_clearing")
+            .is_none());
+        manifest["quality"]["pending_deleted_content_clearing"] = serde_json::Value::Bool(true);
+        conn.execute(
+            "UPDATE manifests SET json = ?1 WHERE id = 1",
+            [manifest.to_string()],
+        )
+        .unwrap();
+    }
+    let status = |repo: &std::path::Path| -> serde_json::Value {
+        serde_json::from_str(&run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("--json").arg("status");
+            command
+        }))
+        .unwrap()
+    };
+    let doctor_check = |repo: &std::path::Path| -> Option<serde_json::Value> {
+        let doctor: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command.arg("--json").arg("doctor").arg(repo);
+            command
+        }))
+        .unwrap();
+        doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "deleted_content")
+            .cloned()
+    };
+    let pending = status(repo);
+    assert_eq!(
+        pending["quality"]["pending_deleted_content_clearing"], true,
+        "{pending}"
+    );
+    let check = doctor_check(repo).expect("doctor reports the unfinished clearing");
+    assert_eq!(check["status"], "warn", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .contains("deleted content may remain until compaction succeeds"),
+        "{check}"
+    );
+
+    let stderr = index_repo_stderr(repo);
+    assert!(stderr.contains("compacting the database"), "{stderr}");
+    let settled = status(repo);
+    assert!(
+        settled["quality"]
+            .get("pending_deleted_content_clearing")
+            .is_none(),
+        "{settled}"
+    );
+    assert!(doctor_check(repo).is_none());
+}
+
 /// The index database readers open: the active generation's when one is published.
 fn active_index_db(repo: &std::path::Path) -> std::path::PathBuf {
     let active = fs::read_to_string(repo.join(".ok/generations/active"))
@@ -2541,11 +2729,31 @@ fn snapshot_import_keeps_an_admitted_files_own_import_of_a_removed_path() {
     );
 }
 
+/// Leave `text` in the index's free pages, as a dropped table's rows, the way an Open Kioku
+/// that did not clear deleted content left them. With `keep_marker` false the database also
+/// loses the record that its writer clears excluded content, as an earlier version's has none.
+fn leave_unzeroed_free_pages(repo: &std::path::Path, text: &str, keep_marker: bool) {
+    let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+    conn.execute_batch("PRAGMA secure_delete = OFF; CREATE TABLE earlier_rows(body TEXT);")
+        .unwrap();
+    if !keep_marker {
+        conn.execute_batch("DELETE FROM schema_meta WHERE key = 'excluded_content_cleared_v1';")
+            .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO earlier_rows VALUES (?1)",
+        [text.repeat(20_000)],
+    )
+    .unwrap();
+    conn.execute_batch("DROP TABLE earlier_rows; PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+}
+
 /// A `--quality fast` artifact is a page copy of the exporter's database, free pages included.
-/// An exporter that denied a path after indexing it and re-indexed leaves its rows there; the
-/// import removes no row, and still must not publish those pages (#549).
-#[test]
-fn snapshot_import_does_not_publish_the_exporters_free_pages() {
+/// An exporter that denied a path after indexing it and re-indexed could leave its rows there;
+/// the import removes no row, and still must not publish those pages (#549). `keep_marker`
+/// decides which gate compacts it: the free-page count, or the missing record (#553).
+fn assert_import_drops_the_exporters_free_pages(keep_marker: bool) {
     // Enough rows that the pages they are deleted from outnumber the ones the import writes
     // again (the manifest), which would otherwise overwrite some of them by chance.
     let util = (0..300)
@@ -2562,6 +2770,7 @@ fn snapshot_import_does_not_publish_the_exporters_free_pages() {
         command.arg("index").arg(repo);
         command
     });
+    leave_unzeroed_free_pages(repo, "render_sealed_ledger ", keep_marker);
     // The exporter's database holds the removed rows in free pages.
     assert!(holds(&index_bytes(repo), "render_sealed_ledger"));
     export_snapshot(repo);
@@ -2576,6 +2785,45 @@ fn snapshot_import_does_not_publish_the_exporters_free_pages() {
             "the imported index holds `{needle}`"
         );
     }
+}
+
+#[test]
+fn snapshot_import_does_not_publish_the_exporters_free_pages() {
+    assert_import_drops_the_exporters_free_pages(true);
+}
+
+#[test]
+fn snapshot_import_does_not_publish_free_pages_an_earlier_exporter_left() {
+    assert_import_drops_the_exporters_free_pages(false);
+}
+
+/// An exporter that deleted rows without zeroing them can leave their bytes in a page that is
+/// still in use, where the free-page count is zero; an artifact that does not record that its
+/// writer clears excluded content is compacted anyway (#553).
+#[test]
+fn snapshot_import_compacts_an_artifact_whose_deleted_rows_sit_in_pages_in_use() {
+    let temp =
+        snapshot_fixture_repo_with(&[("src/main.rs", "fn main() {\n    println!(\"ok\");\n}\n")]);
+    let repo = temp.path();
+    {
+        let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+        conn.execute_batch("VACUUM;").unwrap();
+        conn.execute_batch(
+            "PRAGMA secure_delete = OFF;
+             INSERT INTO schema_meta(key, value) VALUES ('earlier_row', 'quartz_sealed_ledger');
+             DELETE FROM schema_meta WHERE key IN ('earlier_row', 'excluded_content_cleared_v1');
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+        let free: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(free, 0);
+    }
+    assert!(holds(&index_bytes(repo), "quartz_sealed_ledger"));
+    export_snapshot(repo);
+    import_snapshot_json(repo, &[]);
+    assert!(!holds(&index_bytes(repo), "quartz_sealed_ledger"));
 }
 
 /// `ok watch` replaces the rows of the files that changed. A deleted file's co-change facts
@@ -7968,7 +8216,20 @@ fn snapshot_export_fast_copies_one_committed_state_while_a_writer_commits() {
     }
 
     let expanded = temp.path().join("expanded.sqlite");
-    for _ in 0..3 {
+    // Three exports must overlap a commit. Whether one does is up to the scheduler: an export
+    // takes about a tenth of a second, and a loaded runner can leave the writer thread off the
+    // CPU for that long. An export that saw no commit is still checked below, and repeated;
+    // a writer that stopped is a failure, with the error it stopped on.
+    let (mut overlapped, mut attempts) = (0, 0);
+    while overlapped < 3 {
+        attempts += 1;
+        assert!(
+            attempts <= 10,
+            "only {overlapped} of {} exports overlapped a commit; the writer committed {} \
+             batches in all",
+            attempts - 1,
+            committed.load(Ordering::SeqCst)
+        );
         let before = committed.load(Ordering::SeqCst);
         let exported: serde_json::Value = serde_json::from_str(&run({
             let mut command = ok();
@@ -7981,10 +8242,13 @@ fn snapshot_export_fast_copies_one_committed_state_while_a_writer_commits() {
             command
         }))
         .unwrap();
-        assert!(
-            committed.load(Ordering::SeqCst) > before,
-            "the writer must commit while the export runs for this test to mean anything"
-        );
+        if writer.is_finished() {
+            let stopped = writer.join().unwrap();
+            panic!("the writer stopped while exports ran: {stopped:?}");
+        }
+        if committed.load(Ordering::SeqCst) > before {
+            overlapped += 1;
+        }
         assert_eq!(exported["quality"], "fast", "{exported}");
         assert_eq!(exported["metadata"]["compression_level"], 1, "{exported}");
 

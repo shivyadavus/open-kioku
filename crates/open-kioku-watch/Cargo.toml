@@ -24,5 +24,6 @@ open-kioku-errors = { version = "4.0.0", path = "../open-kioku-errors" }
 
 [dev-dependencies]
 rusqlite.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 toml.workspace = true

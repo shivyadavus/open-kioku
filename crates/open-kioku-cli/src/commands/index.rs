@@ -66,13 +66,18 @@ fn index_repo_with_config(
     // is published. Read before staging, which removes the previous manifest. The new manifest
     // carries the work as outstanding until it succeeds, so a blocked pass is retried by the
     // next run and `ok doctor` reports it meanwhile, instead of being silently forgotten.
-    let compact_after_publish = match store.manifest() {
-        Ok(previous) => previous.is_some_and(|previous| previous.needs_pre_redaction_compaction()),
+    let previous_manifest = store.manifest();
+    let compact_after_publish = match &previous_manifest {
+        Ok(previous) => previous
+            .as_ref()
+            .is_some_and(|previous| previous.needs_pre_redaction_compaction()),
         // Failing open here publishes `pending: false` over an index whose state is unknown and
         // never retries. The clearing is idempotent, so assuming it is owed costs one pass.
         Err(_) => true,
     };
     snapshot.manifest.quality.pending_pre_redaction_compaction = compact_after_publish;
+    // Read before staging, which replaces them: what this run removes is compared against it.
+    let paths_before = open_kioku_watch::clearing::PathsBefore::read(&store)?;
     // The manifest is the publication marker, written last (below) so a concurrent reader
     // never opens one whose graph or search index is still being written.
     store.stage_index_with_documents(
@@ -102,6 +107,20 @@ fn index_repo_with_config(
         ),
     );
     store.put_history_snapshot(&history)?;
+    // An unreadable previous manifest leaves its pending clearing unknown, so it is owed.
+    let compaction_owed = match &previous_manifest {
+        Ok(previous) => open_kioku_watch::clearing::compaction_owed(
+            repo,
+            &config,
+            &store,
+            &paths_before,
+            previous.as_ref(),
+            open_kioku_watch::clearing::ClearingScope::Full,
+        )
+        .unwrap_or(true),
+        Err(_) => true,
+    };
+    snapshot.manifest.quality.pending_deleted_content_clearing = compaction_owed;
     report_index_stage(&reporter, "graph", "building dependency graph".to_string());
     let graph = InMemoryGraph::from_index_with_resolved_relationships(
         &snapshot.files,
@@ -146,6 +165,7 @@ fn index_repo_with_config(
         &nodes,
     )?;
     store.put_manifest(&snapshot.manifest)?;
+    let mut compacted = false;
     if compact_after_publish {
         report_index_stage(
             &reporter,
@@ -159,6 +179,7 @@ fn index_repo_with_config(
         // makes the next run retry it.
         match compact_pre_redaction_bytes(repo, &store) {
             Ok(()) => {
+                compacted = true;
                 snapshot.manifest.quality.pending_pre_redaction_compaction = false;
                 store.put_manifest(&snapshot.manifest)?;
             }
@@ -173,6 +194,28 @@ fn index_repo_with_config(
             ),
         }
     }
+    // Deleted rows leave the files once the manifest is out: a compaction when this run
+    // removed a path the policy excludes (or an earlier one left that owed), and a truncating
+    // checkpoint every time, so the write-ahead log keeps no page an earlier run wrote (#553).
+    let compact = compaction_owed && !compacted;
+    if compact {
+        report_index_stage(
+            &reporter,
+            "compact",
+            "compacting the database so rows this or an earlier run removed for paths the index \
+             policy excludes are not left in its free space"
+                .to_string(),
+        );
+    }
+    let outcome = open_kioku_watch::clearing::clear_deleted_content(&store, compact);
+    if let Err(err) = &outcome {
+        report_index_stage(
+            &reporter,
+            "compact",
+            open_kioku_watch::clearing::clearing_failure_message(err),
+        );
+    }
+    open_kioku_watch::clearing::record_clearing(&store, &mut snapshot.manifest, &outcome, true)?;
     report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)
 }

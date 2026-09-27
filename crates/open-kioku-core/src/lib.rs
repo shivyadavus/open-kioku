@@ -4667,6 +4667,13 @@ pub struct IndexQuality {
     /// retried by the next run instead of being reported as done.
     #[serde(default)]
     pub pending_pre_redaction_compaction: bool,
+    /// Rows this or an earlier run deleted may still be readable in the database file or its
+    /// write-ahead log: the compaction after a path the policy excludes lost its rows, or the
+    /// truncating checkpoint every run ends with, did not complete. Set before the manifest
+    /// is published and cleared once that work succeeds, so a crash or a blocked checkpoint
+    /// stays reported and the next `ok index` retries it (#553). Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_deleted_content_clearing: bool,
     /// Every note, typed by producer. Status payloads summarize this list; see
     /// `IndexManifest::status_value`.
     #[serde(default)]

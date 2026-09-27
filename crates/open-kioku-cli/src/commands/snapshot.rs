@@ -247,7 +247,12 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
     // The manifest is the publication marker and the artifact carries one. The database is
     // moved into place without it, and it is put back once the search index has been rebuilt
     // from the imported rows, as `ok index` publishes its own.
-    let compact = filtered.rows_removed || filtered.manifest_redacted || staged_free_pages > 0;
+    // An exporter whose own clearing was still pending can hold removed rows anywhere.
+    let compact = filtered.rows_removed
+        || filtered.manifest_redacted
+        || staged_free_pages > 0
+        || temp_manifest.quality.pending_deleted_content_clearing;
+    temp_manifest.quality.pending_deleted_content_clearing = false;
     if let Err(err) = withhold_snapshot_manifest(&temp_db, compact) {
         remove_staged_db(&temp_db);
         return Err(err);
@@ -1954,14 +1959,25 @@ fn roll_back_to_previous_index(
 /// exporter's own free pages, which can hold rows its policy removed. Compacting after the
 /// manifest is gone leaves no free page behind; the manifest published later is written into
 /// new pages.
+///
+/// A free-page count does not settle whether a database an earlier Open Kioku wrote is clean:
+/// without `secure_delete`, SQLite reuses freed pages without clearing their unallocated space
+/// and removes a row from a page still in use without zeroing it, so an exporter's deleted
+/// rows can sit in pages that are not free (#553). An artifact whose database does not record
+/// that its writer cleared excluded content is compacted whatever `compact` says, and every
+/// compacted one is marked, so the index `ok index` then maintains is not rewritten again.
 fn withhold_snapshot_manifest(db: &Path, compact: bool) -> anyhow::Result<()> {
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .with_context(|| format!("opening {} to withhold its manifest", db.display()))?;
-    conn.execute_batch("PRAGMA journal_mode = DELETE; DELETE FROM manifests;")
-        .with_context(|| format!("withholding the index manifest of {}", db.display()))?;
+    conn.execute_batch(
+        "PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; DELETE FROM manifests;",
+    )
+    .with_context(|| format!("withholding the index manifest of {}", db.display()))?;
+    let compact = compact || !open_kioku_storage_sqlite::excluded_content_cleared(&conn)?;
     if compact {
         conn.execute_batch("VACUUM;")
             .with_context(|| format!("compacting staged snapshot {}", db.display()))?;
+        open_kioku_storage_sqlite::record_excluded_content_cleared(&conn)?;
     }
     Ok(())
 }
