@@ -57,7 +57,9 @@ pub struct CargoManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<CargoDependency>,
     /// Dependencies the manifest places outside the repository: a registry or git dependency, or
-    /// a `path` that leaves the repository. No item of their crates is indexed.
+    /// a `path` that leaves the repository, whose package the workspace root's `[patch]` or
+    /// `[replace]` does not point at a `path` in the repository. No item of their crates is
+    /// indexed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_dependencies: Vec<CargoExternalDependency>,
 }

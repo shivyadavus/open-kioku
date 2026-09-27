@@ -62,3 +62,29 @@ fn rust_impl_of_an_undeclared_crates_trait_stays_unresolved() {
     // Without the manifest declaring `bytes`, nothing shows the crate is outside the repository.
     assert_eq!((proven, external, unresolved), (2, 3, 2));
 }
+
+#[test]
+fn rust_impl_of_a_trait_from_a_crate_patched_into_the_repository_stays_unresolved() {
+    // `util = "1"` is a registry dependency, but the workspace root's `[patch.crates-io]` builds
+    // the repository's `crates/util`, so its trait is the repository's.
+    let (_, external, unresolved) = implements_counts(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[patch.crates-io]\nutil = { path = \"crates/util\" }\n",
+        ),
+        (
+            "crates/util/Cargo.toml",
+            "[package]\nname = \"util\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        ),
+        ("crates/util/src/lib.rs", "pub trait Tool {}\n"),
+        (
+            "crates/app/Cargo.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nutil = \"1\"\n",
+        ),
+        (
+            "crates/app/src/lib.rs",
+            "pub struct S2;\n\nimpl util::Tool for S2 {}\n",
+        ),
+    ]);
+    assert_eq!((external, unresolved), (0, 1));
+}

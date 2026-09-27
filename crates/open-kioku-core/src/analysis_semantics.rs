@@ -81,7 +81,8 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// v20: a Rust trait `impl` whose trait no repository symbol answers is an external resolution
 /// when the index shows the trait is defined outside the repository: named through the standard
 /// library, a dependency the package's manifest places outside the repository (registry, git, or a
-/// `path` leaving it), or, unimported, the standard prelude. A method call on a Rust binding
+/// `path` leaving it) and the workspace root's `[patch]` or `[replace]` does not point back into
+/// it, or, unimported, the standard prelude. A method call on a Rust binding
 /// annotated with a generic type or a reference (`w: &Wrapper<u8>`, `x: &mut Foo`) is typed by
 /// the annotation's path without its generic arguments, and a call path whose last segment names
 /// a type of the module the rest reaches (`crate::a::Engine::new()`, `engine::Engine::new()`)

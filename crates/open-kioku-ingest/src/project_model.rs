@@ -5,7 +5,7 @@ pub use open_kioku_semantic_model::{
     CargoDependency, CargoDependencyKind, CargoExternalDependency, CargoManifest, CargoTargetKind,
     CargoTargets, ModuleInfo, PathAlias, ProjectModel, ProjectRoot,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -405,6 +405,7 @@ fn cargo_manifest(dir: &Path, table: &toml::Table, manifests: &CargoTables) -> C
         external_dependencies: Vec::new(),
     };
     let workspace_root = cargo_workspace_root(dir, package, manifests);
+    let patched_in_repository = cargo_patched_in_repository(dir, package, manifests);
     let mut read = |scope: &toml::Table, target_specific: bool| {
         for (section, kind) in CARGO_DEPENDENCY_TABLES {
             let Some(entries) = scope.get(section).and_then(toml::Value::as_table) else {
@@ -414,7 +415,13 @@ fn cargo_manifest(dir: &Path, table: &toml::Table, manifests: &CargoTables) -> C
                 let Some(mut dependency) =
                     cargo_path_dependency(dir, key, value, kind, workspace_root.as_ref())
                 else {
-                    if cargo_dependency_is_external(dir, key, value, workspace_root.as_ref()) {
+                    if cargo_dependency_is_external(
+                        dir,
+                        key,
+                        value,
+                        workspace_root.as_ref(),
+                        &patched_in_repository,
+                    ) {
                         let external = CargoExternalDependency {
                             crate_name: key.replace('-', "_"),
                             kind,
@@ -555,13 +562,15 @@ pub(crate) fn rust_external_crate_names(
 }
 
 /// Whether a dependency table entry places the dependency outside the repository: it names no
-/// `path` (a registry or git dependency), or its `path` leaves the repository. An inherited entry
-/// the workspace does not declare is placed nowhere the index can tell.
+/// `path` (a registry or git dependency), or its `path` leaves the repository, and the workspace
+/// root does not patch or replace its package with one of the repository. An inherited entry the
+/// workspace does not declare is placed nowhere the index can tell.
 fn cargo_dependency_is_external(
     dir: &Path,
     key: &str,
     value: &toml::Value,
     workspace: Option<&(PathBuf, &toml::Table)>,
+    patched_in_repository: &HashSet<String>,
 ) -> bool {
     let inherited = value
         .get("workspace")
@@ -577,9 +586,94 @@ fn cargo_dependency_is_external(
     } else {
         (dir, value)
     };
+    let package = entry
+        .get("package")
+        .and_then(toml::Value::as_str)
+        .unwrap_or(key);
+    if patched_in_repository.contains(package) {
+        return false;
+    }
     match entry.get("path").and_then(toml::Value::as_str) {
         None => true,
         Some(path) => normalize_path(&join_slash(base, path)).is_none(),
+    }
+}
+
+/// The packages the workspace root's `[patch.<source>]` or `[replace]` tables point at a `path` in
+/// the repository: a registry dependency on one of them builds the repository's copy. Only the
+/// workspace root's tables apply, and a package outside any workspace is its own root.
+fn cargo_patched_in_repository(
+    dir: &Path,
+    package: Option<&toml::Value>,
+    manifests: &CargoTables,
+) -> HashSet<String> {
+    let mut patched = HashSet::new();
+    let Some((root, table)) = cargo_workspace_root_dir(dir, package, manifests)
+        .and_then(|root| Some((root.clone(), manifests.get(&root)?)))
+    else {
+        return patched;
+    };
+    let in_repository = |entry: &toml::Value| {
+        entry
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|path| normalize_path(&join_slash(&root, path)).is_some())
+    };
+    let sources = table
+        .get("patch")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(|sources| sources.values())
+        .filter_map(toml::Value::as_table);
+    for entries in sources {
+        for (key, entry) in entries {
+            if in_repository(entry) {
+                let name = entry
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key);
+                patched.insert(name.to_string());
+            }
+        }
+    }
+    // `[replace]` keys are package ids, `name:version` or a bare name.
+    for (key, entry) in table
+        .get("replace")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+    {
+        if in_repository(entry) {
+            let name = key.split_once(':').map_or(key.as_str(), |(name, _)| name);
+            patched.insert(name.to_string());
+        }
+    }
+    patched
+}
+
+/// The directory of the workspace root whose `[patch]` and `[replace]` apply to the package in
+/// `dir`: the directory `[package] workspace` names, else the nearest manifest at or above `dir`
+/// with a `[workspace]` table, else `dir` itself.
+fn cargo_workspace_root_dir(
+    dir: &Path,
+    package: Option<&toml::Value>,
+    manifests: &CargoTables,
+) -> Option<PathBuf> {
+    let explicit = package
+        .and_then(|package| package.get("workspace"))
+        .and_then(toml::Value::as_str);
+    match explicit {
+        Some(path) => Some(PathBuf::from(normalize_path(&join_slash(dir, path))?)),
+        None => Some(
+            dir.ancestors()
+                .find(|ancestor| {
+                    manifests
+                        .get(*ancestor)
+                        .is_some_and(|table| table.contains_key("workspace"))
+                })
+                .unwrap_or(dir)
+                .to_path_buf(),
+        ),
     }
 }
 
@@ -961,6 +1055,62 @@ mod tests {
         );
         assert!(!app.cargo_targets.autodiscovers(CargoTargetKind::Bin));
         assert!(app.cargo_targets.autodiscovers(CargoTargetKind::Example));
+    }
+
+    #[test]
+    fn a_registry_dependency_the_workspace_root_patches_into_the_repository_is_not_external() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, content: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[patch.crates-io]\nutil = { path = \"crates/util\" }\nforked = { git = \"https://example.invalid/forked\" }\nvendored = { path = \"../outside/vendored\" }\n\n[replace]\n\"codec:1.2.0\" = { path = \"crates/codec\" }\n",
+        );
+        write("crates/util/Cargo.toml", "[package]\nname = \"util\"\n");
+        write("crates/codec/Cargo.toml", "[package]\nname = \"codec\"\n");
+        write(
+            "crates/app/Cargo.toml",
+            "[package]\nname = \"app\"\n\n[dependencies]\nutil = \"1\"\ncodec = \"1.2\"\nshim = { version = \"1\", package = \"util\" }\nforked = \"1\"\nvendored = \"1\"\nserde = \"1\"\n",
+        );
+        let model = ProjectModel::discover(dir.path());
+        let external = |path: &str| {
+            let mut names = model
+                .rust_root_at(Path::new(path))
+                .and_then(|root| root.cargo_manifest.as_ref())
+                .unwrap()
+                .external_dependencies
+                .iter()
+                .map(|dependency| dependency.crate_name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        // `util` (also under the key `shim`) and `codec` build the repository's copies; a git
+        // patch and a path leaving the repository still build code the index does not hold.
+        assert_eq!(external("crates/app"), vec!["forked", "serde", "vendored"]);
+
+        // A package outside any workspace is its own root, and its own `[patch]` applies.
+        let solo = tempfile::tempdir().unwrap();
+        std::fs::write(
+            solo.path().join("Cargo.toml"),
+            "[package]\nname = \"solo\"\n\n[dependencies]\nhelper = \"1\"\n\n[patch.crates-io]\nhelper = { path = \"helper\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(solo.path().join("helper")).unwrap();
+        std::fs::write(
+            solo.path().join("helper/Cargo.toml"),
+            "[package]\nname = \"helper\"\n",
+        )
+        .unwrap();
+        let model = ProjectModel::discover(solo.path());
+        let manifest = model
+            .rust_root_at(Path::new(""))
+            .and_then(|root| root.cargo_manifest.as_ref())
+            .unwrap();
+        assert!(manifest.external_dependencies.is_empty());
     }
 
     #[test]
