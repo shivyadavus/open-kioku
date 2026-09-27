@@ -43,7 +43,10 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// package, and a module file another crate may also compile (declared beside a crate root the
 /// index could not read, or mounted by another crate with `#[path]`) has no module path read from
 /// it; v10 indexes hold `CALLS` edges from such files into one crate's item.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v11";
+/// v12: the symbol-registry pass records a line's use of a target as `CALLS` when any use of it on
+/// the line is a call (`let path = dir.path();`), and rules an item out of a whole line whichever
+/// use comes first; v11 kept whichever edge the line spelled first.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v12";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

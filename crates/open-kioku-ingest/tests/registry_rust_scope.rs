@@ -289,6 +289,17 @@ fn rust_member_call_does_not_take_the_ruled_out_items_place_on_its_line() {
 }
 
 #[test]
+fn rust_member_call_before_the_ruled_out_bare_use_does_not_take_its_place() {
+    // The same line with the member use first: whether the item comes back must not depend on
+    // which use the line spells first.
+    let snapshot = index_rust(
+        "pub struct Store;\n\nimpl Store {\n    pub fn path(&self) {}\n}\n\n#[cfg(test)]\nmod tests {\n    use mock_fs::path;\n\n    fn t(dir: Dir) {\n        let joined = dir.path().join(path);\n    }\n}\n",
+    );
+    let facts = registry_calls(&snapshot, "t", "path");
+    assert!(facts.is_empty(), "unexpected registry edge: {facts:?}");
+}
+
+#[test]
 fn rust_ruling_out_some_same_file_items_does_not_pick_the_rest() {
     // Two same-file `helper`s: the `mod tests` one is out of reach from `caller`, but that does
     // not show that `caller` means the other; the name stays ambiguous as before.
