@@ -428,7 +428,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Trace the shortest dependency or reference path between two files or symbols from the persisted graph, or, when `to` is omitted, list the direct dependency graph neighbours (imports and dependents) of `from` instead. Use to explain how two files or symbols are connected through indexed dependencies. Omit `to` to get the direct dependency neighbours of `from` instead of a route. Prefer impact_analysis for downstream blast radius and query_evidence_graph for arbitrary traversal. This is read-only.",
+        "description": "Trace the shortest dependency or reference path between two files or symbols from the persisted graph, or, when `to` is omitted, list the direct graph neighbours of `from` instead: proven imports, dependents and calls first, then the symbols it contains or defines, then corroborated and heuristic relationships. Use to explain how two files or symbols are connected through indexed dependencies. Omit `to` to get the direct dependency neighbours of `from` instead of a route. Prefer impact_analysis for downstream blast radius and query_evidence_graph for arbitrary traversal. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -437,7 +437,7 @@
               "type": "string"
             },
             "limit": {
-              "description": "Maximum number of neighbours to return when `to` is omitted. Defaults to 20, capped at 100.",
+              "description": "Maximum number of neighbour edges to return when `to` is omitted. Edges are kept in evidence order: proven relationships, then parsed CONTAINS/DEFINES edges, then corroborated, then heuristic relationships; within each, stronger confidence first, then edge id. On a file with many symbols its DEFINES edges can fill the window ahead of unproven imports. `edges_omitted` counts what the limit cut. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "to": {

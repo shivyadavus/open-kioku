@@ -372,8 +372,25 @@ impl<'a> BuiltinCandidateContext<'a> {
 
         for anchor in anchor_symbols.iter().take(8) {
             let node_id = symbol_node_id(anchor);
-            match self.store.neighbors(&node_id.0, request.limit.min(50)) {
-                Ok((nodes, edges)) => {
+            match self
+                .store
+                .neighbor_window(&node_id.0, request.limit.min(50))
+            {
+                Ok(window) => {
+                    // The window keeps the anchor's edges in window order; say what it cut, so a
+                    // neighbourhood capped here is not read as the anchor's whole neighbourhood.
+                    // The cut edges rank lower but need not be weaker: past the limit, edges of
+                    // one tier and confidence are cut by edge id.
+                    let omitted_edges = window.omitted_edges();
+                    if omitted_edges > 0 {
+                        caveats.push(format!(
+                            "graph stream kept {} of {} edge(s) incident to `{}` in evidence order (tier, then confidence, then edge id); {omitted_edges} lower-ranked edge(s) were cut",
+                            window.edges.len(),
+                            window.total_edges,
+                            anchor.qualified_name
+                        ));
+                    }
+                    let (nodes, edges) = (window.nodes, window.edges);
                     let mut omitted_without_direct_evidence = 0usize;
                     for node in nodes {
                         if node.id == node_id {

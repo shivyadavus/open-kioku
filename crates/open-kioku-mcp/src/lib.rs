@@ -946,13 +946,20 @@ async fn dispatch(
             // Without a destination there is no route to trace, so the answer
             // is the node's direct neighbourhood instead.
             let Some(to) = params.get("to").and_then(Value::as_str) else {
-                let (nodes, edges) = store.neighbors(&from, limit(&params))?;
-                return Ok(json!({
+                // The window keeps edges in evidence order; the count of the rest is part of the
+                // answer, so a capped neighbourhood is not read as the whole of it.
+                let window = store.neighbor_window(&from, limit(&params))?;
+                let omitted = window.omitted_edges();
+                let mut response = json!({
                     "node": from,
-                    "nodes": nodes,
-                    "edges": edges,
+                    "nodes": window.nodes,
+                    "edges": window.edges,
                     "evidence_source": "sqlite_graph_store"
-                }));
+                });
+                if omitted > 0 {
+                    response["edges_omitted"] = json!(omitted);
+                }
+                return Ok(response);
             };
             let to = open_kioku_graph::resolve_graph_node(store, to)?;
             Ok(json!({
@@ -1731,7 +1738,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("search_symbols", "List or substring-filter the indexed symbol table (functions, classes, structs, traits, interfaces) with pagination, returning symbol name, kind, file path, and line range. Matching is case-insensitive substring against name and qualified name, ordered by qualified name: it is not fuzzy and the results are not ranked, so an approximate name does not match. Omitting `query` pages through every indexed symbol.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring matched case-insensitively against symbol names and qualified names. Omit to list all symbols ordered by qualified name. Not fuzzy: a name that shares no substring with the query does not match."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100. Use with offset for pagination."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
         ("get_definition", "Retrieve the indexed definition record for a symbol (function, class, struct, trait, module) by name: its file, line range, kind, qualified name, confidence, and provenance. With include_body=true it also joins the symbol back to the indexed chunk text covering it, returning the definition body with the line range it spans plus up to ten indexed lines above and below it verbatim; anything that could not be recovered from the index is stated in `caveats` rather than returned as a shorter body.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."},"include_body":{"type":"boolean","description":"Set true to return the definition body and the indexed lines around it alongside the record. Defaults to false, which returns the record only."}}})),
         ("get_references", "Retrieve evidence about how one resolved symbol is used, in sections that keep their provenance apart: `references` returns indexed occurrences, each with its own provenance and confidence; `callers` and `callees` return persisted CALLS graph edges in the named direction; `implementations` returns verified implementation sites from persisted IMPLEMENTS facts with parser provenance. Every section names its own evidence_source and caveats, because an empty occurrence list and an empty IMPLEMENTS list are different claims.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol to gather usage evidence for. For implementations this is the interface, trait, abstract class, or protocol name."},"kind":{"type":"string","enum":["references","callers","callees","implementations","all"],"description":"Which evidence sections to return. Defaults to 'references'. 'all' returns every section in one response, each still labelled with its own evidence_source. An unknown kind is an invalid-params error (-32602)."},"limit":{"type":"integer","description":"Maximum number of entries per section. Defaults to 20, capped at 100."}}})),
-        ("dependency_path", "Trace the shortest dependency or reference path between two files or symbols from the persisted graph, or, when `to` is omitted, list the direct dependency graph neighbours (imports and dependents) of `from` instead.", json!({"type":"object","required":["from"],"properties":{"from":{"type":"string","description":"The starting node path or symbol name."},"to":{"type":"string","description":"The target node path or symbol name. Omit to return the direct neighbours of `from` rather than a route between two nodes."},"limit":{"type":"integer","description":"Maximum number of neighbours to return when `to` is omitted. Defaults to 20, capped at 100."}}})),
+        ("dependency_path", "Trace the shortest dependency or reference path between two files or symbols from the persisted graph, or, when `to` is omitted, list the direct graph neighbours of `from` instead: proven imports, dependents and calls first, then the symbols it contains or defines, then corroborated and heuristic relationships.", json!({"type":"object","required":["from"],"properties":{"from":{"type":"string","description":"The starting node path or symbol name."},"to":{"type":"string","description":"The target node path or symbol name. Omit to return the direct neighbours of `from` rather than a route between two nodes."},"limit":{"type":"integer","description":"Maximum number of neighbour edges to return when `to` is omitted. Edges are kept in evidence order: proven relationships, then parsed CONTAINS/DEFINES edges, then corroborated, then heuristic relationships; within each, stronger confidence first, then edge id. On a file with many symbols its DEFINES edges can fill the window ahead of unproven imports. `edges_omitted` counts what the limit cut. Defaults to 20, capped at 100."}}})),
         ("impact_analysis", "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact).", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze for downstream impact (e.g., 'src/auth/handler.rs')."}}})),
         ("explain_flow", "Return graph-backed endpoint-to-call flow evidence, plus a heuristic architecture summary. Each flow contains an indexed endpoint and a bounded directed CALLS path.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum endpoint flows to return. Defaults to 20, capped at 100."}}})),
         ("build_context_pack", "Assemble a ranked context pack of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task. Returns Markdown by default, sized for an agent's context window. With compress=true it stores the original snippets under the .ok data directory and returns compact handles instead, which retrieve_context expands on demand.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for (e.g., 'refactor the authentication middleware to support OAuth2')."},"compress":{"type":"boolean","description":"Set true to store snippets locally and return short handles instead of inline source, reducing token count. Defaults to false. This is the only path that writes."},"limit":{"type":"integer","description":"Maximum number of context items to gather. Defaults to 20. Raise it when the pack missed a file you expected; it controls coverage, not rendering cost."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Output format. Defaults to 'markdown', which carries the same evidence as 'json' at a small fraction of the context cost and is what an agent should read. Ask for 'json' only when the result will be parsed rather than read - for example a plan saved for verify_change. 'toon' is token-optimized notation. With compress=true the default is 'json' and 'markdown' is not produced."}}})),
@@ -1969,20 +1976,16 @@ where
     let mut endpoints = store.nodes_by_type(GraphNodeType::Endpoint, MAX_MCP_FETCH, 0)?;
     endpoints.sort_by(|left, right| left.id.0.cmp(&right.id.0));
 
-    let mut call_edges = store.edges_by_type(GraphEdgeType::Calls, MAX_MCP_FETCH, 0)?;
-    call_edges.sort_by(|left, right| left.id.0.cmp(&right.id.0));
-
-    let flow_candidates = endpoints
-        .into_iter()
-        .filter_map(|endpoint| {
-            let call_path = endpoint
-                .symbol_id
-                .as_ref()
-                .map(|symbol_id| flow_call_path(&format!("symbol:{}", symbol_id.0), &call_edges))
-                .unwrap_or_default();
-            (!call_path.is_empty()).then(|| json!({"entrypoint": endpoint, "call_path": call_path}))
-        })
-        .collect::<Vec<_>>();
+    let mut flow_candidates = Vec::new();
+    for endpoint in endpoints {
+        let call_path = match endpoint.symbol_id.as_ref() {
+            Some(symbol_id) => flow_call_path(store, &format!("symbol:{}", symbol_id.0))?,
+            None => Vec::new(),
+        };
+        if !call_path.is_empty() {
+            flow_candidates.push(json!({"entrypoint": endpoint, "call_path": call_path}));
+        }
+    }
     let endpoint_limit = limit(params);
     let has_more = flow_candidates.len() > endpoint_limit;
     let flows = flow_candidates
@@ -2010,22 +2013,30 @@ where
     Ok(response)
 }
 
-fn flow_call_path(
-    start: &str,
-    call_edges: &[open_kioku_core::GraphEdge],
-) -> Vec<open_kioku_core::GraphEdge> {
+/// Each hop follows the strongest outgoing CALLS edge of the current node. The hops used to be
+/// looked up in the first 500 CALLS edges of the whole graph by edge id, so on a larger graph a
+/// hop's edge could fall outside that window, and within it a heuristic edge that hashed low was
+/// followed ahead of a proven one.
+fn flow_call_path<S>(store: &S, start: &str) -> anyhow::Result<Vec<open_kioku_core::GraphEdge>>
+where
+    S: GraphStore + ?Sized,
+{
     const MAX_FLOW_CALL_HOPS: usize = 4;
 
     let mut call_path = Vec::new();
     let mut current = start.to_string();
     for _ in 0..MAX_FLOW_CALL_HOPS {
-        let Some(edge) = call_edges.iter().find(|edge| edge.from.0 == current) else {
+        let Some(edge) = store
+            .edges_by_type_for_node(GraphEdgeType::Calls, &current, true, 1, 0)?
+            .into_iter()
+            .next()
+        else {
             break;
         };
         current = edge.to.0.clone();
-        call_path.push(edge.clone());
+        call_path.push(edge);
     }
-    call_path
+    Ok(call_path)
 }
 
 fn continuation_handle(method: &str, params: &Value) -> String {
@@ -2990,28 +3001,28 @@ where
     S: GraphStore + ?Sized,
 {
     let node = format!("symbol:{}", symbol.id.0);
-    let (nodes, edges) = store.neighbors(&node, MAX_MCP_FETCH)?;
-    let mut edges = edges
-        .into_iter()
-        .filter(|edge| {
-            edge.edge_type == GraphEdgeType::Calls
-                && if inbound {
-                    edge.to.0 == node
-                } else {
-                    edge.from.0 == node
-                }
-        })
-        .collect::<Vec<_>>();
+    // Read by type and direction, strongest evidence first, with one edge past the limit to
+    // tell whether there are more. An untyped neighbourhood window capped here and filtered to
+    // CALLS afterwards lost the calls past the cap and still reported `has_more: false`.
+    let mut edges = store.edges_by_type_for_node(
+        GraphEdgeType::Calls,
+        &node,
+        !inbound,
+        limit.saturating_add(1),
+        0,
+    )?;
     let has_more = edges.len() > limit;
     edges.truncate(limit);
     let related_ids = edges
         .iter()
         .map(|edge| if inbound { &edge.from.0 } else { &edge.to.0 })
         .collect::<std::collections::BTreeSet<_>>();
-    let nodes = nodes
-        .into_iter()
-        .filter(|candidate| related_ids.contains(&candidate.id.0))
-        .collect::<Vec<_>>();
+    let mut nodes = Vec::with_capacity(related_ids.len());
+    for id in related_ids {
+        if let Some(node) = store.node_by_id(id)? {
+            nodes.push(node);
+        }
+    }
     Ok(json!({
         "evidence_source": "sqlite_graph_store",
         "direction": if inbound { "inbound" } else { "outbound" },
@@ -4068,6 +4079,214 @@ mod tests {
                 "{response}"
             );
         }
+    }
+
+    /// The neighbour window keeps a proven edge that heuristic edges outnumber, and says how many
+    /// edges it cut.
+    #[tokio::test]
+    async fn dependency_path_neighbours_keep_proven_edges_and_count_the_cut() {
+        let fixture = McpSnapshotFixture::new();
+        let node = |path: &str| GraphNode {
+            id: NodeId::new(format!("file:{path}")),
+            node_type: GraphNodeType::File,
+            label: path.into(),
+            ..Default::default()
+        };
+        let edge = |id: &str, to: &str| {
+            let mut edge = GraphEdge {
+                id: EdgeId::new(id),
+                from: NodeId::new("file:hub.rs"),
+                to: NodeId::new(format!("file:{to}")),
+                edge_type: GraphEdgeType::Imports,
+                ..Default::default()
+            };
+            edge.evidence.confidence = Confidence::High;
+            edge
+        };
+        let mut proven = edge("z-proven", "proven.rs");
+        proven
+            .set_relationship_proofs(vec![open_kioku_core::RelationshipProof::new(
+                open_kioku_core::RelationshipProofKind::ImportBinding,
+                "test",
+                1,
+            )])
+            .unwrap();
+        let mut nodes = vec![node("hub.rs"), node("proven.rs")];
+        let mut edges = vec![proven];
+        for index in 0..4 {
+            let target = format!("h{index}.rs");
+            nodes.push(node(&target));
+            edges.push(edge(&format!("e-{index}"), &target));
+        }
+        fixture.store.replace_graph(&nodes, &edges).unwrap();
+
+        let response = dispatch(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            "dependency_path",
+            json!({"from": "file:hub.rs", "limit": 2}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["edges"][0]["id"], "z-proven", "{response}");
+        assert_eq!(response["edges"].as_array().unwrap().len(), 2);
+        assert_eq!(response["edges_omitted"], 3, "{response}");
+
+        // An uncut window carries no count.
+        let response = dispatch(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            "dependency_path",
+            json!({"from": "file:hub.rs", "limit": 10}),
+        )
+        .await
+        .unwrap();
+        assert!(response.get("edges_omitted").is_none(), "{response}");
+    }
+
+    /// Callers are read as CALLS edges into the symbol, so a symbol whose other edges outnumber
+    /// the old 500-edge untyped window still reports its calls and that there are more.
+    #[tokio::test]
+    async fn callers_past_a_full_window_of_other_edges_are_found_and_counted() {
+        let fixture = McpSnapshotFixture::new();
+        let symbol = NodeId::new("symbol:symbol-publish");
+        let mut nodes = vec![GraphNode {
+            id: symbol.clone(),
+            node_type: GraphNodeType::Function,
+            label: "publish_invoice_event".into(),
+            symbol_id: Some(SymbolId::new("symbol-publish")),
+            ..Default::default()
+        }];
+        let mut edges = Vec::new();
+        // Parsed containment outranks a heuristic call, and its ids sort first, so under either
+        // order an untyped window of 500 holds none of the calls.
+        for index in 0..MAX_MCP_FETCH {
+            let child = NodeId::new(format!("symbol:child-{index:03}"));
+            nodes.push(GraphNode {
+                id: child.clone(),
+                node_type: GraphNodeType::Field,
+                label: format!("child_{index:03}"),
+                ..Default::default()
+            });
+            let mut contains = GraphEdge {
+                id: EdgeId::new(format!("a-contains-{index:03}")),
+                from: symbol.clone(),
+                to: child,
+                edge_type: GraphEdgeType::Contains,
+                ..Default::default()
+            };
+            contains.evidence.source_type = EvidenceSourceType::TreeSitter;
+            edges.push(contains);
+        }
+        for index in 0..2 {
+            let caller = NodeId::new(format!("symbol:caller-{index}"));
+            nodes.push(GraphNode {
+                id: caller.clone(),
+                node_type: GraphNodeType::Function,
+                label: format!("caller_{index}"),
+                ..Default::default()
+            });
+            edges.push(GraphEdge {
+                id: EdgeId::new(format!("z-call-{index}")),
+                from: caller,
+                to: symbol.clone(),
+                edge_type: GraphEdgeType::Calls,
+                ..Default::default()
+            });
+        }
+        fixture.store.replace_graph(&nodes, &edges).unwrap();
+
+        let response = dispatch(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            "get_references",
+            json!({"query": "publish_invoice_event", "kind": "callers", "limit": 1}),
+        )
+        .await
+        .unwrap();
+        let callers = &response["callers"];
+        assert_eq!(callers["returned"], 1, "{callers}");
+        assert_eq!(callers["edges"][0]["id"], "z-call-0", "{callers}");
+        assert_eq!(callers["has_more"], true, "{callers}");
+    }
+
+    /// A flow's hop is the entrypoint's own strongest outgoing CALLS edge, however many CALLS
+    /// edges the rest of the graph holds and whatever their ids.
+    #[tokio::test]
+    async fn explain_flow_follows_the_strongest_call_of_each_hop() {
+        let fixture = McpSnapshotFixture::new();
+        let function = |id: &str| GraphNode {
+            id: NodeId::new(id),
+            node_type: GraphNodeType::Function,
+            label: id.into(),
+            ..Default::default()
+        };
+        let call = |id: &str, from: &str, to: &str| GraphEdge {
+            id: EdgeId::new(id),
+            from: NodeId::new(from),
+            to: NodeId::new(to),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        };
+        let mut nodes = vec![
+            GraphNode {
+                id: NodeId::new("route:publish-invoice"),
+                node_type: GraphNodeType::Endpoint,
+                label: "POST /publish".into(),
+                symbol_id: Some(SymbolId::new("symbol-publish")),
+                ..Default::default()
+            },
+            function("symbol:symbol-publish"),
+            function("symbol:guessed"),
+            function("symbol:proven"),
+        ];
+        // More CALLS edges than the old whole-graph window, all with ids that sort first.
+        let mut edges = Vec::new();
+        for index in 0..MAX_MCP_FETCH {
+            let (from, to) = (format!("symbol:x{index:03}"), format!("symbol:y{index:03}"));
+            nodes.push(function(&from));
+            nodes.push(function(&to));
+            edges.push(call(&format!("a-call-{index:03}"), &from, &to));
+        }
+        edges.push(call(
+            "m-heuristic",
+            "symbol:symbol-publish",
+            "symbol:guessed",
+        ));
+        let mut proven = call("z-proven", "symbol:symbol-publish", "symbol:proven");
+        proven
+            .set_relationship_proofs(vec![
+                open_kioku_core::RelationshipProof::new(
+                    open_kioku_core::RelationshipProofKind::ExactCallSite,
+                    "test",
+                    1,
+                ),
+                open_kioku_core::RelationshipProof::new(
+                    open_kioku_core::RelationshipProofKind::SameScopeDefinition,
+                    "test",
+                    1,
+                ),
+            ])
+            .unwrap();
+        assert!(proven.is_authoritative_relationship());
+        edges.push(proven);
+        fixture.store.replace_graph(&nodes, &edges).unwrap();
+
+        let response = dispatch(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            "explain_flow",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        let flows = response["flows"].as_array().unwrap();
+        assert_eq!(flows.len(), 1, "{response}");
+        assert_eq!(flows[0]["call_path"][0]["id"], "z-proven", "{response}");
     }
 
     async fn call_fixture_tool(

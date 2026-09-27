@@ -468,6 +468,21 @@ pub fn execute_graph_query(
                             (true, Direction::Forward) | (false, Direction::Reverse) => true,
                             (true, Direction::Reverse) | (false, Direction::Forward) => false,
                         };
+                        // One unpaged read per anchor where the store has it: every page of
+                        // `edges_by_type_for_node` re-reads and re-orders the anchor's whole typed
+                        // edge set, so paging a hub costs its degree once per page.
+                        match store.edges_by_type_for_nodes(
+                            edge_type.clone(),
+                            &[anchor.id.0.as_str()],
+                            outgoing,
+                        ) {
+                            Ok(batch) => {
+                                anchored_edges.extend(batch);
+                                continue;
+                            }
+                            Err(OkError::Unsupported(_)) => {}
+                            Err(error) => return Err(error.into()),
+                        }
                         let mut edge_offset = 0;
                         loop {
                             match store.edges_by_type_for_node(
@@ -494,7 +509,10 @@ pub fn execute_graph_query(
                             }
                         }
                     }
-                    anchored_edges.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+                    // Rows are cut at the query's limit in this order, so it is the window order:
+                    // an anchor's proven edges are matched before its heuristic ones. An edge read
+                    // from two anchors has one sort key, so its copies stay adjacent for dedup.
+                    open_kioku_core::sort_graph_edges_for_window(&mut anchored_edges);
                     anchored_edges.dedup_by(|left, right| left.id == right.id);
                 }
             }
@@ -685,8 +703,25 @@ pub fn execute_graph_query(
                         }
 
                         if depth < edge_range.max_hops {
-                            let (_, edges) =
-                                store.neighbors(&curr_node.id.0, EDGE_SCAN_BATCH_SIZE)?;
+                            // A typed hop reads that type, outgoing, so edges of other types that
+                            // outrank it cannot fill the window; an untyped hop reads the node's
+                            // window. Either is cut at the batch size in window order.
+                            let edges = match &edge_range.edge_type {
+                                Some(hop_type) => match store.edges_by_type_for_node(
+                                    hop_type.clone(),
+                                    &curr_node.id.0,
+                                    true,
+                                    EDGE_SCAN_BATCH_SIZE,
+                                    0,
+                                ) {
+                                    Ok(edges) => edges,
+                                    Err(OkError::Unsupported(_)) => {
+                                        store.neighbors(&curr_node.id.0, EDGE_SCAN_BATCH_SIZE)?.1
+                                    }
+                                    Err(error) => return Err(error.into()),
+                                },
+                                None => store.neighbors(&curr_node.id.0, EDGE_SCAN_BATCH_SIZE)?.1,
+                            };
                             for edge in edges {
                                 // Follow only forward edges for multi-hop
                                 if edge.from.0 != curr_node.id.0 {
@@ -1998,15 +2033,21 @@ mod tests {
         fn neighbors(
             &self,
             node: &str,
-            _limit: usize,
+            limit: usize,
         ) -> open_kioku_errors::Result<(
             Vec<open_kioku_core::GraphNode>,
             Vec<open_kioku_core::GraphEdge>,
         )> {
+            // The store contract: `DERIVED_FROM` is never in the untyped window, and the window
+            // holds at most `limit` edges.
             let edges: Vec<_> = self
                 .edges
                 .iter()
-                .filter(|e| e.from.0 == node || e.to.0 == node)
+                .filter(|e| {
+                    (e.from.0 == node || e.to.0 == node)
+                        && e.edge_type != GraphEdgeType::DerivedFrom
+                })
+                .take(limit)
                 .cloned()
                 .collect();
             let mut nodes = Vec::new();
@@ -2478,6 +2519,73 @@ mod tests {
 
         let query =
             parse_graph_query("MATCH (a:Function)-[:CALLS *1..2]->(b:Function) RETURN a, b")
+                .unwrap();
+        let res = execute_graph_query(
+            &store as &dyn open_kioku_storage::GraphStore,
+            &query,
+            GraphQueryOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(res.rows.len(), 1);
+    }
+
+    /// A typed hop reads that type: `DERIVED_FROM` is never in the untyped neighbour window, so an
+    /// explicit `DERIVED_FROM` hop matched nothing when each hop filtered that window.
+    #[test]
+    fn a_typed_multi_hop_follows_derived_from_edges() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        for id in ["gen", "origin"] {
+            store
+                .nodes
+                .insert(id.into(), test_node(id, id, GraphNodeType::File));
+        }
+        store
+            .edges
+            .push(test_edge("d1", "gen", "origin", GraphEdgeType::DerivedFrom));
+        let query = parse_graph_query("MATCH (a:File)-[:DERIVED_FROM *1..2]->(b:File) RETURN a, b")
+            .unwrap();
+        let res = execute_graph_query(
+            &store as &dyn open_kioku_storage::GraphStore,
+            &query,
+            GraphQueryOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(res.rows.len(), 1);
+    }
+
+    /// A typed hop out of a hub is not lost behind a full window of edges of other types.
+    #[test]
+    fn a_typed_multi_hop_is_not_crowded_out_of_a_hub_by_other_edge_types() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        for (id, node_type) in [
+            ("hub", GraphNodeType::Function),
+            ("callee", GraphNodeType::Function),
+        ] {
+            store.nodes.insert(id.into(), test_node(id, id, node_type));
+        }
+        for index in 0..EDGE_SCAN_BATCH_SIZE {
+            let id = format!("m{index:04}");
+            store
+                .nodes
+                .insert(id.clone(), test_node(&id, &id, GraphNodeType::Module));
+            store.edges.push(test_edge(
+                &format!("i{index:04}"),
+                "hub",
+                &id,
+                GraphEdgeType::Imports,
+            ));
+        }
+        store
+            .edges
+            .push(test_edge("zcall", "hub", "callee", GraphEdgeType::Calls));
+        let query =
+            parse_graph_query("MATCH (a:Function)-[:CALLS *1..1]->(b:Function) RETURN a, b")
                 .unwrap();
         let res = execute_graph_query(
             &store as &dyn open_kioku_storage::GraphStore,
