@@ -221,6 +221,75 @@ fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
     }
 }
 
+/// Fold `incoming` into `existing`, a node of the same id, so that the result does not
+/// depend on the order the writes arrive in: every field is a join (the smallest present
+/// value, a sorted union), which is commutative and associative. A full build and an
+/// incremental one visit the same writes in different orders, and a node whose content
+/// followed its first write (a file node's `source_pass` naming whichever co-change commit
+/// was read first) came out different in each (#591).
+fn merge_node(existing: &mut GraphNode, incoming: GraphNode) {
+    // The write that carries the file or symbol a node stands for names it; an analysis fact
+    // that only points at the node (an import target, a co-changed file, whose spelling of a
+    // path normalizes to the same id) names it only when no such write does. This stays a
+    // join as long as a write carrying a file or symbol id carries a label, which every such
+    // write the graph builder makes does.
+    let label_key = |node: &GraphNode| {
+        (
+            !node.label.is_empty(),
+            node.file_id.is_some() || node.symbol_id.is_some(),
+        )
+    };
+    let (existing_key, incoming_key) = (label_key(existing), label_key(&incoming));
+    if incoming_key > existing_key
+        || (incoming_key == existing_key && incoming.label < existing.label)
+    {
+        existing.label = incoming.label;
+    }
+    join_min(&mut existing.file_id, incoming.file_id);
+    join_min(&mut existing.symbol_id, incoming.symbol_id);
+    join_min(&mut existing.schema_version, incoming.schema_version);
+    join_min(&mut existing.source_pass, incoming.source_pass);
+    join_min(&mut existing.index_mode, incoming.index_mode);
+    join_min(&mut existing.extractor_version, incoming.extractor_version);
+    for (key, value) in incoming.properties {
+        match existing.properties.entry(key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(value);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                // `Value` has no order; its serialized form stands in for one, and is built
+                // only when two writes disagree.
+                if *slot.get() != value {
+                    let (incoming, stored) = (value.to_string(), slot.get().to_string());
+                    if incoming < stored {
+                        slot.insert(value);
+                    }
+                }
+            }
+        }
+    }
+    join_sorted(&mut existing.ambiguity, incoming.ambiguity);
+    join_sorted(&mut existing.quality_notes, incoming.quality_notes);
+}
+
+/// The smaller of two present values; a present value over an absent one.
+fn join_min<T: Ord>(existing: &mut Option<T>, incoming: Option<T>) {
+    if let Some(incoming) = incoming {
+        if existing.as_ref().is_none_or(|current| incoming < *current) {
+            *existing = Some(incoming);
+        }
+    }
+}
+
+fn join_sorted(existing: &mut Vec<String>, incoming: Vec<String>) {
+    if incoming.is_empty() {
+        return;
+    }
+    existing.extend(incoming);
+    existing.sort();
+    existing.dedup();
+}
+
 impl GraphBuffer {
     pub fn new() -> Self {
         Self::default()
@@ -236,40 +305,7 @@ impl GraphBuffer {
 
         if let Some(&index) = self.node_by_id.get(&node.id) {
             let existing = &mut self.nodes[index];
-            if existing.label.is_empty() && !node.label.is_empty() {
-                existing.label = node.label.clone();
-            }
-            if existing.file_id.is_none() && node.file_id.is_some() {
-                existing.file_id = node.file_id.clone();
-            }
-            if existing.symbol_id.is_none() && node.symbol_id.is_some() {
-                existing.symbol_id = node.symbol_id.clone();
-            }
-            if existing.schema_version.is_none() && node.schema_version.is_some() {
-                existing.schema_version = node.schema_version.clone();
-            }
-            if existing.source_pass.is_none() && node.source_pass.is_some() {
-                existing.source_pass = node.source_pass.clone();
-            }
-            if existing.index_mode.is_none() && node.index_mode.is_some() {
-                existing.index_mode = node.index_mode.clone();
-            }
-            if existing.extractor_version.is_none() && node.extractor_version.is_some() {
-                existing.extractor_version = node.extractor_version.clone();
-            }
-            for (k, v) in node.properties {
-                existing.properties.insert(k, v);
-            }
-            for amb in node.ambiguity {
-                if !existing.ambiguity.contains(&amb) {
-                    existing.ambiguity.push(amb);
-                }
-            }
-            for qn in node.quality_notes {
-                if !existing.quality_notes.contains(&qn) {
-                    existing.quality_notes.push(qn);
-                }
-            }
+            merge_node(existing, node);
             existing.id.clone()
         } else {
             let index = self.nodes.len();
@@ -368,6 +404,68 @@ mod tests {
         let (nodes, _) = buffer.into_parts();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].label, "funcA");
+    }
+
+    /// #591: a file node written by the file itself and by analysis facts that point at it
+    /// (co-changes naming different commits, an import resolved to it) must come out the same
+    /// whatever order the writes arrive in. Every field used to follow the first write that
+    /// set it, or the last for properties, so a full and an incremental build disagreed.
+    #[test]
+    fn upsert_node_merges_the_same_node_whatever_the_write_order() {
+        let file_id = open_kioku_core::FileId::new("f1");
+        let id = NodeId::new("file:src/lib.rs");
+        let from_file = GraphNode {
+            id: id.clone(),
+            node_type: GraphNodeType::File,
+            label: "src/lib.rs".into(),
+            file_id: Some(file_id.clone()),
+            ..Default::default()
+        };
+        let fact = |label: &str, source: &str, ambiguity: &[&str], property: i64| GraphNode {
+            id: id.clone(),
+            node_type: GraphNodeType::File,
+            label: label.into(),
+            source_pass: Some(source.into()),
+            ambiguity: ambiguity.iter().map(|note| note.to_string()).collect(),
+            properties: [("weight".to_string(), serde_json::json!(property))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let writes = [
+            from_file,
+            fact("./src/lib.rs", "git-history:bbbb", &["late"], 2),
+            fact("src/lib.rs", "git-history:aaaa", &["early", "late"], 3),
+            fact("src/lib.rs", "open-kioku-import-resolver/relative", &[], 1),
+        ];
+        let merged = |order: &[usize]| {
+            let mut buffer = GraphBuffer::new();
+            for &index in order {
+                buffer.upsert_node(writes[index].clone());
+            }
+            let (nodes, _) = buffer.into_parts();
+            assert_eq!(nodes.len(), 1, "{order:?}");
+            nodes.into_iter().next().unwrap()
+        };
+        let expected = merged(&[0, 1, 2, 3]);
+        assert_eq!(expected.label, "src/lib.rs");
+        assert_eq!(expected.file_id, Some(file_id));
+        assert_eq!(expected.source_pass.as_deref(), Some("git-history:aaaa"));
+        assert_eq!(expected.ambiguity, vec!["early", "late"]);
+        assert_eq!(expected.properties["weight"], serde_json::json!(1));
+        for order in [
+            [3, 2, 1, 0],
+            [1, 0, 3, 2],
+            [2, 3, 0, 1],
+            [1, 2, 3, 0],
+            [3, 1, 0, 2],
+        ] {
+            assert_eq!(
+                serde_json::to_value(merged(&order)).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "write order {order:?}"
+            );
+        }
     }
 
     #[test]
