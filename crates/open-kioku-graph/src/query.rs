@@ -2033,15 +2033,21 @@ mod tests {
         fn neighbors(
             &self,
             node: &str,
-            _limit: usize,
+            limit: usize,
         ) -> open_kioku_errors::Result<(
             Vec<open_kioku_core::GraphNode>,
             Vec<open_kioku_core::GraphEdge>,
         )> {
+            // The store contract: `DERIVED_FROM` is never in the untyped window, and the window
+            // holds at most `limit` edges.
             let edges: Vec<_> = self
                 .edges
                 .iter()
-                .filter(|e| e.from.0 == node || e.to.0 == node)
+                .filter(|e| {
+                    (e.from.0 == node || e.to.0 == node)
+                        && e.edge_type != GraphEdgeType::DerivedFrom
+                })
+                .take(limit)
                 .cloned()
                 .collect();
             let mut nodes = Vec::new();
@@ -2513,6 +2519,73 @@ mod tests {
 
         let query =
             parse_graph_query("MATCH (a:Function)-[:CALLS *1..2]->(b:Function) RETURN a, b")
+                .unwrap();
+        let res = execute_graph_query(
+            &store as &dyn open_kioku_storage::GraphStore,
+            &query,
+            GraphQueryOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(res.rows.len(), 1);
+    }
+
+    /// A typed hop reads that type: `DERIVED_FROM` is never in the untyped neighbour window, so an
+    /// explicit `DERIVED_FROM` hop matched nothing when each hop filtered that window.
+    #[test]
+    fn a_typed_multi_hop_follows_derived_from_edges() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        for id in ["gen", "origin"] {
+            store
+                .nodes
+                .insert(id.into(), test_node(id, id, GraphNodeType::File));
+        }
+        store
+            .edges
+            .push(test_edge("d1", "gen", "origin", GraphEdgeType::DerivedFrom));
+        let query = parse_graph_query("MATCH (a:File)-[:DERIVED_FROM *1..2]->(b:File) RETURN a, b")
+            .unwrap();
+        let res = execute_graph_query(
+            &store as &dyn open_kioku_storage::GraphStore,
+            &query,
+            GraphQueryOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(res.rows.len(), 1);
+    }
+
+    /// A typed hop out of a hub is not lost behind a full window of edges of other types.
+    #[test]
+    fn a_typed_multi_hop_is_not_crowded_out_of_a_hub_by_other_edge_types() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        for (id, node_type) in [
+            ("hub", GraphNodeType::Function),
+            ("callee", GraphNodeType::Function),
+        ] {
+            store.nodes.insert(id.into(), test_node(id, id, node_type));
+        }
+        for index in 0..EDGE_SCAN_BATCH_SIZE {
+            let id = format!("m{index:04}");
+            store
+                .nodes
+                .insert(id.clone(), test_node(&id, &id, GraphNodeType::Module));
+            store.edges.push(test_edge(
+                &format!("i{index:04}"),
+                "hub",
+                &id,
+                GraphEdgeType::Imports,
+            ));
+        }
+        store
+            .edges
+            .push(test_edge("zcall", "hub", "callee", GraphEdgeType::Calls));
+        let query =
+            parse_graph_query("MATCH (a:Function)-[:CALLS *1..1]->(b:Function) RETURN a, b")
                 .unwrap();
         let res = execute_graph_query(
             &store as &dyn open_kioku_storage::GraphStore,
