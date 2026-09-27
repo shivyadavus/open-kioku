@@ -107,14 +107,20 @@ lowest edge ids, and edge ids are content hashes, so which edges survived had no
 their evidence: on this repository's own index a heuristic symbol-registry `CALLS` edge displaced
 an authoritative resolver edge from a 20-edge window. `shortest_path` enqueues each node's hops in
 the same order, so where two equally short routes first diverge the stronger hop is tried first;
-it does not compare whole routes. Authority
-lives in the typed proofs, which SQL cannot evaluate. The SQLite store reads the candidate ids in
-an order SQL can compute — whether the edge carries proofs or is containment, then confidence,
-then id — and decodes edges in that order only until the page is settled, that is until
-`offset + limit` decoded edges rank ahead of anything an unread row could be. A hub of proven edges
-settles after its first page. A node whose proof-carrying edges are mostly not proven is decoded in
-full, so the cost there is the node's degree, paid again on each page of a paged read; graph
-queries read an anchor's typed edges once rather than paging them.
+it does not compare whole routes.
+
+The order is one integer per edge plus the edge id:
+`open_kioku_core::graph_edge_window_rank` folds the tier and the confidence into a rank from 0
+(proven, exact) to 15 (heuristic, low), and `sort_graph_edges_for_window` sorts by
+`(rank, edge id)`. Authority lives in the typed proofs, which SQL cannot evaluate, so the SQLite
+store computes the rank when it writes an edge and persists it in `graph_edges.window_rank`,
+indexed with each endpoint as `(endpoint, window_rank, id)` and `(endpoint, edge_type,
+window_rank, id)`. A bounded read is then an index range scan that stops at the end of its page:
+its cost follows the window, not the node's degree, whatever the node's edges prove.
+`neighbors` reads the outgoing and incoming windows separately and merges them, since no one
+index holds both endpoints. An index whose ranks were not written by this binary's rank function, or that an
+older Open Kioku has written to since, is read by decoding and sorting every matching edge, which
+gives the same answer more slowly; see [Window ranks](storage-model.md#window-ranks).
 
 `GraphStore::neighbor_window` returns the kept edges with the node's total edge count, and the
 surfaces that already report caps use it: MCP `dependency_path` without `to` adds

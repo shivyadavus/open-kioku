@@ -265,6 +265,8 @@ pub(crate) struct EdgeRow {
     pub(crate) ev_message_sid: Option<i64>,
     pub(crate) ev_indexed_at_sid: i64,
     pub(crate) extra_sid: Option<i64>,
+    /// [`open_kioku_core::graph_edge_window_rank`], so a bounded read orders and limits in SQL.
+    pub(crate) window_rank: i64,
 }
 
 pub(crate) fn encode_edge(
@@ -335,6 +337,7 @@ pub(crate) fn encode_edge(
                 .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
         )?,
         extra_sid,
+        window_rank: i64::from(open_kioku_core::graph_edge_window_rank(edge)),
     })
 }
 

@@ -154,6 +154,7 @@ impl SqliteStore {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                 | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
                 | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            StoreOpener::Writer,
         )
     }
 
@@ -164,7 +165,9 @@ impl SqliteStore {
     /// read-only MCP session or `ok search` left an empty `.ok/index.sqlite` behind, which
     /// every later read reported as a legacy index awaiting rebuild rather than as a
     /// repository nobody had indexed. The connection is still read-write: `initialize` runs
-    /// the idempotent schema statements and the legacy-layout reset records its marker.
+    /// the idempotent schema statements and the legacy-layout reset records its marker. It does
+    /// not rank graph edges or build their rank indexes, which only [`open`](Self::open) does:
+    /// until then bounded edge reads decode and sort, with the same answers.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if !path.is_file() {
@@ -176,6 +179,7 @@ impl SqliteStore {
         Self::open_with_flags(
             path.to_path_buf(),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            StoreOpener::Reader,
         )
     }
 
@@ -293,9 +297,247 @@ impl SqliteStore {
         })
     }
 
-    fn open_with_flags(path: PathBuf, flags: rusqlite::OpenFlags) -> Result<Self> {
+    fn initialize_as(&self, opener: StoreOpener) -> Result<()> {
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        ensure_supported_sqlite_schema(&conn)?;
+        let created_here = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(storage_err)?
+            == 0;
+        reset_legacy_graph_storage(&mut conn)?;
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS manifests (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS manifest_withdrawals (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              reason TEXT NOT NULL,
+              withdrawn_at TEXT NOT NULL
+            );
+            -- Publishing a manifest ends a withdrawal whichever binary publishes it, including
+            -- one that does not know this table, so a reason can never outlive its index.
+            CREATE TRIGGER IF NOT EXISTS manifest_insert_ends_withdrawal
+              AFTER INSERT ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
+            CREATE TRIGGER IF NOT EXISTS manifest_update_ends_withdrawal
+              AFTER UPDATE ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
+            CREATE TABLE IF NOT EXISTS files (
+              id TEXT PRIMARY KEY,
+              path TEXT NOT NULL UNIQUE,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS symbols (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              qualified_name TEXT NOT NULL,
+              file_id TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+            CREATE INDEX IF NOT EXISTS idx_symbols_name_nocase ON symbols(name COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_symbols_qualified_name ON symbols(qualified_name);
+            CREATE TABLE IF NOT EXISTS chunks (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              start_line INTEGER NOT NULL,
+              end_line INTEGER NOT NULL,
+              text TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
+            CREATE TABLE IF NOT EXISTS document_sections (
+              path TEXT NOT NULL,
+              start_line INTEGER NOT NULL,
+              end_line INTEGER NOT NULL,
+              content_hash TEXT NOT NULL,
+              json TEXT NOT NULL,
+              PRIMARY KEY(path, start_line, end_line)
+            );
+            CREATE INDEX IF NOT EXISTS idx_document_sections_path
+              ON document_sections(path, start_line);
+            CREATE INDEX IF NOT EXISTS idx_document_sections_hash
+              ON document_sections(content_hash);
+            CREATE TABLE IF NOT EXISTS tests (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tests_file ON tests(file_id);
+            CREATE TABLE IF NOT EXISTS imports (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              imported TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_id);
+            CREATE TABLE IF NOT EXISTS occurrences (
+              id TEXT PRIMARY KEY,
+              symbol_id TEXT NOT NULL,
+              file_id TEXT NOT NULL,
+              is_definition INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_occurrences_symbol ON occurrences(symbol_id);
+            CREATE INDEX IF NOT EXISTS idx_occurrences_file ON occurrences(file_id);
+            CREATE TABLE IF NOT EXISTS analysis_facts (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              source_type TEXT NOT NULL,
+              target TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_analysis_facts_file ON analysis_facts(file_id);
+            CREATE INDEX IF NOT EXISTS idx_analysis_facts_source ON analysis_facts(source_type);
+            CREATE INDEX IF NOT EXISTS idx_analysis_facts_target ON analysis_facts(target);
+            CREATE TABLE IF NOT EXISTS vector_targets (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              target_kind TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              vector_id INTEGER NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_vector_targets_file ON vector_targets(file_id);
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+              cache_key TEXT PRIMARY KEY,
+              target_id TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS semantic_index_runs (
+              id TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              vector_count INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS semantic_coverage (
+              id TEXT PRIMARY KEY,
+              target_kind TEXT NOT NULL,
+              indexed_count INTEGER NOT NULL,
+              stale_count INTEGER NOT NULL,
+              failed_count INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS graph_nodes (
+              id TEXT PRIMARY KEY,
+              label TEXT NOT NULL,
+              node_type TEXT DEFAULT '',
+              file_id TEXT DEFAULT '',
+              symbol_id TEXT DEFAULT '',
+              evidence_available BOOLEAN DEFAULT 0,
+              freshness INTEGER DEFAULT 0,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS graph_strings (
+              sid INTEGER PRIMARY KEY,
+              vhash INTEGER NOT NULL,
+              value TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_strings_vhash ON graph_strings(vhash);
+            CREATE TABLE IF NOT EXISTS graph_edges (
+              id TEXT PRIMARY KEY,
+              from_sid INTEGER NOT NULL,
+              to_sid INTEGER NOT NULL,
+              edge_type TEXT NOT NULL,
+              confidence TEXT NOT NULL DEFAULT '',
+              source_type TEXT NOT NULL DEFAULT '',
+              source_sid INTEGER,
+              freshness INTEGER NOT NULL DEFAULT 0,
+              ev_id TEXT NOT NULL DEFAULT '',
+              ev_path_sid INTEGER,
+              ev_line_start INTEGER,
+              ev_line_end INTEGER,
+              ev_symbol_sid INTEGER,
+              ev_message_sid INTEGER,
+              ev_indexed_at_sid INTEGER,
+              extra_sid INTEGER,
+              window_rank INTEGER NOT NULL DEFAULT -1
+            );
+
+            CREATE TABLE IF NOT EXISTS scopes (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              parent_id TEXT,
+              owner_symbol_id TEXT,
+              kind TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_scopes_file ON scopes(file_id);
+
+            CREATE TABLE IF NOT EXISTS bindings (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              scope_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_bindings_lookup ON bindings(file_id, scope_id, name);
+
+            CREATE TABLE IF NOT EXISTS call_site_strings (
+              sid INTEGER PRIMARY KEY,
+              vhash INTEGER NOT NULL,
+              value TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_call_site_strings_vhash ON call_site_strings(vhash);
+            CREATE TABLE IF NOT EXISTS call_sites (
+              id_sid INTEGER PRIMARY KEY,
+              file_sid INTEGER NOT NULL,
+              scope_sid INTEGER NOT NULL,
+              caller_sid INTEGER,
+              callee_sid INTEGER NOT NULL,
+              receiver_sid INTEGER,
+              receiver_kind TEXT NOT NULL DEFAULT 'Unknown',
+              start_line INTEGER NOT NULL,
+              start_column INTEGER NOT NULL,
+              end_line INTEGER NOT NULL DEFAULT 0,
+              end_column INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_sid);
+            CREATE INDEX IF NOT EXISTS idx_call_sites_name ON call_sites(callee_sid);
+            CREATE INDEX IF NOT EXISTS idx_call_sites_file ON call_sites(file_sid);
+
+            CREATE TABLE IF NOT EXISTS relationship_evidence (
+              id TEXT PRIMARY KEY,
+              edge_id TEXT NOT NULL,
+              source_type TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_relationship_evidence_edge ON relationship_evidence(edge_id);
+            "#,
+        )
+        .map_err(storage_err)?;
+        migrate_history_schema(&mut conn)?;
+        migrate_graph_schema(&mut conn, opener)?;
+        // Every writer this file will see clears excluded content as it removes it, so nothing
+        // it holds needs the one-time compaction an older file does.
+        if created_here {
+            set_schema_meta_flag(&conn, EXCLUDED_CONTENT_CLEARED_FLAG)?;
+        }
+        Ok(())
+    }
+
+    fn open_with_flags(
+        path: PathBuf,
+        flags: rusqlite::OpenFlags,
+        writer: StoreOpener,
+    ) -> Result<Self> {
         let store = Self::connect(path, flags)?;
-        store.initialize()?;
+        store.initialize_as(writer)?;
         Ok(store)
     }
 
@@ -1054,238 +1296,7 @@ impl SqliteStore {
 
 impl MetadataStore for SqliteStore {
     fn initialize(&self) -> Result<()> {
-        let mut conn = self
-            .connection
-            .lock()
-            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        ensure_supported_sqlite_schema(&conn)?;
-        let created_here = conn
-            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map_err(storage_err)?
-            == 0;
-        reset_legacy_graph_storage(&mut conn)?;
-        conn.execute_batch(
-            r#"
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE IF NOT EXISTS manifests (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS manifest_withdrawals (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              reason TEXT NOT NULL,
-              withdrawn_at TEXT NOT NULL
-            );
-            -- Publishing a manifest ends a withdrawal whichever binary publishes it, including
-            -- one that does not know this table, so a reason can never outlive its index.
-            CREATE TRIGGER IF NOT EXISTS manifest_insert_ends_withdrawal
-              AFTER INSERT ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
-            CREATE TRIGGER IF NOT EXISTS manifest_update_ends_withdrawal
-              AFTER UPDATE ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
-            CREATE TABLE IF NOT EXISTS files (
-              id TEXT PRIMARY KEY,
-              path TEXT NOT NULL UNIQUE,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS symbols (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              qualified_name TEXT NOT NULL,
-              file_id TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
-            CREATE INDEX IF NOT EXISTS idx_symbols_name_nocase ON symbols(name COLLATE NOCASE);
-            CREATE INDEX IF NOT EXISTS idx_symbols_qualified_name ON symbols(qualified_name);
-            CREATE TABLE IF NOT EXISTS chunks (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              start_line INTEGER NOT NULL,
-              end_line INTEGER NOT NULL,
-              text TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
-            CREATE TABLE IF NOT EXISTS document_sections (
-              path TEXT NOT NULL,
-              start_line INTEGER NOT NULL,
-              end_line INTEGER NOT NULL,
-              content_hash TEXT NOT NULL,
-              json TEXT NOT NULL,
-              PRIMARY KEY(path, start_line, end_line)
-            );
-            CREATE INDEX IF NOT EXISTS idx_document_sections_path
-              ON document_sections(path, start_line);
-            CREATE INDEX IF NOT EXISTS idx_document_sections_hash
-              ON document_sections(content_hash);
-            CREATE TABLE IF NOT EXISTS tests (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_tests_file ON tests(file_id);
-            CREATE TABLE IF NOT EXISTS imports (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              imported TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_id);
-            CREATE TABLE IF NOT EXISTS occurrences (
-              id TEXT PRIMARY KEY,
-              symbol_id TEXT NOT NULL,
-              file_id TEXT NOT NULL,
-              is_definition INTEGER NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_occurrences_symbol ON occurrences(symbol_id);
-            CREATE INDEX IF NOT EXISTS idx_occurrences_file ON occurrences(file_id);
-            CREATE TABLE IF NOT EXISTS analysis_facts (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              source_type TEXT NOT NULL,
-              target TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_analysis_facts_file ON analysis_facts(file_id);
-            CREATE INDEX IF NOT EXISTS idx_analysis_facts_source ON analysis_facts(source_type);
-            CREATE INDEX IF NOT EXISTS idx_analysis_facts_target ON analysis_facts(target);
-            CREATE TABLE IF NOT EXISTS vector_targets (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              target_kind TEXT NOT NULL,
-              content_hash TEXT NOT NULL,
-              vector_id INTEGER NOT NULL,
-              model TEXT NOT NULL,
-              dimensions INTEGER NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_vector_targets_file ON vector_targets(file_id);
-            CREATE TABLE IF NOT EXISTS embedding_cache (
-              cache_key TEXT PRIMARY KEY,
-              target_id TEXT NOT NULL,
-              content_hash TEXT NOT NULL,
-              model TEXT NOT NULL,
-              dimensions INTEGER NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS semantic_index_runs (
-              id TEXT PRIMARY KEY,
-              status TEXT NOT NULL,
-              model TEXT NOT NULL,
-              dimensions INTEGER NOT NULL,
-              vector_count INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS semantic_coverage (
-              id TEXT PRIMARY KEY,
-              target_kind TEXT NOT NULL,
-              indexed_count INTEGER NOT NULL,
-              stale_count INTEGER NOT NULL,
-              failed_count INTEGER NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS graph_nodes (
-              id TEXT PRIMARY KEY,
-              label TEXT NOT NULL,
-              node_type TEXT DEFAULT '',
-              file_id TEXT DEFAULT '',
-              symbol_id TEXT DEFAULT '',
-              evidence_available BOOLEAN DEFAULT 0,
-              freshness INTEGER DEFAULT 0,
-              json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS graph_strings (
-              sid INTEGER PRIMARY KEY,
-              vhash INTEGER NOT NULL,
-              value TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_graph_strings_vhash ON graph_strings(vhash);
-            CREATE TABLE IF NOT EXISTS graph_edges (
-              id TEXT PRIMARY KEY,
-              from_sid INTEGER NOT NULL,
-              to_sid INTEGER NOT NULL,
-              edge_type TEXT NOT NULL,
-              confidence TEXT NOT NULL DEFAULT '',
-              source_type TEXT NOT NULL DEFAULT '',
-              source_sid INTEGER,
-              freshness INTEGER NOT NULL DEFAULT 0,
-              ev_id TEXT NOT NULL DEFAULT '',
-              ev_path_sid INTEGER,
-              ev_line_start INTEGER,
-              ev_line_end INTEGER,
-              ev_symbol_sid INTEGER,
-              ev_message_sid INTEGER,
-              ev_indexed_at_sid INTEGER,
-              extra_sid INTEGER
-            );
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_sid);
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_sid);
-
-            CREATE TABLE IF NOT EXISTS scopes (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              parent_id TEXT,
-              owner_symbol_id TEXT,
-              kind TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_scopes_file ON scopes(file_id);
-
-            CREATE TABLE IF NOT EXISTS bindings (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              scope_id TEXT NOT NULL,
-              name TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_bindings_lookup ON bindings(file_id, scope_id, name);
-
-            CREATE TABLE IF NOT EXISTS call_site_strings (
-              sid INTEGER PRIMARY KEY,
-              vhash INTEGER NOT NULL,
-              value TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_call_site_strings_vhash ON call_site_strings(vhash);
-            CREATE TABLE IF NOT EXISTS call_sites (
-              id_sid INTEGER PRIMARY KEY,
-              file_sid INTEGER NOT NULL,
-              scope_sid INTEGER NOT NULL,
-              caller_sid INTEGER,
-              callee_sid INTEGER NOT NULL,
-              receiver_sid INTEGER,
-              receiver_kind TEXT NOT NULL DEFAULT 'Unknown',
-              start_line INTEGER NOT NULL,
-              start_column INTEGER NOT NULL,
-              end_line INTEGER NOT NULL DEFAULT 0,
-              end_column INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_sid);
-            CREATE INDEX IF NOT EXISTS idx_call_sites_name ON call_sites(callee_sid);
-            CREATE INDEX IF NOT EXISTS idx_call_sites_file ON call_sites(file_sid);
-
-            CREATE TABLE IF NOT EXISTS relationship_evidence (
-              id TEXT PRIMARY KEY,
-              edge_id TEXT NOT NULL,
-              source_type TEXT NOT NULL,
-              json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_relationship_evidence_edge ON relationship_evidence(edge_id);
-            "#,
-        )
-        .map_err(storage_err)?;
-        migrate_history_schema(&mut conn)?;
-        migrate_graph_schema(&mut conn)?;
-        // Every writer this file will see clears excluded content as it removes it, so nothing
-        // it holds needs the one-time compaction an older file does.
-        if created_here {
-            set_schema_meta_flag(&conn, EXCLUDED_CONTENT_CLEARED_FLAG)?;
-        }
-        Ok(())
+        self.initialize_as(StoreOpener::Writer)
     }
 
     fn put_manifest(&self, manifest: &IndexManifest) -> Result<()> {
@@ -4083,25 +4094,28 @@ const GRAPH_INDEXES: &[(&str, &str)] = &[
         "idx_graph_nodes_symbol",
         "CREATE INDEX IF NOT EXISTS idx_graph_nodes_symbol ON graph_nodes(symbol_id)",
     ),
+    // An endpoint's edges in window order, with or without a type: a bounded read is a range
+    // scan that stops at its limit. The edge id is the order's tiebreak, so it is part of the key
+    // rather than left to a sort of every edge that shares the rank.
     (
-        "idx_graph_edges_from",
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_sid)",
+        "idx_graph_edges_from_rank",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from_rank ON graph_edges(from_sid, window_rank, id)",
     ),
     (
-        "idx_graph_edges_to",
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_sid)",
+        "idx_graph_edges_to_rank",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to_rank ON graph_edges(to_sid, window_rank, id)",
     ),
     (
         "idx_graph_edges_type",
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type)",
     ),
     (
-        "idx_graph_edges_from_type",
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from_type ON graph_edges(from_sid, edge_type)",
+        "idx_graph_edges_from_type_rank",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from_type_rank ON graph_edges(from_sid, edge_type, window_rank, id)",
     ),
     (
-        "idx_graph_edges_to_type",
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to_type ON graph_edges(to_sid, edge_type)",
+        "idx_graph_edges_to_type_rank",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to_type_rank ON graph_edges(to_sid, edge_type, window_rank, id)",
     ),
     (
         "idx_graph_edges_source_type",
@@ -4111,6 +4125,14 @@ const GRAPH_INDEXES: &[(&str, &str)] = &[
         "idx_graph_strings_vhash",
         "CREATE INDEX IF NOT EXISTS idx_graph_strings_vhash ON graph_strings(vhash)",
     ),
+];
+
+/// Endpoint indexes the window-rank indexes replaced; each is a prefix of its replacement.
+const RETIRED_GRAPH_INDEXES: &[&str] = &[
+    "idx_graph_edges_from",
+    "idx_graph_edges_to",
+    "idx_graph_edges_from_type",
+    "idx_graph_edges_to_type",
 ];
 
 fn insert_graph_rows<'a>(
@@ -4146,7 +4168,7 @@ fn insert_graph_rows<'a>(
         // the edge statement is prepared; `prepare_cached` makes the reborrow free.
         let row = compact::encode_edge(tx, strings, edge)?;
         tx.prepare_cached(
-            "INSERT INTO graph_edges(id, from_sid, to_sid, edge_type, confidence, source_type, source_sid, freshness, ev_id, ev_path_sid, ev_line_start, ev_line_end, ev_symbol_sid, ev_message_sid, ev_indexed_at_sid, extra_sid) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO graph_edges(id, from_sid, to_sid, edge_type, confidence, source_type, source_sid, freshness, ev_id, ev_path_sid, ev_line_start, ev_line_end, ev_symbol_sid, ev_message_sid, ev_indexed_at_sid, extra_sid, window_rank) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         )
         .map_err(storage_err)?
         .execute(params![
@@ -4166,6 +4188,7 @@ fn insert_graph_rows<'a>(
             row.ev_message_sid,
             row.ev_indexed_at_sid,
             row.extra_sid,
+            row.window_rank,
         ])
         .map_err(storage_err)?;
     }
@@ -4381,13 +4404,23 @@ impl GraphStore for SqliteStore {
         // dependency — a test does not depend on the module it is named after — and `neighbors`
         // backs `module_dependencies`, which callers read as imports and dependents. Consumers
         // that want it ask for it by type through `edges_by_type_for_node`.
-        let (edges, total_edges) = ranked_edge_window(
+        //
+        // No one index yields both endpoints' edges in window order, so each direction is its own
+        // range scan, cut at `limit`, and the two are merged.
+        let _snapshot = read_snapshot(&conn)?;
+        let ranked = window_ranks_current(&conn)?;
+        let mut edges = edge_window(&conn, ranked, NEIGHBOR_OUTGOING, &[&node_sid], 0, limit)?;
+        edges.extend(edge_window(
             &conn,
-            "(e.from_sid = ?1 OR e.to_sid = ?1) AND e.edge_type != 'DerivedFrom'",
+            ranked,
+            NEIGHBOR_INCOMING,
             &[&node_sid],
             0,
             limit,
-        )?;
+        )?);
+        open_kioku_core::sort_graph_edges_for_window(&mut edges);
+        edges.truncate(limit);
+        let total_edges = count_neighbor_edges(&conn, node_sid)?;
         let mut ids = edges
             .iter()
             .flat_map(|edge| [edge.from.0.clone(), edge.to.0.clone()])
@@ -4579,9 +4612,16 @@ impl GraphStore for SqliteStore {
         let Some(node_sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, node_id)? else {
             return Ok(Vec::new());
         };
-        let endpoint_column = if outgoing { "from_sid" } else { "to_sid" };
-        let filter = format!("e.{endpoint_column} = ?1 AND e.edge_type = ?2");
-        Ok(ranked_edge_window(&conn, &filter, &[&node_sid, &edge_type], offset, limit)?.0)
+        let _snapshot = read_snapshot(&conn)?;
+        let ranked = window_ranks_current(&conn)?;
+        edge_window(
+            &conn,
+            ranked,
+            typed_endpoint_filter(outgoing),
+            &[&node_sid, &edge_type],
+            offset,
+            limit,
+        )
     }
 
     fn edges_by_type_for_nodes(
@@ -4697,197 +4737,137 @@ impl GraphStore for SqliteStore {
         ) else {
             return Ok(Vec::new());
         };
-        Ok(ranked_edge_window(
+        let _snapshot = read_snapshot(&conn)?;
+        let ranked = window_ranks_current(&conn)?;
+        edge_window(
             &conn,
-            "e.from_sid = ?1 AND e.to_sid = ?2",
+            ranked,
+            EDGES_BETWEEN,
             &[&from_sid, &to_sid],
             0,
             limit,
-        )?
-        .0)
+        )
     }
 }
 
-/// SQL half of the window order: an upper bound on each row's
-/// [`open_kioku_core::graph_edge_window_tier`], from columns alone, so no string is read.
-///
-/// - group 0: a relationship with an extension record, the only place typed proofs live. It may
-///   be proven, so it is bounded by the top tier, but may turn out corroborated or heuristic.
-/// - group 1: containment (`CONTAINS`, `DEFINES`) from tree-sitter, SCIP or LSP — exactly tier 2.
-/// - group 2: everything else, which carries no proof — exactly heuristic.
-///
-/// The source-type list mirrors `EvidenceSourceType::is_exact_reference_source`, and the
-/// confidence rank matches the core's order, strongest first.
-const WINDOW_CANDIDATE_SELECT: &str = "\
-SELECT e.id, \
-CASE WHEN e.edge_type IN ('Contains', 'Defines') THEN \
-(CASE WHEN e.source_type IN ('TreeSitter', 'Scip', 'Lsp') THEN 1 ELSE 2 END) \
-WHEN e.extra_sid IS NULL THEN 2 ELSE 0 END AS window_group, \
-CASE e.confidence WHEN 'Exact' THEN 0 WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END \
-AS window_confidence \
-FROM graph_edges e";
+/// A node's outgoing edges in [`GraphStore::neighbor_window`]: `DERIVED_FROM` is left out.
+const NEIGHBOR_OUTGOING: &str = "e.from_sid = ?1 AND e.edge_type != 'DerivedFrom'";
+/// A node's incoming edges in [`GraphStore::neighbor_window`]. A self-loop is outgoing only.
+const NEIGHBOR_INCOMING: &str =
+    "e.to_sid = ?1 AND e.from_sid != ?1 AND e.edge_type != 'DerivedFrom'";
+/// Every incoming edge a [`GraphStore::neighbor_window`] counts, self-loops included, so the
+/// count reads only the `(to_sid, edge_type, ...)` index.
+const NEIGHBOR_INCOMING_WITH_LOOPS: &str = "e.to_sid = ?1 AND e.edge_type != 'DerivedFrom'";
+/// A node's self-loops, found through its outgoing edges. The unary `+` keeps SQLite from
+/// reading them through the incoming index instead.
+const NEIGHBOR_LOOPS_BY_OUTGOING: &str =
+    "e.from_sid = ?1 AND +e.to_sid = ?1 AND e.edge_type != 'DerivedFrom'";
+/// A node's self-loops, found through its incoming edges.
+const NEIGHBOR_LOOPS_BY_INCOMING: &str =
+    "+e.from_sid = ?1 AND e.to_sid = ?1 AND e.edge_type != 'DerivedFrom'";
+/// The edges of one pair, for [`GraphStore::graph_edges_between`].
+const EDGES_BETWEEN: &str = "e.from_sid = ?1 AND e.to_sid = ?2";
 
-/// Tier of every row in [`WINDOW_CANDIDATE_SELECT`]'s group 1.
-const CONTAINMENT_WINDOW_TIER: u8 = 2;
+/// A node's edges of one type, for [`GraphStore::edges_by_type_for_node`].
+fn typed_endpoint_filter(outgoing: bool) -> &'static str {
+    if outgoing {
+        "e.from_sid = ?1 AND e.edge_type = ?2"
+    } else {
+        "e.to_sid = ?1 AND e.edge_type = ?2"
+    }
+}
 
-/// One candidate row of [`ranked_edge_window`]: edge id, SQL group, SQL confidence rank.
-type WindowCandidate = (String, i64, i64);
+/// The statement [`edge_window`] runs over current ranks: `filter`'s `param_count` parameters,
+/// then the limit and the offset.
+fn ranked_window_sql(filter: &str, param_count: usize) -> String {
+    format!(
+        "{} WHERE {filter} ORDER BY e.window_rank, e.id LIMIT ?{} OFFSET ?{}",
+        compact::EDGE_SELECT,
+        param_count + 1,
+        param_count + 2
+    )
+}
 
-/// One page (`offset`, `limit`) of the edges matching `filter` (a `WHERE` clause over `e`), in
-/// window order, and how many edges match in all.
+/// A deferred read transaction when the connection is not already in one, so the statements of
+/// one read — the rank-version check, a window per direction, their counts — see one snapshot,
+/// and an `ok watch` commit from another process between them cannot change the answer halfway.
+/// A caller already inside a transaction has its own snapshot. Dropping it without a commit
+/// ends the read.
+fn read_snapshot(conn: &Connection) -> Result<Option<Transaction<'_>>> {
+    if conn.is_autocommit() {
+        conn.unchecked_transaction().map(Some).map_err(storage_err)
+    } else {
+        Ok(None)
+    }
+}
+
+/// One page (`offset`, `limit`) of the edges matching `filter` — a `WHERE` clause over `e`
+/// whose parameters are `?1`..`?n` — in window order.
 ///
-/// Authority is decided by the typed proofs an edge carries, which SQL cannot evaluate, and
-/// `ORDER BY id LIMIT` let whichever edges hashed low fill the window, so a heuristic edge
-/// displaced a proven one. This reads the candidates' ids in an order SQL can compute from
-/// columns — tier bound, then confidence, then id — and decodes edges in that order only until
-/// the page is settled: once `offset + limit` decoded edges rank ahead of the best key any unread
-/// row could have, the rest is never decoded. A hub of proven edges settles after its first page;
-/// a node whose proof-carrying edges are mostly not proven is decoded in full, which is the cost
-/// of ranking by proof. The id tiebreak keeps pages stable across runs and across an incremental
-/// `ok watch` update, which changes insertion order.
-fn ranked_edge_window(
+/// With `ranked` ([`window_ranks_current`]), SQL orders and limits by the persisted rank and
+/// edge id, which is [`open_kioku_core::sort_graph_edges_for_window`] order by construction. Over
+/// the `(endpoint, [type,] window_rank, id)` indexes that is a range scan that stops at the end
+/// of the page, so a read costs what its window holds, not what the node's degree is. Without
+/// current ranks every matching edge is decoded and sorted: the answer is the same, and slower.
+fn edge_window(
     conn: &Connection,
+    ranked: bool,
     filter: &str,
     params: &[&dyn rusqlite::ToSql],
     offset: usize,
     limit: usize,
-) -> Result<(Vec<GraphEdge>, usize)> {
-    // The candidate ids and the edges they name are read by separate statements. A deferred read
-    // transaction holds one snapshot across both, so an `ok watch` commit from another process
-    // between them cannot delete an edge the first statement listed. A caller already inside a
-    // transaction has its own snapshot. Dropping it without a commit ends the read.
-    let _snapshot = if conn.is_autocommit() {
-        Some(conn.unchecked_transaction().map_err(storage_err)?)
+) -> Result<Vec<GraphEdge>> {
+    if !ranked {
+        let mut stmt = conn
+            .prepare_cached(&format!("{} WHERE {filter}", compact::EDGE_SELECT))
+            .map_err(storage_err)?;
+        let mut rows = stmt.query(params).map_err(storage_err)?;
+        let edges = all_edges_in_window_order(&mut rows)?;
+        return Ok(edges.into_iter().skip(offset).take(limit).collect());
+    }
+    let mut stmt = conn
+        .prepare_cached(&ranked_window_sql(filter, params.len()))
+        .map_err(storage_err)?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
+    let mut bound = params.to_vec();
+    bound.push(&limit);
+    bound.push(&offset);
+    let mut rows = stmt.query(bound.as_slice()).map_err(storage_err)?;
+    collect_edges(&mut rows)
+}
+
+/// How many edges [`GraphStore::neighbor_window`] draws from.
+///
+/// Both directions are counted from the covering endpoint indexes, and self-loops, which both
+/// counts hold, once from whichever direction has fewer edges: that count reads every row it
+/// passes, and a hub has one direction far larger than the other.
+fn count_neighbor_edges(conn: &Connection, node_sid: i64) -> Result<usize> {
+    let outgoing = count_edges(conn, NEIGHBOR_OUTGOING, &[&node_sid])?;
+    let incoming = count_edges(conn, NEIGHBOR_INCOMING_WITH_LOOPS, &[&node_sid])?;
+    let loops = if outgoing <= incoming {
+        NEIGHBOR_LOOPS_BY_OUTGOING
     } else {
-        None
+        NEIGHBOR_LOOPS_BY_INCOMING
     };
+    Ok(outgoing + incoming - count_edges(conn, loops, &[&node_sid])?)
+}
+
+/// How many edges match `filter`, as [`edge_window`] takes it.
+fn count_edges(conn: &Connection, filter: &str, params: &[&dyn rusqlite::ToSql]) -> Result<usize> {
     let mut stmt = conn
         .prepare_cached(&format!(
-            "{WINDOW_CANDIDATE_SELECT} WHERE {filter} \
-             ORDER BY window_group, window_confidence, e.id"
+            "SELECT COUNT(*) FROM graph_edges e WHERE {filter}"
         ))
         .map_err(storage_err)?;
-    let candidates = stmt
-        .query_map(params, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .map_err(storage_err)?
-        .collect::<std::result::Result<Vec<WindowCandidate>, _>>()
+    let count: i64 = stmt
+        .query_row(params, |row| row.get(0))
         .map_err(storage_err)?;
-    let total = candidates.len();
-    let need = offset.saturating_add(limit);
-    if need == 0 {
-        return Ok((Vec::new(), total));
-    }
-
-    let mut kept: Vec<(u8, GraphEdge)> = Vec::new();
-    let mut top_tier = 0usize;
-    let mut containment_read = 0usize;
-    let mut above_heuristic = 0usize;
-    let mut heuristic_read = 0usize;
-    // Heuristic edges decoded from group 0, in SQL (confidence, id) order, which is their window
-    // order, and how many of them precede the current group-2 row.
-    let mut group_zero_heuristic: Vec<(i64, &str)> = Vec::new();
-    let mut heuristic_ahead = 0usize;
-    let mut fetched: HashMap<String, GraphEdge> = HashMap::new();
-    let mut next_fetch = 0usize;
-    let mut chunk = 64usize;
-    for (index, (id, group, confidence)) in candidates.iter().enumerate() {
-        // How many decoded edges rank ahead of this row whatever its tier turns out to be. Rows of
-        // one group are read in their window order, so a decoded edge of the row's own bound
-        // tier from its own group is always ahead of it.
-        let ahead = match group {
-            0 => top_tier,
-            1 => top_tier + containment_read,
-            _ => {
-                // A group-0 edge that turned out heuristic is ahead only if its (confidence, id)
-                // precedes this row's.
-                while group_zero_heuristic
-                    .get(heuristic_ahead)
-                    .is_some_and(|earlier| *earlier < (*confidence, id.as_str()))
-                {
-                    heuristic_ahead += 1;
-                }
-                above_heuristic + heuristic_read + heuristic_ahead
-            }
-        };
-        if ahead >= need {
-            break;
-        }
-        if index >= next_fetch {
-            let end = (index + chunk).min(candidates.len());
-            fetch_edges_by_id(conn, &candidates[index..end], &mut fetched)?;
-            next_fetch = end;
-            chunk = (chunk * 2).min(512);
-        }
-        let edge = fetched.remove(id).ok_or_else(|| {
-            OkError::Storage(format!("graph edge `{id}` vanished during a window read"))
-        })?;
-        let tier = match group {
-            0 => open_kioku_core::graph_edge_window_tier(&edge),
-            1 => CONTAINMENT_WINDOW_TIER,
-            _ => 0,
-        };
-        debug_assert_eq!(
-            open_kioku_core::graph_edge_window_tier(&edge),
-            tier,
-            "the SQL tier bound disagrees with the core tier for `{id}`"
-        );
-        match group {
-            0 => {
-                if tier == open_kioku_core::GRAPH_EDGE_WINDOW_TIER_MAX {
-                    top_tier += 1;
-                }
-                if tier > 0 {
-                    above_heuristic += 1;
-                } else {
-                    group_zero_heuristic.push((*confidence, id.as_str()));
-                }
-            }
-            1 => {
-                containment_read += 1;
-                above_heuristic += 1;
-            }
-            _ => heuristic_read += 1,
-        }
-        kept.push((tier, edge));
-    }
-    kept.sort_by_cached_key(|(tier, edge)| {
-        open_kioku_core::graph_edge_window_key_with_tier(edge, *tier)
-    });
-    let edges = kept
-        .into_iter()
-        .map(|(_, edge)| edge)
-        .skip(offset)
-        .take(limit)
-        .collect();
-    Ok((edges, total))
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
 }
 
-/// Decode the edges named by `rows` into `into`, in one statement.
-fn fetch_edges_by_id(
-    conn: &Connection,
-    rows: &[WindowCandidate],
-    into: &mut HashMap<String, GraphEdge>,
-) -> Result<()> {
-    let placeholders = vec!["?"; rows.len()].join(", ");
-    let mut stmt = conn
-        .prepare(&format!(
-            "{} WHERE e.id IN ({placeholders})",
-            compact::EDGE_SELECT
-        ))
-        .map_err(storage_err)?;
-    let mut result = stmt
-        .query(rusqlite::params_from_iter(rows.iter().map(|(id, _, _)| id)))
-        .map_err(storage_err)?;
-    while let Some(row) = result.next().map_err(storage_err)? {
-        let edge = compact::edge_from_row(row)?;
-        into.insert(edge.id.0.clone(), edge);
-    }
-    Ok(())
-}
-
-/// Every edge a statement yields, in window order. For reads that keep
-/// every edge anyway, such as a route search expanding a node, where one decoding pass is cheaper
-/// than [`ranked_edge_window`]'s two.
+/// Every edge a statement yields, in window order, for reads that keep every edge anyway, such
+/// as a route search expanding a node.
 fn all_edges_in_window_order(rows: &mut rusqlite::Rows<'_>) -> Result<Vec<GraphEdge>> {
     let mut edges = collect_edges(rows)?;
     open_kioku_core::sort_graph_edges_for_window(&mut edges);
@@ -5092,7 +5072,19 @@ fn clear_schema_meta_flag(conn: &Connection, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
+/// Who is opening a store, which decides whether the open may rank every graph edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreOpener {
+    /// `SqliteStore::open`: `ok index`, `ok init`, `ok watch`, snapshot import. About to write,
+    /// so it brings the edge window ranks and their indexes up to date first.
+    Writer,
+    /// `SqliteStore::open_existing`: status and other surfaces that only read. Ranking a large
+    /// index is a long write nobody asked for, so they leave the ranks as they are, and bounded
+    /// reads decode and sort until a writer has ranked them.
+    Reader,
+}
+
+fn migrate_graph_schema(conn: &mut Connection, opener: StoreOpener) -> Result<()> {
     // Add columns to graph_nodes. If any column was actually added, the table was genuinely
     // pre-migration and the backfill must run regardless of the marker.
     let mut columns_added = false;
@@ -5105,6 +5097,9 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
     ] {
         columns_added |= add_column_if_not_exists(conn, stmt)?;
     }
+    if opener == StoreOpener::Writer {
+        migrate_graph_edge_window_ranks(conn)?;
+    }
 
     // The backfill full-scans both graph tables, so it must run once per store, not on every
     // open. Before the marker existed it also re-matched rows whose optional columns are
@@ -5114,9 +5109,23 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
         set_schema_meta_flag(conn, GRAPH_QUERY_COLUMNS_FLAG)?;
     }
 
-    // Add indexes (idempotent via IF NOT EXISTS; shared with bulk replace_graph rebuilds)
-    for (_, ddl) in GRAPH_INDEXES {
+    // Add indexes (idempotent via IF NOT EXISTS; shared with bulk replace_graph rebuilds). The
+    // rank indexes are the writer's: an index whose ranks a writer has not brought up to date may
+    // not have the column, and building them is as long a write as ranking.
+    for (name, ddl) in GRAPH_INDEXES {
+        if opener == StoreOpener::Reader && name.ends_with("_rank") {
+            continue;
+        }
         conn.execute(ddl, []).map_err(storage_err)?;
+    }
+    // Dropped only now that the rank indexes exist: dropped first, an open killed before the
+    // rank indexes were built would leave every endpoint read a scan and sort until the next
+    // writer. An older writer recreates them, so every writer open drops them again.
+    if opener == StoreOpener::Writer {
+        for name in RETIRED_GRAPH_INDEXES {
+            conn.execute(&format!("DROP INDEX IF EXISTS {name}"), [])
+                .map_err(storage_err)?;
+        }
     }
 
     let version: i64 = conn
@@ -5128,6 +5137,143 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `schema_meta` key recording the [`open_kioku_core::GRAPH_EDGE_WINDOW_RANK_VERSION`] every
+/// `graph_edges.window_rank` was computed with. Bounded reads order by the column only while it
+/// matches this binary's version, and fall back to decoding and sorting otherwise.
+const GRAPH_EDGE_WINDOW_RANK_KEY: &str = "graph_edge_window_rank_version";
+
+/// Trigger that withdraws the recorded rank version when a row arrives without a rank.
+///
+/// Every insert this crate makes names `window_rank`. One that does not — an Open Kioku from
+/// before window ranks writing to an index this version has ranked — gets the column's `-1`
+/// default, and a reader that trusted the recorded version would order that row first and cut
+/// its window by edge id again. The trigger lives in the file, so it fires for any writer: from
+/// that insert on, bounded reads decode and sort, until the next writer's open of this version
+/// ranks every row and records the version again.
+const GRAPH_EDGES_UNRANKED_TRIGGER: &str = "\
+CREATE TRIGGER IF NOT EXISTS graph_edges_unranked_insert AFTER INSERT ON graph_edges \
+WHEN NEW.window_rank < 0 \
+BEGIN DELETE FROM schema_meta WHERE key = 'graph_edge_window_rank_version'; END";
+
+/// Bring every edge row's window rank up to this binary's rank function, in one transaction: add
+/// the column to an index written before it existed, install [`GRAPH_EDGES_UNRANKED_TRIGGER`],
+/// and, when the recorded version is missing or differs, rank every row and record the version.
+/// The endpoint indexes the rank indexes replace are dropped by [`migrate_graph_schema`] only
+/// once the rank indexes exist, so an open killed in between leaves one or the other.
+///
+/// The column, trigger, ranks and version commit together, and the version is recorded only
+/// over rows it describes: an open killed partway leaves the file as it was, and any later insert
+/// without a rank withdraws the version. `user_version` is not raised. An older Open Kioku keeps
+/// reading and writing the file — its reads name their columns, and its writes only switch
+/// ranked reads off until this version's next writer open — rather than being locked out of it.
+fn migrate_graph_edge_window_ranks(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction().map_err(storage_err)?;
+    let added = !has_column(&tx, "graph_edges", "window_rank")?;
+    if added {
+        tx.execute(
+            "ALTER TABLE graph_edges ADD COLUMN window_rank INTEGER NOT NULL DEFAULT -1",
+            [],
+        )
+        .map_err(storage_err)?;
+    }
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .map_err(storage_err)?;
+    tx.execute(GRAPH_EDGES_UNRANKED_TRIGGER, [])
+        .map_err(storage_err)?;
+    let current = open_kioku_core::GRAPH_EDGE_WINDOW_RANK_VERSION.to_string();
+    if added || stored_window_rank_version(&tx)?.as_deref() != Some(current.as_str()) {
+        rank_graph_edges(&tx)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES(?1, ?2)",
+            params![GRAPH_EDGE_WINDOW_RANK_KEY, current],
+        )
+        .map_err(storage_err)?;
+    }
+    tx.commit().map_err(storage_err)
+}
+
+/// The rank version recorded by [`migrate_graph_edge_window_ranks`], or `None` when the file
+/// has none. Reads nothing but `schema_meta`, and creates nothing, so a read-only probe
+/// connection can ask.
+fn stored_window_rank_version(conn: &Connection) -> Result<Option<String>> {
+    if !table_exists(conn, "schema_meta")? {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT value FROM schema_meta WHERE key = ?1",
+        params![GRAPH_EDGE_WINDOW_RANK_KEY],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(storage_err)
+}
+
+/// Whether every `graph_edges.window_rank` was computed by this binary's rank function, so SQL
+/// may order and limit by it. `false` for an index no writer of this version has ranked, and for
+/// one an older writer has added rows to since: the read surfaces open without ranking, and such
+/// an index is read by decoding every edge.
+fn window_ranks_current(conn: &Connection) -> Result<bool> {
+    // The version is only recorded with the column, but a table dropped and recreated by a writer
+    // that does not know it would leave the version behind.
+    if !has_column(conn, "graph_edges", "window_rank")? {
+        return Ok(false);
+    }
+    Ok(stored_window_rank_version(conn)?.as_deref()
+        == Some(
+            open_kioku_core::GRAPH_EDGE_WINDOW_RANK_VERSION
+                .to_string()
+                .as_str(),
+        ))
+}
+
+/// Recompute `window_rank` for every edge row, a page of edges at a time in id order so memory
+/// stays bounded on a large index.
+///
+/// A row that cannot be decoded keeps the rank it has (`-1` if it never had one, which orders it
+/// first). Every read that reaches it fails with the
+/// row's own error, which is the report a damaged row must produce; failing here would instead
+/// refuse the writer's open, and with it the `ok index` that repairs the row.
+fn rank_graph_edges(tx: &Transaction<'_>) -> Result<()> {
+    const PAGE: i64 = 4096;
+    let mut after = String::new();
+    loop {
+        let mut ranks = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare_cached(&format!(
+                    "{} WHERE e.id > ?1 ORDER BY e.id LIMIT ?2",
+                    compact::EDGE_SELECT
+                ))
+                .map_err(storage_err)?;
+            let mut rows = stmt.query(params![after, PAGE]).map_err(storage_err)?;
+            while let Some(row) = rows.next().map_err(storage_err)? {
+                let id: String = row.get(0).map_err(storage_err)?;
+                let rank = compact::edge_from_row(row)
+                    .ok()
+                    .map(|edge| i64::from(open_kioku_core::graph_edge_window_rank(&edge)));
+                ranks.push((id, rank));
+            }
+        }
+        let Some((last, _)) = ranks.last() else {
+            return Ok(());
+        };
+        after = last.clone();
+        let mut update = tx
+            .prepare_cached(
+                "UPDATE graph_edges SET window_rank = ?2 WHERE id = ?1 AND window_rank IS NOT ?2",
+            )
+            .map_err(storage_err)?;
+        for (id, rank) in &ranks {
+            if let Some(rank) = rank {
+                update.execute(params![id, rank]).map_err(storage_err)?;
+            }
+        }
+    }
 }
 
 fn backfill_graph_query_columns(conn: &mut Connection) -> Result<()> {
@@ -5885,9 +6031,11 @@ fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact, decode_index_manifest, newer_index_message, schema_meta_flag,
-        set_schema_meta_flag, SqliteStore, GRAPH_REBUILD_REQUIRED_FLAG,
-        SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION,
+        compact, decode_index_manifest, has_column, newer_index_message, ranked_window_sql,
+        schema_meta_flag, set_schema_meta_flag, typed_endpoint_filter, window_ranks_current,
+        SqliteStore, EDGES_BETWEEN, GRAPH_INDEXES, GRAPH_REBUILD_REQUIRED_FLAG, NEIGHBOR_INCOMING,
+        NEIGHBOR_INCOMING_WITH_LOOPS, NEIGHBOR_LOOPS_BY_INCOMING, NEIGHBOR_LOOPS_BY_OUTGOING,
+        NEIGHBOR_OUTGOING, SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use open_kioku_core::{
@@ -8668,10 +8816,10 @@ mod tests {
         assert_eq!(between[0].id.0, "z-proven");
     }
 
-    /// The early-settling window read returns exactly the prefix a full decode and sort would,
-    /// for every page, over a mix of every tier, all three SQL groups and every confidence.
+    /// A window read returns exactly the prefix a full decode and sort would, for every page,
+    /// over a mix of every tier and every confidence.
     #[test]
-    fn a_settled_window_matches_the_fully_sorted_edges_for_every_page() {
+    fn a_ranked_window_matches_the_fully_sorted_edges_for_every_page() {
         let store = make_current_store();
         let hub = || NodeId::new("file:hub.rs");
         let mut nodes = vec![GraphNode {
@@ -8705,7 +8853,7 @@ mod tests {
             };
             edge.evidence.confidence = confidences[index % 4];
             match index % 6 {
-                // Proven: SQL group 0.
+                // Proven.
                 0 => edge
                     .set_relationship_proofs(vec![RelationshipProof::new(
                         RelationshipProofKind::ImportBinding,
@@ -8713,7 +8861,7 @@ mod tests {
                         1,
                     )])
                     .unwrap(),
-                // Carries a proof, but an ambiguous one: SQL group 0, heuristic tier.
+                // Carries a proof, but an ambiguous one: heuristic tier.
                 1 => edge
                     .set_relationship_proofs(vec![RelationshipProof::new(
                         RelationshipProofKind::ImportBinding,
@@ -8721,7 +8869,7 @@ mod tests {
                         2,
                     )])
                     .unwrap(),
-                // Corroborated: SQL group 0.
+                // Corroborated.
                 2 => edge
                     .set_relationship_proofs(vec![RelationshipProof::new(
                         RelationshipProofKind::QualifiedName,
@@ -8729,17 +8877,17 @@ mod tests {
                         1,
                     )])
                     .unwrap(),
-                // Parsed containment: SQL group 1.
+                // Parsed containment.
                 3 => {
                     edge.edge_type = GraphEdgeType::Defines;
                     edge.evidence.source_type = EvidenceSourceType::TreeSitter;
                 }
-                // Regex containment: SQL group 2, heuristic tier.
+                // Regex containment: heuristic tier.
                 4 => {
                     edge.edge_type = GraphEdgeType::Defines;
                     edge.evidence.source_type = EvidenceSourceType::Regex;
                 }
-                // Proofless, with no extension record: SQL group 2.
+                // Proofless.
                 _ => {}
             }
             edges.push(edge);
@@ -8796,20 +8944,715 @@ mod tests {
         }
     }
 
-    /// The window read holds its own read transaction when the connection has none, ends it, and
+    /// Edges covering every tier, confidence, edge type, direction and SQL-visible shape a window
+    /// read can meet, including self-loops and `DERIVED_FROM`, from a seeded generator.
+    fn fuzzed_hub_edges(trial: u64, next: &mut impl FnMut(u64) -> u64) -> Vec<GraphEdge> {
+        let types = [
+            GraphEdgeType::Imports,
+            GraphEdgeType::Calls,
+            GraphEdgeType::References,
+            GraphEdgeType::Defines,
+            GraphEdgeType::Contains,
+            GraphEdgeType::SimilarTo,
+            GraphEdgeType::DependsOn,
+            GraphEdgeType::DerivedFrom,
+        ];
+        let sources = [
+            EvidenceSourceType::TreeSitter,
+            EvidenceSourceType::Scip,
+            EvidenceSourceType::Lsp,
+            EvidenceSourceType::Regex,
+            EvidenceSourceType::StaticAnalysis,
+            EvidenceSourceType::Heuristic,
+        ];
+        let confidences = [
+            Confidence::Exact,
+            Confidence::High,
+            Confidence::Medium,
+            Confidence::Low,
+        ];
+        let proof = |kind, candidates| RelationshipProof::new(kind, "fuzz", candidates);
+        let mut edges = Vec::new();
+        for index in 0..1 + next(90) {
+            // Endpoint 6 is the hub itself, so some edges are self-loops.
+            let endpoint = |value: u64| match value {
+                6 => "symbol:hub".to_string(),
+                other => format!("symbol:o{other}"),
+            };
+            let other = endpoint(next(7));
+            let (from, to) = if next(2) == 0 {
+                ("symbol:hub".to_string(), other)
+            } else {
+                (other, "symbol:hub".to_string())
+            };
+            let mut edge = GraphEdge {
+                id: EdgeId::new(format!("t{trial}-{:06}", next(10_000) * 100 + index)),
+                from: NodeId::new(from),
+                to: NodeId::new(to),
+                edge_type: types[next(types.len() as u64) as usize].clone(),
+                ..Default::default()
+            };
+            edge.evidence.confidence = confidences[next(4) as usize];
+            edge.evidence.source_type = sources[next(sources.len() as u64) as usize].clone();
+            match next(9) {
+                0 => {}
+                1 => edge
+                    .set_relationship_proofs(vec![proof(RelationshipProofKind::ImportBinding, 1)])
+                    .unwrap(),
+                2 => edge
+                    .set_relationship_proofs(vec![proof(RelationshipProofKind::ImportBinding, 2)])
+                    .unwrap(),
+                3 => edge
+                    .set_relationship_proofs(vec![proof(RelationshipProofKind::QualifiedName, 1)])
+                    .unwrap(),
+                4 => edge
+                    .set_relationship_proofs(vec![
+                        proof(RelationshipProofKind::ExactCallSite, 1),
+                        proof(RelationshipProofKind::SameScopeDefinition, 1),
+                    ])
+                    .unwrap(),
+                5 => {
+                    let mut mismatched = proof(RelationshipProofKind::ExactReference, 1);
+                    mismatched.target_symbol_id = Some(SymbolId::new("mismatch"));
+                    edge.set_relationship_proofs(vec![mismatched]).unwrap();
+                }
+                6 => {
+                    edge.properties.insert("unrelated".into(), json!(1));
+                }
+                7 => edge.ambiguity.push("ambiguous".into()),
+                _ => edge
+                    .set_relationship_proofs(vec![
+                        proof(RelationshipProofKind::ModuleOrPackageBinding, 1),
+                        proof(RelationshipProofKind::QualifiedName, 1),
+                    ])
+                    .unwrap(),
+            }
+            edges.push(edge);
+        }
+        edges.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+        edges.dedup_by(|left, right| left.id == right.id);
+        edges
+    }
+
+    /// Every bounded read of `store` returns exactly the page the in-memory full sort of `edges`
+    /// gives, for every limit and offset.
+    fn assert_windows_match_full_sort(store: &SqliteStore, edges: &[GraphEdge], context: &str) {
+        let hub = "symbol:hub";
+        let sorted = |selected: Vec<&GraphEdge>| {
+            let mut selected = selected.into_iter().cloned().collect::<Vec<_>>();
+            open_kioku_core::sort_graph_edges_for_window(&mut selected);
+            selected
+                .into_iter()
+                .map(|edge| edge.id.0)
+                .collect::<Vec<_>>()
+        };
+        let ids = |edges: &[GraphEdge]| {
+            edges
+                .iter()
+                .map(|edge| edge.id.0.clone())
+                .collect::<Vec<_>>()
+        };
+        let incident = sorted(
+            edges
+                .iter()
+                .filter(|edge| {
+                    edge.edge_type != GraphEdgeType::DerivedFrom
+                        && (edge.from.0 == hub || edge.to.0 == hub)
+                })
+                .collect(),
+        );
+        for limit in 0..=incident.len() + 1 {
+            let window = store.neighbor_window(hub, limit).unwrap();
+            assert_eq!(
+                window.total_edges,
+                incident.len(),
+                "{context} limit {limit}"
+            );
+            assert_eq!(
+                ids(&window.edges),
+                incident[..limit.min(incident.len())],
+                "{context} limit {limit}"
+            );
+        }
+        let types = edges
+            .iter()
+            .map(|edge| edge.edge_type.clone())
+            .collect::<BTreeSet<_>>();
+        for edge_type in types {
+            for outgoing in [true, false] {
+                let full = sorted(
+                    edges
+                        .iter()
+                        .filter(|edge| {
+                            edge.edge_type == edge_type
+                                && if outgoing {
+                                    edge.from.0 == hub
+                                } else {
+                                    edge.to.0 == hub
+                                }
+                        })
+                        .collect(),
+                );
+                for offset in 0..=full.len() {
+                    for limit in [1, 2, 5] {
+                        let page = store
+                            .edges_by_type_for_node(edge_type.clone(), hub, outgoing, limit, offset)
+                            .unwrap();
+                        let end = (offset + limit).min(full.len());
+                        assert_eq!(
+                            ids(&page),
+                            full[offset.min(end)..end],
+                            "{context} {edge_type:?} outgoing={outgoing} {offset}+{limit}"
+                        );
+                    }
+                }
+            }
+        }
+        for other in (0..6)
+            .map(|index| format!("symbol:o{index}"))
+            .chain([hub.to_string()])
+        {
+            for (from, to) in [(hub, other.as_str()), (other.as_str(), hub)] {
+                let full = sorted(
+                    edges
+                        .iter()
+                        .filter(|edge| edge.from.0 == from && edge.to.0 == to)
+                        .collect(),
+                );
+                for limit in 1..=full.len() + 1 {
+                    let got = store.graph_edges_between(from, to, limit).unwrap();
+                    assert_eq!(
+                        ids(&got),
+                        full[..limit.min(full.len())],
+                        "{context} {from}->{to} limit {limit}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Randomized: SQL-ordered windows over persisted ranks equal the in-memory full sort, for
+    /// a graph written in one piece and for one grown by `ok watch` partial writes, and the
+    /// decode-and-sort reading of an index without current ranks gives the same answers.
+    #[test]
+    fn ranked_windows_match_the_full_sort_across_writes_and_layouts() {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        for trial in 0..12 {
+            let store = make_current_store();
+            let mut nodes = vec![GraphNode {
+                id: NodeId::new("symbol:hub"),
+                node_type: GraphNodeType::Function,
+                label: "hub".into(),
+                ..Default::default()
+            }];
+            for index in 0..6 {
+                nodes.push(GraphNode {
+                    id: NodeId::new(format!("symbol:o{index}")),
+                    node_type: GraphNodeType::Function,
+                    label: format!("o{index}"),
+                    ..Default::default()
+                });
+            }
+            let edges = fuzzed_hub_edges(trial, &mut next);
+            // Half from a full index, the rest from a watcher's partial write.
+            let split = edges.len() / 2;
+            store.replace_graph(&nodes, &edges[..split]).unwrap();
+            store
+                .replace_files_index(PartialIndexUpdate {
+                    manifest: &make_manifest(),
+                    changed_files: &[],
+                    deleted_file_ids: &[],
+                    symbols: &[],
+                    chunks: &[],
+                    tests: &[],
+                    imports: &[],
+                    occurrences: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                    graph_nodes: &[],
+                    graph_edges: &edges[split..],
+                })
+                .unwrap();
+            {
+                let conn = store.connection.lock().unwrap();
+                assert!(window_ranks_current(&conn).unwrap());
+                let mut stmt = conn
+                    .prepare("SELECT id, window_rank FROM graph_edges ORDER BY id")
+                    .unwrap();
+                let stored = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                let expected = edges
+                    .iter()
+                    .map(|edge| {
+                        (
+                            edge.id.0.clone(),
+                            i64::from(open_kioku_core::graph_edge_window_rank(edge)),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(stored, expected, "trial {trial}: persisted ranks");
+            }
+            assert_windows_match_full_sort(&store, &edges, &format!("trial {trial} ranked"));
+
+            // An index no writer of this version has ranked: garbage in the column, and no
+            // current version recorded. Reads must not trust the column.
+            {
+                let conn = store.connection.lock().unwrap();
+                conn.execute_batch(
+                    "UPDATE graph_edges SET window_rank = 15 - window_rank; \
+                     UPDATE schema_meta SET value = '0' \
+                     WHERE key = 'graph_edge_window_rank_version';",
+                )
+                .unwrap();
+                assert!(!window_ranks_current(&conn).unwrap());
+            }
+            assert_windows_match_full_sort(&store, &edges, &format!("trial {trial} unranked"));
+        }
+    }
+
+    /// Every bounded read over current ranks is an index range scan in window order: no read
+    /// sorts the node's edges, so its cost follows the window rather than the node's degree.
+    #[test]
+    fn bounded_edge_reads_are_range_scans_in_window_order() {
+        let store = make_current_store();
+        let conn = store.connection.lock().unwrap();
+        for (filter, param_count, index) in [
+            (NEIGHBOR_OUTGOING, 1, "idx_graph_edges_from_rank"),
+            (NEIGHBOR_INCOMING, 1, "idx_graph_edges_to_rank"),
+            (
+                typed_endpoint_filter(true),
+                2,
+                "idx_graph_edges_from_type_rank",
+            ),
+            (
+                typed_endpoint_filter(false),
+                2,
+                "idx_graph_edges_to_type_rank",
+            ),
+            (EDGES_BETWEEN, 2, "_rank"),
+        ] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                ranked_window_sql(filter, param_count)
+            );
+            let mut stmt = conn.prepare(&sql).unwrap();
+            let params = vec![Some(1i64); param_count + 2];
+            let plan = stmt
+                .query_map(rusqlite::params_from_iter(params), |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
+            assert!(
+                !plan.contains("TEMP B-TREE"),
+                "`{filter}` sorts instead of scanning in order:\n{plan}"
+            );
+            assert!(
+                plan.contains(&format!("SEARCH e USING INDEX {index}"))
+                    || plan.contains("SEARCH e USING INDEX") && index == "_rank",
+                "`{filter}` does not read `{index}`:\n{plan}"
+            );
+        }
+        // The window's total: both directions from covering indexes, self-loops from the side
+        // the caller chose.
+        for (filter, expected) in [
+            (
+                NEIGHBOR_OUTGOING,
+                "USING COVERING INDEX idx_graph_edges_from_type_rank",
+            ),
+            (
+                NEIGHBOR_INCOMING_WITH_LOOPS,
+                "USING COVERING INDEX idx_graph_edges_to_type_rank",
+            ),
+            (NEIGHBOR_LOOPS_BY_OUTGOING, "INDEX idx_graph_edges_from"),
+            (NEIGHBOR_LOOPS_BY_INCOMING, "INDEX idx_graph_edges_to"),
+        ] {
+            let sql =
+                format!("EXPLAIN QUERY PLAN SELECT COUNT(*) FROM graph_edges e WHERE {filter}");
+            let plan = conn
+                .prepare(&sql)
+                .unwrap()
+                .query_map([1i64], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
+            assert!(
+                plan.contains(expected),
+                "`{filter}` counts through:\n{plan}"
+            );
+        }
+    }
+
+    /// The hub fixture of [`fuzzed_hub_edges`], written by this version and then put back in the
+    /// layout a version-4 writer leaves: no rank column, trigger, rank indexes or recorded rank
+    /// version, and the endpoint indexes the rank indexes replaced. Returns the edges it holds.
+    fn write_pre_rank_index(path: &std::path::Path) -> Vec<GraphEdge> {
+        let mut next = {
+            let mut seed: u64 = 7;
+            move |bound: u64| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (seed >> 33) % bound
+            }
+        };
+        let edges = fuzzed_hub_edges(0, &mut next);
+        let mut nodes = vec![GraphNode {
+            id: NodeId::new("symbol:hub"),
+            node_type: GraphNodeType::Function,
+            label: "hub".into(),
+            ..Default::default()
+        }];
+        for index in 0..6 {
+            nodes.push(GraphNode {
+                id: NodeId::new(format!("symbol:o{index}")),
+                node_type: GraphNodeType::Function,
+                label: format!("o{index}"),
+                ..Default::default()
+            });
+        }
+        {
+            let store = SqliteStore::open(path).unwrap();
+            store.put_manifest(&make_manifest()).unwrap();
+            store.replace_graph(&nodes, &edges).unwrap();
+        }
+        // Put the file back in the layout a version-4 writer left: no rank column, no rank
+        // indexes, the endpoint indexes they replaced, no recorded rank version.
+        {
+            let conn = Connection::open(path).unwrap();
+            for (name, _) in GRAPH_INDEXES {
+                if name.ends_with("_rank") {
+                    conn.execute(&format!("DROP INDEX {name}"), []).unwrap();
+                }
+            }
+            conn.execute_batch(
+                "DROP TRIGGER graph_edges_unranked_insert;
+                 ALTER TABLE graph_edges DROP COLUMN window_rank;
+                 CREATE INDEX idx_graph_edges_from ON graph_edges(from_sid);
+                 CREATE INDEX idx_graph_edges_to ON graph_edges(to_sid);
+                 CREATE INDEX idx_graph_edges_from_type ON graph_edges(from_sid, edge_type);
+                 CREATE INDEX idx_graph_edges_to_type ON graph_edges(to_sid, edge_type);
+                 DELETE FROM schema_meta WHERE key = 'graph_edge_window_rank_version';
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        edges
+    }
+
+    /// The `idx_` indexes of `graph_edges`, by name.
+    fn graph_edge_indexes(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'index' \
+                 AND tbl_name = 'graph_edges' AND name LIKE 'idx_%' ORDER BY name",
+            )
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// An index written before window ranks existed keeps answering through the read-only
+    /// surfaces, which open without migrating, and the next writer's open ranks it in place: the
+    /// column, the ranks, the recorded version and the rank indexes, with `user_version` left
+    /// where it was so an older Open Kioku can still open the file.
+    #[test]
+    fn an_index_from_before_window_ranks_is_read_then_ranked_on_the_next_writer_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let edges = write_pre_rank_index(&path);
+
+        // A read-only surface serves it as it is, decoding and sorting.
+        let probe = SqliteStore::open_for_probe(&path).unwrap();
+        assert_windows_match_full_sort(&probe, &edges, "unmigrated");
+        {
+            let conn = probe.connection.lock().unwrap();
+            assert!(!has_column(&conn, "graph_edges", "window_rank").unwrap());
+        }
+        drop(probe);
+
+        // The next writer's open ranks it.
+        let store = SqliteStore::open(&path).unwrap();
+        {
+            let conn = store.connection.lock().unwrap();
+            assert!(window_ranks_current(&conn).unwrap());
+            let version: i64 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION);
+            assert_eq!(
+                graph_edge_indexes(&conn),
+                [
+                    "idx_graph_edges_from_rank",
+                    "idx_graph_edges_from_type_rank",
+                    "idx_graph_edges_source_type",
+                    "idx_graph_edges_to_rank",
+                    "idx_graph_edges_to_type_rank",
+                    "idx_graph_edges_type",
+                ]
+            );
+            let mut stmt = conn
+                .prepare("SELECT id, window_rank FROM graph_edges ORDER BY id")
+                .unwrap();
+            let stored = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            let expected = edges
+                .iter()
+                .map(|edge| {
+                    (
+                        edge.id.0.clone(),
+                        i64::from(open_kioku_core::graph_edge_window_rank(edge)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(stored, expected);
+        }
+        assert_windows_match_full_sort(&store, &edges, "migrated");
+
+        // Ranks written by another version of the rank function are recomputed by the next
+        // writer's open, not trusted.
+        {
+            let conn = store.connection.lock().unwrap();
+            conn.execute_batch(
+                "UPDATE graph_edges SET window_rank = 15 - window_rank; \
+                 UPDATE schema_meta SET value = '0' \
+                 WHERE key = 'graph_edge_window_rank_version';",
+            )
+            .unwrap();
+        }
+        drop(store);
+        let store = SqliteStore::open(&path).unwrap();
+        assert!(window_ranks_current(&store.connection.lock().unwrap()).unwrap());
+        assert_windows_match_full_sort(&store, &edges, "re-ranked");
+    }
+
+    /// Every stored rank equals the core rank of the edge with that id.
+    fn assert_persisted_ranks(conn: &Connection, edges: &[GraphEdge]) {
+        let mut stmt = conn
+            .prepare("SELECT id, window_rank FROM graph_edges ORDER BY id")
+            .unwrap();
+        let stored = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let mut expected = edges
+            .iter()
+            .map(|edge| {
+                (
+                    edge.id.0.clone(),
+                    i64::from(open_kioku_core::graph_edge_window_rank(edge)),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(stored, expected);
+    }
+
+    /// A read-only open (`ok status`, `ok doctor`) of an index from before window ranks neither
+    /// ranks it nor builds the rank indexes: that long write is the next writer's, and until then
+    /// reads decode and sort. A writer's open killed before its transaction commits leaves the
+    /// file as it was, with no version recorded over unranked rows.
+    #[test]
+    fn only_a_writer_open_ranks_an_index_and_an_interrupted_one_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let edges = write_pre_rank_index(&path);
+
+        let store = SqliteStore::open_existing(&path).unwrap();
+        {
+            let conn = store.connection.lock().unwrap();
+            assert!(!has_column(&conn, "graph_edges", "window_rank").unwrap());
+            assert!(!graph_edge_indexes(&conn)
+                .iter()
+                .any(|name| name.ends_with("_rank")));
+        }
+        assert_windows_match_full_sort(&store, &edges, "read-only open");
+        drop(store);
+
+        // The rank transaction, cut off before its commit.
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(
+                "ALTER TABLE graph_edges ADD COLUMN window_rank INTEGER NOT NULL DEFAULT -1;
+                 UPDATE graph_edges SET window_rank = 0 WHERE rowid % 2 = 0;
+                 INSERT OR REPLACE INTO schema_meta(key, value)
+                 VALUES('graph_edge_window_rank_version', '1');",
+            )
+            .unwrap();
+            std::mem::forget(tx);
+        }
+        let probe = SqliteStore::open_for_probe(&path).unwrap();
+        {
+            let conn = probe.connection.lock().unwrap();
+            assert!(!has_column(&conn, "graph_edges", "window_rank").unwrap());
+            assert!(!window_ranks_current(&conn).unwrap());
+        }
+        assert_windows_match_full_sort(&probe, &edges, "interrupted rank transaction");
+    }
+
+    /// A writer's open killed after the rank transaction commits but before the rank indexes are
+    /// built still leaves the endpoint indexes in place, so reads stay index lookups; the next
+    /// writer's open builds the rank indexes and only then drops the endpoint ones.
+    #[test]
+    fn ranks_committed_without_rank_indexes_keep_the_endpoint_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let edges = write_pre_rank_index(&path);
+        let retired = [
+            "idx_graph_edges_from",
+            "idx_graph_edges_from_type",
+            "idx_graph_edges_to",
+            "idx_graph_edges_to_type",
+        ];
+        {
+            // The rank transaction alone, as an open killed right after its commit leaves it.
+            let mut conn = Connection::open(&path).unwrap();
+            super::migrate_graph_edge_window_ranks(&mut conn).unwrap();
+            assert!(window_ranks_current(&conn).unwrap());
+            let names = graph_edge_indexes(&conn);
+            for name in retired {
+                assert!(names.iter().any(|index| index == name), "{name}: {names:?}");
+            }
+            assert!(!names.iter().any(|index| index.ends_with("_rank")));
+        }
+        let probe = SqliteStore::open_for_probe(&path).unwrap();
+        assert_windows_match_full_sort(&probe, &edges, "ranked, rank indexes missing");
+        drop(probe);
+
+        let store = SqliteStore::open(&path).unwrap();
+        let names = graph_edge_indexes(&store.connection.lock().unwrap());
+        assert!(retired
+            .iter()
+            .all(|name| !names.iter().any(|index| index == name)));
+        assert_eq!(
+            names
+                .iter()
+                .filter(|index| index.ends_with("_rank"))
+                .count(),
+            4
+        );
+    }
+
+    /// An Open Kioku from before window ranks can still write to a ranked index. Its inserts
+    /// name no rank, so they take the `-1` default, and the trigger withdraws the recorded
+    /// version with them: reads stop trusting the column at once, rather than ordering those rows
+    /// first, and the next writer's open of this version ranks every row again. The file is also
+    /// in the state a writer killed after the rank transaction but before the rank indexes were
+    /// built leaves, with the endpoint indexes an older writer recreates.
+    #[test]
+    fn an_unranked_insert_withdraws_the_rank_version_until_the_next_writer_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let edges = write_pre_rank_index(&path);
+        drop(SqliteStore::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (name, _) in GRAPH_INDEXES {
+                if name.ends_with("_rank") {
+                    conn.execute(&format!("DROP INDEX {name}"), []).unwrap();
+                }
+            }
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_sid);
+                 CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_sid);
+                 INSERT INTO graph_edges(id, from_sid, to_sid, edge_type, confidence,
+                   source_type, source_sid, freshness, ev_id, ev_path_sid, ev_line_start,
+                   ev_line_end, ev_symbol_sid, ev_message_sid, ev_indexed_at_sid, extra_sid)
+                 SELECT 'old-' || id, from_sid, to_sid, edge_type, confidence, source_type,
+                   source_sid, freshness, ev_id, ev_path_sid, ev_line_start, ev_line_end,
+                   ev_symbol_sid, ev_message_sid, ev_indexed_at_sid, extra_sid
+                 FROM graph_edges;",
+            )
+            .unwrap();
+        }
+        let mut all = edges.clone();
+        all.extend(edges.iter().map(|edge| {
+            let mut copy = edge.clone();
+            copy.id = EdgeId::new(format!("old-{}", edge.id.0));
+            copy
+        }));
+
+        let probe = SqliteStore::open_for_probe(&path).unwrap();
+        {
+            let conn = probe.connection.lock().unwrap();
+            assert!(!window_ranks_current(&conn).unwrap());
+            let unranked: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM graph_edges WHERE window_rank < 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(unranked as usize, edges.len());
+        }
+        assert_windows_match_full_sort(&probe, &all, "after an unranked insert");
+        drop(probe);
+
+        let store = SqliteStore::open(&path).unwrap();
+        {
+            let conn = store.connection.lock().unwrap();
+            assert!(window_ranks_current(&conn).unwrap());
+            assert_persisted_ranks(&conn, &all);
+            assert_eq!(
+                graph_edge_indexes(&conn),
+                [
+                    "idx_graph_edges_from_rank",
+                    "idx_graph_edges_from_type_rank",
+                    "idx_graph_edges_source_type",
+                    "idx_graph_edges_to_rank",
+                    "idx_graph_edges_to_type_rank",
+                    "idx_graph_edges_type",
+                ]
+            );
+        }
+        assert_windows_match_full_sort(&store, &all, "re-ranked after an unranked insert");
+    }
+
+    /// A window read holds its own read transaction when the connection has none, ends it, and
     /// reuses a caller's transaction rather than failing to open a nested one.
     #[test]
-    fn a_window_read_brackets_its_two_statements_in_one_snapshot() {
+    fn a_window_read_brackets_its_statements_in_one_snapshot() {
         let store = make_current_store();
         let conn = store.connection.lock().unwrap();
         assert!(conn.is_autocommit());
-        super::ranked_edge_window(&conn, "1 = 1", &[], 0, 10).unwrap();
+        {
+            let snapshot = super::read_snapshot(&conn).unwrap();
+            assert!(snapshot.is_some());
+            assert!(!conn.is_autocommit(), "the read must hold a transaction");
+        }
         assert!(
             conn.is_autocommit(),
             "the read transaction must end with the read"
         );
         conn.execute_batch("BEGIN DEFERRED").unwrap();
-        super::ranked_edge_window(&conn, "1 = 1", &[], 0, 10).unwrap();
+        assert!(super::read_snapshot(&conn).unwrap().is_none());
         assert!(
             !conn.is_autocommit(),
             "a caller's transaction must be left open"
@@ -9054,8 +9897,8 @@ mod tests {
                      'idx_graph_nodes_file',
                      'idx_graph_nodes_symbol',
                      'idx_graph_edges_type',
-                     'idx_graph_edges_from_type',
-                     'idx_graph_edges_to_type',
+                     'idx_graph_edges_from_type_rank',
+                     'idx_graph_edges_to_type_rank',
                      'idx_graph_edges_source_type',
                      'idx_graph_strings_vhash'
                    )",

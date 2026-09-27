@@ -137,6 +137,31 @@ changed files' rows and the complete graph of the new snapshot, in one transacti
    is what makes the incremental graph equal a clean rebuild rather than approximate it.
 3. Unchanged edges keep their stored evidence, including `indexed_at`.
 
+### Window ranks
+
+Bounded edge reads keep a node's strongest edges first ([Bounded edge
+windows](graph-model.md#bounded-edge-windows)). The order depends on the typed relationship
+proofs, which SQL cannot evaluate, so each `graph_edges` row carries `window_rank`, the value of
+`open_kioku_core::graph_edge_window_rank` for that row, computed by the single insert every
+writer uses (`ok index`, `ok watch`, and the reconcile step above). A row is never updated in
+place, so its rank always describes the edge the row stores. Four indexes serve the windows:
+`idx_graph_edges_from_rank` and `idx_graph_edges_to_rank` on `(endpoint, window_rank, id)`, and
+`idx_graph_edges_from_type_rank` and `idx_graph_edges_to_type_rank` on `(endpoint, edge_type,
+window_rank, id)`. They replace the endpoint indexes (`from_sid`, `to_sid`, `(from_sid,
+edge_type)`, `(to_sid, edge_type)`), each a prefix of its replacement. The edge id is in the key
+because it is the order's tiebreak: without it, SQLite would sort every edge that shares a rank,
+which on a hub is all of them.
+
+The `schema_meta` key `graph_edge_window_rank_version` records the
+`open_kioku_core::GRAPH_EDGE_WINDOW_RANK_VERSION` the ranks were computed with. Reads order and
+limit in SQL only while it equals the reader's version; otherwise they decode every matching edge
+and sort it, which is the same answer at the cost of the node's degree. A writer's open
+recomputes every rank when the version is missing or differs, and records it in the same
+transaction, so a reader never sees a version over ranks it does not describe. The trigger
+`graph_edges_unranked_insert` deletes the key whenever a row is inserted with a negative rank,
+which is what an insert that names no rank gets; see below. A change to the rank function bumps
+the version, and a core test pins the rank of every edge shape to it.
+
 ### Publication order
 
 The manifest is the publication marker, written as the last step of an index run.
@@ -733,8 +758,34 @@ manifests still read through serde defaults.
 
 `ok snapshot import` refuses an artifact whose `sqlite_user_version` is below the supported
 version and names the fix, instead of importing a store whose graph would be discarded on
-first open. `ok snapshot export` likewise refuses a store awaiting a rebuild, rather than
-writing `graph_edge_count: 0` into the artifact metadata as though it were a measurement. It
+first open. `ok snapshot export` likewise refuses a store awaiting a rebuild, rather than writing `graph_edge_count: 0` into the
+artifact metadata as though it were a measurement. It
 opens the index the way every read surface does, so it refuses with `indexing in progress`
 while a live writer holds the lock and no manifest is published, and with `repository is not
 indexed` when there is no published index to export.
+
+### Opening an index from before window ranks
+
+Window ranks do not change `user_version`. A writer's open (`SqliteStore::open`: `ok index`,
+`ok init`, `ok watch`, `ok snapshot import`) brings an index up to date in one transaction: it adds
+the column (default `-1`), installs the `graph_edges_unranked_insert` trigger, and, when
+`graph_edge_window_rank_version` is missing or differs, decodes every edge once to rank it (4,096
+edges at a time) and records the version. The rank indexes are built after it commits, and only
+then are the four endpoint indexes they replace dropped. An open killed partway leaves either the
+file as it was, or ranks with their version and the endpoint indexes still in place; neither makes
+a reader trust a rank that is not there, and every bounded read still has an index to use. A row that cannot be decoded keeps `-1`, which orders it first, and fails every read
+that reaches it, as it did before; refusing the open instead would also refuse the `ok index` that
+repairs it.
+
+Every other open ranks nothing. The read surfaces open without running a schema statement, and
+`SqliteStore::open_existing` (`ok status`, `ok doctor`) runs the idempotent schema statements but
+neither ranks edges nor builds the rank indexes: on a large index that is a long write, and a
+status command is not where to pay it. Until a writer has opened the index, bounded reads decode
+and sort, with the same answers.
+
+An Open Kioku from before window ranks can still open, read and write a ranked index: its reads
+name their columns, and its inserts name no rank, so they take the `-1` default and the trigger
+withdraws the recorded version. From then on bounded reads decode and sort, until this version's
+next writer open ranks every row again. The older writer also rebuilds the four endpoint indexes
+once on its first open (about 2.3 s at 170,840 edges), and this version's next writer open drops
+them again, so alternating between the two versions pays that rebuild, and a re-rank, each time.

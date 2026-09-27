@@ -14,10 +14,10 @@ pub mod relationship;
 pub use analysis_semantics::*;
 
 pub use relationship::{
-    graph_edge_window_key, graph_edge_window_key_with_tier, graph_edge_window_tier,
+    graph_edge_window_key, graph_edge_window_rank, graph_edge_window_tier,
     normalize_relationship_proofs, relationship_authority, sort_graph_edges_for_window,
     RelationshipAuthority, RelationshipProof, RelationshipProofFilter, RelationshipProofKind,
-    GRAPH_EDGE_WINDOW_TIER_MAX, RELATIONSHIP_PROOFS_PROPERTY,
+    GRAPH_EDGE_WINDOW_RANK_VERSION, GRAPH_EDGE_WINDOW_TIER_MAX, RELATIONSHIP_PROOFS_PROPERTY,
 };
 
 macro_rules! id_type {

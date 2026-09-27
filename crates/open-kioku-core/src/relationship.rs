@@ -405,9 +405,6 @@ pub const GRAPH_EDGE_WINDOW_TIER_MAX: u8 = 3;
 /// - 0: heuristic — proofless or statistical edges (`SIMILAR_TO`, `SEMANTICALLY_RELATED`, a
 ///   symbol-registry name match), and containment from the regex fallback, which is a guess
 ///   about where a symbol is.
-///
-/// Only an edge that carries typed relationship proofs, or a `CONTAINS`/`DEFINES` edge, can rank
-/// above 0; the SQLite store relies on that to skip proof decoding for the rest.
 pub fn graph_edge_window_tier(edge: &GraphEdge) -> u8 {
     match edge.edge_type {
         GraphEdgeType::Contains | GraphEdgeType::Defines => {
@@ -425,23 +422,33 @@ pub fn graph_edge_window_tier(edge: &GraphEdge) -> u8 {
     }
 }
 
-/// Sort key of one edge in window order: see [`sort_graph_edges_for_window`]. Smaller sorts first.
-pub fn graph_edge_window_key(
-    edge: &GraphEdge,
-) -> (std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, String) {
-    graph_edge_window_key_with_tier(edge, graph_edge_window_tier(edge))
+/// Version of [`graph_edge_window_rank`]. A store that persists ranks records the version it
+/// wrote them with and recomputes them when it differs, so bump it with any change to the rank an
+/// edge gets: to the tiers, to their order, or to how confidence orders edges within one.
+///
+/// Before the first bump: a writer checks the recorded version only when it opens the store, so
+/// a long-running writer of the previous version (an `ok watch` started before the upgrade) would
+/// keep inserting non-negative ranks of the old function under the new version, which the
+/// unranked-insert trigger cannot see. The bump must make writers re-check the stored version
+/// before each write and withdraw it on a mismatch, or record the version per row.
+pub const GRAPH_EDGE_WINDOW_RANK_VERSION: u32 = 1;
+
+/// Window position class of one edge: 0 is kept first, 15 last.
+/// Evidence tier ([`graph_edge_window_tier`]) decides it, and evidence confidence orders edges
+/// within one tier, so a confident heuristic edge never ranks ahead of a proven one.
+///
+/// One integer, rather than a tuple, so a store can persist it beside the edge and index it:
+/// ordering by `(rank, edge id)` is then exactly [`sort_graph_edges_for_window`], and a bounded
+/// read is an index range scan instead of a decode and sort of every edge of the node.
+pub fn graph_edge_window_rank(edge: &GraphEdge) -> u8 {
+    const CONFIDENCE_LEVELS: u8 = 4;
+    (GRAPH_EDGE_WINDOW_TIER_MAX - graph_edge_window_tier(edge)) * CONFIDENCE_LEVELS
+        + (CONFIDENCE_LEVELS - 1 - confidence_rank(edge.evidence.confidence))
 }
 
-/// [`graph_edge_window_key`] for an edge whose tier the caller already computed.
-pub fn graph_edge_window_key_with_tier(
-    edge: &GraphEdge,
-    tier: u8,
-) -> (std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, String) {
-    (
-        std::cmp::Reverse(tier),
-        std::cmp::Reverse(confidence_rank(edge.evidence.confidence)),
-        edge.id.0.clone(),
-    )
+/// Sort key of one edge in window order: see [`sort_graph_edges_for_window`]. Smaller sorts first.
+pub fn graph_edge_window_key(edge: &GraphEdge) -> (u8, String) {
+    (graph_edge_window_rank(edge), edge.id.0.clone())
 }
 
 /// Order a set of graph edges the way every bounded edge window keeps them: by evidence tier
@@ -455,7 +462,7 @@ pub fn graph_edge_window_key_with_tier(
 /// never outranks a proven one — and the edge id makes the order total and independent of
 /// insertion order.
 pub fn sort_graph_edges_for_window(edges: &mut [GraphEdge]) {
-    // The tier parses the typed proofs, so it is computed once per edge rather than per
+    // The rank parses the typed proofs, so it is computed once per edge rather than per
     // comparison.
     edges.sort_by_cached_key(graph_edge_window_key);
 }
@@ -518,6 +525,156 @@ mod tests {
         };
         edge.set_relationship_proofs(proofs).unwrap();
         edge
+    }
+
+    /// Stores persist this rank and recompute it only when the version changes, so the rank of
+    /// every shape of edge is pinned with the version: a change to the tiers, to which sources
+    /// count as parsed containment, to how an authority class maps to a tier, or to how
+    /// confidence orders edges fails here unless the version moves with it.
+    ///
+    /// The expected tier is spelled out rather than computed through the functions under test.
+    /// The authority policy itself is versioned with the analysis semantics, whose change forces
+    /// a full rebuild and so a fresh rank for every edge; this pins how each class it can return
+    /// ranks.
+    #[test]
+    fn window_rank_table_is_pinned_to_its_version() {
+        const SOURCES: [EvidenceSourceType; 11] = [
+            EvidenceSourceType::TreeSitter,
+            EvidenceSourceType::Scip,
+            EvidenceSourceType::Lsp,
+            EvidenceSourceType::Regex,
+            EvidenceSourceType::Lexical,
+            EvidenceSourceType::Semantic,
+            EvidenceSourceType::Runtime,
+            EvidenceSourceType::GitHistory,
+            EvidenceSourceType::StaticAnalysis,
+            EvidenceSourceType::ExternalIntegration,
+            EvidenceSourceType::Heuristic,
+        ];
+        const CONFIDENCES: [Confidence; 4] = [
+            Confidence::Exact,
+            Confidence::High,
+            Confidence::Medium,
+            Confidence::Low,
+        ];
+        let relationship_types = [
+            GraphEdgeType::References,
+            GraphEdgeType::UsesType,
+            GraphEdgeType::Calls,
+            GraphEdgeType::Implements,
+            GraphEdgeType::Extends,
+            GraphEdgeType::Imports,
+            GraphEdgeType::DependsOn,
+            GraphEdgeType::ExposesEndpoint,
+            GraphEdgeType::CallsEndpoint,
+            GraphEdgeType::ReadsConfig,
+            GraphEdgeType::WritesConfig,
+            GraphEdgeType::ReadsTable,
+            GraphEdgeType::WritesTable,
+            GraphEdgeType::PublishesEvent,
+            GraphEdgeType::ConsumesEvent,
+            GraphEdgeType::Tests,
+            GraphEdgeType::TestCovers,
+            GraphEdgeType::Validates,
+            GraphEdgeType::OwnedBy,
+            GraphEdgeType::ChangedBy,
+            GraphEdgeType::FailedIn,
+            GraphEdgeType::BelongsTo,
+            GraphEdgeType::MentionedIn,
+            GraphEdgeType::RelatedToTicket,
+            GraphEdgeType::SimilarTo,
+            GraphEdgeType::SemanticallyRelated,
+            GraphEdgeType::DerivedFrom,
+        ];
+        let proof_sets: Vec<Vec<RelationshipProof>> = vec![
+            Vec::new(),
+            vec![proof(RelationshipProofKind::ImportBinding, 1)],
+            vec![proof(RelationshipProofKind::ImportBinding, 2)],
+            vec![proof(RelationshipProofKind::QualifiedName, 1)],
+            vec![proof(RelationshipProofKind::DeclaredOrigin, 1)],
+            vec![
+                proof(RelationshipProofKind::ExactCallSite, 1),
+                proof(RelationshipProofKind::SameScopeDefinition, 1),
+            ],
+            vec![
+                proof(RelationshipProofKind::ImportBinding, 1),
+                proof(RelationshipProofKind::QualifiedName, 1),
+            ],
+            vec![
+                proof(RelationshipProofKind::InheritanceBinding, 1),
+                proof(RelationshipProofKind::TraitOrInterfaceBinding, 1),
+            ],
+            vec![proof(RelationshipProofKind::ModuleOrPackageBinding, 1)],
+        ];
+        let expected_rank =
+            |tier: u8, confidence_index: usize| (3 - tier) * 4 + confidence_index as u8;
+        let mut checked = 0;
+        for (confidence_index, confidence) in CONFIDENCES.into_iter().enumerate() {
+            // Containment: parsed from a parser or index is tier 2, anything else is heuristic,
+            // whatever proofs the edge carries.
+            for edge_type in [GraphEdgeType::Contains, GraphEdgeType::Defines] {
+                for source in SOURCES {
+                    for proofs in &proof_sets {
+                        let mut containment = edge(edge_type.clone(), proofs.clone());
+                        containment.evidence.source_type = source.clone();
+                        containment.evidence.confidence = confidence;
+                        let parsed = matches!(
+                            source,
+                            EvidenceSourceType::TreeSitter
+                                | EvidenceSourceType::Scip
+                                | EvidenceSourceType::Lsp
+                        );
+                        assert_eq!(
+                            (
+                                GRAPH_EDGE_WINDOW_RANK_VERSION,
+                                graph_edge_window_rank(&containment)
+                            ),
+                            (
+                                1,
+                                expected_rank(if parsed { 2 } else { 0 }, confidence_index)
+                            ),
+                            "{edge_type:?} from {source:?} at {confidence:?}: a change to the \
+                             window rank must bump GRAPH_EDGE_WINDOW_RANK_VERSION"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+            // Relationships: the authority class decides the tier, and the source does not.
+            let mut classes = BTreeSet::new();
+            for edge_type in &relationship_types {
+                for source in SOURCES {
+                    for proofs in &proof_sets {
+                        let mut relationship = edge(edge_type.clone(), proofs.clone());
+                        relationship.evidence.source_type = source.clone();
+                        relationship.evidence.confidence = confidence;
+                        let authority = relationship.relationship_authority();
+                        classes.insert(format!("{authority:?}"));
+                        let tier = match authority {
+                            RelationshipAuthority::Authoritative => 3,
+                            RelationshipAuthority::Corroborating => 1,
+                            RelationshipAuthority::Heuristic => 0,
+                        };
+                        assert_eq!(
+                            (
+                                GRAPH_EDGE_WINDOW_RANK_VERSION,
+                                graph_edge_window_rank(&relationship)
+                            ),
+                            (1, expected_rank(tier, confidence_index)),
+                            "{edge_type:?} {authority:?} from {source:?} at {confidence:?}: a \
+                             change to the window rank must bump GRAPH_EDGE_WINDOW_RANK_VERSION"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                classes.len(),
+                3,
+                "every authority class must be exercised: {classes:?}"
+            );
+        }
+        assert_eq!(checked, 4 * (2 + 27) * 11 * 9);
     }
 
     #[test]
