@@ -677,6 +677,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
     const THING_CLOSURE_CALLER: &str = "pub struct Thing;\n\nimpl Thing {\n    pub fn target_fn(&self) {}\n}\n\npub fn caller_fn(things: &[Thing]) {\n    things.iter().for_each(|engine| engine.target_fn());\n}\n";
     const ENGINE_CALLER: &str =
         "use engine::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
+    const GENERIC_PLAN_ENGINE_CALLER: &str = "pub struct PlanEngine<'a> {\n    store: &'a str,\n}\n\nimpl<'a> PlanEngine<'a> {\n    pub fn target_fn(store: &'a str) -> Self {\n        PlanEngine { store }\n    }\n}\n\npub fn caller_fn() {\n    PlanEngine::target_fn(\"index\");\n}\n";
     const LIB_AND_BIN_BESIDE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n\n[[bin]]\nname = \"app\"\npath = \"main.rs\"\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
         "cross_module_item_import" => (
@@ -1152,6 +1153,59 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                 ("Cargo.toml", ENGINE),
                 ("src/lib.rs", "pub mod util;\n\npub fn target_fn() {}\n"),
                 ("src/util.rs", THING_CLOSURE_CALLER),
+            ],
+            false,
+        ),
+        // The members of `impl<'a> PlanEngine<'a>` belong to `PlanEngine` (#593).
+        "generic_lifetime_impl_constructor" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod engine;\n"),
+                ("src/engine.rs", GENERIC_PLAN_ENGINE_CALLER),
+            ],
+            true,
+        ),
+        // The members of `impl<T> Wrapper<T>` belong to `Wrapper`, so `self` there is a `Wrapper`
+        // and `target_fn` a member of it.
+        "generic_type_impl_method" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod wrapper;\n"),
+                (
+                    "src/wrapper.rs",
+                    "pub struct Wrapper<T>(T);\n\nimpl<T> Wrapper<T> {\n    pub fn target_fn(&self) {}\n\n    pub fn caller_fn(&self) {\n        self.target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `PlanEngine::target_fn()` through `use engine::PlanEngine;` reaches the member of the
+        // dependency's generic `impl`.
+        "workspace_dependency_generic_impl_constructor" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                (
+                    "crates/engine/src/lib.rs",
+                    "pub struct PlanEngine<'a> {\n    store: &'a str,\n}\n\nimpl<'a> PlanEngine<'a> {\n    pub fn target_fn(store: &'a str) -> Self {\n        PlanEngine { store }\n    }\n}\n",
+                ),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "use engine::PlanEngine;\n\npub fn caller_fn() {\n    PlanEngine::target_fn(\"index\");\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `impl Wrapper<u8>` and `impl Wrapper<u16>` each declare `target_fn`; the index does not
+        // match type arguments, so the call keeps both candidates and no authoritative edge.
+        "generic_impl_instantiations_same_method" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod wrapper;\n"),
+                (
+                    "src/wrapper.rs",
+                    "pub struct Wrapper<T>(T);\n\nimpl Wrapper<u8> {\n    pub fn target_fn(&self) {}\n\n    pub fn caller_fn(&self) {\n        self.target_fn();\n    }\n}\n\nimpl Wrapper<u16> {\n    pub fn target_fn(&self) {}\n}\n",
+                ),
             ],
             false,
         ),
