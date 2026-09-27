@@ -2081,6 +2081,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             // Set by the run that publishes this manifest, from the index it replaces.
             pending_pre_redaction_compaction: false,
             pending_deleted_content_clearing: false,
+            pending_derived_store_pruning: false,
             quality_notes,
         }
     } else {
@@ -2119,6 +2120,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             // Set by the run that publishes this manifest, from the index it replaces.
             pending_pre_redaction_compaction: false,
             pending_deleted_content_clearing: false,
+            pending_derived_store_pruning: false,
             quality_notes,
         }
     };

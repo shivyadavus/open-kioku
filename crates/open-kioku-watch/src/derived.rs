@@ -75,24 +75,26 @@ pub fn prune_removed_paths(root: &Path, store: &SqliteStore) -> Result<DerivedSt
 
 /// [`prune_removed_paths`] for a writer that has published `manifest`: the line to report, if
 /// any. A failed prune does not fail the run, whose index is correct either way; it is recorded
-/// as `pending_deleted_content_clearing`, so `ok status`, `repo_status` and `ok doctor` report
-/// it and the next `ok index` or watcher start retries it (a store held by a long reader is
-/// the usual cause). Errs only when that manifest cannot be written.
+/// as `pending_derived_store_pruning`, so `ok status`, `repo_status` and `ok doctor` report it
+/// and the next `ok index` or watcher start retries it (a store held by a long reader is the
+/// usual cause). A prune that succeeds clears it, having checked every path. Neither outcome
+/// touches `pending_deleted_content_clearing`, which is the database's own compaction (#585).
+/// The manifest is written only when the outcome changes it. Errs only when that write fails.
 pub fn prune_and_record(
     root: &Path,
     store: &SqliteStore,
     manifest: &mut IndexManifest,
 ) -> Result<Option<String>> {
-    match prune_removed_paths(root, store) {
-        Ok(pruned) => Ok(pruned.summary()),
-        Err(err) => {
-            if !manifest.quality.pending_deleted_content_clearing {
-                manifest.quality.pending_deleted_content_clearing = true;
-                store.put_manifest(manifest)?;
-            }
-            Ok(Some(prune_failure_message(&err)))
-        }
+    let outcome = prune_removed_paths(root, store);
+    let pending = outcome.is_err();
+    if manifest.quality.pending_derived_store_pruning != pending {
+        manifest.quality.pending_derived_store_pruning = pending;
+        store.put_manifest(manifest)?;
     }
+    Ok(match outcome {
+        Ok(pruned) => pruned.summary(),
+        Err(err) => Some(prune_failure_message(&err)),
+    })
 }
 
 /// The sentence a writer prints when pruning failed.
@@ -100,6 +102,6 @@ pub fn prune_failure_message(err: &open_kioku_errors::OkError) -> String {
     format!(
         "removing the text of paths the index no longer holds from the semantic vector store \
          and context handle store failed ({err}); it may remain there until a later `ok index` \
-         succeeds, and `ok doctor` reports it meanwhile"
+         or watcher start prunes them, and `ok doctor` reports it meanwhile"
     )
 }

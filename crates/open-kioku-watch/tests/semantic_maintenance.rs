@@ -216,3 +216,72 @@ fn watch_prunes_a_deleted_file_from_a_vector_store_it_does_not_refresh() {
     );
     assert!(!holders("alpha_watch_token").is_empty());
 }
+
+fn quality(repo: &Path) -> open_kioku_core::IndexQuality {
+    let db = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    SqliteStore::open(db)
+        .unwrap()
+        .manifest()
+        .unwrap()
+        .unwrap()
+        .quality
+}
+
+/// A prune that fails is recorded apart from the database's compaction, stays reported across
+/// file events that do not prune, and is cleared by the next prune that succeeds; from then on
+/// an event that only changes a file does not prune again (#585). Whether an event pruned is
+/// read from an interrupted build directory, which every prune removes.
+#[test]
+fn watch_records_a_failed_prune_apart_and_stops_pruning_once_one_succeeds() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    initialize_repo(repo);
+    fs::write(repo.join("src/extra.rs"), "pub fn extra_watch_token() {}\n").unwrap();
+    reindex_repo(repo).unwrap();
+    let mut config = semantic_config(repo);
+    config.semantic.enabled = false;
+    write_config(repo, &config);
+    let interrupted_build = open_kioku_storage::generations::resolve_index_location(repo)
+        .vectors_root()
+        .join("builds/build-1");
+    let context_store = repo.join(".ok/context.sqlite");
+    let auth = repo.join("src/auth.rs");
+    let edit = |token: &str| {
+        fs::write(&auth, format!("pub fn {token}() {{}}\n")).unwrap();
+        let status = reindex_repo_after_changes(repo, [auth.as_path()]).unwrap();
+        assert!(status.partial && status.deleted_files == 0, "{status:?}");
+    };
+
+    fs::write(
+        &context_store,
+        "not a database, long enough to be read as one's header\n".repeat(4),
+    )
+    .unwrap();
+    let billing = repo.join("src/billing.rs");
+    fs::remove_file(&billing).unwrap();
+    let status = reindex_repo_after_changes(repo, [billing.as_path()]).unwrap();
+    assert_eq!(status.deleted_files, 1);
+    let recorded = quality(repo);
+    assert!(recorded.pending_derived_store_pruning, "{recorded:?}");
+    assert!(!recorded.pending_deleted_content_clearing, "{recorded:?}");
+
+    // Pending, but not retried per event: left to the next `ok index` or watcher start.
+    fs::create_dir_all(&interrupted_build).unwrap();
+    edit("beta_watch_token");
+    assert!(interrupted_build.exists());
+    assert!(quality(repo).pending_derived_store_pruning);
+
+    // An event that removes a path prunes, and its success settles the earlier failure.
+    fs::remove_file(&context_store).unwrap();
+    let extra = repo.join("src/extra.rs");
+    fs::remove_file(&extra).unwrap();
+    reindex_repo_after_changes(repo, [extra.as_path()]).unwrap();
+    assert!(!interrupted_build.exists());
+    let recorded = quality(repo);
+    assert!(!recorded.pending_derived_store_pruning, "{recorded:?}");
+    assert!(!recorded.pending_deleted_content_clearing, "{recorded:?}");
+
+    fs::create_dir_all(&interrupted_build).unwrap();
+    edit("gamma_watch_token");
+    assert!(interrupted_build.exists(), "a settled prune ran again");
+}

@@ -4674,13 +4674,19 @@ pub struct IndexQuality {
     pub pending_pre_redaction_compaction: bool,
     /// Rows this or an earlier run deleted may still be readable in the database file or its
     /// write-ahead log: the compaction after a path the policy excludes lost its rows, or the
-    /// truncating checkpoint every run ends with, did not complete; or text of a path the index
-    /// no longer holds may remain in the semantic vector store or stored context handles,
-    /// because removing it from them failed (#564). Set before the manifest
+    /// truncating checkpoint every run ends with, did not complete. Set before the manifest
     /// is published and cleared once that work succeeds, so a crash or a blocked checkpoint
     /// stays reported and the next `ok index` retries it (#553). Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending_deleted_content_clearing: bool,
+    /// Text of a path the index no longer holds may remain in the stores derived from it, the
+    /// semantic vector store and stored context handles, because removing it from them failed
+    /// (#564). Kept apart from `pending_deleted_content_clearing` so that retrying one never
+    /// costs the other: a failed prune does not make the next run compact the database, and a
+    /// pending compaction does not make every `ok watch` event prune (#585). Carried to each
+    /// manifest a writer publishes until a prune succeeds. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_derived_store_pruning: bool,
     /// Every note, typed by producer. Status payloads summarize this list; see
     /// `IndexManifest::status_value`.
     #[serde(default)]

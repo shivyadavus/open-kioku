@@ -8782,8 +8782,10 @@ fn index_removes_denied_and_deleted_paths_from_the_vector_store_and_context_hand
 }
 
 /// A prune that fails, here over a context store that is not a database, does not fail
-/// `ok index`, whose index is correct either way: it is recorded as outstanding clearing, which
-/// status reports, and the next run that succeeds clears it (#564).
+/// `ok index`, whose index is correct either way: it is recorded as an outstanding prune, which
+/// status and doctor report, and the next run that succeeds clears it (#564). It is recorded
+/// apart from the database's own compaction, so a run retrying it does not also compact the
+/// database (#585).
 #[test]
 fn index_records_a_failed_prune_as_outstanding_instead_of_failing() {
     let temp = tempfile::tempdir().unwrap();
@@ -8805,21 +8807,63 @@ fn index_records_a_failed_prune_as_outstanding_instead_of_failing() {
         "not a database, long enough to be read as one's header\n".repeat(4),
     )
     .unwrap();
+    let doctor_checks = |repo: &std::path::Path| -> Vec<serde_json::Value> {
+        let doctor: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command.arg("--json").arg("doctor").arg(repo);
+            command
+        }))
+        .unwrap();
+        doctor["checks"].as_array().unwrap().clone()
+    };
+    let named = |checks: &[serde_json::Value], name: &str| {
+        checks.iter().find(|check| check["name"] == name).cloned()
+    };
 
-    let (_, stderr) = run_ok_with_stderr({
+    for _ in 0..2 {
+        let (_, stderr) = run_ok_with_stderr({
+            let mut command = ok();
+            command.arg("index").arg(repo);
+            command
+        });
+        assert!(
+            stderr.contains("context handle store failed")
+                && stderr.contains("`ok doctor` reports it"),
+            "{stderr}"
+        );
+        // The second run retries the prune, not a compaction nothing owes.
+        assert!(!stderr.contains("compacting the database"), "{stderr}");
+        let status = status_json(repo);
+        assert_eq!(
+            status["quality"]["pending_derived_store_pruning"], true,
+            "{status}"
+        );
+        assert!(
+            status["quality"]["pending_deleted_content_clearing"].is_null(),
+            "{status}"
+        );
+        let checks = doctor_checks(repo);
+        let check = named(&checks, "derived_stores").expect("doctor reports the prune");
+        assert_eq!(check["status"], "warn", "{check}");
+        assert!(
+            check["message"]
+                .as_str()
+                .unwrap()
+                .contains("stored context handles"),
+            "{check}"
+        );
+        assert_eq!(named(&checks, "deleted_content"), None);
+    }
+    let text = run({
         let mut command = ok();
-        command.arg("index").arg(repo);
+        command.arg("--repo").arg(repo).arg("status");
         command
     });
     assert!(
-        stderr.contains("context handle store failed") && stderr.contains("`ok doctor` reports it"),
-        "{stderr}"
+        text.contains("Derived stores: removed paths' text"),
+        "{text}"
     );
-    let status = status_json(repo);
-    assert_eq!(
-        status["quality"]["pending_deleted_content_clearing"], true,
-        "{status}"
-    );
+    assert!(!text.contains("Deleted content"), "{text}");
 
     fs::remove_file(repo.join(".ok/context.sqlite")).unwrap();
     run({
@@ -8829,9 +8873,10 @@ fn index_records_a_failed_prune_as_outstanding_instead_of_failing() {
     });
     let status = status_json(repo);
     assert!(
-        status["quality"]["pending_deleted_content_clearing"].is_null(),
+        status["quality"]["pending_derived_store_pruning"].is_null(),
         "{status}"
     );
+    assert_eq!(named(&doctor_checks(repo), "derived_stores"), None);
 }
 
 fn assert_secrets_absent(label: &str, haystack: &str, secrets: &[&str]) {

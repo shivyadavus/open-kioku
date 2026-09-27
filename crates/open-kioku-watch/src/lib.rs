@@ -334,6 +334,10 @@ pub fn reindex_repo_after_changes<'a>(
             || previous_manifest
                 .as_ref()
                 .is_some_and(|previous| previous.quality.pending_deleted_content_clearing);
+        // Reported until a prune succeeds, which this event may not attempt (below).
+        snapshot.manifest.quality.pending_derived_store_pruning = previous_manifest
+            .as_ref()
+            .is_some_and(|previous| previous.quality.pending_derived_store_pruning);
         // Published last: every component the manifest describes is in place by now.
         store.put_manifest(&snapshot.manifest)
     };
@@ -393,12 +397,11 @@ pub fn reindex_repo_after_changes<'a>(
     )?;
     maintain_semantic_index(root, &store, &config);
     // Only a run that removed a path owes this; a partial update that only changed files
-    // skips reading the vector store on every event.
-    if !partial
-        || deleted_file_count > 0
-        || compaction_owed
-        || snapshot.manifest.quality.pending_deleted_content_clearing
-    {
+    // skips reading the vector store on every event. A prune an earlier run left pending is
+    // not a reason either: like a pending compaction it is retried by the next `ok index` or
+    // watcher start, not once per change (#585). Any prune that runs checks every path, so
+    // one that succeeds here settles it too.
+    if !partial || deleted_file_count > 0 || compaction_owed {
         prune_derived_stores(root, &store, &mut snapshot.manifest)?;
     }
 
@@ -463,6 +466,10 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     )
     .unwrap_or(true);
     snapshot.manifest.quality.pending_deleted_content_clearing = compaction_owed;
+    // Reported until the prune below succeeds.
+    snapshot.manifest.quality.pending_derived_store_pruning = previous_manifest
+        .as_ref()
+        .is_some_and(|previous| previous.quality.pending_derived_store_pruning);
     let graph_nodes = replace_graph_from_snapshot(&store, &snapshot)?;
     rebuild_disk_index_with_graph(
         default_index_dir(root),
