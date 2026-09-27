@@ -405,9 +405,6 @@ pub const GRAPH_EDGE_WINDOW_TIER_MAX: u8 = 3;
 /// - 0: heuristic — proofless or statistical edges (`SIMILAR_TO`, `SEMANTICALLY_RELATED`, a
 ///   symbol-registry name match), and containment from the regex fallback, which is a guess
 ///   about where a symbol is.
-///
-/// Only an edge that carries typed relationship proofs, or a `CONTAINS`/`DEFINES` edge, can rank
-/// above 0; the SQLite store relies on that to skip proof decoding for the rest.
 pub fn graph_edge_window_tier(edge: &GraphEdge) -> u8 {
     match edge.edge_type {
         GraphEdgeType::Contains | GraphEdgeType::Defines => {
@@ -425,23 +422,27 @@ pub fn graph_edge_window_tier(edge: &GraphEdge) -> u8 {
     }
 }
 
-/// Sort key of one edge in window order: see [`sort_graph_edges_for_window`]. Smaller sorts first.
-pub fn graph_edge_window_key(
-    edge: &GraphEdge,
-) -> (std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, String) {
-    graph_edge_window_key_with_tier(edge, graph_edge_window_tier(edge))
+/// Version of [`graph_edge_window_rank`]. A store that persists ranks records the version it
+/// wrote them with and recomputes them when it differs, so bump it with any change to the rank an
+/// edge gets: to the tiers, to their order, or to how confidence orders edges within one.
+pub const GRAPH_EDGE_WINDOW_RANK_VERSION: u32 = 1;
+
+/// Window position class of one edge: 0 is kept first, 15 last.
+/// Evidence tier ([`graph_edge_window_tier`]) decides it, and evidence confidence orders edges
+/// within one tier, so a confident heuristic edge never ranks ahead of a proven one.
+///
+/// One integer, rather than a tuple, so a store can persist it beside the edge and index it:
+/// ordering by `(rank, edge id)` is then exactly [`sort_graph_edges_for_window`], and a bounded
+/// read is an index range scan instead of a decode and sort of every edge of the node.
+pub fn graph_edge_window_rank(edge: &GraphEdge) -> u8 {
+    const CONFIDENCE_LEVELS: u8 = 4;
+    (GRAPH_EDGE_WINDOW_TIER_MAX - graph_edge_window_tier(edge)) * CONFIDENCE_LEVELS
+        + (CONFIDENCE_LEVELS - 1 - confidence_rank(edge.evidence.confidence))
 }
 
-/// [`graph_edge_window_key`] for an edge whose tier the caller already computed.
-pub fn graph_edge_window_key_with_tier(
-    edge: &GraphEdge,
-    tier: u8,
-) -> (std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, String) {
-    (
-        std::cmp::Reverse(tier),
-        std::cmp::Reverse(confidence_rank(edge.evidence.confidence)),
-        edge.id.0.clone(),
-    )
+/// Sort key of one edge in window order: see [`sort_graph_edges_for_window`]. Smaller sorts first.
+pub fn graph_edge_window_key(edge: &GraphEdge) -> (u8, String) {
+    (graph_edge_window_rank(edge), edge.id.0.clone())
 }
 
 /// Order a set of graph edges the way every bounded edge window keeps them: by evidence tier
@@ -455,7 +456,7 @@ pub fn graph_edge_window_key_with_tier(
 /// never outranks a proven one — and the edge id makes the order total and independent of
 /// insertion order.
 pub fn sort_graph_edges_for_window(edges: &mut [GraphEdge]) {
-    // The tier parses the typed proofs, so it is computed once per edge rather than per
+    // The rank parses the typed proofs, so it is computed once per edge rather than per
     // comparison.
     edges.sort_by_cached_key(graph_edge_window_key);
 }
@@ -518,6 +519,46 @@ mod tests {
         };
         edge.set_relationship_proofs(proofs).unwrap();
         edge
+    }
+
+    /// Stores persist this rank and recompute it only when the version changes, so the table and
+    /// the version are pinned together: a change to either without the other fails here.
+    #[test]
+    fn window_rank_table_is_pinned_to_its_version() {
+        let ranked = |tier: &str, confidence: Confidence| {
+            let mut edge = edge(GraphEdgeType::Imports, Vec::new());
+            match tier {
+                "proven" => edge
+                    .set_relationship_proofs(vec![proof(RelationshipProofKind::ImportBinding, 1)])
+                    .unwrap(),
+                "containment" => {
+                    edge.edge_type = GraphEdgeType::Contains;
+                    edge.evidence.source_type = EvidenceSourceType::TreeSitter;
+                }
+                "corroborated" => edge
+                    .set_relationship_proofs(vec![proof(RelationshipProofKind::QualifiedName, 1)])
+                    .unwrap(),
+                _ => {}
+            }
+            edge.evidence.confidence = confidence;
+            graph_edge_window_rank(&edge)
+        };
+        let mut table = Vec::new();
+        for tier in ["proven", "containment", "corroborated", "heuristic"] {
+            for confidence in [
+                Confidence::Exact,
+                Confidence::High,
+                Confidence::Medium,
+                Confidence::Low,
+            ] {
+                table.push(ranked(tier, confidence));
+            }
+        }
+        assert_eq!(
+            (GRAPH_EDGE_WINDOW_RANK_VERSION, table),
+            (1, (0..16).collect::<Vec<u8>>()),
+            "a change to graph_edge_window_rank must bump GRAPH_EDGE_WINDOW_RANK_VERSION"
+        );
     }
 
     #[test]
