@@ -71,6 +71,16 @@ a `GraphEdge` is unchanged by the 4.0 storage work.
 
 The graph builder creates file-to-symbol `DEFINES` edges from extracted symbols and `REFERENCES` edges from persisted exact symbol occurrences. Heuristic reference expansion is intentionally avoided for common repeated names; richer reference coverage should come from configured SCIP indexes or future language-specific resolvers. SQLite persists `graph_nodes` and `graph_edges`, and `open-kioku-storage::GraphStore` exposes neighborhood and shortest-path traversal to CLI and MCP callers.
 
+Symbol-registry name matches are read from code only: a word inside a comment or a string literal
+is not a use of anything. The registry finds them with a lexical pass per language, not a parse,
+so a regular-expression literal still reads as code and the names in an interpolated Python or
+Rust string read as literal. JSON, Markdown and plain text have no such rules and are read whole
+(YAML and TOML lose only their `#` comments). Its name-only strategies (same module, unique project name, suffix
+import reachability, fuzzy) never link a token to a symbol of another language family; TypeScript
+and JavaScript are one family, and every other language is its own. A same-named definition in
+another language still counts against a unique-name match, so setting it aside never makes a
+common name look unique.
+
 ### Bounded edge windows
 
 Every read that keeps only some of a node's edges keeps them in one order, set by
