@@ -649,7 +649,7 @@ fn extract_symbol_visibility(
         Language::Rust => match rust_associated_owner(node) {
             Some(owner) if owner.kind() == "trait_item" => rust_visibility(owner),
             Some(owner) if owner.child_by_field_name("trait").is_some() => {
-                rust_trait_impl_visibility(content, owner, ctx)
+                rust_trait_impl_visibility(file, content, owner, ctx)
             }
             _ => rust_visibility(node),
         },
@@ -716,13 +716,26 @@ fn rust_associated_owner(node: Node<'_>) -> Option<Node<'_>> {
 /// A trait `impl` member carries no modifier of its own: it can be called wherever the trait is
 /// in scope and the implementing type can be named, so it records the narrower of the two.
 ///
-/// The parser sees one file. A trait or type named by a bare identifier that this file declares
-/// exactly once (or always with the same visibility) contributes that declaration's visibility.
-/// Anything else, such as `fmt::Display`, `super::Store`, a prelude trait, a trait imported from
-/// another file, or a name the file declares twice with different visibility, is not bounded:
-/// an external trait is callable wherever it is in scope, so an unknown trait reads `Public`
+/// The type bound is a nameability heuristic, not a reachability proof: a private type handed
+/// out as `impl Trait` or `Box<dyn Trait>` from a public function has its trait methods called
+/// from outside the module that declares it. The record states who can name the `impl`, which is
+/// what the impact test-scope reads it for.
+///
+/// The parser sees one file, so a bound comes only from a declaration in it:
+/// - a bare name (`Store`, `Store<T>`) the file declares once, or always with the same
+///   visibility, anywhere in its tree;
+/// - a `self::`, `super::` or `crate::` path whose last segment is declared directly in the module
+///   the path names, when that module is in this file: `super::` past the file's top level and
+///   `crate::` outside a crate root name another file;
+/// - an implementing type seen through `&T`, `&mut T`, `Box<T>`, `Rc<T>` and `Arc<T>`, which
+///   can be named only where `T` can.
+///
+/// Anything else, such as `fmt::Display`, a prelude trait, a trait imported from another file, a
+/// longer module path, or a name the file declares twice with different visibility, is not
+/// bounded: a trait from elsewhere is callable wherever it is in scope, so it reads `Public`
 /// rather than claiming a narrower reach the evidence does not show.
 fn rust_trait_impl_visibility(
+    file: &File,
     content: &str,
     impl_node: Node<'_>,
     ctx: &mut ParseContext,
@@ -730,14 +743,180 @@ fn rust_trait_impl_visibility(
     let declared = ctx
         .rust_declared_visibility
         .get_or_insert_with(|| rust_declared_visibility(content, impl_node));
-    let declared_visibility = |field: &str| {
-        impl_node
-            .child_by_field_name(field)
-            .and_then(|type_node| rust_bare_type_name(content, type_node))
-            .and_then(|name| declared.get(name).copied().flatten())
+    let bound = |type_node: Option<Node<'_>>| {
+        type_node
+            .and_then(|type_node| {
+                rust_declared_type_visibility(file, content, impl_node, type_node, declared)
+            })
             .unwrap_or(Visibility::Public)
     };
-    narrower_rust_visibility(declared_visibility("trait"), declared_visibility("type"))
+    let implementing_type = impl_node
+        .child_by_field_name("type")
+        .map(|type_node| rust_pointee_type(content, type_node, declared));
+    narrower_rust_visibility(
+        bound(impl_node.child_by_field_name("trait")),
+        bound(implementing_type),
+    )
+}
+
+/// `Hidden` for `&Hidden`, `&mut Hidden`, `Box<Hidden>`, `Rc<Hidden>`, `Arc<Hidden>` and any
+/// nesting of them. A file that declares its own `Box`, `Rc` or `Arc` keeps that type.
+fn rust_pointee_type<'tree>(
+    content: &str,
+    mut node: Node<'tree>,
+    declared: &HashMap<String, Option<Visibility>>,
+) -> Node<'tree> {
+    const POINTERS: [&str; 9] = [
+        "Box",
+        "Rc",
+        "Arc",
+        "std::boxed::Box",
+        "std::rc::Rc",
+        "std::sync::Arc",
+        "alloc::boxed::Box",
+        "alloc::rc::Rc",
+        "alloc::sync::Arc",
+    ];
+    loop {
+        let inner = match node.kind() {
+            "reference_type" => node.child_by_field_name("type"),
+            "generic_type" => node
+                .child_by_field_name("type")
+                .and_then(|head| head.utf8_text(content.as_bytes()).ok())
+                .filter(|head| POINTERS.contains(head) && !declared.contains_key(*head))
+                .and_then(|_| node.child_by_field_name("type_arguments"))
+                .and_then(|arguments| {
+                    let mut cursor = arguments.walk();
+                    let mut types = arguments.named_children(&mut cursor);
+                    match (types.next(), types.next()) {
+                        (Some(only), None) => Some(only),
+                        _ => None,
+                    }
+                }),
+            _ => None,
+        };
+        match inner {
+            Some(inner) => node = inner,
+            None => return node,
+        }
+    }
+}
+
+/// The visibility this file declares for the trait or type `node` names, per the rules on
+/// [`rust_trait_impl_visibility`]; `None` when the name is not bounded here.
+fn rust_declared_type_visibility(
+    file: &File,
+    content: &str,
+    impl_node: Node<'_>,
+    node: Node<'_>,
+    declared: &HashMap<String, Option<Visibility>>,
+) -> Option<Visibility> {
+    let node = if node.kind() == "generic_type" {
+        node.child_by_field_name("type")?
+    } else {
+        node
+    };
+    match node.kind() {
+        "type_identifier" => {
+            let name = node.utf8_text(content.as_bytes()).ok()?;
+            declared.get(name).copied().flatten()
+        }
+        "scoped_type_identifier" => {
+            let path = node.child_by_field_name("path")?;
+            let name = node
+                .child_by_field_name("name")?
+                .utf8_text(content.as_bytes())
+                .ok()?;
+            let module = rust_path_module(file, content, impl_node, path)?;
+            rust_module_item_visibility(content, module, name)
+        }
+        _ => None,
+    }
+}
+
+/// The in-file module a `self`, `super` or `crate` path names from `from`, as the node holding
+/// that module's items; `None` for any other path or a module in another file.
+fn rust_path_module<'tree>(
+    file: &File,
+    content: &str,
+    from: Node<'tree>,
+    path: Node<'_>,
+) -> Option<Node<'tree>> {
+    let text = path.utf8_text(content.as_bytes()).ok()?;
+    let mut module = rust_enclosing_module(from)?;
+    for (index, segment) in text.split("::").map(str::trim).enumerate() {
+        match segment {
+            "self" if index == 0 => {}
+            "super" => {
+                // A file's top level is the child of a module declared in another file.
+                let declaring_mod = module
+                    .parent()
+                    .filter(|parent| parent.kind() == "mod_item")?;
+                module = rust_enclosing_module(declaring_mod)?;
+            }
+            "crate" if index == 0 && is_rust_crate_root(&file.path) => {
+                while let Some(parent) = module.parent() {
+                    module = parent;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(module)
+}
+
+/// The `source_file`, or the body of the inline `mod`, whose items include `node`.
+fn rust_enclosing_module(node: Node<'_>) -> Option<Node<'_>> {
+    let mut current = node.parent();
+    while let Some(candidate) = current {
+        let is_module = candidate.kind() == "source_file"
+            || (candidate.kind() == "declaration_list"
+                && candidate
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == "mod_item"));
+        if is_module {
+            return Some(candidate);
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+/// Cargo's default crate roots: `lib.rs`, `main.rs`, and a binary directly under `bin/`. A root
+/// set elsewhere by a manifest `path` is not recognised, so its `crate::` paths stay unbounded.
+fn is_rust_crate_root(path: &std::path::Path) -> bool {
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    matches!(file_name, Some("lib.rs" | "main.rs"))
+        || (path.extension().is_some_and(|extension| extension == "rs")
+            && path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .is_some_and(|parent| parent == "bin"))
+}
+
+/// The visibility of the trait or type `name` declared directly in `module`; `None` when it is
+/// not, or is declared there more than once with different visibility.
+fn rust_module_item_visibility(content: &str, module: Node<'_>, name: &str) -> Option<Visibility> {
+    let mut cursor = module.walk();
+    let mut found = None;
+    for item in module.named_children(&mut cursor) {
+        let declares_name = matches!(
+            item.kind(),
+            "trait_item" | "struct_item" | "enum_item" | "union_item" | "type_item"
+        ) && item
+            .child_by_field_name("name")
+            .and_then(|item_name| item_name.utf8_text(content.as_bytes()).ok())
+            == Some(name);
+        if declares_name {
+            let visibility = rust_visibility(item);
+            match found {
+                None => found = Some(visibility),
+                Some(seen) if seen != visibility => return None,
+                Some(_) => {}
+            }
+        }
+    }
+    found
 }
 
 fn narrower_rust_visibility(left: Visibility, right: Visibility) -> Visibility {
@@ -765,18 +944,6 @@ fn rust_impl_owner_name<'a>(content: &'a str, type_node: Node<'_>) -> Option<&'a
         type_node
     };
     node.utf8_text(content.as_bytes()).ok().map(str::trim)
-}
-
-/// `Store` or `Store<T>`; `None` for a path, reference, tuple or other type form.
-fn rust_bare_type_name<'a>(content: &'a str, node: Node<'_>) -> Option<&'a str> {
-    let node = if node.kind() == "generic_type" {
-        node.child_by_field_name("type")?
-    } else {
-        node
-    };
-    (node.kind() == "type_identifier")
-        .then(|| node.utf8_text(content.as_bytes()).ok())
-        .flatten()
 }
 
 /// Every trait, struct, enum, union and type alias the file declares, anywhere in its tree, by
@@ -2377,6 +2544,86 @@ mod tests {
             ),
         );
         for (line, name) in [(4, "check"), (5, "drain")] {
+            assert!(
+                symbols.contains(&(line, name.to_string(), Visibility::Public)),
+                "{name} at line {line} should be Public; got {symbols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_trait_impl_reads_relative_trait_paths_and_looks_through_pointers() {
+        let symbols = visibility_at(
+            Language::Rust,
+            "src/lib.rs",
+            concat!(
+                "pub trait Store { fn load(&self); }\n",
+                "pub(crate) trait Cache { fn evict(&self); }\n",
+                "struct Hidden;\n",
+                "pub struct Gen<T>(T);\n",
+                "impl Store for &Hidden { fn load(&self) {} }\n",
+                "impl Store for &mut Hidden { fn load(&self) {} }\n",
+                "impl Store for Box<Hidden> { fn load(&self) {} }\n",
+                "impl Store for std::rc::Rc<Hidden> { fn load(&self) {} }\n",
+                "impl<'a> Store for &'a Arc<Hidden> { fn load(&self) {} }\n",
+                "impl crate::Cache for Gen<u8> { fn evict(&self) {} }\n",
+                "impl self::Cache for Gen<u16> { fn evict(&self) {} }\n",
+                "impl Store for crate::Hidden { fn load(&self) {} }\n",
+                "mod inner {\n",
+                "    pub struct Inner;\n",
+                "    impl super::Cache for Inner { fn evict(&self) {} }\n",
+                "    impl crate::Store for Inner { fn load(&self) {} }\n",
+                "}\n",
+            ),
+        );
+        let expected = [
+            (5, "load", Visibility::Private),
+            (6, "load", Visibility::Private),
+            (7, "load", Visibility::Private),
+            (8, "load", Visibility::Private),
+            (9, "load", Visibility::Private),
+            (10, "evict", Visibility::Crate),
+            (11, "evict", Visibility::Crate),
+            (12, "load", Visibility::Private),
+            (15, "evict", Visibility::Crate),
+            (16, "load", Visibility::Public),
+        ];
+        for (line, name, visibility) in expected {
+            assert!(
+                symbols.contains(&(line, name.to_string(), visibility)),
+                "{name} at line {line} should be {visibility:?}; got {symbols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_trait_impl_paths_into_another_file_are_not_narrowed() {
+        let symbols = visibility_at(
+            Language::Rust,
+            "src/store.rs",
+            concat!(
+                "pub(crate) trait Cache { fn evict(&self); }\n",
+                "pub trait Store { fn load(&self); }\n",
+                "struct Hidden;\n",
+                "pub struct Box<T>(T);\n",
+                "pub struct Disk;\n",
+                // Outside a crate root, `crate::` and a top-level `super::` name another file.
+                "impl crate::Cache for Disk { fn evict(&self) {} }\n",
+                "impl super::Cache for Disk { fn evict(&self) {} }\n",
+                // This file's own `Box` is not the standard pointer.
+                "impl Store for Box<Hidden> { fn load(&self) {} }\n",
+                // A module path longer than `self`/`super`/`crate` is not followed.
+                "impl crate::store::Cache for Disk { fn evict(&self) {} }\n",
+                "impl Store for Vec<Hidden> { fn load(&self) {} }\n",
+            ),
+        );
+        for (line, name) in [
+            (6, "evict"),
+            (7, "evict"),
+            (8, "load"),
+            (9, "evict"),
+            (10, "load"),
+        ] {
             assert!(
                 symbols.contains(&(line, name.to_string(), Visibility::Public)),
                 "{name} at line {line} should be Public; got {symbols:?}"
