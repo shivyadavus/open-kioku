@@ -157,10 +157,14 @@ fn prune_after_removal(backend: &str, remaining: Option<File>) {
         VectorStorePrune {
             removed_targets: 1,
             removed_paths: 1,
-            discarded_generations: 0,
+            discarded_generations: Vec::new(),
             discarded_builds: 1,
         }
     );
+    // The vector index goes with the removed targets rather than being rebuilt here.
+    for artifact in ["index.json", "index.usearch", "index.meta.json"] {
+        assert!(!repo.join(".ok/vectors/current").join(artifact).exists());
+    }
     assert_eq!(
         vector_files_holding(repo, "zebra_payroll_marker"),
         Vec::<PathBuf>::new(),
@@ -173,7 +177,17 @@ fn prune_after_removal(backend: &str, remaining: Option<File>) {
     // Pruning does not make the store current: it still describes the earlier index.
     let status = manager.status();
     assert!(!status.corrupt, "{status:?}");
-    assert!(status.stale && !status.ready, "{status:?}");
+    assert!(
+        status.stale && !status.ready && status.rebuild_required,
+        "{status:?}"
+    );
+    assert!(
+        status
+            .rebuild_reasons
+            .iter()
+            .any(|reason| reason.contains("1 target(s) for 1 path(s) the index no longer holds")),
+        "{status:?}"
+    );
     assert!(manager.search("payroll formula", 5).is_err());
     // A second pass finds nothing left to remove.
     assert!(
@@ -224,7 +238,11 @@ fn prune_discards_a_generation_it_cannot_read() {
 
     let pruned = prune_vector_store(repo, &[]).unwrap();
 
-    assert_eq!(pruned.discarded_generations, 1);
+    assert_eq!(pruned.discarded_generations.len(), 1);
+    assert!(
+        pruned.discarded_generations[0].contains("could not be read"),
+        "{pruned:?}"
+    );
     assert!(!current.exists());
     assert!(!repo.join(".ok/models").exists());
 }
@@ -234,4 +252,129 @@ fn prune_without_a_vector_store_creates_nothing() {
     let temp = tempfile::tempdir().unwrap();
     assert!(prune_vector_store(temp.path(), &[]).unwrap().is_empty());
     assert!(!temp.path().join(".ok").exists());
+}
+
+/// Builds a store over both files and republishes the index without the removed one.
+fn built_store_then_removal(repo: &Path, store: &SqliteStore, config: &SemanticConfig) {
+    let kept = file("file_kept", "src/invoice.rs");
+    let removed = file("file_removed", "src/payroll.rs");
+    let kept_chunk = chunk("chunk_kept", &kept, KEPT_TEXT);
+    persist(
+        repo,
+        store,
+        &[kept.clone(), removed.clone()],
+        &[
+            kept_chunk.clone(),
+            chunk("chunk_removed", &removed, REMOVED_TEXT),
+        ],
+    );
+    SemanticIndexManager::new(repo, store, config)
+        .index()
+        .unwrap();
+    persist(repo, store, &[kept], &[kept_chunk]);
+}
+
+/// Every file is replaced by a rename after the marker is written, so a run killed partway
+/// leaves a stale generation, never a corrupt one, and the next run finishes the removal.
+#[test]
+fn an_interrupted_prune_is_finished_by_the_next_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+    let config = semantic_config("usearch-hnsw-f32");
+    built_store_then_removal(repo, &store, &config);
+    let current = repo.join(".ok/vectors/current");
+    let unpruned_ids = fs::read(current.join("ids.json")).unwrap();
+    let files = store.list_files(usize::MAX, 0).unwrap();
+    prune_vector_store(repo, &files).unwrap();
+    // As a kill after the marker and the index removal, before `ids.json` was replaced.
+    fs::write(current.join("ids.json"), &unpruned_ids).unwrap();
+
+    let status = SemanticIndexManager::new(repo, &store, &config).status();
+    assert!(!status.corrupt && status.stale, "{status:?}");
+    let pruned = prune_vector_store(repo, &files).unwrap();
+
+    assert_eq!(pruned.removed_targets, 1);
+    assert_eq!(
+        vector_files_holding(repo, "zebra_payroll_marker"),
+        Vec::<PathBuf>::new()
+    );
+}
+
+/// `previous` is what an interrupted promotion leaves: with `current` gone it is recovered
+/// and pruned, and beside a `current` it is removed.
+#[test]
+fn prune_recovers_or_removes_a_previous_generation() {
+    for keep_current in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        let config = semantic_config("exact-flat");
+        built_store_then_removal(repo, &store, &config);
+        let vectors = repo.join(".ok/vectors");
+        if keep_current {
+            copy_dir(&vectors.join("current"), &vectors.join("previous"));
+        } else {
+            fs::rename(vectors.join("current"), vectors.join("previous")).unwrap();
+        }
+
+        let pruned = prune_vector_store(repo, &store.list_files(usize::MAX, 0).unwrap()).unwrap();
+
+        assert_eq!(pruned.removed_targets, 1, "keep_current={keep_current}");
+        assert!(vectors.join("current/ids.json").is_file());
+        assert!(!vectors.join("previous").exists());
+        assert_eq!(
+            vector_files_holding(repo, "zebra_payroll_marker"),
+            Vec::<PathBuf>::new()
+        );
+    }
+}
+
+/// `status` takes no lock of its own, so it leaves an interrupted promotion to a writer that
+/// holds the index lock rather than race its prune.
+#[test]
+fn status_leaves_recovery_to_a_writer_holding_the_index_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+    let config = semantic_config("exact-flat");
+    persist(
+        repo,
+        &store,
+        &[file("file_kept", "src/invoice.rs")],
+        &[chunk(
+            "chunk_kept",
+            &file("file_kept", "src/invoice.rs"),
+            KEPT_TEXT,
+        )],
+    );
+    let manager = SemanticIndexManager::new(repo, &store, &config);
+    manager.index().unwrap();
+    let vectors = repo.join(".ok/vectors");
+    fs::rename(vectors.join("current"), vectors.join("previous")).unwrap();
+
+    let lock =
+        open_kioku_storage::generations::IndexWriteLock::acquire(repo, std::time::Duration::ZERO)
+            .unwrap();
+    let held = manager.status();
+    assert!(!vectors.join("current").exists());
+    assert!(
+        held.notes
+            .iter()
+            .any(|note| note.contains("recovery is left to it")),
+        "{held:?}"
+    );
+    drop(lock);
+
+    let released = manager.status();
+    assert!(released.ready, "{released:?}");
+    assert!(vectors.join("current").exists());
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    }
 }

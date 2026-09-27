@@ -209,7 +209,7 @@ impl<'a> SemanticIndexManager<'a> {
 
     pub fn status(&self) -> SemanticStatus {
         let mut notes = Vec::new();
-        if let Some(note) = self.recover_interrupted_promotion() {
+        if let Some(note) = self.recover_interrupted_promotion_unless_locked() {
             notes.push(note);
         }
         let current = self.current_dir();
@@ -267,20 +267,33 @@ impl<'a> SemanticIndexManager<'a> {
             cache_misses: 0,
             disk_usage_bytes: dir_size(&current),
         });
+        let pruned = pruned_marker(&current);
+        // A pruned generation has no vector index by design; it is stale, not corrupt.
         let corrupt = manifest
             .as_ref()
-            .map(|manifest| !index_artifacts_present(&current, &manifest.backend))
+            .map(|manifest| {
+                pruned.is_none() && !index_artifacts_present(&current, &manifest.backend)
+            })
             .unwrap_or(true);
         let source_stale = manifest
             .as_ref()
             .is_some_and(|manifest| !self.source_generation_compatible(manifest));
-        let stale = manifest
-            .as_ref()
-            .map(|manifest| !self.compatible(manifest))
-            .unwrap_or(false);
+        let stale = pruned.is_some()
+            || manifest
+                .as_ref()
+                .map(|manifest| !self.compatible(manifest))
+                .unwrap_or(false);
         let mut rebuild_reasons = Vec::new();
         if corrupt {
             rebuild_reasons.push("semantic index is corrupt or incomplete".to_string());
+        }
+        if let Some(marker) = &pruned {
+            let reason = format!(
+                "{} target(s) for {} path(s) the index no longer holds were removed from the semantic index and its vector index with them; rebuild semantic index (kept embeddings are reused)",
+                marker.removed_targets, marker.removed_paths
+            );
+            notes.push(reason.clone());
+            rebuild_reasons.push(reason);
         }
         if source_stale {
             rebuild_reasons.push(
@@ -876,6 +889,34 @@ impl<'a> SemanticIndexManager<'a> {
         })
     }
 
+    /// Recovery for `status`: see [`Self::recover_interrupted_promotion`].
+    fn recover_interrupted_promotion_unless_locked(&self) -> Option<String> {
+        if self.current_dir().exists() || !self.previous_dir().exists() {
+            return None;
+        }
+        // `status` is a read surface and takes no lock of its own, so it recovers only when no
+        // writer holds the index lock: an index run prunes this store under it (#564). A
+        // writer that does hold it recovers the generation itself.
+        let _lock = match open_kioku_storage::generations::IndexWriteLock::acquire(
+            &self.repo,
+            std::time::Duration::ZERO,
+        ) {
+            Ok(lock) => Some(lock),
+            Err(_) if open_kioku_storage::generations::index_write_in_progress(&self.repo) => {
+                return Some(
+                    "an interrupted promotion left the previous semantic generation; an index writer holds the lock, so recovery is left to it"
+                        .into(),
+                );
+            }
+            // No writer, but the lock file could not be taken (a read-only `.ok`): recover as
+            // before rather than leave the generation missing.
+            Err(_) => None,
+        };
+        self.recover_interrupted_promotion()
+    }
+
+    /// Builds call this directly: they run under the index write lock (the CLI and `ok watch`
+    /// take it), which `status` cannot assume.
     fn recover_interrupted_promotion(&self) -> Option<String> {
         let current = self.current_dir();
         let previous = self.previous_dir();
@@ -1250,9 +1291,9 @@ pub struct VectorStorePrune {
     pub removed_targets: usize,
     /// Distinct paths those targets came from.
     pub removed_paths: usize,
-    /// Generations removed whole because they could not be read, so what they held could not
-    /// be checked against the index.
-    pub discarded_generations: usize,
+    /// Generations removed whole, each with why: one that could not be read, whose content
+    /// could not be checked against the index, or one whose rewrite failed.
+    pub discarded_generations: Vec<String>,
     /// Interrupted semantic builds removed.
     pub discarded_builds: usize,
 }
@@ -1263,18 +1304,33 @@ impl VectorStorePrune {
     }
 }
 
+/// Written into a generation whose targets [`prune_vector_store`] removed. Its vector index is
+/// removed with them, so the generation reports stale (rebuild required) rather than corrupt,
+/// and search refuses it until `ok semantic index` rebuilds it from the kept embeddings.
+const PRUNED_MARKER: &str = "pruned.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrunedMarker {
+    removed_targets: usize,
+    removed_paths: usize,
+    pruned_at: String,
+}
+
 /// Removes from the semantic vector store every target whose path is not among `indexed_files`,
-/// the files the published index holds, or is among them but no longer embedded (a deleted file, a path the policy now excludes
-/// or denies, vendored or generated code). Their text, embedding cache entries and vectors are
-/// rewritten out of each generation, not tombstoned, so no file under `.ok/vectors` keeps them
-/// (#564). The rest of the embedding cache is kept, so the next `ok semantic index` re-embeds
-/// nothing it already had.
+/// the files the published index holds, or is among them but no longer embedded (a deleted
+/// file, a path the policy now excludes or denies, vendored or generated code). Their text and
+/// embedding cache entries are rewritten out of `ids.json` and `embeddings.cache`, and the
+/// generation's vector index is removed rather than rebuilt: the store is stale after any index
+/// run and search refuses it until `ok semantic index` rebuilds it, and that rebuild reuses the
+/// kept embeddings, so rebuilding an HNSW graph here would be paid twice. No file under
+/// `.ok/vectors` keeps the removed text (#564).
 ///
-/// Pruning does not make the store current: its manifest still names the authoritative index
-/// generation it was built from, so status reports it stale and search refuses it until
-/// rebuilt. A generation that cannot be read is removed whole, since what it holds cannot be
-/// checked. Callers hold the index write lock, which every semantic build also takes, so a
-/// build directory present here is an interrupted one and is removed with the rest.
+/// Each file is replaced by a rename, and the marker that makes the generation report stale is
+/// written first, so an interruption leaves a generation the next run prunes again. A generation
+/// that cannot be read is removed whole, since what it holds cannot be checked. Callers hold the
+/// index write lock, which every semantic build also takes, so a build directory present here
+/// is an interrupted one and is removed, and a `previous` generation left by an interrupted
+/// promotion is recovered (when `current` is missing) or removed.
 pub fn prune_vector_store(repo: &Path, indexed_files: &[File]) -> Result<VectorStorePrune> {
     let root = open_kioku_storage::generations::resolve_index_location(repo).vectors_root();
     let mut report = VectorStorePrune::default();
@@ -1291,39 +1347,63 @@ pub fn prune_vector_store(repo: &Path, indexed_files: &[File]) -> Result<VectorS
         report.discarded_builds = fs::read_dir(&builds)?.count();
         remove_vector_dir(&builds)?;
     }
-    for generation in [root.join("current"), root.join("previous")] {
-        if !generation.exists() {
-            continue;
-        }
-        match prune_generation(&generation, &builds, &embedded_paths) {
-            Ok(Some((targets, paths))) => {
-                report.removed_targets += targets;
-                report.removed_paths += paths;
-            }
-            Ok(None) => {}
-            Err(_) => {
-                remove_vector_dir(&generation)?;
-                report.discarded_generations += 1;
-            }
+    let current = root.join("current");
+    let previous = root.join("previous");
+    if previous.exists() {
+        if current.exists() {
+            remove_vector_dir(&previous)?;
+        } else {
+            fs::rename(&previous, &current)?;
         }
     }
-    // A failed rewrite leaves its scratch directory here.
-    if builds.exists() {
-        remove_vector_dir(&builds)?;
+    if !current.exists() {
+        return Ok(report);
+    }
+    match prune_generation(&current, &embedded_paths) {
+        Ok(Some((targets, paths))) => {
+            report.removed_targets = targets;
+            report.removed_paths = paths;
+        }
+        Ok(None) => {}
+        // Removing it is the safe answer either way: it may hold the removed text.
+        Err(failure) => {
+            remove_vector_dir(&current)?;
+            report
+                .discarded_generations
+                .push(format!("{}: {failure}", current.display()));
+        }
     }
     Ok(report)
 }
 
+#[derive(Debug)]
+enum GenerationPruneFailure {
+    Unreadable(OkError),
+    Rewrite(OkError),
+}
+
+impl std::fmt::Display for GenerationPruneFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(err) => write!(
+                formatter,
+                "could not be read ({err}), so what it holds could not be checked against the index"
+            ),
+            Self::Rewrite(err) => write!(formatter, "rewriting it failed ({err})"),
+        }
+    }
+}
+
 /// Rewrites one generation without the targets outside `embedded_paths`, returning how many
-/// targets and paths it removed, or `None` when it held none. The rewrite is written beside
-/// the generation and swapped in, so an interruption leaves either the old generation or none.
+/// targets and paths it removed, or `None` when it held none.
 fn prune_generation(
     generation: &Path,
-    scratch_root: &Path,
     embedded_paths: &HashSet<PathBuf>,
-) -> Result<Option<(usize, usize)>> {
-    let targets =
-        serde_json::from_slice::<Vec<SemanticTarget>>(&fs::read(generation.join("ids.json"))?)?;
+) -> std::result::Result<Option<(usize, usize)>, GenerationPruneFailure> {
+    let read = |name: &str| -> Result<Vec<u8>> { Ok(fs::read(generation.join(name))?) };
+    let targets = read("ids.json")
+        .and_then(|raw| Ok(serde_json::from_slice::<Vec<SemanticTarget>>(&raw)?))
+        .map_err(GenerationPruneFailure::Unreadable)?;
     let (kept, removed): (Vec<_>, Vec<_>) = targets
         .into_iter()
         .partition(|target| embedded_paths.contains(&target.path));
@@ -1335,12 +1415,15 @@ fn prune_generation(
         .map(|target| &target.path)
         .collect::<HashSet<_>>()
         .len();
-    let mut manifest =
-        serde_json::from_slice::<SemanticManifest>(&fs::read(generation.join("manifest.json"))?)?;
-    let mut cache =
-        serde_json::from_slice::<EmbeddingCache>(&fs::read(generation.join("embeddings.cache"))?)?;
-    let mut stats =
-        serde_json::from_slice::<SemanticStats>(&fs::read(generation.join("stats.json"))?)?;
+    let parsed = (|| -> Result<(SemanticManifest, EmbeddingCache, SemanticStats)> {
+        Ok((
+            serde_json::from_slice(&read("manifest.json")?)?,
+            serde_json::from_slice(&read("embeddings.cache")?)?,
+            serde_json::from_slice(&read("stats.json")?)?,
+        ))
+    })();
+    let (mut manifest, mut cache, mut stats) =
+        parsed.map_err(GenerationPruneFailure::Unreadable)?;
     let kept_ids = kept
         .iter()
         .map(|target| target.stable_id.as_str())
@@ -1348,75 +1431,55 @@ fn prune_generation(
     cache
         .entries
         .retain(|_, entry| kept_ids.contains(entry.target_id.as_str()));
-    let vectors = cache
-        .entries
-        .values()
-        .filter(|entry| entry.vector.len() == manifest.dimensions)
-        .map(|entry| (entry.target_id.as_str(), &entry.vector))
-        .collect::<HashMap<_, _>>();
-    // Rebuilt from the kept vectors rather than removed from the loaded index: an HNSW graph
-    // keeps a removed vector's slot, and its bytes, in the file it saves.
-    let records = kept
-        .iter()
-        .filter_map(|target| {
-            vectors
-                .get(target.stable_id.as_str())
-                .map(|vector| VectorRecord {
-                    id: target.vector_id,
-                    target_id: target.stable_id.clone(),
-                    target_kind: target.kind.clone(),
-                    vector: (*vector).clone(),
-                })
-        })
-        .collect::<Vec<_>>();
-    let vector_count = records.len();
-
-    let scratch = scratch_root.join(format!("prune-{}", Utc::now().timestamp_millis()));
-    fs::create_dir_all(&scratch)?;
-    match resolved_backend_from_name(&manifest.backend)? {
-        ResolvedSemanticBackend::ExactFlat => {
-            let mut index = ExactFlatVectorIndex::new(manifest.dimensions)?;
-            for record in records {
-                index.add(record)?;
-            }
-            index.save(&scratch.join("index.json"))?;
-        }
-        backend @ (ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16) => {
-            let scalar_kind = if backend == ResolvedSemanticBackend::HnswF32 {
-                AnnScalarKind::F32
-            } else {
-                AnnScalarKind::Bf16
-            };
-            let mut index = UsearchHnswVectorIndex::with_parameters(
-                manifest.dimensions,
-                scalar_kind,
-                vector_count,
-                PRODUCTION_HNSW_PARAMETERS,
-            )?;
-            for record in records {
-                index.add(record)?;
-            }
-            index.save(&scratch.join("index.usearch"))?;
-        }
-    }
     let mut counts = BTreeMap::<String, usize>::new();
     for target in &kept {
         *counts.entry(target.kind.clone()).or_default() += 1;
     }
-    manifest.vector_count = vector_count;
+    let cached = cache.entries.len();
+    manifest.vector_count = cached;
     manifest.target_counts = counts;
-    stats.vector_count = vector_count;
-    stats.indexed_count = vector_count;
-    stats.failed_count = kept.len().saturating_sub(vector_count);
-    write_json(&scratch.join("manifest.json"), &manifest)?;
-    write_json(&scratch.join("ids.json"), &kept)?;
-    write_json(&scratch.join("embeddings.cache"), &cache)?;
-    stats.disk_usage_bytes = dir_size(&scratch);
-    write_json(&scratch.join("stats.json"), &stats)?;
+    stats.vector_count = cached;
+    stats.indexed_count = cached;
+    stats.failed_count = kept.len().saturating_sub(cached);
 
-    remove_vector_dir(generation)?;
-    fs::rename(&scratch, generation)?;
+    let mut rewrite = || -> Result<()> {
+        // First, so that from here on the generation reads as pruned and stale, never corrupt.
+        replace_json(
+            generation,
+            PRUNED_MARKER,
+            &PrunedMarker {
+                removed_targets: removed.len(),
+                removed_paths,
+                pruned_at: Utc::now().to_rfc3339(),
+            },
+        )?;
+        for artifact in ["index.json", "index.usearch", "index.meta.json"] {
+            match fs::remove_file(generation.join(artifact)) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
+                _ => {}
+            }
+        }
+        replace_json(generation, "ids.json", &kept)?;
+        replace_json(generation, "embeddings.cache", &cache)?;
+        replace_json(generation, "manifest.json", &manifest)?;
+        stats.disk_usage_bytes = dir_size(generation);
+        replace_json(generation, "stats.json", &stats)
+    };
+    rewrite().map_err(GenerationPruneFailure::Rewrite)?;
     Ok(Some((removed.len(), removed_paths)))
+}
+
+/// Writes `value` beside `name` and renames it over it, so the file is either the old or the
+/// new content, never a partial write.
+fn replace_json(dir: &Path, name: &str, value: &impl Serialize) -> Result<()> {
+    let staged = dir.join(format!(".{name}.pruning"));
+    fs::write(&staged, serde_json::to_vec_pretty(value)?)?;
+    fs::rename(&staged, dir.join(name))?;
+    Ok(())
+}
+
+fn pruned_marker(generation: &Path) -> Option<PrunedMarker> {
+    read_json::<PrunedMarker>(&generation.join(PRUNED_MARKER))
 }
 
 fn remove_vector_dir(path: &Path) -> Result<()> {
