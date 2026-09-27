@@ -768,12 +768,12 @@ indexed` when there is no published index to export.
 
 Window ranks do not change `user_version`. A writer's open (`SqliteStore::open`: `ok index`,
 `ok init`, `ok watch`, `ok snapshot import`) brings an index up to date in one transaction: it adds
-the column (default `-1`), installs the `graph_edges_unranked_insert` trigger, drops the four
-endpoint indexes the rank indexes replaced, and, when `graph_edge_window_rank_version` is missing
-or differs, decodes every edge once to rank it (4,096 edges at a time) and records the version.
-The rank indexes are built after it commits. An open killed partway leaves either the file as it
-was or ranks with their version and no indexes yet; neither makes a reader trust a rank that is
-not there. A row that cannot be decoded keeps `-1`, which orders it first, and fails every read
+the column (default `-1`), installs the `graph_edges_unranked_insert` trigger, and, when
+`graph_edge_window_rank_version` is missing or differs, decodes every edge once to rank it (4,096
+edges at a time) and records the version. The rank indexes are built after it commits, and only
+then are the four endpoint indexes they replace dropped. An open killed partway leaves either the
+file as it was, or ranks with their version and the endpoint indexes still in place; neither makes
+a reader trust a rank that is not there, and every bounded read still has an index to use. A row that cannot be decoded keeps `-1`, which orders it first, and fails every read
 that reaches it, as it did before; refusing the open instead would also refuse the `ok index` that
 repairs it.
 
@@ -786,5 +786,6 @@ and sort, with the same answers.
 An Open Kioku from before window ranks can still open, read and write a ranked index: its reads
 name their columns, and its inserts name no rank, so they take the `-1` default and the trigger
 withdraws the recorded version. From then on bounded reads decode and sort, until this version's
-next writer open ranks every row again. It also recreates the endpoint indexes, which that open
-drops again.
+next writer open ranks every row again. The older writer also rebuilds the four endpoint indexes
+once on its first open (about 2.3 s at 170,840 edges), and this version's next writer open drops
+them again, so alternating between the two versions pays that rebuild, and a re-rank, each time.

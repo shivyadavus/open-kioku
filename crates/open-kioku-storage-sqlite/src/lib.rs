@@ -5118,6 +5118,15 @@ fn migrate_graph_schema(conn: &mut Connection, opener: StoreOpener) -> Result<()
         }
         conn.execute(ddl, []).map_err(storage_err)?;
     }
+    // Dropped only now that the rank indexes exist: dropped first, an open killed before the
+    // rank indexes were built would leave every endpoint read a scan and sort until the next
+    // writer. An older writer recreates them, so every writer open drops them again.
+    if opener == StoreOpener::Writer {
+        for name in RETIRED_GRAPH_INDEXES {
+            conn.execute(&format!("DROP INDEX IF EXISTS {name}"), [])
+                .map_err(storage_err)?;
+        }
+    }
 
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -5150,8 +5159,9 @@ BEGIN DELETE FROM schema_meta WHERE key = 'graph_edge_window_rank_version'; END"
 
 /// Bring every edge row's window rank up to this binary's rank function, in one transaction: add
 /// the column to an index written before it existed, install [`GRAPH_EDGES_UNRANKED_TRIGGER`],
-/// drop the endpoint indexes the rank indexes replaced (an older writer recreates them), and,
-/// when the recorded version is missing or differs, rank every row and record the version.
+/// and, when the recorded version is missing or differs, rank every row and record the version.
+/// The endpoint indexes the rank indexes replace are dropped by [`migrate_graph_schema`] only
+/// once the rank indexes exist, so an open killed in between leaves one or the other.
 ///
 /// The column, trigger, ranks and version commit together, and the version is recorded only
 /// over rows it describes: an open killed partway leaves the file as it was, and any later insert
@@ -5175,10 +5185,6 @@ fn migrate_graph_edge_window_ranks(conn: &mut Connection) -> Result<()> {
     .map_err(storage_err)?;
     tx.execute(GRAPH_EDGES_UNRANKED_TRIGGER, [])
         .map_err(storage_err)?;
-    for name in RETIRED_GRAPH_INDEXES {
-        tx.execute(&format!("DROP INDEX IF EXISTS {name}"), [])
-            .map_err(storage_err)?;
-    }
     let current = open_kioku_core::GRAPH_EDGE_WINDOW_RANK_VERSION.to_string();
     if added || stored_window_rank_version(&tx)?.as_deref() != Some(current.as_str()) {
         rank_graph_edges(&tx)?;
@@ -9509,6 +9515,49 @@ mod tests {
             assert!(!window_ranks_current(&conn).unwrap());
         }
         assert_windows_match_full_sort(&probe, &edges, "interrupted rank transaction");
+    }
+
+    /// A writer's open killed after the rank transaction commits but before the rank indexes are
+    /// built still leaves the endpoint indexes in place, so reads stay index lookups; the next
+    /// writer's open builds the rank indexes and only then drops the endpoint ones.
+    #[test]
+    fn ranks_committed_without_rank_indexes_keep_the_endpoint_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let edges = write_pre_rank_index(&path);
+        let retired = [
+            "idx_graph_edges_from",
+            "idx_graph_edges_from_type",
+            "idx_graph_edges_to",
+            "idx_graph_edges_to_type",
+        ];
+        {
+            // The rank transaction alone, as an open killed right after its commit leaves it.
+            let mut conn = Connection::open(&path).unwrap();
+            super::migrate_graph_edge_window_ranks(&mut conn).unwrap();
+            assert!(window_ranks_current(&conn).unwrap());
+            let names = graph_edge_indexes(&conn);
+            for name in retired {
+                assert!(names.iter().any(|index| index == name), "{name}: {names:?}");
+            }
+            assert!(!names.iter().any(|index| index.ends_with("_rank")));
+        }
+        let probe = SqliteStore::open_for_probe(&path).unwrap();
+        assert_windows_match_full_sort(&probe, &edges, "ranked, rank indexes missing");
+        drop(probe);
+
+        let store = SqliteStore::open(&path).unwrap();
+        let names = graph_edge_indexes(&store.connection.lock().unwrap());
+        assert!(retired
+            .iter()
+            .all(|name| !names.iter().any(|index| index == name)));
+        assert_eq!(
+            names
+                .iter()
+                .filter(|index| index.ends_with("_rank"))
+                .count(),
+            4
+        );
     }
 
     /// An Open Kioku from before window ranks can still write to a ranked index. Its inserts

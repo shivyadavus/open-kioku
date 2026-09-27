@@ -425,6 +425,12 @@ pub fn graph_edge_window_tier(edge: &GraphEdge) -> u8 {
 /// Version of [`graph_edge_window_rank`]. A store that persists ranks records the version it
 /// wrote them with and recomputes them when it differs, so bump it with any change to the rank an
 /// edge gets: to the tiers, to their order, or to how confidence orders edges within one.
+///
+/// Before the first bump: a writer checks the recorded version only when it opens the store, so
+/// a long-running writer of the previous version (an `ok watch` started before the upgrade) would
+/// keep inserting non-negative ranks of the old function under the new version, which the
+/// unranked-insert trigger cannot see. The bump must make writers re-check the stored version
+/// before each write and withdraw it on a mismatch, or record the version per row.
 pub const GRAPH_EDGE_WINDOW_RANK_VERSION: u32 = 1;
 
 /// Window position class of one edge: 0 is kept first, 15 last.
