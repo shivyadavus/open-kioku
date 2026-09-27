@@ -118,9 +118,9 @@ indexed with each endpoint as `(endpoint, window_rank, id)` and `(endpoint, edge
 window_rank, id)`. A bounded read is then an index range scan that stops at the end of its page:
 its cost follows the window, not the node's degree, whatever the node's edges prove.
 `neighbors` reads the outgoing and incoming windows separately and merges them, since no one
-index holds both endpoints. An index whose ranks were not written by this binary's rank function
-is read by decoding and sorting every matching edge, which gives the same answer more slowly; see
-[Window ranks](storage-model.md#window-ranks).
+index holds both endpoints. An index whose ranks were not written by this binary's rank function, or that an
+older Open Kioku has written to since, is read by decoding and sorting every matching edge, which
+gives the same answer more slowly; see [Window ranks](storage-model.md#window-ranks).
 
 `GraphStore::neighbor_window` returns the kept edges with the node's total edge count, and the
 surfaces that already report caps use it: MCP `dependency_path` without `to` adds

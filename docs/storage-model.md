@@ -156,9 +156,11 @@ The `schema_meta` key `graph_edge_window_rank_version` records the
 `open_kioku_core::GRAPH_EDGE_WINDOW_RANK_VERSION` the ranks were computed with. Reads order and
 limit in SQL only while it equals the reader's version; otherwise they decode every matching edge
 and sort it, which is the same answer at the cost of the node's degree. A writer's open
-recomputes every rank when the version differs, and records the new version in the same
-transaction, so a reader never sees a version over ranks it does not describe. A change to the
-rank function bumps the version, and a core test pins the two together.
+recomputes every rank when the version is missing or differs, and records it in the same
+transaction, so a reader never sees a version over ranks it does not describe. The trigger
+`graph_edges_unranked_insert` deletes the key whenever a row is inserted with a negative rank,
+which is what an insert that names no rank gets; see below. A change to the rank function bumps
+the version, and a core test pins the rank of every edge shape to it.
 
 ### Publication order
 
@@ -754,10 +756,9 @@ deserialized, on every surface and on `ok snapshot import`, with one message: th
 written by a newer Open Kioku; upgrade Open Kioku or run `ok index` to rebuild it. Older
 manifests still read through serde defaults.
 
-`ok snapshot import` refuses an artifact whose `sqlite_user_version` is below 4, the compact
-graph layout, and names the fix, instead of importing a store whose graph would be discarded on
-first open. An artifact from 4 on is migrated when the import opens it. `ok snapshot export`
-likewise refuses a store awaiting a rebuild, rather than writing `graph_edge_count: 0` into the
+`ok snapshot import` refuses an artifact whose `sqlite_user_version` is below the supported
+version and names the fix, instead of importing a store whose graph would be discarded on
+first open. `ok snapshot export` likewise refuses a store awaiting a rebuild, rather than writing `graph_edge_count: 0` into the
 artifact metadata as though it were a measurement. It
 opens the index the way every read surface does, so it refuses with `indexing in progress`
 while a live writer holds the lock and no manifest is published, and with `repository is not
@@ -765,16 +766,25 @@ indexed` when there is no published index to export.
 
 ### Opening an index from before window ranks
 
-`user_version` 5 adds `graph_edges.window_rank` and its indexes. A writer's open (`ok index`,
-`ok watch`, `ok snapshot import`) migrates a version-4 index in place. In one transaction it adds
-the column, drops the four endpoint indexes it replaces, decodes every edge once to compute its
-rank (a page of 4,096 edges at a time) and records the rank version; the rank indexes are built
-once that commits. A row that cannot be decoded keeps its default rank and fails every read that reaches
-it, as it did before; refusing the open instead would also refuse the `ok index` that repairs it.
-The read surfaces (MCP, `ok search`, `ok impact`, ...) open without migrating, and until a writer
-has opened the index they read it by decoding and sorting, with the same answers.
+Window ranks do not change `user_version`. A writer's open (`SqliteStore::open`: `ok index`,
+`ok init`, `ok watch`, `ok snapshot import`) brings an index up to date in one transaction: it adds
+the column (default `-1`), installs the `graph_edges_unranked_insert` trigger, drops the four
+endpoint indexes the rank indexes replaced, and, when `graph_edge_window_rank_version` is missing
+or differs, decodes every edge once to rank it (4,096 edges at a time) and records the version.
+The rank indexes are built after it commits. An open killed partway leaves either the file as it
+was or ranks with their version and no indexes yet; neither makes a reader trust a rank that is
+not there. A row that cannot be decoded keeps `-1`, which orders it first, and fails every read
+that reaches it, as it did before; refusing the open instead would also refuse the `ok index` that
+repairs it.
 
-An Open Kioku that reads `user_version` 4 refuses a migrated index, `ok index` included, as
-written by a newer version. That is deliberate: its writer would add edges without a rank, which
-a newer reader would then trust. To go back to such a version, remove the repository's `.ok/`
-directory and index again with it.
+Every other open ranks nothing. The read surfaces open without running a schema statement, and
+`SqliteStore::open_existing` (`ok status`, `ok doctor`) runs the idempotent schema statements but
+neither ranks edges nor builds the rank indexes: on a large index that is a long write, and a
+status command is not where to pay it. Until a writer has opened the index, bounded reads decode
+and sort, with the same answers.
+
+An Open Kioku from before window ranks can still open, read and write a ranked index: its reads
+name their columns, and its inserts name no rank, so they take the `-1` default and the trigger
+withdraws the recorded version. From then on bounded reads decode and sort, until this version's
+next writer open ranks every row again. It also recreates the endpoint indexes, which that open
+drops again.
