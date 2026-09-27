@@ -26,7 +26,10 @@ Each case is a JSON object:
   "id": "plan-engine",
   "task": "change plan engine boundary evidence",
   "expected_primary_context": ["crates/open-kioku-plan/src/lib.rs"],
-  "expected_impact": ["crates/open-kioku-context/src/lib.rs"],
+  "expected_impact": [
+    "crates/open-kioku-cli/src/commands/mod.rs",
+    "crates/open-kioku-mcp/src/lib.rs"
+  ],
   "expected_tests": ["plan_surfaces_runtime_signals"],
   "expected_boundary": ["crates/open-kioku-plan/src/lib.rs"],
   "forbidden_paths": ["target/generated.rs"],
@@ -49,6 +52,42 @@ Fields:
 - `expected_verdict`: `pass`, `warn`, or `fail`.
 - `expected_confidence`: whether the workflow should be treated as successful
   for confidence calibration.
+
+## Changing a case
+
+The cases are a frozen regression suite: a behaviour change is proven by adding a
+case, not by editing an existing one until it passes. An existing expectation is
+changed only when it is wrong about the repository, and the reason is recorded
+here and in the pull request that changes it. An `expected_impact` entry must be
+a file that can actually be affected by the change: a file in a crate that
+depends on the changed crate and uses the changed API. A file the changed crate
+itself depends on is upstream of the change, and a match on it is a false
+positive that the case would otherwise reward.
+
+Recorded changes:
+
+- `plan-engine` (#557): `expected_impact` was `crates/open-kioku-context/src/lib.rs`,
+  but `open-kioku-plan` depends on `open-kioku-context`, not the reverse. It is now
+  `crates/open-kioku-cli/src/commands/mod.rs` (the `ok plan` and `ok preflight`
+  commands build a `PlanEngine`) and `crates/open-kioku-mcp/src/lib.rs` (the MCP
+  plan tools build one).
+- `ingest-history` (#557): `expected_impact` was `crates/open-kioku-git/src/lib.rs`,
+  but `open-kioku-ingest` depends on `open-kioku-git`, not the reverse. It is now
+  `crates/open-kioku-cli/src/commands/index.rs` and `crates/open-kioku-watch/src/lib.rs`,
+  the only callers of the `Indexer` entry points that return Git history
+  (`index_repo_with_history_mode_and_progress` and `index_repo_with_history`).
+
+Both old expectations were met only by lexical matches that moved across the
+case limit when unrelated test names changed (#537, #548). On the build before
+the change they were no longer met at all: both cases scored an impact recall of
+0.0, and the suite's `impact_recall_at_k` was 0.900. With the corrected
+expectations `ingest-history` scores 0.5 (`index.rs` ranks third; `watch/src/lib.rs`
+is not in the plan's impact list) and `plan-engine` stays at 0.0: neither
+corrected file appears anywhere in its plan's 31-file impact list. That is a
+measured gap in impact analysis for this change, not a case to adjust further.
+The suite's `impact_recall_at_k` moves from 0.900 to 0.925 only because the
+corrected `ingest-history` expectation names a file the plan already returned;
+impact analysis itself did not change. Impact recall is reported but not gated.
 
 ## Metrics
 
