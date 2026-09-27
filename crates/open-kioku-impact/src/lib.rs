@@ -138,7 +138,8 @@ impl<'a> ImpactEngine<'a> {
         let mut exact_reference_sources = Vec::new();
         let mut omitted_direct = 0;
         let mut omitted_direct_exact = 0;
-        let mut omitted_direct_dependents = 0;
+        let mut omitted_direct_imports = 0;
+        let mut omitted_direct_import_uses = 0;
         // Rust package structure answers what the graph cannot: which downstream crates import
         // this file's public items, and which lexical matches no dependency path can reach.
         let rust_packages = match &file {
@@ -224,11 +225,13 @@ impl<'a> ImpactEngine<'a> {
                 .skip(MAX_DIRECT_IMPACTS)
                 .filter(|result| result.is_exact_reference())
                 .count();
-            omitted_direct_dependents = direct
-                .iter()
-                .skip(MAX_DIRECT_IMPACTS)
-                .filter(|result| impact_authority_tier(result) == 1)
-                .count();
+            for result in direct.iter().skip(MAX_DIRECT_IMPACTS) {
+                match direct_impact_kind(result) {
+                    DirectImpactKind::CrateImport => omitted_direct_imports += 1,
+                    DirectImpactKind::CrateImportUse => omitted_direct_import_uses += 1,
+                    _ => {}
+                }
+            }
             omitted_direct = cap_impacts(&mut direct, MAX_DIRECT_IMPACTS);
             direct
         } else {
@@ -246,8 +249,9 @@ impl<'a> ImpactEngine<'a> {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            // `lib` or `mod` names no dependent; searching it matched every crate root.
-            if indirect_stem.len() < 3 || is_generic_symbol_name(indirect_stem) {
+            // A Rust crate or module root's stem names no dependent: searching `lib` matched
+            // every crate root in a workspace.
+            if indirect_stem.len() < 3 || matches!(indirect_stem, "lib" | "mod" | "main") {
                 continue;
             }
             let second = search(indirect_stem, 10)?;
@@ -292,8 +296,14 @@ impl<'a> ImpactEngine<'a> {
             }
             if let Some(reachability) = &reachability {
                 if !unreachable_lexical.is_empty() {
+                    let sample = unreachable_lexical
+                        .iter()
+                        .take(3)
+                        .map(|path| format!("`{}`", path.display()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     reasons.push(format!(
-                        "{} lexical match(es) left out: Rust files in no package, or in packages that do not depend on `{}`",
+                        "{} lexical match(es) left out: Rust files in no workspace package, or in packages with no Cargo dependency path to `{}` (e.g. {sample})",
                         unreachable_lexical.len(),
                         workspace.package_name(reachability.package)
                     ));
@@ -307,7 +317,7 @@ impl<'a> ImpactEngine<'a> {
         // were cut so a short list is not read as the whole blast radius.
         if omitted_direct > 0 {
             reasons.push(format!(
-                "{omitted_direct} further direct impact(s) omitted beyond the {MAX_DIRECT_IMPACTS}-entry cap, {omitted_direct_exact} of them exact-reference entries and {omitted_direct_dependents} crate-import entries; heuristic entries are cut before any exact reference or crate import"
+                "{omitted_direct} further direct impact(s) omitted beyond the {MAX_DIRECT_IMPACTS}-entry cap, {omitted_direct_exact} of them exact-reference entries, {omitted_direct_imports} crate-import entries and {omitted_direct_import_uses} imported-name uses; exact references are cut last, then crate imports and imported-name uses"
             ));
         }
         if omitted_indirect > 0 {
@@ -1563,9 +1573,11 @@ pub fn is_lexical_impact_result(result: &SearchResult) -> bool {
     )
 }
 
-/// Which Rust files a change to one package can reach: that package and the packages that
-/// depend on it. A Rust file in another package, or in none, cannot be affected by the change,
-/// so a lexical match there is a shared word, not a dependent.
+/// Which Rust files a change to one package can reach through Cargo: that package and the
+/// packages that depend on it. A Rust file in another package, or in none, has no Cargo
+/// dependency path to the change, so a lexical match there is read as a shared word rather than
+/// a dependent. Coupling Cargo does not see (a harness that runs a built binary and parses its
+/// output) is not followed; the pruned count and a sample of paths stay in the risk reasons.
 struct RustReachability<'a> {
     workspace: &'a CargoWorkspace,
     package: usize,

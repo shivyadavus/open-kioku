@@ -15,7 +15,7 @@ use open_kioku_storage::{IndexData, MetadataStore};
 use open_kioku_storage_sqlite::SqliteStore;
 use std::path::{Path, PathBuf};
 
-const FILES: [(&str, &str); 13] = [
+const FILES: [(&str, &str); 17] = [
     (
         "Cargo.toml",
         "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n",
@@ -48,6 +48,25 @@ const FILES: [(&str, &str); 13] = [
     (
         "crates/app/src/unrelated.rs",
         "pub fn unrelated() -> usize {\n    7\n}\n",
+    ),
+    // Imports another crate's `PlanEngine`: its use is that item, not the engine's.
+    (
+        "crates/app/src/shadow.rs",
+        "use other::PlanEngine;\n\npub fn shadow() -> PlanEngine {\n    PlanEngine\n}\n",
+    ),
+    // Names the word only in a string, a comment and as a method: no use of the type.
+    (
+        "crates/app/src/mentions.rs",
+        "// PlanEngine is built elsewhere.\npub fn mentions(value: &Wrapper) -> &str {\n    value.PlanEngine();\n    \"PlanEngine\"\n}\n",
+    ),
+    // Depends on the engine under another name and imports it by that name.
+    (
+        "crates/aliased/Cargo.toml",
+        "[package]\nname = \"aliased\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nengine = { package = \"plan-engine\", path = \"../engine\" }\n",
+    ),
+    (
+        "crates/aliased/src/lib.rs",
+        "use engine::PlanEngine;\n\npub fn aliased() -> usize {\n    PlanEngine::new(4).limit\n}\n",
     ),
     // A package that does not depend on the engine, naming the same word.
     (
@@ -157,12 +176,23 @@ fn a_downstream_crate_that_imports_a_public_item_is_a_direct_impact() {
 
     let paths = listed_paths(&report);
     assert!(!paths.contains(&PathBuf::from("crates/app/src/unrelated.rs")));
+    for not_a_use in ["crates/app/src/shadow.rs", "crates/app/src/mentions.rs"] {
+        assert!(
+            !report
+                .direct_impacts
+                .iter()
+                .any(|result| result.path == Path::new(not_a_use)
+                    && has_signal(result, "crate_import_use")),
+            "{not_a_use}: {:?}",
+            report.direct_impacts
+        );
+    }
     assert!(
         report
             .risk_report
             .reasons
             .iter()
-            .any(|reason| reason.starts_with("1 file(s) in 1 package(s) import public items")),
+            .any(|reason| reason.starts_with("2 file(s) in 2 package(s) import public items")),
         "{:?}",
         report.risk_report.reasons
     );
@@ -204,7 +234,7 @@ fn lexical_matches_no_dependency_path_reaches_are_left_out_and_counted() {
     }
     assert!(
         report.risk_report.reasons.iter().any(|reason| reason
-            == "3 lexical match(es) left out: Rust files in no package, or in packages that do not depend on `plan-engine`"),
+            .starts_with("3 lexical match(es) left out: Rust files in no workspace package, or in packages with no Cargo dependency path to `plan-engine` (e.g. ")),
         "{:?}",
         report.risk_report.reasons
     );
@@ -235,4 +265,23 @@ fn an_item_the_crate_root_reexports_reaches_its_defining_file() {
         result.path == Path::new("crates/app/src/commands.rs")
             && has_signal(result, "crate_import_use")
     }));
+}
+
+#[test]
+fn a_renamed_dependency_is_followed_under_the_name_its_package_uses() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = indexed_workspace(dir.path());
+
+    let report = ImpactEngine::new(&store)
+        .for_file(Path::new("crates/engine/src/lib.rs"))
+        .unwrap();
+
+    assert!(
+        report.direct_impacts.iter().any(|result| {
+            result.path == Path::new("crates/aliased/src/lib.rs")
+                && has_signal(result, "crate_import")
+        }),
+        "{:?}",
+        report.direct_impacts
+    );
 }

@@ -46,12 +46,19 @@ struct CargoPackage {
     lib_crate: String,
     /// Repository-relative root file of the library crate.
     lib_root: PathBuf,
-    dependencies: BTreeSet<String>,
+    /// Package name of each dependency, with the crate name this package writes for it when the
+    /// manifest renames it (`alias = { package = "real-name" }`); `None` means the dependency's
+    /// own library crate name.
+    dependencies: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Debug, Clone)]
 enum Manifest {
-    Package(usize),
+    /// `members` are set when the package's manifest is also a workspace root.
+    Package {
+        index: usize,
+        members: Vec<String>,
+    },
     /// A manifest with no `[package]`: a virtual workspace root. `members` are the path prefixes
     /// its member globs name, so a member whose own manifest is not indexed stays unknown.
     Virtual {
@@ -79,6 +86,7 @@ pub(crate) struct CargoWorkspace {
 impl CargoWorkspace {
     pub(crate) fn load(store: &dyn MetadataStore, files: &[File]) -> Result<Self> {
         let mut workspace = Self::default();
+        let mut tables = Vec::new();
         for file in files.iter().filter(|file| {
             file.path
                 .file_name()
@@ -92,17 +100,34 @@ impl CargoWorkspace {
                 .map(|chunk| chunk.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            let manifest = match text.parse::<toml::Table>() {
-                Ok(table) => match parse_package(&table, &dir) {
-                    Some(package) => {
-                        workspace.packages.push(package);
-                        Manifest::Package(workspace.packages.len() - 1)
+            // A manifest the index holds no text for proves nothing about the files under it.
+            match text.parse::<toml::Table>() {
+                Ok(table) if !text.trim().is_empty() => tables.push((dir, table)),
+                _ => {
+                    workspace.manifests.insert(dir, Manifest::Unreadable);
+                }
+            }
+        }
+        // `alias.workspace = true` inherits the workspace's `alias = { package = "real" }`.
+        let inherited = tables
+            .iter()
+            .filter_map(|(_, table)| table.get("workspace")?.get("dependencies")?.as_table())
+            .flatten()
+            .filter_map(|(key, value)| {
+                Some((key.clone(), value.get("package")?.as_str()?.to_string()))
+            })
+            .collect::<HashMap<_, _>>();
+        for (dir, table) in tables {
+            let members = workspace_members(&table, &dir);
+            let manifest = match parse_package(&table, &dir, &inherited) {
+                Some(package) => {
+                    workspace.packages.push(package);
+                    Manifest::Package {
+                        index: workspace.packages.len() - 1,
+                        members,
                     }
-                    None => Manifest::Virtual {
-                        members: workspace_members(&table, &dir),
-                    },
-                },
-                Err(_) => Manifest::Unreadable,
+                }
+                None => Manifest::Virtual { members },
             };
             workspace.manifests.insert(dir, manifest);
         }
@@ -111,16 +136,26 @@ impl CargoWorkspace {
 
     pub(crate) fn membership(&self, path: &Path) -> Membership {
         let normalized = path.to_string_lossy().replace('\\', "/");
+        let in_member = |members: &[String]| {
+            members
+                .iter()
+                .any(|member| normalized.starts_with(member.as_str()))
+        };
         let mut dir = path.parent();
         while let Some(current) = dir {
             match self.manifests.get(current) {
-                Some(Manifest::Package(index)) => return Membership::Package(*index),
+                // Under a member directory of a root package whose own manifest was not
+                // found on the way up: that member's package, not the root's, compiles it.
+                Some(Manifest::Package { index, members }) => {
+                    return if in_member(members) {
+                        Membership::Unknown
+                    } else {
+                        Membership::Package(*index)
+                    };
+                }
                 Some(Manifest::Unreadable) => return Membership::Unknown,
                 Some(Manifest::Virtual { members }) => {
-                    return if members
-                        .iter()
-                        .any(|member| normalized.starts_with(member.as_str()))
-                    {
+                    return if in_member(members) {
                         Membership::Unknown
                     } else {
                         Membership::Outside
@@ -139,7 +174,23 @@ impl CargoWorkspace {
     fn depends_on(&self, dependent: usize, dependency: usize) -> bool {
         self.packages[dependent]
             .dependencies
-            .contains(&self.packages[dependency].name)
+            .contains_key(&self.packages[dependency].name)
+    }
+
+    /// The crate name `dependent` writes in a `use` path to reach `dependency`, when it declares
+    /// the dependency or is the package itself (its tests, benches and examples).
+    fn crate_name_in(&self, dependent: usize, dependency: usize) -> Option<&str> {
+        let own = self.packages[dependency].lib_crate.as_str();
+        if dependent == dependency {
+            return Some(own);
+        }
+        match self.packages[dependent]
+            .dependencies
+            .get(&self.packages[dependency].name)?
+        {
+            Some(renamed) => Some(renamed.as_str()),
+            None => Some(own),
+        }
     }
 
     /// `package` and every package that depends on it, directly or through other packages.
@@ -185,7 +236,11 @@ impl CargoWorkspace {
     }
 }
 
-fn parse_package(table: &toml::Table, dir: &Path) -> Option<CargoPackage> {
+fn parse_package(
+    table: &toml::Table,
+    dir: &Path,
+    inherited: &HashMap<String, String>,
+) -> Option<CargoPackage> {
     let name = table.get("package")?.get("name")?.as_str()?.to_string();
     let lib = table.get("lib");
     let lib_crate = lib
@@ -198,7 +253,7 @@ fn parse_package(table: &toml::Table, dir: &Path) -> Option<CargoPackage> {
             .and_then(toml::Value::as_str)
             .unwrap_or("src/lib.rs"),
     );
-    let mut dependencies = BTreeSet::new();
+    let mut dependencies = BTreeMap::new();
     let mut read_tables = |scope: &toml::Table| {
         for section in [
             "dependencies",
@@ -211,12 +266,19 @@ fn parse_package(table: &toml::Table, dir: &Path) -> Option<CargoPackage> {
                 continue;
             };
             for (key, value) in entries {
-                // `alias = { package = "real-name" }` depends on `real-name`.
+                // `alias = { package = "real-name" }` depends on `real-name`, and this package's
+                // code names it `alias`.
+                let inherits = value
+                    .get("workspace")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false);
                 let package = value
                     .get("package")
                     .and_then(toml::Value::as_str)
+                    .or_else(|| inherits.then(|| inherited.get(key).map(String::as_str))?)
                     .unwrap_or(key);
-                dependencies.insert(package.to_string());
+                let renamed = (package != key).then(|| key.replace('-', "_"));
+                dependencies.insert(package.to_string(), renamed);
             }
         }
     };
@@ -270,12 +332,13 @@ pub(crate) struct CrateDependents {
 /// of the importing packages that name such an item.
 ///
 /// An importer is found from its own stored `use` row, in a package whose manifest declares the
-/// dependency, naming a public top-level item the changed file defines: the path is the crate
-/// name, the file's module path, and the item. A use site is weaker: an identifier token equal
-/// to an imported name, outside line comments, in another file of an importing package, where
-/// that package defines no item of the same name. It covers what an import row cannot show,
-/// such as a file `include!`d into the crate root that imports the item, or a sibling module
-/// reaching it through `super::*`.
+/// dependency, naming a public top-level item the changed file defines: the path is the crate name
+/// that package uses for it, the file's module path, and the item. A use site is weaker: an
+/// identifier equal to an imported name in another file of an importing package, outside comments
+/// and string literals and not after a `.`, where that package defines no item of the same name
+/// and the file imports no item of that name from elsewhere. It covers what an import row cannot
+/// show, such as a file `include!`d into the crate root that imports the item, or a sibling
+/// module reaching it through `super::*`.
 ///
 /// Test files rank below production files: they depend on the item too, but the plan selects
 /// them as validation, and a change breaks production dependents first.
@@ -305,11 +368,13 @@ pub(crate) fn crate_dependent_impacts(
     if items.is_empty() {
         return Ok(CrateDependents::default());
     }
-    let files_by_id = files
+    // Membership is read once per Rust file, not once per file per dependent package.
+    let rust_files = files
         .iter()
-        .map(|file| (&file.id, file))
-        .collect::<HashMap<&FileId, &File>>();
-    let crate_name = workspace.packages[package].lib_crate.as_str();
+        .filter(|file| file.language == Language::Rust)
+        .map(|file| (&file.id, (file, workspace.membership(&file.path))))
+        .collect::<HashMap<&FileId, (&File, Membership)>>();
+    let own_crate = workspace.packages[package].lib_crate.as_str();
     let imports = store.imports()?;
     let reexported = crate_root_reexports(
         store,
@@ -322,14 +387,22 @@ pub(crate) fn crate_dependent_impacts(
     )?;
 
     // Importing file -> (import rows naming the changed file, the item names they import).
-    let mut importers = BTreeMap::<&Path, (Vec<Import>, BTreeSet<String>, usize)>::new();
-    for import in imports {
-        let Some(file) = files_by_id.get(&import.file_id) else {
+    let mut importers = BTreeMap::<&Path, (Vec<&Import>, BTreeSet<String>, usize)>::new();
+    let mut imports_by_file = HashMap::<&FileId, Vec<&Import>>::new();
+    for import in &imports {
+        let Some((file, membership)) = rust_files.get(&import.file_id) else {
             continue;
         };
-        if file.id == target_file.id || file.language != Language::Rust {
+        imports_by_file.entry(&file.id).or_default().push(import);
+        if file.id == target_file.id {
             continue;
         }
+        let Membership::Package(importer_package) = *membership else {
+            continue;
+        };
+        let Some(crate_name) = workspace.crate_name_in(importer_package, package) else {
+            continue;
+        };
         let Some(item) =
             imported_item(&import.imported, crate_name, &module_path, &items).or_else(|| {
                 (!reexported.is_empty())
@@ -339,12 +412,6 @@ pub(crate) fn crate_dependent_impacts(
         else {
             continue;
         };
-        let Membership::Package(importer_package) = workspace.membership(&file.path) else {
-            continue;
-        };
-        if importer_package != package && !workspace.depends_on(importer_package, package) {
-            continue;
-        }
         let entry = importers
             .entry(file.path.as_path())
             .or_insert_with(|| (Vec::new(), BTreeSet::new(), importer_package));
@@ -356,7 +423,7 @@ pub(crate) fn crate_dependent_impacts(
 
     let mut dependents = CrateDependents::default();
     let mut names_by_package = BTreeMap::<usize, BTreeSet<String>>::new();
-    for (path, (imports, names, importer_package)) in &importers {
+    for (path, (rows, names, importer_package)) in &importers {
         if *importer_package != package {
             names_by_package
                 .entry(*importer_package)
@@ -365,12 +432,13 @@ pub(crate) fn crate_dependent_impacts(
         }
         dependents
             .results
-            .push(crate_import_result(path, imports, crate_name, target_file));
+            .push(crate_import_result(path, rows, own_crate, target_file));
     }
     dependents.importing_files = importers.len();
 
     let mut scanned = 0usize;
     for (dependent_package, names) in &names_by_package {
+        let dependent_package = *dependent_package;
         let mut names = names
             .iter()
             .filter(|name| !PRELUDE_NAMES.contains(&name.as_str()))
@@ -379,12 +447,17 @@ pub(crate) fn crate_dependent_impacts(
         // A package defining its own item of the same name makes a bare use of the name
         // ambiguous; only the import row itself can then attribute a use to the changed file.
         for name in names.clone() {
-            let shadowed = store.symbols_named(&name, 64)?.iter().any(|symbol| {
-                symbol.name == name
-                    && files_by_id.get(&symbol.file_id).is_some_and(|file| {
-                        workspace.membership(&file.path) == Membership::Package(*dependent_package)
-                    })
-            });
+            let shadowed = store
+                .symbols_named(&name, usize::MAX)?
+                .iter()
+                .any(|symbol| {
+                    symbol.name == name
+                        && rust_files
+                            .get(&symbol.file_id)
+                            .is_some_and(|(_, membership)| {
+                                *membership == Membership::Package(dependent_package)
+                            })
+                });
             if shadowed {
                 names.remove(&name);
             }
@@ -392,14 +465,31 @@ pub(crate) fn crate_dependent_impacts(
         if names.is_empty() {
             continue;
         }
-        let dependent_package = *dependent_package;
-        let candidates = files.iter().filter(|file| {
-            file.language == Language::Rust
-                && file.id != target_file.id
-                && !importers.contains_key(file.path.as_path())
-                && workspace.membership(&file.path) == Membership::Package(dependent_package)
-        });
+        let mut candidates = rust_files
+            .values()
+            .filter(|(file, membership)| {
+                *membership == Membership::Package(dependent_package)
+                    && file.id != target_file.id
+                    && !importers.contains_key(file.path.as_path())
+            })
+            .map(|(file, _)| *file)
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.path.cmp(&right.path));
         for file in candidates {
+            // A file importing the same name from another path means that item, not this one.
+            let own_names = names
+                .iter()
+                .filter(|name| {
+                    !imports_by_file.get(&file.id).is_some_and(|rows| {
+                        rows.iter()
+                            .any(|row| row.imported.rsplit("::").next() == Some(name.as_str()))
+                    })
+                })
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if own_names.is_empty() {
+                continue;
+            }
             if scanned >= MAX_CRATE_USE_SCAN_FILES {
                 dependents.unscanned_files += 1;
                 continue;
@@ -411,16 +501,13 @@ pub(crate) fn crate_dependent_impacts(
             let mut first = None::<(u32, String, String)>;
             for chunk in &chunks {
                 for (offset, line) in chunk.text.lines().enumerate() {
-                    if line.trim_start().starts_with("//") {
-                        continue;
-                    }
-                    for token in identifier_tokens(line) {
-                        if let Some(name) = names.get(token) {
+                    for token in code_identifiers(line) {
+                        if let Some(name) = own_names.get(token) {
                             uses += 1;
                             if first.is_none() {
                                 first = Some((
                                     chunk.range.start + offset as u32,
-                                    name.clone(),
+                                    (*name).to_string(),
                                     line.trim().chars().take(240).collect(),
                                 ));
                             }
@@ -435,7 +522,7 @@ pub(crate) fn crate_dependent_impacts(
                     &name,
                     snippet,
                     uses,
-                    crate_name,
+                    own_crate,
                     target_file,
                 ));
                 dependents.use_files += 1;
@@ -546,14 +633,56 @@ fn imported_item<'a>(
     }
 }
 
-fn identifier_tokens(line: &str) -> impl Iterator<Item = &str> {
-    line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|token| {
-            token
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        })
+/// Identifiers a line uses as code: outside `//` comments and string literals, and not the
+/// member of a `receiver.` (a method or field of some other type).
+fn code_identifiers(line: &str) -> Vec<&str> {
+    let mut identifiers = Vec::new();
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            match byte {
+                b'\\' => index += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            index += 1;
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            break;
+        }
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = index;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let after_dot = line[..start].trim_end().ends_with('.');
+            if !after_dot {
+                identifiers.push(&line[start..index]);
+            }
+            continue;
+        }
+        if byte.is_ascii_digit() {
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    identifiers
 }
 
 /// Production dependents first; within each, an importer before a use site, and more import
@@ -569,7 +698,7 @@ fn dependent_score(path: &Path, base: f32, count: usize) -> f32 {
 
 fn crate_import_result(
     path: &Path,
-    imports: &[Import],
+    imports: &[&Import],
     crate_name: &str,
     target_file: &File,
 ) -> SearchResult {
@@ -670,13 +799,17 @@ mod tests {
                 "[package]\nname = \"app\"\n\n[lib]\nname = \"app_core\"\npath = \"lib/root.rs\"\n\n[dependencies]\nengine = { package = \"plan-engine\", path = \"../engine\" }\n\n[target.'cfg(unix)'.dev-dependencies]\nunix-helper = \"1\"\n",
             ),
             Path::new("crates/app"),
+            &HashMap::new(),
         )
         .unwrap();
         assert_eq!(package.lib_crate, "app_core");
         assert_eq!(package.lib_root, PathBuf::from("crates/app/lib/root.rs"));
         assert_eq!(
             package.dependencies,
-            BTreeSet::from(["plan-engine".to_string(), "unix-helper".to_string()])
+            BTreeMap::from([
+                ("plan-engine".to_string(), Some("engine".to_string())),
+                ("unix-helper".to_string(), None),
+            ])
         );
     }
 
@@ -687,12 +820,17 @@ mod tests {
             parse_package(
                 &manifest("[package]\nname = \"engine\"\n"),
                 Path::new("crates/engine"),
+                &HashMap::new(),
             )
             .unwrap(),
         );
-        workspace
-            .manifests
-            .insert(PathBuf::from("crates/engine"), Manifest::Package(0));
+        workspace.manifests.insert(
+            PathBuf::from("crates/engine"),
+            Manifest::Package {
+                index: 0,
+                members: Vec::new(),
+            },
+        );
         workspace.manifests.insert(
             PathBuf::new(),
             Manifest::Virtual {
@@ -748,5 +886,57 @@ mod tests {
             Some(ImportedItem::Module)
         ));
         assert!(imported_item("engine::builder::Missing", "engine", &module, &items).is_none());
+    }
+
+    #[test]
+    fn code_identifiers_skip_comments_strings_and_members() {
+        assert_eq!(
+            code_identifiers(r#"let x = Engine::new("Engine \" Engine").run(); // Engine"#),
+            vec!["let", "x", "Engine", "new"]
+        );
+        assert_eq!(code_identifiers("value.Engine + 2u8"), vec!["value"]);
+    }
+
+    #[test]
+    fn a_root_package_does_not_claim_its_workspace_members_files() {
+        let mut workspace = CargoWorkspace::default();
+        workspace.packages.push(
+            parse_package(
+                &manifest("[package]\nname = \"root\"\n"),
+                Path::new(""),
+                &HashMap::new(),
+            )
+            .unwrap(),
+        );
+        workspace.manifests.insert(
+            PathBuf::new(),
+            Manifest::Package {
+                index: 0,
+                members: vec!["crates/".into()],
+            },
+        );
+        assert_eq!(
+            workspace.membership(Path::new("src/lib.rs")),
+            Membership::Package(0)
+        );
+        assert_eq!(
+            workspace.membership(Path::new("crates/unindexed/src/lib.rs")),
+            Membership::Unknown
+        );
+    }
+
+    #[test]
+    fn an_inherited_workspace_dependency_keeps_its_rename() {
+        let inherited = HashMap::from([("engine".to_string(), "plan-engine".to_string())]);
+        let package = parse_package(
+            &manifest("[package]\nname = \"app\"\n\n[dependencies]\nengine.workspace = true\n"),
+            Path::new("crates/app"),
+            &inherited,
+        )
+        .unwrap();
+        assert_eq!(
+            package.dependencies,
+            BTreeMap::from([("plan-engine".to_string(), Some("engine".to_string()))])
+        );
     }
 }
