@@ -674,6 +674,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
     const ENGINE: &str = "[package]\nname = \"engine\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
     const APP_INHERITS_ENGINE: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nengine.workspace = true\n";
     const APP_RENAMES_ENGINE: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ncore_alias = { package = \"engine\", path = \"../engine\" }\n";
+    const THING_CLOSURE_CALLER: &str = "pub struct Thing;\n\nimpl Thing {\n    pub fn target_fn(&self) {}\n}\n\npub fn caller_fn(things: &[Thing]) {\n    things.iter().for_each(|engine| engine.target_fn());\n}\n";
     const ENGINE_CALLER: &str =
         "use engine::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
     const LIB_AND_BIN_BESIDE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n\n[[bin]]\nname = \"app\"\npath = \"main.rs\"\n";
@@ -1103,6 +1104,56 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                 ),
             ],
             true,
+        ),
+        // A single-segment call path through the declared crate, with no `use`.
+        "workspace_dependency_root_path_call" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub fn caller_fn() {\n    engine::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `engine.target_fn()` on a closure parameter named like the declared crate is a method
+        // of the value, which has the receiver text of `engine::target_fn()`.
+        "closure_value_named_like_dependency" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                ("crates/app/src/lib.rs", THING_CLOSURE_CALLER),
+            ],
+            false,
+        ),
+        // The same through an `if let` binding, which records no binding either.
+        "pattern_value_named_like_dependency" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub struct Thing;\n\nimpl Thing {\n    pub fn target_fn(&self) {}\n}\n\npub fn caller_fn(first: Option<Thing>) {\n    if let Some(engine) = first {\n        engine.target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // Inside package `engine`'s own library, a closure parameter named `engine`: library
+        // code cannot name its own crate, and a value is no path in any case.
+        "closure_value_named_like_own_crate" => (
+            vec![
+                ("Cargo.toml", ENGINE),
+                ("src/lib.rs", "pub mod util;\n\npub fn target_fn() {}\n"),
+                ("src/util.rs", THING_CLOSURE_CALLER),
+            ],
+            false,
         ),
         // `pub mod r#type;` is the file `type.rs` (#543).
         "raw_identifier_module_crate_path" => (

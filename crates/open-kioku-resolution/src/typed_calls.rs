@@ -26,11 +26,6 @@ pub(crate) fn resolve_typed_receiver_outcome(
         ctx.bindings
             .resolve_before(&call.scope_id, lookup_name, &call.range, ctx.scopes)
     else {
-        if ctx.language == Language::Rust && !through_self_field {
-            if let Some(outcome) = resolve_rust_crate_name_outcome(call, ctx, lookup_name) {
-                return outcome;
-            }
-        }
         return imported_receiver_outcome(call, ctx, lookup_name);
     };
 
@@ -297,10 +292,10 @@ fn rust_module_path_outcome(
 }
 
 /// A Rust call through a path whose first segment is a crate name the caller's package declares,
-/// read from that library crate's root and ending only in a file placed in that crate. The parser
-/// cannot tell `engine::run()` from `engine.run()` by the receiver alone, so this is also tried
-/// for a lowercase receiver no local binding names.
-pub(crate) fn resolve_rust_crate_name_outcome(
+/// read from that library crate's root and ending only in a file placed in that crate. Only a
+/// module receiver reaches here: `engine.run()` shares the receiver text of `engine::run()`, and
+/// a closure, pattern or loop binding named `engine` is not recorded as a binding.
+fn resolve_rust_crate_name_outcome(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
     receiver: &str,
@@ -1805,17 +1800,22 @@ mod tests {
             placements.clone(),
             crates,
             |ctx| {
-                // The parser reads a lowercase path receiver as a value: `engine::run()` and
-                // `engine.run()` both have receiver `engine`. Both kinds reach the crate.
+                // `engine.run()` has the receiver text of `engine::run()`: a value named like
+                // the crate, such as a closure parameter no binding records, never reaches it.
                 let at = |receiver: &str, callee: &str| {
-                    let module =
-                        proven_target(ctx, &module_path_call("scope:worker", receiver, callee));
                     let value = CallSite {
                         receiver_kind: ReceiverKind::Value,
                         ..module_path_call("scope:worker", receiver, callee)
                     };
-                    assert_eq!(module, proven_target(ctx, &value), "`{receiver}::{callee}`");
-                    module
+                    assert!(
+                        matches!(
+                            crate::calls::resolve_call_outcome(&value, ctx),
+                            ResolutionOutcome::Unresolved { ref candidates, .. }
+                                if candidates.is_empty()
+                        ),
+                        "`{receiver}.{callee}()`"
+                    );
+                    proven_target(ctx, &module_path_call("scope:worker", receiver, callee))
                 };
                 assert_eq!(
                     at("engine", "run").as_deref(),
@@ -1837,10 +1837,7 @@ mod tests {
         with_rust_files("crates/nodep/src/lib.rs", &items, placements, |ctx| {
             let call = module_path_call("scope:worker", "engine::plan", "build");
             assert_eq!(proven_target(ctx, &call), None);
-            let call = CallSite {
-                receiver_kind: ReceiverKind::Value,
-                ..module_path_call("scope:worker", "engine", "run")
-            };
+            let call = module_path_call("scope:worker", "engine", "run");
             assert_eq!(proven_target(ctx, &call), None);
         });
     }

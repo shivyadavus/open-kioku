@@ -1101,17 +1101,51 @@ fn classify_receiver_string(language: &Language, recv: &str) -> ReceiverKind {
         .unwrap_or(ReceiverKind::Value)
 }
 
+/// The receiver of a Rust `path::name()` call: the path before the last `::`. Unlike the value of
+/// a `receiver.name()` call, which shares its text, a path is never a local binding. A lowercase
+/// head is a module or crate (`engine::run()`, `fs::read()`), except a primitive type
+/// (`u32::from()`, `str::from_utf8()`); an uppercase one is a type.
 fn classify_rust_path_receiver(recv: &str) -> ReceiverKind {
     let recv = recv.trim();
+    let head = recv.split("::").next().unwrap_or(recv);
     if matches!(recv, "crate" | "self" | "super")
         || recv.starts_with("crate::")
         || recv.starts_with("self::")
         || recv.starts_with("super::")
     {
         ReceiverKind::Module
+    } else if is_rust_primitive_type(head) {
+        ReceiverKind::Type
+    } else if head.starts_with(|ch: char| ch.is_ascii_lowercase() || ch == '_')
+        && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+    {
+        ReceiverKind::Module
     } else {
         classify_receiver_string(&Language::Rust, recv)
     }
+}
+
+fn is_rust_primitive_type(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "char"
+            | "str"
+            | "f32"
+            | "f64"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+    )
 }
 
 fn extract_binding(
@@ -2375,6 +2409,52 @@ mod tests {
             kind_for("instance_target"),
             (Some("self"), ReceiverKind::Self_)
         );
+    }
+
+    #[test]
+    fn rust_path_receivers_are_told_apart_from_values_that_share_their_text() {
+        let file = File {
+            id: FileId::new("file_rust_paths"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/lib.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "fn run(items: Vec<Thing>) { engine::path_call(); engine::inner::nested_call(); u32::primitive_call(); Engine::type_call(); items.iter().for_each(|engine| engine.value_call()); }",
+        )
+        .expect("Rust call fixture should parse");
+        let kind_for = |callee: &str| {
+            facts
+                .calls
+                .iter()
+                .find(|call| call.callee_name == callee)
+                .map(|call| (call.receiver.as_deref(), call.receiver_kind))
+                .expect("call")
+        };
+        // `engine::f()` and `engine.f()` share the receiver text `engine`; only the path is a
+        // module, and only a module receiver may name a crate.
+        assert_eq!(
+            kind_for("path_call"),
+            (Some("engine"), ReceiverKind::Module)
+        );
+        assert_eq!(
+            kind_for("nested_call"),
+            (Some("engine::inner"), ReceiverKind::Module)
+        );
+        assert_eq!(
+            kind_for("value_call"),
+            (Some("engine"), ReceiverKind::Value)
+        );
+        assert_eq!(
+            kind_for("primitive_call"),
+            (Some("u32"), ReceiverKind::Type)
+        );
+        assert_eq!(kind_for("type_call"), (Some("Engine"), ReceiverKind::Type));
     }
 
     #[test]

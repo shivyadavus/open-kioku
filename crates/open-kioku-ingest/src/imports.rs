@@ -648,18 +648,23 @@ impl<'a> RustModuleTree<'a> {
     }
 
     /// The library crates each Rust file names by crate name: the dependencies its package
-    /// declares that are visible to it, and its own package's library, each placed at its crate
-    /// root. Shared by every file of one package and importer kind.
+    /// declares that are visible to it, each placed at its crate root, and its own package's
+    /// library for a file only another crate of the package compiles (a binary, integration test,
+    /// example or bench). Library code cannot name its own crate that way, nor can a build script,
+    /// and a file the library may compile is treated as library code. Shared by every file of one
+    /// package, importer kind and library membership.
     pub(crate) fn crate_names(&self) -> HashMap<FileId, Arc<RustCrateNames>> {
-        let mut by_package = HashMap::<(&Path, CargoImporter), Arc<RustCrateNames>>::new();
+        let mut by_package = HashMap::<(&Path, CargoImporter, bool), Arc<RustCrateNames>>::new();
         let mut names = HashMap::new();
         for (id, path) in &self.files {
             let Some(root) = self.project.nearest_root_for(path, Language::Rust) else {
                 continue;
             };
             let kind = self.cargo_importer(path);
+            let names_own_library =
+                kind == CargoImporter::Crate && self.outside_the_library(root, path);
             let crates = by_package
-                .entry((root.path.as_path(), kind))
+                .entry((root.path.as_path(), kind, names_own_library))
                 .or_insert_with(|| {
                     let mut crates = RustCrateNames::new();
                     let dependencies = root
@@ -677,7 +682,9 @@ impl<'a> RustModuleTree<'a> {
                             crates.insert(name.to_string(), placement);
                         }
                     }
-                    if let Some(package) = root.package_name.as_deref() {
+                    if let Some(package) =
+                        root.package_name.as_deref().filter(|_| names_own_library)
+                    {
                         if let Some(placement) = library_placement(root) {
                             crates.entry(package.replace('-', "_")).or_insert(placement);
                         }
@@ -690,6 +697,26 @@ impl<'a> RustModuleTree<'a> {
             }
         }
         names
+    }
+
+    /// Whether `path`, a file of the package at `root`, is compiled only into crates other than
+    /// the package's library: the crate roots that declare it are known, none is the library's,
+    /// and no other crate may compile it too.
+    fn outside_the_library(&self, root: &ProjectRoot, path: &Path) -> bool {
+        let Some(library) = RustPackageLayout::of(Some(root)).library_stem() else {
+            return false;
+        };
+        let Some(file) = self.module_file_of(path) else {
+            return false;
+        };
+        if file.importer_root.is_none() && self.shared_files().contains(&importer_stem(&file)) {
+            return false;
+        }
+        let roots = match &file.importer_root {
+            Some(own) => vec![own.clone()],
+            None => self.declared_placement(&file).1,
+        };
+        !roots.is_empty() && !roots.contains(&library)
     }
 
     /// Whether the declared module tree places `file` at its path, and the crate roots whose
@@ -3881,5 +3908,39 @@ mod tests {
         let main_id = FileId::new(format!("file:{main}"));
         assert!(!targets.is_in_crate(&main_id, "engine::missing"));
         assert!(!targets.is_in_crate(&FileId::new("file:crates/nodep/src/lib.rs"), "engine::run"));
+    }
+
+    #[test]
+    fn a_package_names_its_own_library_only_from_its_other_crates() {
+        // `crates/engine` has a library (`lib.rs` declaring `util`), a binary, an integration
+        // test and a build script; `crates/app` depends on it.
+        let files = [
+            "crates/engine/src/lib.rs",
+            "crates/engine/src/util.rs",
+            "crates/engine/src/main.rs",
+            "crates/engine/tests/it.rs",
+            "crates/engine/build.rs",
+            "crates/app/src/lib.rs",
+        ]
+        .map(source_file);
+        let project = cross_crate_project();
+        let declarations = vec![mod_decl("crates/engine/src/lib.rs", "util")];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let names = modules.crate_names();
+        let named = |path: &str| {
+            names
+                .get(&FileId::new(format!("file:{path}")))
+                .map(|crates| crates.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        // Library code cannot write its own crate's name, and a build script names only its
+        // build dependencies.
+        assert!(named("crates/engine/src/lib.rs").is_empty());
+        assert!(named("crates/engine/src/util.rs").is_empty());
+        assert!(named("crates/engine/build.rs").is_empty());
+        assert_eq!(named("crates/engine/src/main.rs"), vec!["engine"]);
+        assert_eq!(named("crates/engine/tests/it.rs"), vec!["engine"]);
+        assert_eq!(named("crates/app/src/lib.rs"), vec!["engine"]);
     }
 }
