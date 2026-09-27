@@ -636,7 +636,6 @@ fn cargo_patched_in_repository(
             }
         }
     }
-    // `[replace]` keys are package ids, `name:version` or a bare name.
     for (key, entry) in table
         .get("replace")
         .and_then(toml::Value::as_table)
@@ -644,11 +643,35 @@ fn cargo_patched_in_repository(
         .flatten()
     {
         if in_repository(entry) {
-            let name = key.split_once(':').map_or(key.as_str(), |(name, _)| name);
-            patched.insert(name.to_string());
+            if let Some(name) = cargo_package_id_spec_name(key) {
+                patched.insert(name.to_string());
+            }
         }
     }
     patched
+}
+
+/// The package name of a `[replace]` key, a package id spec: `name`, `name:version`,
+/// `name@version`, `url#name:version`, `url#name@version`, or `url#version`, which names the
+/// package by the URL's last path segment.
+fn cargo_package_id_spec_name(spec: &str) -> Option<&str> {
+    let spec = spec.trim();
+    let (url, fragment) = match spec.rsplit_once('#') {
+        Some((url, fragment)) => (Some(url), fragment),
+        None if spec.contains("://") => (Some(spec), ""),
+        None => (None, spec),
+    };
+    let name = fragment.split([':', '@']).next().unwrap_or_default();
+    let names_version = name.starts_with(|ch: char| ch.is_ascii_digit());
+    let name = match url {
+        Some(url) if name.is_empty() || names_version => url
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or_default(),
+        _ => name,
+    };
+    (!name.is_empty() && !name.contains(['/', ':'])).then_some(name)
 }
 
 /// The directory of the workspace root whose `[patch]` and `[replace]` apply to the package in
@@ -662,19 +685,38 @@ fn cargo_workspace_root_dir(
     let explicit = package
         .and_then(|package| package.get("workspace"))
         .and_then(toml::Value::as_str);
-    match explicit {
-        Some(path) => Some(PathBuf::from(normalize_path(&join_slash(dir, path))?)),
-        None => Some(
-            dir.ancestors()
-                .find(|ancestor| {
-                    manifests
-                        .get(*ancestor)
-                        .is_some_and(|table| table.contains_key("workspace"))
-                })
-                .unwrap_or(dir)
-                .to_path_buf(),
-        ),
+    if let Some(path) = explicit {
+        return Some(PathBuf::from(normalize_path(&join_slash(dir, path))?));
     }
+    let nearest = dir.ancestors().find_map(|ancestor| {
+        let workspace = manifests.get(ancestor)?.get("workspace")?.as_table()?;
+        Some((ancestor, workspace))
+    });
+    // Cargo takes the nearest workspace above a package as its root only when that workspace's
+    // `members` cover the package and its `exclude` does not; an excluded package, or one no
+    // member names, is a root of its own.
+    Some(match nearest {
+        Some((root, _)) if root == dir => dir.to_path_buf(),
+        Some((root, workspace))
+            if path_is_under_any(dir, &workspace_path_prefixes(workspace, "members", root))
+                && !path_is_under_any(
+                    dir,
+                    &workspace_path_prefixes(workspace, "exclude", root),
+                ) =>
+        {
+            root.to_path_buf()
+        }
+        _ => dir.to_path_buf(),
+    })
+}
+
+/// Whether the repository-relative `dir` is at or below one of `prefixes`, as
+/// [`workspace_members`] spells them.
+fn path_is_under_any(dir: &Path, prefixes: &[String]) -> bool {
+    let dir = format!("{}/", dir.to_string_lossy().replace('\\', "/"));
+    prefixes
+        .iter()
+        .any(|prefix| dir.starts_with(prefix.as_str()))
 }
 
 /// `path`, relative to the repository-relative `dir`, joined with `/` separators.
@@ -691,8 +733,14 @@ fn join_slash(dir: &Path, path: &str) -> String {
 /// Repository-relative path prefixes of a workspace's `members`, each glob cut at its first
 /// wildcard, and a literal member ending in `/`.
 fn workspace_members(workspace: &toml::Table, dir: &Path) -> Vec<String> {
+    workspace_path_prefixes(workspace, "members", dir)
+}
+
+/// Repository-relative path prefixes of the paths a workspace table lists under `key`, as
+/// [`workspace_members`] reads them.
+fn workspace_path_prefixes(workspace: &toml::Table, key: &str, dir: &Path) -> Vec<String> {
     workspace
-        .get("members")
+        .get(key)
         .and_then(toml::Value::as_array)
         .into_iter()
         .flatten()
@@ -1055,6 +1103,90 @@ mod tests {
         );
         assert!(!app.cargo_targets.autodiscovers(CargoTargetKind::Bin));
         assert!(app.cargo_targets.autodiscovers(CargoTargetKind::Example));
+    }
+
+    #[test]
+    fn a_package_the_workspace_excludes_or_does_not_list_is_its_own_patch_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, content: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\nexclude = [\"tools/solo\"]\n",
+        );
+        write("tools/util/Cargo.toml", "[package]\nname = \"util\"\n");
+        let own_patch =
+            "[dependencies]\nutil = \"1\"\n\n[patch.crates-io]\nutil = { path = \"../util\" }\n";
+        write(
+            "tools/solo/Cargo.toml",
+            &format!("[package]\nname = \"solo\"\n\n{own_patch}"),
+        );
+        write(
+            "tools/unlisted/Cargo.toml",
+            &format!("[package]\nname = \"unlisted\"\n\n{own_patch}"),
+        );
+        let model = ProjectModel::discover(dir.path());
+        for package in ["tools/solo", "tools/unlisted"] {
+            let manifest = model
+                .rust_root_at(Path::new(package))
+                .and_then(|root| root.cargo_manifest.as_ref())
+                .unwrap();
+            assert!(
+                manifest.external_dependencies.is_empty(),
+                "{package}: {:?}",
+                manifest.external_dependencies
+            );
+        }
+    }
+
+    #[test]
+    fn replace_keys_are_read_as_package_id_specs() {
+        for (spec, name) in [
+            ("util", Some("util")),
+            ("util:1.0.0", Some("util")),
+            ("util@1.0.0", Some("util")),
+            (
+                "https://github.com/rust-lang/crates.io-index#util:1.0.0",
+                Some("util"),
+            ),
+            (
+                "https://github.com/rust-lang/crates.io-index#util@1.0.0",
+                Some("util"),
+            ),
+            ("https://github.com/acme/util#1.0.0", Some("util")),
+            ("https://github.com/acme/util", Some("util")),
+        ] {
+            assert_eq!(cargo_package_id_spec_name(spec), name, "{spec}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, content: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[replace]\n\"https://github.com/rust-lang/crates.io-index#util:1.0.0\" = { path = \"crates/util\" }\n\"codec@1.2.0\" = { path = \"crates/codec\" }\n",
+        );
+        write("crates/util/Cargo.toml", "[package]\nname = \"util\"\n");
+        write("crates/codec/Cargo.toml", "[package]\nname = \"codec\"\n");
+        write(
+            "crates/app/Cargo.toml",
+            "[package]\nname = \"app\"\n\n[dependencies]\nutil = \"1\"\ncodec = \"1.2\"\n",
+        );
+        let model = ProjectModel::discover(dir.path());
+        let manifest = model
+            .rust_root_at(Path::new("crates/app"))
+            .and_then(|root| root.cargo_manifest.as_ref())
+            .unwrap();
+        assert!(
+            manifest.external_dependencies.is_empty(),
+            "{:?}",
+            manifest.external_dependencies
+        );
     }
 
     #[test]
