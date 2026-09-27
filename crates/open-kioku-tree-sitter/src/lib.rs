@@ -391,6 +391,9 @@ fn is_scope_node(file: &File, node: Node<'_>) -> Option<ScopeKind> {
             "struct_item" | "enum_item" | "union_item" => Some(ScopeKind::Class),
             "trait_item" | "impl_item" => Some(ScopeKind::Trait),
             "function_item" => Some(ScopeKind::Function),
+            // A closure's typed parameters are bindings of the closure alone: `|ctx: &mut Ring|`
+            // must not type a `ctx` the enclosing function uses after the closure.
+            "closure_expression" => Some(ScopeKind::Closure),
             "block" => Some(ScopeKind::Block),
             _ => None,
         },
@@ -3070,7 +3073,7 @@ mod ri3_rust_use_import_site_tests {
 #[cfg(test)]
 mod ri3_rust_binding_type_tests {
     use super::parse_file;
-    use open_kioku_core::{Binding, File, FileId, Language, RepositoryId};
+    use open_kioku_core::{Binding, File, FileId, Language, RepositoryId, ScopeKind};
 
     fn rust_bindings(source: &str) -> Vec<Binding> {
         let file = File {
@@ -3121,6 +3124,41 @@ mod ri3_rust_binding_type_tests {
             binding(&bindings, "raw").declared_type.as_deref(),
             Some("Raw")
         );
+    }
+
+    #[test]
+    fn rust_closure_parameters_bind_in_the_closure_alone() {
+        let file = File {
+            id: FileId::new("file:src/caller.rs"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/caller.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "pub fn run(ctx: Ring) {\n    let submit = |ctx: &mut Ring| ctx.submit();\n    ctx.flush();\n}\n",
+        )
+        .expect("Rust closure fixture should parse");
+        let scope_of = |binding: &Binding| {
+            facts
+                .scopes
+                .iter()
+                .find(|scope| scope.id == binding.scope_id)
+                .map(|scope| scope.kind)
+        };
+        let ctx = facts
+            .bindings
+            .iter()
+            .filter(|binding| binding.name == "ctx")
+            .collect::<Vec<_>>();
+        assert_eq!(ctx.len(), 2, "{ctx:?}");
+        assert_eq!(scope_of(ctx[0]), Some(ScopeKind::Function));
+        assert_eq!(ctx[1].declared_type.as_deref(), Some("mut Ring"));
+        assert_eq!(scope_of(ctx[1]), Some(ScopeKind::Closure));
     }
 }
 

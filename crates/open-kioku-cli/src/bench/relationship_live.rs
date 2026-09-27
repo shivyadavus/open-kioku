@@ -1209,6 +1209,118 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // A receiver annotated with a generic type, by reference or by value, is a `Wrapper`
+        // (#599).
+        "generic_annotated_parameter_receiver" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod wrapper;\n"),
+                (
+                    "src/wrapper.rs",
+                    "pub struct Wrapper<T>(T);\n\nimpl<T> Wrapper<T> {\n    pub fn target_fn(&self) {}\n}\n\npub fn caller_fn(w: &Wrapper<u8>) {\n    w.target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        "generic_annotated_let_receiver" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod wrapper;\n"),
+                (
+                    "src/wrapper.rs",
+                    "pub struct Wrapper<T>(T);\n\nimpl<T> Wrapper<T> {\n    pub fn target_fn(&mut self) {}\n}\n\npub fn caller_fn(seed: u8) {\n    let mut w: Wrapper<u8> = Wrapper(seed);\n    w.target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `Vec<Thing>` is a `Vec`: its `target_fn` is the extension trait's, never `Thing`'s.
+        "generic_annotation_container_receiver" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod thing;\n"),
+                (
+                    "src/thing.rs",
+                    "pub struct Thing;\n\nimpl Thing {\n    pub fn target_fn(&self) {}\n}\n\npub trait Ext {\n    fn target_fn(&self);\n}\n\nimpl<T> Ext for Vec<T> {\n    fn target_fn(&self) {}\n}\n\npub fn caller_fn(things: Vec<Thing>) {\n    things.target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `impl Wrapper<u8>` and `impl Wrapper<u16>` each declare `target_fn`, and the index does
+        // not match type arguments, so `w: &Wrapper<u8>` keeps both candidates.
+        "generic_annotation_instantiations_same_method" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod wrapper;\n"),
+                (
+                    "src/wrapper.rs",
+                    "pub struct Wrapper<T>(T);\n\nimpl Wrapper<u8> {\n    pub fn target_fn(&self) {}\n}\n\nimpl Wrapper<u16> {\n    pub fn target_fn(&self) {}\n}\n\npub fn caller_fn(w: &Wrapper<u8>) {\n    w.target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // A closure's typed parameter binds in the closure alone: after it, `w` is the function's
+        // `Vec<Thing>` parameter again, never the closure's `&Wrapper<u8>`.
+        "closure_parameter_after_the_closure" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod wrapper;\n"),
+                (
+                    "src/wrapper.rs",
+                    "pub struct Wrapper<T>(T);\n\nimpl<T> Wrapper<T> {\n    pub fn target_fn(&self) {}\n}\n\npub struct Thing;\n\npub trait Ext {\n    fn target_fn(&self);\n}\n\nimpl<T> Ext for Vec<T> {\n    fn target_fn(&self) {}\n}\n\npub fn caller_fn(w: Vec<Thing>) {\n    let check = |w: &Wrapper<u8>| w.0 > 0;\n    let _ = check;\n    w.target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // A path through a type reaches its associated function, in this crate and in a declared
+        // dependency (#599).
+        "crate_path_type_associated_fn" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod engine;\npub mod caller;\n"),
+                (
+                    "src/engine.rs",
+                    "pub struct PlanEngine;\n\nimpl PlanEngine {\n    pub fn target_fn() -> Self {\n        PlanEngine\n    }\n}\n",
+                ),
+                (
+                    "src/caller.rs",
+                    "pub fn caller_fn() {\n    crate::engine::PlanEngine::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        "dependency_crate_type_associated_fn" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                (
+                    "crates/engine/src/lib.rs",
+                    "pub struct PlanEngine;\n\nimpl PlanEngine {\n    pub fn target_fn() -> Self {\n        PlanEngine\n    }\n}\n",
+                ),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub fn caller_fn() {\n    engine::PlanEngine::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // The path names `PlanEngine`, which declares no `target_fn`; another type of the module
+        // does.
+        "crate_path_type_without_the_member" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod engine;\npub mod caller;\n"),
+                (
+                    "src/engine.rs",
+                    "pub struct PlanEngine;\n\npub struct Other;\n\nimpl Other {\n    pub fn target_fn() {}\n}\n",
+                ),
+                (
+                    "src/caller.rs",
+                    "pub fn caller_fn() {\n    crate::engine::PlanEngine::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
         // `pub mod r#type;` is the file `type.rs` (#543).
         "raw_identifier_module_crate_path" => (
             vec![

@@ -4,8 +4,8 @@ use crate::index::{ScopeIndex, SymbolIndex};
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
 use open_kioku_core::{
     Binding, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, InheritanceKind,
-    InheritanceSite, LineRange, RelationshipProof, RelationshipProofKind, ScopeId, Symbol,
-    SymbolId, SymbolKind,
+    InheritanceSite, Language, LineRange, RelationshipProof, RelationshipProofKind, ScopeId,
+    Symbol, SymbolId, SymbolKind,
 };
 use open_kioku_semantic_model::SemanticRepository;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -126,6 +126,34 @@ pub fn resolve_inheritance_relationship_outcome(
         ctx.repository,
         Some(ctx.scopes),
     );
+    if parent_candidates.is_empty()
+        && site.kind == InheritanceKind::TraitImpl
+        && child.language == Language::Rust
+    {
+        if let Some((identity, via_import)) = rust_external_trait(child, &site.parent_name, ctx) {
+            let evidence = ResolutionEvidence {
+                kind: if via_import {
+                    ResolutionEvidenceKind::ExplicitImport
+                } else {
+                    ResolutionEvidenceKind::LexicalScope
+                },
+                source_type: EvidenceSourceType::TreeSitter,
+                file_range: syntax_file_range(ctx, &site.range),
+                symbol_id: None,
+                message: format!(
+                    "implemented trait `{}` is `{identity}`, defined outside the repository",
+                    site.parent_name
+                ),
+            };
+            return (
+                edge_type,
+                ResolutionOutcome::External {
+                    identity,
+                    evidence: vec![evidence],
+                },
+            );
+        }
+    }
     let target_ids = parent_candidates
         .iter()
         .map(|candidate| candidate.target.clone())
@@ -209,6 +237,145 @@ pub fn resolve_inheritance_relationship_outcome(
         edge_type.clone(),
         evaluate_candidates(&edge_type, candidates),
     )
+}
+
+/// Traits of the Rust standard prelude, in any edition, that code names without importing them.
+const RUST_PRELUDE_TRAITS: &[&str] = &[
+    "AsMut",
+    "AsRef",
+    "AsyncFn",
+    "AsyncFnMut",
+    "AsyncFnOnce",
+    "Clone",
+    "Copy",
+    "Default",
+    "DoubleEndedIterator",
+    "Drop",
+    "Eq",
+    "ExactSizeIterator",
+    "Extend",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "From",
+    "FromIterator",
+    "Future",
+    "Into",
+    "IntoFuture",
+    "IntoIterator",
+    "Iterator",
+    "Ord",
+    "PartialEq",
+    "PartialOrd",
+    "Send",
+    "Sized",
+    "Sync",
+    "ToOwned",
+    "ToString",
+    "TryFrom",
+    "TryInto",
+    "Unpin",
+];
+
+/// The path of the trait a Rust `impl` names, when no repository symbol answers to it and the
+/// index can show it is defined outside the repository, and whether an import showed it. The
+/// path's first segment decides: an import binding it from the standard library or from a
+/// dependency the package's manifest places outside the repository (`use std::fmt;` for
+/// `fmt::Debug`), such a crate named directly (`std::error::Error`, `tokio::io::AsyncRead`), or,
+/// for a bare name nothing in scope imports, a trait of the standard prelude (`Iterator`).
+/// `None` whenever the path may name an item of the repository: through `crate`, `self` or
+/// `super`, an item or glob import in scope, or an import the index cannot place outside.
+fn rust_external_trait(
+    child: &Symbol,
+    trait_name: &str,
+    ctx: &ResolutionContext<'_>,
+) -> Option<(String, bool)> {
+    let path = rust_trait_path(trait_name)?;
+    let (absolute, path) = match path.strip_prefix("::") {
+        Some(rest) => (true, rest),
+        None => (false, path),
+    };
+    let mut segments = path.split("::").map(str::trim);
+    let first = segments.next()?;
+    let rest = segments.collect::<Vec<_>>();
+    if absolute {
+        return ctx
+            .scopes
+            .rust_names_external_crate(&child.file_id, first)
+            .then(|| (path.to_string(), false));
+    }
+    if matches!(first, "crate" | "self" | "super" | "Self") {
+        return None;
+    }
+    let scope = child.scope_id.as_ref()?;
+    if crate::context::nearest_lexical_items(ctx, scope, first, |_| true).is_some() {
+        return None;
+    }
+    match crate::context::scoped_import(
+        ctx.repository,
+        Some(ctx.scopes),
+        &child.language,
+        &child.file_id,
+        Some(scope),
+        first,
+        |_| true,
+    ) {
+        crate::context::ScopedImport::Resolved(bindings) => {
+            let mut sources = bindings
+                .iter()
+                .map(|binding| rust_external_import_source(ctx, child, &binding.source_module))
+                .collect::<Option<Vec<_>>>()?;
+            sources.sort_unstable();
+            sources.dedup();
+            let [source] = sources.as_slice() else {
+                return None;
+            };
+            let identity = std::iter::once(*source)
+                .chain(rest.iter().copied())
+                .collect::<Vec<_>>()
+                .join("::");
+            Some((identity, true))
+        }
+        crate::context::ScopedImport::Unresolved => None,
+        crate::context::ScopedImport::NotImported if rest.is_empty() => RUST_PRELUDE_TRAITS
+            .contains(&first)
+            .then(|| (format!("std::prelude::{first}"), false)),
+        crate::context::ScopedImport::NotImported => ctx
+            .scopes
+            .rust_names_external_crate(&child.file_id, first)
+            .then(|| (path.to_string(), false)),
+    }
+}
+
+/// A `use` path whose first segment names a crate outside the repository, without a trailing
+/// `self`.
+fn rust_external_import_source<'s>(
+    ctx: &ResolutionContext<'_>,
+    child: &Symbol,
+    source: &'s str,
+) -> Option<&'s str> {
+    let source = source.trim();
+    let source = source.strip_prefix("::").unwrap_or(source);
+    let source = source.strip_suffix("::self").unwrap_or(source);
+    let first = source.split("::").next()?.trim();
+    ctx.scopes
+        .rust_names_external_crate(&child.file_id, first)
+        .then_some(source)
+}
+
+/// The path of the trait an `impl` header names, without generic arguments (`From<u8>` is a use
+/// of `From`) or the parenthesized arguments of a closure trait. `None` for anything that is not
+/// a plain path.
+fn rust_trait_path(trait_name: &str) -> Option<&str> {
+    let end = trait_name.find(['<', '(']).unwrap_or(trait_name.len());
+    let path = trait_name[..end].trim();
+    let body = path.strip_prefix("::").unwrap_or(path);
+    let plain = !body.is_empty()
+        && body.split("::").all(|segment| {
+            let segment = segment.strip_prefix("r#").unwrap_or(segment);
+            !segment.is_empty() && segment.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+        });
+    plain.then_some(path)
 }
 
 pub fn resolve_declared_type_use_outcome(
@@ -615,6 +782,143 @@ mod ri3_relationship_outcome_tests {
             .proofs
             .iter()
             .all(|proof| proof.source_range.is_some()));
+    }
+
+    /// A Rust struct `Child` declared at file scope of `src/lib.rs`, with the file's `use`
+    /// bindings `(local name, source path, glob)` and the crates outside the repository its
+    /// package declares, and the outcome of `impl <trait_name> for Child`.
+    fn rust_trait_impl_outcome(
+        trait_name: &str,
+        imports: &[(&str, &str, bool)],
+        external_crates: &[&str],
+    ) -> ResolutionOutcome {
+        let mut child = symbol("symbol:child", "Child", SymbolKind::Class);
+        child.scope_id = Some(ScopeId::new("scope:file"));
+        let file_scope = Scope {
+            id: ScopeId::new("scope:file"),
+            file_id: FileId::new("file:src/lib.rs"),
+            parent_id: None,
+            owner_symbol_id: None,
+            kind: ScopeKind::File,
+            range: SourceRange {
+                start_line: 1,
+                start_column: 1,
+                end_line: 40,
+                end_column: 1,
+            },
+        };
+        let mut fixture = Fixture::new(vec![child.clone()], vec![file_scope], Vec::new());
+        for (local_name, source, is_glob) in imports {
+            fixture
+                .repo
+                .imports
+                .insert(open_kioku_semantic_model::ImportBinding {
+                    file_id: fixture.file_id.clone(),
+                    scope_id: ScopeId::new("scope:file"),
+                    local_name: (*local_name).into(),
+                    imported_name: (*local_name).into(),
+                    source_module: (*source).into(),
+                    resolved_module: None,
+                    target_file: None,
+                    target_symbol: None,
+                    origin: open_kioku_semantic_model::ImportOrigin::Unknown,
+                    is_type_only: false,
+                    is_glob: *is_glob,
+                    evidence: Vec::new(),
+                    rule: open_kioku_semantic_model::ImportBindingRule::ModuleKey,
+                });
+        }
+        fixture.scopes.record_rust_external_crates(
+            [(
+                fixture.file_id.clone(),
+                std::sync::Arc::new(
+                    external_crates
+                        .iter()
+                        .map(|name| (*name).to_string())
+                        .collect::<BTreeSet<_>>(),
+                ),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let site = InheritanceSite {
+            child_symbol_id: child.id,
+            parent_name: trait_name.into(),
+            kind: InheritanceKind::TraitImpl,
+            order: 0,
+            range: range(),
+        };
+        let (edge_type, outcome) =
+            resolve_inheritance_relationship_outcome(&site, &fixture.context());
+        assert_eq!(edge_type, GraphEdgeType::Implements);
+        outcome
+    }
+
+    fn external_identity(outcome: &ResolutionOutcome) -> Option<&str> {
+        match outcome {
+            ResolutionOutcome::External { identity, .. } => Some(identity),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn rust_impl_of_a_standard_library_trait_is_external() {
+        let through_module =
+            rust_trait_impl_outcome("fmt::Debug", &[("fmt", "std::fmt", false)], &[]);
+        assert_eq!(external_identity(&through_module), Some("std::fmt::Debug"));
+        let direct = rust_trait_impl_outcome("std::error::Error", &[], &[]);
+        assert_eq!(external_identity(&direct), Some("std::error::Error"));
+        let imported =
+            rust_trait_impl_outcome("Deref", &[("Deref", "core::ops::Deref", false)], &[]);
+        assert_eq!(external_identity(&imported), Some("core::ops::Deref"));
+        let generic = rust_trait_impl_outcome("From<u8>", &[], &[]);
+        assert_eq!(external_identity(&generic), Some("std::prelude::From"));
+        let prelude = rust_trait_impl_outcome("Iterator", &[], &[]);
+        assert_eq!(external_identity(&prelude), Some("std::prelude::Iterator"));
+    }
+
+    #[test]
+    fn rust_impl_of_a_trait_from_a_dependency_outside_the_repository_is_external() {
+        let imported = rust_trait_impl_outcome(
+            "AsyncRead",
+            &[("AsyncRead", "tokio::io::AsyncRead", false)],
+            &["tokio"],
+        );
+        assert_eq!(external_identity(&imported), Some("tokio::io::AsyncRead"));
+        let direct = rust_trait_impl_outcome("bytes::Buf", &[], &["bytes"]);
+        assert_eq!(external_identity(&direct), Some("bytes::Buf"));
+    }
+
+    #[test]
+    fn rust_impl_of_a_trait_the_index_cannot_place_outside_stays_unresolved() {
+        let unresolved = |outcome: ResolutionOutcome| {
+            assert!(
+                matches!(outcome, ResolutionOutcome::Unresolved { .. }),
+                "expected unresolved, got {outcome:?}"
+            );
+        };
+        // A crate the package's manifest does not declare may be one of the repository.
+        unresolved(rust_trait_impl_outcome(
+            "AsyncRead",
+            &[("AsyncRead", "tokio::io::AsyncRead", false)],
+            &[],
+        ));
+        unresolved(rust_trait_impl_outcome("bytes::Buf", &[], &[]));
+        // A path through this crate names an item of the repository the index did not bind.
+        unresolved(rust_trait_impl_outcome(
+            "AsyncWrite",
+            &[("AsyncWrite", "crate::io::AsyncWrite", false)],
+            &["tokio"],
+        ));
+        unresolved(rust_trait_impl_outcome("crate::Link", &[], &[]));
+        // A glob in scope may supply a prelude name, and a bare name outside the prelude comes
+        // from somewhere the index does not see.
+        unresolved(rust_trait_impl_outcome(
+            "Iterator",
+            &[("*", "crate::iter::*", true)],
+            &[],
+        ));
+        unresolved(rust_trait_impl_outcome("Debug", &[], &[]));
     }
 
     #[test]

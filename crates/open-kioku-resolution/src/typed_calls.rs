@@ -4,7 +4,7 @@ use crate::index::RustModulePlacement;
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
 use open_kioku_core::{
     Binding, CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, Language,
-    LineRange, RelationshipProof, RelationshipProofKind, ScopeId, SymbolId, SymbolKind,
+    LineRange, RelationshipProof, RelationshipProofKind, ScopeId, Symbol, SymbolId, SymbolKind,
 };
 use std::collections::BTreeMap;
 
@@ -49,6 +49,11 @@ pub(crate) fn binding_receiver_type(
         .map(str::trim)
         .filter(|declared| !declared.is_empty())
     {
+        let declared = if ctx.language == Language::Rust {
+            rust_annotated_receiver_type(declared).unwrap_or(declared)
+        } else {
+            declared
+        };
         return Some((declared.to_string(), true));
     }
     let inferred = binding
@@ -57,6 +62,68 @@ pub(crate) fn binding_receiver_type(
         .map(str::trim)
         .filter(|inferred| !inferred.is_empty())?;
     Some(inferred_receiver_type(ctx, scope_id, inferred))
+}
+
+/// The type whose members a method call on a Rust binding annotated `annotation` reaches: the
+/// annotation's path without its generic arguments, seen through references. `x: Foo<u8>`,
+/// `w: &Wrapper<u8>` and `m: &'a mut Foo` are a `Foo`, a `Wrapper` and a `Foo`; generic arguments
+/// pick an instantiation of the type, not another type. `v: Vec<Foo>` is a `Vec`, never a `Foo`.
+/// `None` for any other form, such as a tuple, slice, pointer, trait object or `impl Trait`.
+fn rust_annotated_receiver_type(annotation: &str) -> Option<&str> {
+    let mut rest = annotation.trim();
+    while let Some(referent) = rest.strip_prefix('&') {
+        rest = referent.trim_start();
+        if let Some(lifetime) = rest.strip_prefix('\'') {
+            let end = lifetime.find(char::is_whitespace)?;
+            rest = lifetime[end..].trim_start();
+        }
+        if let Some(referent) = rest.strip_prefix("mut ") {
+            rest = referent.trim_start();
+        }
+    }
+    // The parser drops a parameter's leading `&`, leaving `mut Foo` for `&mut Foo`.
+    if let Some(referent) = rest.strip_prefix("mut ") {
+        rest = referent.trim_start();
+    }
+    let path = match rest.find('<') {
+        Some(open) => {
+            let arguments = rest[open..].trim_end();
+            if !arguments.ends_with('>') || !angle_brackets_close_at_end(arguments) {
+                return None;
+            }
+            rest[..open].trim_end()
+        }
+        None => rest,
+    };
+    let body = path.strip_prefix("::").unwrap_or(path);
+    let plain = !body.is_empty()
+        && body.split("::").all(|segment| {
+            let segment = segment.strip_prefix("r#").unwrap_or(segment);
+            !segment.is_empty() && segment.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+        });
+    plain.then_some(path)
+}
+
+/// Whether the `<` opening `arguments` is closed by its last character, so nothing follows the
+/// generic arguments: `<u8>` but not `<u8> + Send` or `<A>::B<C>`.
+fn angle_brackets_close_at_end(arguments: &str) -> bool {
+    let mut depth = 0usize;
+    for (index, ch) in arguments.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                let Some(next) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next;
+                if depth == 0 {
+                    return index + ch.len_utf8() == arguments.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The type an initializer gives its binding, and whether the index proves it.
@@ -162,39 +229,86 @@ pub(crate) fn resolve_module_member_outcome(
     }
 }
 
-/// A Rust call through a `crate::`, `self::` or `super::` path. `self` and `super` start from the
-/// innermost module around the call, an inline `mod` block included: `super::f()` in
+/// A Rust call through a `crate::`, `self::` or `super::` path, or one through a crate name the
+/// caller's package declares (see [`rust_crate_name_member_names`]). `self` and `super` start
+/// from the innermost module around the call, an inline `mod` block included: `super::f()` in
 /// `mod tests` of `src/worker.rs` names the `f` that file declares, not one in the crate root. A
 /// path ending in a module of this file names an item that module declares or brings in from
 /// another module of the file. One ending outside the file's scopes names items by the qualified
 /// names its module path spells in the caller's own crate, read from the declared module tree: it
 /// starts only in a file the tree records, `crate::` from that crate's root and `self`/`super`
 /// only from a file the tree places at its path, and ends only in a file placed in that crate.
+///
+/// When the whole path names no item, a path whose last segment names a type of the module the
+/// rest reaches is a call to an associated function of that type: `crate::a::Engine::new()` and
+/// `engine::Engine::new()` reach `new` declared in an `impl` of that `Engine`.
 fn resolve_rust_qualified_module_outcome(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
     receiver: &str,
 ) -> Option<ResolutionOutcome> {
     let receiver = receiver.trim();
-    if let Some(outcome) = resolve_rust_crate_name_outcome(call, ctx, receiver) {
-        return Some(outcome);
+    if let Some((targets, strategy)) =
+        rust_module_path_items(call, ctx, receiver, &call.callee_name, |symbol| {
+            !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
+        })
+    {
+        return Some(rust_module_path_outcome(call, ctx, targets, strategy));
+    }
+    let (module_path, type_name) = receiver.rsplit_once("::")?;
+    let type_name = type_name.trim();
+    if matches!(type_name, "" | "self" | "super" | "crate") {
+        return None;
+    }
+    let (types, strategy) =
+        rust_module_path_items(call, ctx, module_path.trim(), type_name, |symbol| {
+            matches!(
+                symbol.kind,
+                SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface
+            )
+        })?;
+    let mut members = types
+        .iter()
+        .flat_map(|type_id| find_members_by_name(ctx, type_id, &call.callee_name))
+        .filter(|member| {
+            ctx.symbols.get(member).is_some_and(|symbol| {
+                matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method)
+            })
+        })
+        .collect::<Vec<_>>();
+    normalize_symbol_ids(&mut members);
+    if members.is_empty() {
+        return None;
+    }
+    Some(rust_type_path_outcome(call, ctx, members, strategy))
+}
+
+/// The items named `name` that `accept` admits in the module a Rust path names, and how the path
+/// reached them; `None` when the path is not one the resolver reads or reaches no such item.
+fn rust_module_path_items(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    path: &str,
+    name: &str,
+    accept: impl Fn(&Symbol) -> bool,
+) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
+    if let Some(targets) = rust_crate_name_items(call, ctx, path, name, &accept) {
+        return Some((targets, RustModulePathStrategy::CrateName));
     }
     let own = ctx.scopes.rust_module_placement(ctx.file_id);
     // A file another crate may compile too is read against no one crate.
     let mut placement = own.filter(|placement| !placement.in_other_crates);
-    let (mut targets, strategy) = if receiver == "crate" || receiver.starts_with("crate::") {
-        let names = rust_crate_path_member_names(placement?, receiver, &call.callee_name)?;
+    let (mut targets, strategy) = if path == "crate" || path.starts_with("crate::") {
+        let names = rust_crate_path_member_names(placement?, path, name)?;
         (
-            rust_qualified_targets(ctx, &names),
+            rust_qualified_targets(ctx, &names, &accept),
             RustModulePathStrategy::CrateQualified,
         )
     } else {
-        let (depth, segments) = rust_relative_path(receiver)?;
+        let (depth, segments) = rust_relative_path(path)?;
         match crate::context::rust_relative_module(ctx, &call.scope_id, depth, &segments)? {
             RustRelativeModule::InFile(module) => (
-                crate::context::rust_module_items(ctx, module, &call.callee_name, |symbol| {
-                    !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
-                }),
+                crate::context::rust_module_items(ctx, module, name, &accept),
                 RustModulePathStrategy::ModuleScope,
             ),
             RustRelativeModule::Outside { climbs, path } => {
@@ -206,10 +320,9 @@ fn resolve_rust_qualified_module_outcome(
                     });
                 }
                 // The path is read off this file's module, which only a placed file has.
-                let names =
-                    rust_outside_member_names(placement?, climbs, &path, &call.callee_name)?;
+                let names = rust_outside_member_names(placement?, climbs, &path, name)?;
                 (
-                    rust_qualified_targets(ctx, &names),
+                    rust_qualified_targets(ctx, &names, &accept),
                     RustModulePathStrategy::CrateQualified,
                 )
             }
@@ -227,10 +340,63 @@ fn resolve_rust_qualified_module_outcome(
         });
     }
     normalize_symbol_ids(&mut targets);
-    if targets.is_empty() {
-        return None;
-    }
-    Some(rust_module_path_outcome(call, ctx, targets, strategy))
+    (!targets.is_empty()).then_some((targets, strategy))
+}
+
+/// The associated functions a Rust path through a type reached, each proven by the call site,
+/// the module path, the qualified name of the type it spells, and membership in that type.
+fn rust_type_path_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    targets: Vec<SymbolId>,
+    strategy: RustModulePathStrategy,
+) -> ResolutionOutcome {
+    let (module_strategy, type_strategy) = match strategy {
+        RustModulePathStrategy::CrateQualified => {
+            ("rust_crate_qualified_module", "rust_crate_qualified_type")
+        }
+        RustModulePathStrategy::ModuleScope => ("rust_module_scope_path", "rust_module_scope_type"),
+        RustModulePathStrategy::CrateName => ("rust_crate_name_module", "rust_crate_name_type"),
+    };
+    let candidate_count = targets.len();
+    let ambiguity = ambiguity_strings(&targets);
+    let candidates = targets
+        .into_iter()
+        .map(|target| {
+            let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact);
+            candidate.evidence.push(ResolutionEvidence {
+                kind: ResolutionEvidenceKind::LexicalScope,
+                source_type: EvidenceSourceType::TreeSitter,
+                file_range: call_file_range(call, ctx),
+                symbol_id: Some(target.clone()),
+                message: "associated function of the type an exact Rust path names".into(),
+            });
+            candidate.proofs.push(call_site_proof(call, ctx, &target));
+            for (kind, strategy) in [
+                (
+                    RelationshipProofKind::ModuleOrPackageBinding,
+                    module_strategy,
+                ),
+                (RelationshipProofKind::QualifiedName, type_strategy),
+                (
+                    RelationshipProofKind::ContainingType,
+                    "direct_member_of_path_type",
+                ),
+            ] {
+                candidate.proofs.push(proof(
+                    kind,
+                    strategy,
+                    call,
+                    ctx,
+                    &target,
+                    candidate_count,
+                    &ambiguity,
+                ));
+            }
+            candidate
+        })
+        .collect();
+    evaluate_candidates(&GraphEdgeType::Calls, candidates)
 }
 
 /// The candidates a Rust module path reached, each proven by the call site, the module path and
@@ -296,17 +462,20 @@ fn rust_module_path_outcome(
     evaluate_candidates(&GraphEdgeType::Calls, candidates)
 }
 
-/// A Rust call through a path whose first segment is a crate name the caller's package declares,
-/// read from that library crate's root and ending only in a file placed in that crate. Only a
-/// module receiver reaches here: `engine.run()` shares the receiver text of `engine::run()`, and
-/// a closure, pattern or loop binding named `engine` is not recorded as a binding.
-fn resolve_rust_crate_name_outcome(
+/// The items named `name` that `accept` admits in the module a Rust path through a crate name the
+/// caller's package declares reaches, read from that library crate's root and ending only in a
+/// file placed in that crate. Only a module receiver reaches here: `engine.run()` shares the
+/// receiver text of `engine::run()`, and a closure, pattern or loop binding named `engine` is not
+/// recorded as a binding.
+fn rust_crate_name_items(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
-    receiver: &str,
-) -> Option<ResolutionOutcome> {
-    let (names, crate_placement) = rust_crate_name_member_names(call, ctx, receiver.trim())?;
-    let mut targets = rust_qualified_targets(ctx, &names);
+    path: &str,
+    name: &str,
+    accept: impl Fn(&Symbol) -> bool,
+) -> Option<Vec<SymbolId>> {
+    let (names, crate_placement) = rust_crate_name_member_names(call, ctx, path.trim(), name)?;
+    let mut targets = rust_qualified_targets(ctx, &names, accept);
     targets.retain(|target| {
         ctx.symbols.get(target).is_some_and(|symbol| {
             ctx.scopes
@@ -314,15 +483,7 @@ fn resolve_rust_crate_name_outcome(
         })
     });
     normalize_symbol_ids(&mut targets);
-    if targets.is_empty() {
-        return None;
-    }
-    Some(rust_module_path_outcome(
-        call,
-        ctx,
-        targets,
-        RustModulePathStrategy::CrateName,
-    ))
+    (!targets.is_empty()).then_some(targets)
 }
 
 /// How a Rust module path reached its candidates.
@@ -345,6 +506,7 @@ fn rust_crate_name_member_names<'c>(
     call: &CallSite,
     ctx: &ResolutionContext<'c>,
     receiver: &str,
+    member: &str,
 ) -> Option<(Vec<String>, &'c RustModulePlacement)> {
     let mut segments = receiver.split("::").map(str::trim);
     let first = segments.next()?;
@@ -368,24 +530,24 @@ fn rust_crate_name_member_names<'c>(
         module.push(rust_module_name(segment).to_string());
     }
     Some((
-        rust_module_member_names(placement, &module, &call.callee_name),
+        rust_module_member_names(placement, &module, member),
         placement,
     ))
 }
 
-/// The symbols of the qualified names a Rust path spells, other than modules: `task::yield_now()`
-/// beside `mod yield_now;` names a function, and the module's own symbol carries the same qualified
-/// name as an item of its parent would.
-fn rust_qualified_targets(ctx: &ResolutionContext<'_>, names: &[String]) -> Vec<SymbolId> {
+/// The symbols of the qualified names a Rust path spells that `accept` admits. A call path never
+/// ends in a module: `task::yield_now()` beside `mod yield_now;` names a function, and the
+/// module's own symbol carries the same qualified name as an item of its parent would.
+fn rust_qualified_targets(
+    ctx: &ResolutionContext<'_>,
+    names: &[String],
+    accept: impl Fn(&Symbol) -> bool,
+) -> Vec<SymbolId> {
     names
         .iter()
         .filter_map(|name| ctx.symbols.by_qualified.get(name))
         .flat_map(|ids| ids.iter().cloned())
-        .filter(|id| {
-            ctx.symbols.get(id).is_some_and(|symbol| {
-                !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
-            })
-        })
+        .filter(|id| ctx.symbols.get(id).is_some_and(&accept))
         .collect()
 }
 
@@ -1136,6 +1298,15 @@ mod tests {
     }
 
     fn with_context<T>(symbols: Vec<Symbol>, test: impl FnOnce(&ResolutionContext<'_>) -> T) -> T {
+        with_annotated_context("Service", symbols, test)
+    }
+
+    /// As [`with_context`], with the binding `svc` annotated `declared_type`.
+    fn with_annotated_context<T>(
+        declared_type: &str,
+        symbols: Vec<Symbol>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
         let file_id = FileId::new("file:src/lib.rs");
         let scopes = ScopeIndex::build(vec![Scope {
             id: ScopeId::new("scope:file"),
@@ -1155,7 +1326,7 @@ mod tests {
             file_id: file_id.clone(),
             scope_id: ScopeId::new("scope:file"),
             name: "svc".into(),
-            declared_type: Some("Service".into()),
+            declared_type: Some(declared_type.into()),
             inferred_type: None,
             range: SourceRange {
                 start_line: 10,
@@ -1181,6 +1352,77 @@ mod tests {
             semantics,
         );
         test(&context)
+    }
+
+    #[test]
+    fn rust_annotated_receiver_types_drop_generic_arguments_and_references() {
+        for (annotation, expected) in [
+            ("Service", Some("Service")),
+            ("Service<u8>", Some("Service")),
+            ("&Service<u8>", Some("Service")),
+            ("&'a mut Service<'a, T>", Some("Service")),
+            ("mut Service", Some("Service")),
+            ("&&Service", Some("Service")),
+            ("net::Service<Vec<u8>>", Some("net::Service")),
+            ("Vec<Service>", Some("Vec")),
+            ("&dyn Service", None),
+            ("impl Service", None),
+            ("[Service; 2]", None),
+            ("(Service, u8)", None),
+            ("*const Service", None),
+            ("Service<u8> + Send", None),
+            ("<Service as Run>::Output", None),
+            ("Service<fn() -> u8>", None),
+        ] {
+            assert_eq!(
+                rust_annotated_receiver_type(annotation),
+                expected,
+                "{annotation}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_generic_and_reference_annotations_type_their_receiver() {
+        for annotation in [
+            "Service<u8>",
+            "&Service<u8>",
+            "&'a mut Service",
+            "mut Service",
+        ] {
+            with_annotated_context(
+                annotation,
+                vec![
+                    type_symbol("symbol:type:Service", "Service"),
+                    method_symbol("symbol:method:Service.run", "symbol:type:Service"),
+                ],
+                |ctx| match resolve_typed_receiver_outcome(&call(), ctx) {
+                    ResolutionOutcome::Proven { candidate } => {
+                        assert_eq!(candidate.target_symbol_id.0, "symbol:method:Service.run");
+                        assert!(candidate
+                            .proofs
+                            .iter()
+                            .any(|proof| proof.kind == RelationshipProofKind::ReceiverType));
+                    }
+                    other => panic!("`{annotation}` should prove the call, got {other:?}"),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn rust_annotation_of_a_container_does_not_type_the_receiver_as_its_element() {
+        with_annotated_context(
+            "Vec<Service>",
+            vec![
+                type_symbol("symbol:type:Service", "Service"),
+                method_symbol("symbol:method:Service.run", "symbol:type:Service"),
+            ],
+            |ctx| match resolve_typed_receiver_outcome(&call(), ctx) {
+                ResolutionOutcome::Unresolved { candidates, .. } => assert!(candidates.is_empty()),
+                other => panic!("`Vec<Service>` is no `Service`, got {other:?}"),
+            },
+        );
     }
 
     #[test]
@@ -1669,34 +1911,42 @@ mod tests {
             )]
             .into(),
         );
-        // An item written `path (mod)` is a module symbol of that qualified name.
+        // An item written `path (mod)` is a module symbol of that qualified name, `path (type)`
+        // a struct, and `path @Type` a method of the struct whose id is `Type`, with the qualified
+        // name tree-sitter gives an `impl` member: the file's path and the member's name.
         let symbols = items
             .iter()
-            .map(|(item, file)| (item.strip_suffix(" (mod)"), item, file))
-            .map(|(module, item, file)| (module.unwrap_or(item), module.is_some(), file))
-            .map(|(qualified, is_module, file)| Symbol {
-                id: SymbolId::new(if is_module {
-                    format!("{qualified}#mod")
+            .map(|(item, file)| {
+                let (qualified, kind, parent) = if let Some(module) = item.strip_suffix(" (mod)") {
+                    (module, SymbolKind::Module, None)
+                } else if let Some(ty) = item.strip_suffix(" (type)") {
+                    (ty, SymbolKind::Class, None)
+                } else if let Some((member, owner)) = item.split_once(" @") {
+                    (member, SymbolKind::Method, Some(owner))
                 } else {
-                    qualified.to_string()
-                }),
-                name: qualified.rsplit("::").next().unwrap_or_default().into(),
-                qualified_name: qualified.into(),
-                kind: if is_module {
-                    SymbolKind::Module
-                } else {
-                    SymbolKind::Function
-                },
-                file_id: FileId::new(format!("file:{file}")),
-                range: None,
-                language: Language::Rust,
-                confidence: Confidence::Exact,
-                provenance: EvidenceSourceType::TreeSitter,
-                module_id: None,
-                parent_symbol_id: None,
-                scope_id: None,
-                signature: None,
-                visibility: Visibility::Public,
+                    (*item, SymbolKind::Function, None)
+                };
+                let name = qualified.rsplit("::").next().unwrap_or_default();
+                Symbol {
+                    id: SymbolId::new(match (&kind, parent) {
+                        (SymbolKind::Module, _) => format!("{qualified}#mod"),
+                        (_, Some(owner)) => format!("{owner}.{name}"),
+                        _ => qualified.to_string(),
+                    }),
+                    name: name.into(),
+                    qualified_name: qualified.into(),
+                    kind,
+                    file_id: FileId::new(format!("file:{file}")),
+                    range: None,
+                    language: Language::Rust,
+                    confidence: Confidence::Exact,
+                    provenance: EvidenceSourceType::TreeSitter,
+                    module_id: None,
+                    parent_symbol_id: parent.map(SymbolId::new),
+                    scope_id: None,
+                    signature: None,
+                    visibility: Visibility::Public,
+                }
             })
             .collect();
         let symbol_index = SymbolIndex::build(symbols);
@@ -1845,6 +2095,118 @@ mod tests {
             assert_eq!(proven_target(ctx, &call), None);
             let call = module_path_call("scope:worker", "engine", "run");
             assert_eq!(proven_target(ctx, &call), None);
+        });
+    }
+
+    #[test]
+    fn rust_paths_through_a_type_reach_its_associated_functions() {
+        // `crate::a::Engine::new()` in the app and `engine::Engine::new()` through the declared
+        // crate `engine`, whose crate root declares its own `Engine`.
+        let app = |module: &[&str]| placement("src", &["src::lib"], Some(module));
+        let engine = |module: &[&str]| {
+            placement(
+                "crates::engine::src",
+                &["crates::engine::src::lib"],
+                Some(module),
+            )
+        };
+        let items = [
+            ("src::a::Engine (type)", "src/a.rs"),
+            ("src::a::new @src::a::Engine", "src/a.rs"),
+            ("src::b::Engine (type)", "src/b.rs"),
+            ("src::b::new @src::b::Engine", "src/b.rs"),
+            ("src::b::new @src::b::Engine2", "src/b.rs"),
+            ("src::b::Engine2 (type)", "src/b.rs"),
+            (
+                "crates::engine::src::lib::Engine (type)",
+                "crates/engine/src/lib.rs",
+            ),
+            (
+                "crates::engine::src::lib::new @crates::engine::src::lib::Engine",
+                "crates/engine/src/lib.rs",
+            ),
+        ];
+        let placements = vec![
+            ("src/lib.rs", app(&[])),
+            ("src/a.rs", app(&["a"])),
+            ("src/b.rs", app(&["b"])),
+            ("crates/engine/src/lib.rs", engine(&[])),
+        ];
+        let crates = vec![("engine", engine(&[]))];
+        with_rust_crates("src/lib.rs", &items, placements, crates, |ctx| {
+            let at = |receiver: &str, callee: &str| {
+                proven_target(ctx, &module_path_call("scope:worker", receiver, callee))
+            };
+            assert_eq!(
+                at("crate::a::Engine", "new").as_deref(),
+                Some("src::a::Engine.new")
+            );
+            assert_eq!(
+                at("engine::Engine", "new").as_deref(),
+                Some("crates::engine::src::lib::Engine.new")
+            );
+            // A type the path does not name, and a member the type does not declare.
+            assert_eq!(at("crate::a::Missing", "new"), None);
+            assert_eq!(at("crate::a::Engine", "build"), None);
+            // `src/b.rs` declares `new` on both `Engine` and `Engine2`; the path names `Engine`.
+            assert_eq!(
+                at("crate::b::Engine", "new").as_deref(),
+                Some("src::b::Engine.new")
+            );
+            let outcome = resolve_module_member_outcome(
+                &module_path_call("scope:worker", "crate::a::Engine", "new"),
+                ctx,
+            );
+            let ResolutionOutcome::Proven { candidate } = outcome else {
+                panic!("expected a proven edge");
+            };
+            let kinds = candidate
+                .proofs
+                .iter()
+                .map(|proof| proof.kind)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(kinds.contains(&RelationshipProofKind::ModuleOrPackageBinding));
+            assert!(kinds.contains(&RelationshipProofKind::QualifiedName));
+            assert!(kinds.contains(&RelationshipProofKind::ContainingType));
+        });
+    }
+
+    #[test]
+    fn rust_path_through_a_type_with_two_same_named_members_is_ambiguous() {
+        let app = |module: &[&str]| placement("src", &["src::lib"], Some(module));
+        // `impl Engine<u8>` and `impl Engine<u16>` each declare `new`.
+        let items = [
+            ("src::a::Engine (type)", "src/a.rs"),
+            ("src::a::new @src::a::Engine", "src/a.rs"),
+        ];
+        let placements = vec![("src/lib.rs", app(&[])), ("src/a.rs", app(&["a"]))];
+        with_rust_files("src/lib.rs", &items, placements, |ctx| {
+            let mut symbols = ctx.symbols.by_id.values().cloned().collect::<Vec<_>>();
+            let mut second = ctx
+                .symbols
+                .get(&SymbolId::new("src::a::Engine.new"))
+                .cloned()
+                .unwrap();
+            second.id = SymbolId::new("src::a::Engine.new#2");
+            symbols.push(second);
+            let symbols = SymbolIndex::build(symbols);
+            let ctx = ResolutionContext::new(
+                ctx.file_id,
+                ctx.file_path,
+                None,
+                Language::Rust,
+                ctx.repository,
+                &symbols,
+                ctx.scopes,
+                ctx.bindings,
+                ctx.inheritance,
+                ctx.semantics,
+            );
+            let call = module_path_call("scope:worker", "crate::a::Engine", "new");
+            assert!(matches!(
+                resolve_module_member_outcome(&call, &ctx),
+                ResolutionOutcome::Ambiguous { .. }
+            ));
         });
     }
 

@@ -56,6 +56,32 @@ pub struct CargoManifest {
     /// git dependency names no directory here and is left out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<CargoDependency>,
+    /// Dependencies the manifest places outside the repository: a registry or git dependency, or
+    /// a `path` that leaves the repository, whose package the workspace root's `[patch]` or
+    /// `[replace]` does not point at a `path` in the repository. No item of their crates is
+    /// indexed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_dependencies: Vec<CargoExternalDependency>,
+}
+
+/// One dependency of a Rust package on a package outside the repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CargoExternalDependency {
+    /// The name the dependent's code writes the dependency's crate under: the dependency table's
+    /// key with `-` read as `_`.
+    pub crate_name: String,
+    pub kind: CargoDependencyKind,
+}
+
+impl CargoExternalDependency {
+    /// Whether code of the crate rooted at `importer` can name this dependency; see
+    /// [`CargoDependency::visible_to`].
+    pub fn visible_to(&self, importer: CargoImporter) -> bool {
+        match importer {
+            CargoImporter::BuildScript => self.kind == CargoDependencyKind::Build,
+            CargoImporter::Crate => self.kind != CargoDependencyKind::Build,
+        }
+    }
 }
 
 /// One dependency of a Rust package on another package of the repository.
@@ -225,6 +251,29 @@ impl ProjectModel {
             [dir] => self.rust_root_at(dir),
             _ => None,
         }
+    }
+
+    /// Whether `crate_name` in code of `importer`'s package names a crate outside the repository:
+    /// the package declares a dependency visible to `kind` under that name that the manifest
+    /// places outside the repository, and none under that name that it places inside.
+    pub fn rust_external_dependency(
+        &self,
+        importer: &ProjectRoot,
+        crate_name: &str,
+        kind: CargoImporter,
+    ) -> bool {
+        let Some(manifest) = importer.cargo_manifest.as_ref() else {
+            return false;
+        };
+        manifest
+            .external_dependencies
+            .iter()
+            .any(|dependency| dependency.visible_to(kind) && dependency.crate_name == crate_name)
+            && !manifest.dependencies.iter().any(|dependency| {
+                dependency.visible_to(kind)
+                    && (dependency.crate_name.as_deref() == Some(crate_name)
+                        || dependency.key.replace('-', "_") == crate_name)
+            })
     }
 }
 
