@@ -34,8 +34,20 @@ struct TantivyFields {
     chunk_json: Field,
     file_json: Field,
     symbol_json: Field,
+    /// Absent from indexes written before the serialized symbol record stopped being searched
+    /// (#569); those are queried on `symbol_json` as they were written, see `symbol_query_field`.
+    symbol_text: Option<Field>,
     /// Absent from indexes written before documents carried a repository-order rank.
     order_key: Option<Field>,
+}
+
+impl TantivyFields {
+    /// The field a query matches a chunk's symbol through. An index written before #569 indexed
+    /// the whole serialized record in `symbol_json` and has no `symbol_text`; it keeps being
+    /// searched the way it was written until the next `ok index` rebuilds it with this schema.
+    fn symbol_query_field(&self) -> Field {
+        self.symbol_text.unwrap_or(self.symbol_json)
+    }
 }
 
 impl TantivySearchIndex {
@@ -119,7 +131,7 @@ impl TantivySearchIndex {
             .collect::<HashMap<_, _>>();
         let order = document_order(chunks, graph_nodes, &files_by_id, &symbols_by_id);
         for (rank, &entry) in order.iter().enumerate() {
-            let mut document = match entry {
+            let (mut document, symbol, file) = match entry {
                 DocumentEntry::Chunk(index) => {
                     let chunk = &chunks[index];
                     let Some(file) = files_by_id.get(chunk.file_id.0.as_str()) else {
@@ -133,13 +145,14 @@ impl TantivySearchIndex {
                         .map(serde_json::to_string)
                         .transpose()?
                         .unwrap_or_default();
-                    doc!(
+                    let document = doc!(
                         self.fields.path => file.path.to_string_lossy().to_string(),
                         self.fields.content => format!("{}\n{}", file.path.display(), chunk.text),
                         self.fields.chunk_json => serde_json::to_string(chunk)?,
                         self.fields.file_json => serde_json::to_string(file)?,
                         self.fields.symbol_json => symbol_json,
-                    )
+                    );
+                    (document, symbol, *file)
                 }
                 DocumentEntry::GraphNode(index) => {
                     let node = &graph_nodes[index];
@@ -164,15 +177,19 @@ impl TantivySearchIndex {
                         text: graph_node_text(node, file, symbol),
                         symbol_id: node.symbol_id.clone(),
                     };
-                    doc!(
+                    let document = doc!(
                         self.fields.path => file.path.to_string_lossy().to_string(),
                         self.fields.content => graph_chunk.text.clone(),
                         self.fields.chunk_json => serde_json::to_string(&graph_chunk)?,
                         self.fields.file_json => serde_json::to_string(file)?,
                         self.fields.symbol_json => symbol_json,
-                    )
+                    );
+                    (document, symbol, file)
                 }
             };
+            if let (Some(symbol_text), Some(symbol)) = (self.fields.symbol_text, symbol) {
+                document.add_text(symbol_text, symbol_search_text(symbol, file));
+            }
             if let Some(order_key) = self.fields.order_key {
                 document.add_u64(order_key, rank as u64);
             }
@@ -241,7 +258,7 @@ impl TantivySearchIndex {
             vec![
                 self.fields.content,
                 self.fields.path,
-                self.fields.symbol_json,
+                self.fields.symbol_query_field(),
             ],
         );
         let mut results = Vec::new();
@@ -544,15 +561,52 @@ fn schema() -> Schema {
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         )
         .set_stored();
+    // A symbol's searchable text is only read by queries; the record it came from is stored in
+    // `symbol_json`.
+    let symbol_text = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer(CODE_TOKENIZER)
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
     let stored_text = TextOptions::default().set_stored();
     let mut builder = Schema::builder();
     builder.add_text_field("path", text);
-    builder.add_text_field("content", code_text.clone());
+    builder.add_text_field("content", code_text);
     builder.add_text_field("chunk_json", stored_text.clone());
     builder.add_text_field("file_json", stored_text.clone());
-    builder.add_text_field("symbol_json", code_text);
+    builder.add_text_field("symbol_json", stored_text);
+    builder.add_text_field(SYMBOL_TEXT_FIELD, symbol_text);
     builder.add_u64_field(ORDER_KEY_FIELD, FAST);
     builder.build()
+}
+
+/// Indexed field holding a chunk's symbol as code vocabulary; see `symbol_search_text`.
+const SYMBOL_TEXT_FIELD: &str = "symbol_text";
+
+/// The words a query can match a symbol by: its name, qualified name and signature, and the
+/// path of the file that declares it. These are the repository's own identifiers and code.
+///
+/// The rest of the record is stored-only (#569). It used to be indexed as the serialized JSON,
+/// so its keys and enum values (`visibility`, `private`, `confidence`, `high`, `language`,
+/// `rust`, `kind`, `function`, `provenance`, `tree_sitter`) were terms in nearly every chunk
+/// that had a symbol: "private key handling" matched every private Rust item, and a change to
+/// stored visibility moved BM25 document lengths and so the ranking of unrelated queries. Ids
+/// are 64-character hashes the tokenizer drops.
+///
+/// The declaring path is the part of the record's scope id that is code vocabulary; its
+/// scope-kind and ordinal words are not. Qualified names here are derived from the path too,
+/// so a symbol's directory and file words count twice, as they did through the scope id.
+/// Measured on the development split of a 10k-file Java corpus, leaving the path out cost two
+/// of 51 `issue_to_code` cases their gold file in the top 20.
+fn symbol_search_text(symbol: &Symbol, file: &File) -> String {
+    let mut text = format!("{}\n{}", symbol.name, symbol.qualified_name);
+    if let Some(signature) = &symbol.signature {
+        text.push('\n');
+        text.push_str(signature);
+    }
+    text.push('\n');
+    text.push_str(&file.path.to_string_lossy());
+    text
 }
 
 /// Fast field holding each document's rank in repository order; see `document_order`.
@@ -807,6 +861,7 @@ fn fields(schema: Schema) -> Result<TantivyFields> {
         chunk_json: field(&schema, "chunk_json")?,
         file_json: field(&schema, "file_json")?,
         symbol_json: field(&schema, "symbol_json")?,
+        symbol_text: schema.get_field(SYMBOL_TEXT_FIELD).ok(),
         order_key: schema.get_field(ORDER_KEY_FIELD).ok(),
     })
 }
@@ -1499,5 +1554,217 @@ mod determinism_tests {
         assert_eq!((split_segments, whole_segments), (1, 1));
         assert_eq!(document_ranks(&split), document_ranks(&whole));
         assert_eq!(fingerprint(&split), fingerprint(&whole));
+    }
+}
+
+#[cfg(test)]
+mod symbol_text_tests {
+    use super::{rebuild_disk_index, TantivySearchIndex, CODE_TOKENIZER, SYMBOL_TEXT_FIELD};
+    use open_kioku_core::{
+        CodeChunk, Confidence, EvidenceSourceType, File, FileId, Language, LineRange, RepositoryId,
+        ScopeId, Symbol, SymbolId, SymbolKind, Visibility,
+    };
+    use open_kioku_storage::SearchIndex;
+    use tantivy::schema::{IndexRecordOption, TextFieldIndexing, TextOptions};
+
+    fn file() -> File {
+        File {
+            id: FileId::new("file-1"),
+            repository_id: RepositoryId::new("repo-1"),
+            path: "src/keys.rs".into(),
+            language: Language::Rust,
+            size_bytes: 64,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        }
+    }
+
+    /// A private Rust function whose name, qualified name and signature share no word with the
+    /// metadata of its record.
+    fn symbol(file: &File, visibility: Visibility) -> Symbol {
+        Symbol {
+            id: SymbolId::new("symbol-1"),
+            name: "rotate".into(),
+            qualified_name: "vault::ledger::rotate".into(),
+            kind: SymbolKind::Function,
+            file_id: file.id.clone(),
+            range: Some(LineRange { start: 1, end: 3 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: Some(ScopeId::new("src/keys.rs:scope:file:0")),
+            signature: Some("fn(material: &Seed) Epoch".into()),
+            visibility,
+        }
+    }
+
+    fn chunks(file: &File, symbol: &Symbol) -> Vec<CodeChunk> {
+        vec![
+            CodeChunk {
+                id: "chunk-1".into(),
+                file_id: file.id.clone(),
+                range: LineRange { start: 1, end: 3 },
+                language: Language::Rust,
+                text: "fn rotate() {\n    swap();\n}".into(),
+                symbol_id: Some(symbol.id.clone()),
+            },
+            // A chunk with no symbol, so a query term found in both has document frequency 2.
+            CodeChunk {
+                id: "chunk-2".into(),
+                file_id: file.id.clone(),
+                range: LineRange { start: 5, end: 7 },
+                language: Language::Rust,
+                text: "fn swap() {\n    rotate();\n}".into(),
+                symbol_id: None,
+            },
+        ]
+    }
+
+    fn index(visibility: Visibility) -> (tempfile::TempDir, TantivySearchIndex) {
+        index_with(visibility, EvidenceSourceType::TreeSitter)
+    }
+
+    fn index_with(
+        visibility: Visibility,
+        provenance: EvidenceSourceType,
+    ) -> (tempfile::TempDir, TantivySearchIndex) {
+        let temp = tempfile::tempdir().unwrap();
+        let file = file();
+        let symbol = Symbol {
+            provenance,
+            ..symbol(&file, visibility)
+        };
+        let index =
+            rebuild_disk_index(temp.path(), &chunks(&file, &symbol), &[file], &[symbol]).unwrap();
+        (temp, index)
+    }
+
+    #[test]
+    fn symbol_metadata_words_match_nothing() {
+        let (_temp, index) = index(Visibility::Private);
+        // Each of these was a term of the serialized record: a key, an enum value, or a word
+        // of the scope id.
+        for query in [
+            "private",
+            "high",
+            "rust",
+            "function",
+            "tree sitter",
+            "visibility",
+            "confidence",
+            "provenance",
+            "scope",
+        ] {
+            let results = index.search(query, 10).unwrap();
+            assert!(
+                results.is_empty(),
+                "`{query}` matched {:?}",
+                results
+                    .iter()
+                    .map(|result| &result.line_range)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn symbol_name_qualified_name_and_signature_stay_searchable() {
+        let (_temp, index) = index(Visibility::Private);
+        // Neither word is in the chunk text or the path: only the qualified name and the
+        // signature hold them.
+        for query in ["ledger", "epoch"] {
+            let results = index.search(query, 10).unwrap();
+            assert_eq!(results.len(), 1, "`{query}`");
+            assert_eq!(
+                results[0]
+                    .symbol
+                    .as_ref()
+                    .map(|symbol| symbol.name.as_str()),
+                Some("rotate")
+            );
+            // The full record still comes back from the stored field.
+            assert_eq!(
+                results[0].symbol.as_ref().map(|symbol| symbol.visibility),
+                Some(Visibility::Private)
+            );
+        }
+    }
+
+    #[test]
+    fn the_declaring_path_is_searched_as_symbol_text() {
+        let (_temp, index) = index(Visibility::Private);
+        // `keys` is only in the declaring file's path, never in the symbol's name, qualified
+        // name or signature. `content` also starts with the path, so the symbol field is
+        // queried on its own.
+        let symbol_text = index.fields.symbol_text.unwrap();
+        let query = tantivy::query::QueryParser::for_index(&index.index, vec![symbol_text])
+            .parse_query("keys")
+            .unwrap();
+        let searcher = index.index.reader().unwrap().searcher();
+        let hits = searcher.search(&query, &tantivy::collector::Count).unwrap();
+        assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn stored_symbol_metadata_does_not_move_scores() {
+        // `tree_sitter` is two terms and `scip` one, so while the record was indexed this
+        // changed the length of every document that has the symbol and moved its BM25 score.
+        let bm25 = |visibility, provenance| {
+            let (_temp, index) = index_with(visibility, provenance);
+            index
+                .search("rotate swap", 10)
+                .unwrap()
+                .into_iter()
+                .map(|result| {
+                    (
+                        result.line_range.map(|range| range.start),
+                        result.score.to_bits(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = bm25(Visibility::Private, EvidenceSourceType::TreeSitter);
+        assert_eq!(before.len(), 2);
+        assert_eq!(before, bm25(Visibility::Crate, EvidenceSourceType::Scip));
+    }
+
+    #[test]
+    fn an_index_written_with_a_searchable_symbol_record_still_searches() {
+        // The schema before #569: `symbol_json` indexed with the code tokenizer and no
+        // `symbol_text`. It is searched as it was written until the next `ok index`.
+        let temp = tempfile::tempdir().unwrap();
+        let mut builder = tantivy::schema::Schema::builder();
+        for (_, entry) in super::schema().fields() {
+            match entry.name() {
+                SYMBOL_TEXT_FIELD => {}
+                "symbol_json" => {
+                    builder.add_text_field(
+                        "symbol_json",
+                        TextOptions::default()
+                            .set_indexing_options(
+                                TextFieldIndexing::default()
+                                    .set_tokenizer(CODE_TOKENIZER)
+                                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                            )
+                            .set_stored(),
+                    );
+                }
+                _ => {
+                    builder.add_field(entry.clone());
+                }
+            }
+        }
+        tantivy::Index::create_in_dir(temp.path(), builder.build()).unwrap();
+        let mut index = TantivySearchIndex::open_or_create(temp.path()).unwrap();
+        assert!(index.fields.symbol_text.is_none());
+        let file = file();
+        let symbol = symbol(&file, Visibility::Private);
+        index
+            .rebuild(&chunks(&file, &symbol), &[file], &[symbol])
+            .unwrap();
+        assert_eq!(index.search("ledger", 10).unwrap().len(), 1);
     }
 }

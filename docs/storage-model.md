@@ -676,7 +676,7 @@ as a group.
 
 ## Search
 
-Lexical search is exposed behind `open-kioku-storage::SearchIndex`. `open-kioku-search-tantivy` builds a disk-backed Tantivy BM25 index under `.ok/search/tantivy` with stored chunk, file, and symbol payloads so search responses can return evidence without rereading source files. `open-kioku-search-regex` remains a deterministic fallback and regex utility.
+Lexical search is exposed behind `open-kioku-storage::SearchIndex`. `open-kioku-search-tantivy` builds a disk-backed Tantivy BM25 index under `.ok/search/tantivy` with stored chunk, file, and symbol payloads so search responses can return evidence without rereading source files. The payloads are stored, not searched; a query matches a document's path, its text, and its symbol's name, qualified name, signature and declaring file path. `open-kioku-search-regex` remains a deterministic fallback and regex utility.
 
 ## KV Graph
 
