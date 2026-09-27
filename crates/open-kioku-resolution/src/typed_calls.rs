@@ -588,7 +588,11 @@ pub(crate) fn imported_receiver_outcome(
                         .symbols
                         .get(id)
                         .map(|symbol| {
-                            symbol.name == call.callee_name && symbol.parent_symbol_id.is_none()
+                            // `mod yield_now;` beside `pub use yield_now::yield_now;` is a
+                            // module of the same name, never what a call reaches.
+                            symbol.name == call.callee_name
+                                && symbol.parent_symbol_id.is_none()
+                                && !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
                         })
                         .unwrap_or(false)
                     {
@@ -1869,6 +1873,85 @@ mod tests {
             let call = module_path_call("scope:worker", "crate::task", "yield_now");
             assert_eq!(proven_target(ctx, &call), None);
         });
+    }
+
+    #[test]
+    fn a_call_through_an_imported_module_never_reaches_a_module_it_declares() {
+        // `use engine::task; task::yield_now()`: `task/mod.rs` declares `mod yield_now;`, and
+        // the function it re-exports lives in `task/yield_now.rs`.
+        let symbol = |id: &str, qualified: &str, kind: SymbolKind, file: &str| Symbol {
+            id: SymbolId::new(id),
+            name: qualified.rsplit("::").next().unwrap_or_default().into(),
+            qualified_name: qualified.into(),
+            kind,
+            file_id: FileId::new(file),
+            range: None,
+            language: Language::Rust,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: Visibility::Public,
+        };
+        let symbols = SymbolIndex::build(vec![
+            symbol(
+                "module",
+                "crates::engine::src::task::yield_now",
+                SymbolKind::Module,
+                "file:crates/engine/src/task/mod.rs",
+            ),
+            symbol(
+                "function",
+                "crates::engine::src::task::yield_now::yield_now",
+                SymbolKind::Function,
+                "file:crates/engine/src/task/yield_now.rs",
+            ),
+        ]);
+        let caller = FileId::new("file:crates/app/src/lib.rs");
+        let mut repository = open_kioku_semantic_model::SemanticRepository::new();
+        repository
+            .imports
+            .insert(open_kioku_semantic_model::ImportBinding {
+                file_id: caller.clone(),
+                scope_id: ScopeId::new("scope:worker"),
+                local_name: "task".into(),
+                imported_name: "task".into(),
+                source_module: "engine::task".into(),
+                resolved_module: None,
+                target_file: Some(FileId::new("file:crates/engine/src/task/mod.rs")),
+                target_symbol: None,
+                origin: open_kioku_semantic_model::ImportOrigin::Internal,
+                is_type_only: false,
+                is_glob: false,
+                evidence: Vec::new(),
+                rule: open_kioku_semantic_model::ImportBindingRule::RustModulePath,
+            });
+        let scopes = ScopeIndex::build(Vec::new());
+        let bindings = BindingIndex::build(Vec::new());
+        let inheritance = InheritanceIndex::build(Vec::new());
+        let ctx = ResolutionContext::new(
+            &caller,
+            std::path::Path::new("crates/app/src/lib.rs"),
+            None,
+            Language::Rust,
+            &repository,
+            &symbols,
+            &scopes,
+            &bindings,
+            &inheritance,
+            open_kioku_languages::semantics_for(&Language::Rust).unwrap(),
+        );
+        let call = CallSite {
+            file_id: caller.clone(),
+            receiver_kind: ReceiverKind::Value,
+            ..module_path_call("scope:worker", "task", "yield_now")
+        };
+        assert!(matches!(
+            imported_receiver_outcome(&call, &ctx, "task"),
+            ResolutionOutcome::Unresolved { ref candidates, .. } if candidates.is_empty()
+        ));
     }
 
     #[test]
