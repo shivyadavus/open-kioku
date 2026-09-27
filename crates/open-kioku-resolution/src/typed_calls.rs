@@ -373,11 +373,19 @@ fn rust_crate_name_member_names<'c>(
     ))
 }
 
+/// The symbols of the qualified names a Rust path spells, other than modules: `task::yield_now()`
+/// beside `mod yield_now;` names a function, and the module's own symbol carries the same qualified
+/// name as an item of its parent would.
 fn rust_qualified_targets(ctx: &ResolutionContext<'_>, names: &[String]) -> Vec<SymbolId> {
     names
         .iter()
         .filter_map(|name| ctx.symbols.by_qualified.get(name))
         .flat_map(|ids| ids.iter().cloned())
+        .filter(|id| {
+            ctx.symbols.get(id).is_some_and(|symbol| {
+                !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
+            })
+        })
         .collect()
 }
 
@@ -1656,13 +1664,24 @@ mod tests {
             )]
             .into(),
         );
+        // An item written `path (mod)` is a module symbol of that qualified name.
         let symbols = items
             .iter()
-            .map(|(qualified, file)| Symbol {
-                id: SymbolId::new(*qualified),
+            .map(|(item, file)| (item.strip_suffix(" (mod)"), item, file))
+            .map(|(module, item, file)| (module.unwrap_or(item), module.is_some(), file))
+            .map(|(qualified, is_module, file)| Symbol {
+                id: SymbolId::new(if is_module {
+                    format!("{qualified}#mod")
+                } else {
+                    qualified.to_string()
+                }),
                 name: qualified.rsplit("::").next().unwrap_or_default().into(),
-                qualified_name: (*qualified).into(),
-                kind: SymbolKind::Function,
+                qualified_name: qualified.into(),
+                kind: if is_module {
+                    SymbolKind::Module
+                } else {
+                    SymbolKind::Function
+                },
                 file_id: FileId::new(format!("file:{file}")),
                 range: None,
                 language: Language::Rust,
@@ -1818,6 +1837,36 @@ mod tests {
                 receiver_kind: ReceiverKind::Value,
                 ..module_path_call("scope:worker", "engine", "run")
             };
+            assert_eq!(proven_target(ctx, &call), None);
+        });
+    }
+
+    #[test]
+    fn a_rust_call_path_never_ends_in_a_module_symbol() {
+        // `task/mod.rs` declares `mod yield_now;` and re-exports its function, which lives in
+        // `task/yield_now.rs`: the module's symbol spells the qualified name the call path does.
+        let task = |module: &[&str]| placement("src", &["src::lib"], Some(module));
+        let items = [
+            ("src::task::yield_now (mod)", "src/task/mod.rs"),
+            ("src::task::yield_now::yield_now", "src/task/yield_now.rs"),
+        ];
+        let placements = vec![
+            ("src/lib.rs", task(&[])),
+            ("src/task/mod.rs", task(&["task"])),
+            ("src/task/yield_now.rs", task(&["task", "yield_now"])),
+        ];
+        with_rust_crates(
+            "tests/it.rs",
+            &items,
+            placements.clone(),
+            vec![("engine", task(&[]))],
+            |ctx| {
+                let call = module_path_call("scope:worker", "engine::task", "yield_now");
+                assert_eq!(proven_target(ctx, &call), None);
+            },
+        );
+        with_rust_files("src/lib.rs", &items, placements, |ctx| {
+            let call = module_path_call("scope:worker", "crate::task", "yield_now");
             assert_eq!(proven_target(ctx, &call), None);
         });
     }
