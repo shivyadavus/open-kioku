@@ -117,11 +117,27 @@ pub fn normalize_repo_path(path: &Path) -> Result<String> {
     Ok(parts.join("/"))
 }
 
+/// Identity for an analysis-fact target that has no richer namespace (a module, package, type,
+/// callable, table, topic or queue named by its label).
+///
+/// The label is hashed as spelled: code identifiers, module paths, package import names, and
+/// message-broker topic and queue names are case-sensitive, so `tempfile::TempDir` and
+/// `tempfile::tempdir` are different targets and must not share a node. Only a
+/// [`GraphNodeType::DatabaseTable`] label is folded, because unquoted SQL identifiers compare
+/// without case and the same table is spelled `Orders` in a JPA mapping and `orders` in a traced
+/// statement. Folding a table named by a quoted identifier, or by a MySQL server with
+/// case-sensitive table names, can merge two tables; it cannot split one.
 pub fn legacy_analysis_node_id(node_type: GraphNodeType, label: &str) -> NodeId {
-    NodeId::new(format!(
-        "analysis:{node_type:?}:{}",
+    let hash = if analysis_label_is_case_insensitive(&node_type) {
         stable_hash(&label.to_ascii_lowercase())
-    ))
+    } else {
+        stable_hash(label)
+    };
+    NodeId::new(format!("analysis:{node_type:?}:{hash}"))
+}
+
+fn analysis_label_is_case_insensitive(node_type: &GraphNodeType) -> bool {
+    matches!(node_type, GraphNodeType::DatabaseTable)
 }
 
 pub fn runtime_node_id(label: &str) -> NodeId {
@@ -430,10 +446,53 @@ mod tests {
     }
 
     #[test]
-    fn legacy_analysis_ids_are_stable_for_backwards_compatibility() {
+    fn analysis_ids_keep_case_variant_code_names_apart() {
+        assert_ne!(
+            legacy_analysis_node_id(GraphNodeType::Class, "tempfile::TempDir"),
+            legacy_analysis_node_id(GraphNodeType::Class, "tempfile::tempdir")
+        );
+        assert_ne!(
+            legacy_analysis_node_id(
+                GraphNodeType::Function,
+                "DEFAULT_RELATIONSHIP_EDGE_QUERY_LIMIT"
+            ),
+            legacy_analysis_node_id(
+                GraphNodeType::Function,
+                "default_relationship_edge_query_limit"
+            )
+        );
+        for node_type in [
+            GraphNodeType::Module,
+            GraphNodeType::Package,
+            GraphNodeType::Interface,
+            GraphNodeType::Method,
+            GraphNodeType::Topic,
+            GraphNodeType::Queue,
+        ] {
+            assert_ne!(
+                legacy_analysis_node_id(node_type.clone(), "std::io"),
+                legacy_analysis_node_id(node_type, "STD::IO")
+            );
+        }
+    }
+
+    #[test]
+    fn analysis_ids_fold_case_only_for_sql_tables() {
+        assert_eq!(
+            legacy_analysis_node_id(GraphNodeType::DatabaseTable, "Orders"),
+            legacy_analysis_node_id(GraphNodeType::DatabaseTable, "orders")
+        );
+    }
+
+    #[test]
+    fn analysis_ids_are_stable_for_an_unchanged_label() {
         assert_eq!(
             legacy_analysis_node_id(GraphNodeType::Module, "std::io"),
-            legacy_analysis_node_id(GraphNodeType::Module, "STD::IO")
+            legacy_analysis_node_id(GraphNodeType::Module, "std::io")
+        );
+        assert_ne!(
+            legacy_analysis_node_id(GraphNodeType::Module, "std::io"),
+            legacy_analysis_node_id(GraphNodeType::Package, "std::io")
         );
     }
 }

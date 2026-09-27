@@ -1460,6 +1460,92 @@ mod tests {
     }
 
     #[test]
+    fn case_variant_analysis_targets_stay_separate_nodes() {
+        let file = File {
+            id: FileId::new("f1"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from("src/main.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let fact =
+            |id: &str, target: &str, kind: GraphNodeType, edge_type: GraphEdgeType| AnalysisFact {
+                id: id.into(),
+                file_id: file.id.clone(),
+                symbol_id: None,
+                target: target.into(),
+                target_kind: kind,
+                edge_type,
+                range: None,
+                confidence: Confidence::High,
+                source: "analyzer".into(),
+                source_type: EvidenceSourceType::StaticAnalysis,
+                message: "msg".into(),
+            };
+        let facts = [
+            fact(
+                "type",
+                "tempfile::TempDir",
+                GraphNodeType::Function,
+                GraphEdgeType::References,
+            ),
+            fact(
+                "call",
+                "tempfile::tempdir",
+                GraphNodeType::Function,
+                GraphEdgeType::Calls,
+            ),
+            fact(
+                "jpa",
+                "Orders",
+                GraphNodeType::DatabaseTable,
+                GraphEdgeType::ReadsTable,
+            ),
+            fact(
+                "trace",
+                "orders",
+                GraphNodeType::DatabaseTable,
+                GraphEdgeType::ReadsTable,
+            ),
+        ];
+
+        let graph = InMemoryGraph::from_index_with_analysis(
+            std::slice::from_ref(&file),
+            &[],
+            &[],
+            &[],
+            &[],
+            &facts,
+        );
+        let target_of = |edge_type: GraphEdgeType| {
+            let edge = graph
+                .edges
+                .iter()
+                .find(|edge| edge.edge_type == edge_type)
+                .expect("analysis fact edge should exist");
+            graph.nodes[edge.to.0.as_str()].label.to_string()
+        };
+        assert_eq!(target_of(GraphEdgeType::References), "tempfile::TempDir");
+        assert_eq!(target_of(GraphEdgeType::Calls), "tempfile::tempdir");
+        let function_nodes = graph
+            .nodes
+            .values()
+            .filter(|node| node.node_type == GraphNodeType::Function)
+            .count();
+        assert_eq!(function_nodes, 2);
+        // Unquoted SQL identifiers compare without case, so both spellings name one table.
+        let table_nodes = graph
+            .nodes
+            .values()
+            .filter(|node| node.node_type == GraphNodeType::DatabaseTable)
+            .count();
+        assert_eq!(table_nodes, 1);
+    }
+
+    #[test]
     fn test_buffer_output_is_stable_across_repeated_runs() {
         let file1 = File {
             id: FileId::new("f1"),
