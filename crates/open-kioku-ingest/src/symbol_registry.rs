@@ -1800,9 +1800,8 @@ impl TokenContext {
 /// `x == MAX {` open blocks.
 fn rust_field_brace(before: &str) -> bool {
     let before = before.trim_end();
-    let path_start = before
-        .rfind(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == ':'))
-        .map_or(0, |idx| idx + 1);
+    let path_start =
+        trailing_run_start(before, |ch| ch.is_alphanumeric() || ch == '_' || ch == ':');
     let path = &before[path_start..];
     let type_named = path
         .rsplit("::")
@@ -2371,9 +2370,7 @@ fn raw_string_open(bytes: &[u8], idx: usize) -> Option<(usize, usize)> {
 /// The string prefix (`f`, `rb`, `Rf`...) that ends `before`, the line up to a quote: its last
 /// word, when that is at most two prefix letters.
 fn string_prefix(before: &str) -> Option<&str> {
-    let start = before
-        .rfind(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-        .map_or(0, |idx| idx + 1);
+    let start = trailing_run_start(before, |ch| ch.is_alphanumeric() || ch == '_');
     let word = &before[start..];
     (!word.is_empty() && word.len() <= 2 && word.chars().all(|ch| "bBrRfFuU".contains(ch)))
         .then_some(word)
@@ -2476,9 +2473,8 @@ fn member_receiver(line: &str, start: usize) -> Option<String> {
         .strip_suffix("?.")
         .or_else(|| before.strip_suffix('.'))?
         .trim_end();
-    let word_start = before
-        .rfind(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
-        .map_or(0, |idx| idx + 1);
+    let word_start =
+        trailing_run_start(before, |ch| ch.is_alphanumeric() || ch == '_' || ch == '$');
     let word = &before[word_start..];
     let head = !before[..word_start].trim_end().ends_with(['.', '?']);
     (head
@@ -2488,14 +2484,21 @@ fn member_receiver(line: &str, start: usize) -> Option<String> {
     .then(|| word.to_string())
 }
 
+/// Where the run of characters `keep` accepts that ends `text` starts, as a byte offset on a
+/// character boundary: the character before the run may be any width (`·`, `—`).
+fn trailing_run_start(text: &str, keep: impl Fn(char) -> bool) -> usize {
+    text.char_indices()
+        .rev()
+        .find(|(_, ch)| !keep(*ch))
+        .map_or(0, |(idx, ch)| idx + ch.len_utf8())
+}
+
 /// The path segment a Rust token is the tail of: `mem` before `take` in `std::mem::take(..)`.
 /// `None` for a bare name, and for a path whose segment is not a plain name (`Vec::<u8>::new`,
 /// `<T as Trait>::name`), which is matched as before.
 fn path_qualifier(before: &str) -> Option<String> {
     let path = before.trim_end().strip_suffix("::")?.trim_end();
-    let start = path
-        .rfind(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-        .map_or(0, |idx| idx + 1);
+    let start = trailing_run_start(path, |ch| ch.is_alphanumeric() || ch == '_');
     let segment = &path[start..];
     (!segment.is_empty()).then(|| segment.to_string())
 }
@@ -3997,5 +4000,25 @@ mod tests {
             line_targets(&report),
             vec![call("api::parseLimit", 6), reference("api::Kind", 9)]
         );
+    }
+
+    #[test]
+    fn a_wide_character_before_a_member_path_quote_or_brace_reads_without_panicking() {
+        // A character wider than a byte just before a word used to leave a slice mid-character.
+        let text = "x = a·.join(b)\ny = —.lower()\nz = ·f'{v}'\nw = Ω::new()\nlet s = é·Foo { a, b };\nv := ·pkg.Call()";
+        for language in [
+            Language::Rust,
+            Language::Python,
+            Language::JavaScript,
+            Language::TypeScript,
+            Language::Java,
+            Language::Go,
+            Language::Markdown,
+        ] {
+            let _ = token_uses(text, &language);
+        }
+        let symbols = unique_functions(Language::Python, &["join", "value"]);
+        let report = resolve_text(Language::Python, "z = ·f'{value}'", &symbols);
+        assert_eq!(line_targets(&report), vec![reference("util::value", 1)]);
     }
 }
