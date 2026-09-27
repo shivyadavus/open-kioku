@@ -15,29 +15,29 @@
           "typescript": "ri3-language-semantics-v1"
         },
         "parser_semantics": {
-          "go": "tier1-parser-semantics-v6",
-          "java": "tier1-parser-semantics-v6",
-          "javascript": "tier1-parser-semantics-v6",
-          "python": "tier1-parser-semantics-v6",
-          "rust": "tier1-parser-semantics-v6",
-          "typescript": "tier1-parser-semantics-v6"
+          "go": "tier1-parser-semantics-v7",
+          "java": "tier1-parser-semantics-v7",
+          "javascript": "tier1-parser-semantics-v7",
+          "python": "tier1-parser-semantics-v7",
+          "rust": "tier1-parser-semantics-v7",
+          "typescript": "tier1-parser-semantics-v7"
         },
         "project_resolver_version": "project-resolver-v1",
         "proof_policy_version": "ri3-proof-policy-v1",
-        "relationship_resolver_version": "ri3-relationship-resolver-v13",
+        "relationship_resolver_version": "ri3-relationship-resolver-v14",
         "stable_identity_version": "stable-identity-v1",
         "version": 1
       },
-      "fingerprint": "9be9840aadd8abcfda8f1f13f2f404dafe1d2695143a60dd04077938822ad28e"
+      "fingerprint": "1b4421542669480244b435e874c5925d4f4a516799ba594aea6326af5d38b125"
     },
     "analysis_semantics_status": {
       "affected_components": [],
       "affected_languages": [],
-      "current_fingerprint": "9be9840aadd8abcfda8f1f13f2f404dafe1d2695143a60dd04077938822ad28e",
+      "current_fingerprint": "1b4421542669480244b435e874c5925d4f4a516799ba594aea6326af5d38b125",
       "reasons": [],
       "recommended_action": "none",
       "status": "compatible",
-      "stored_fingerprint": "9be9840aadd8abcfda8f1f13f2f404dafe1d2695143a60dd04077938822ad28e"
+      "stored_fingerprint": "1b4421542669480244b435e874c5925d4f4a516799ba594aea6326af5d38b125"
     },
     "chunk_count": 1,
     "coverage": {
