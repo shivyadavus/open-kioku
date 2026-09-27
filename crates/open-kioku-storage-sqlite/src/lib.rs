@@ -466,7 +466,8 @@ impl SqliteStore {
               ev_message_sid INTEGER,
               ev_indexed_at_sid INTEGER,
               extra_sid INTEGER,
-              window_rank INTEGER NOT NULL DEFAULT -1
+              window_rank INTEGER NOT NULL DEFAULT -1,
+              content_hash INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS scopes (
@@ -740,10 +741,13 @@ impl SqliteStore {
     /// to the renamed symbol, a name reference from a config file) are not anchored at a node
     /// the file owns, so they are reconciled by identity instead: every stored node and edge
     /// absent from the new graph is removed, and every node and edge of the new graph absent
-    /// from the store is added. That pass reads every stored edge id once, which is
-    /// proportional to the graph rather than to the change, and is what makes the stored graph
-    /// match a clean rebuild rather than approximate it. Unchanged edges keep their stored
-    /// evidence, including its `indexed_at`.
+    /// from the store is added. An edge id names only the relationship's type and endpoints,
+    /// so a stored edge the new graph holds under the same id is kept only when its stored
+    /// content hash matches the new edge's; otherwise (a proof, confidence or evidence range
+    /// changed because another file did) it is rewritten from the new graph. That pass reads
+    /// every stored edge id and hash once, which is proportional to the graph rather than to
+    /// the change, and is what makes the stored graph match a clean rebuild rather than
+    /// approximate it. Unchanged edges keep their stored evidence, including its `indexed_at`.
     ///
     /// The previous manifest stays published: readers are not told the repository is
     /// unindexed, and they read this update's rows and graph, under the previous manifest, as
@@ -3324,6 +3328,11 @@ pub struct GraphReconciliation {
     pub nodes_added: usize,
     pub edges_removed: usize,
     pub edges_added: usize,
+    /// Stored edges the new graph holds under the same id with different content (proofs,
+    /// confidence, evidence range, message), or whose stored row could not be decoded to
+    /// compare: removed and added again, so they are counted in `edges_removed` and
+    /// `edges_added` too.
+    pub edges_rewritten: usize,
     /// Dictionary entries no surviving edge referenced.
     pub strings_removed: usize,
 }
@@ -3570,23 +3579,77 @@ fn replace_files_rows(
         .unwrap_or_default();
     let mut edge_stored = vec![false; new_edges.len()];
     let mut removed_edge_ids = Vec::new();
+    let mut unhashed = Vec::new();
     if !changed_path_sids.is_empty() || full_graph.is_some() {
         let mut stmt = tx
-            .prepare(&format!("SELECT id, {EDGE_SID_COLUMNS} FROM graph_edges"))
+            .prepare(&format!(
+                "SELECT id, content_hash, {EDGE_SID_COLUMNS} FROM graph_edges"
+            ))
             .map_err(storage_err)?;
         let mut rows = stmt.query([]).map_err(storage_err)?;
         while let Some(row) = rows.next().map_err(storage_err)? {
             let id: String = row.get(0).map_err(storage_err)?;
-            let sids = edge_sids(row, 1)?;
+            let stored_hash: Option<i64> = row.get(1).map_err(storage_err)?;
+            let sids = edge_sids(row, 2)?;
             let refreshed =
                 sids[EDGE_SID_EV_PATH].is_some_and(|sid| changed_path_sids.contains(&sid));
-            let retained = full_graph.is_none() || new_edges.contains_key(id.as_str());
-            if refreshed || !retained {
+            // With a full graph a stored edge is kept only when the new graph holds it with
+            // the same content. An id names the relationship (type and endpoints), not its
+            // evidence, so a proof or confidence that changed because another file changed
+            // leaves the id alone; keeping the row would serve the old proofs, and the old
+            // window rank, until the edge happened to be deleted.
+            let kept = !refreshed
+                && match full_graph {
+                    None => true,
+                    Some((_, edges)) => match new_edges.get(id.as_str()) {
+                        None => false,
+                        Some(&index) => {
+                            let new_hash = compact::edge_content_hash(&edges[index])?;
+                            match stored_hash {
+                                Some(stored) if stored == new_hash => {
+                                    edge_stored[index] = true;
+                                    true
+                                }
+                                Some(_) => {
+                                    report.edges_rewritten += 1;
+                                    false
+                                }
+                                // Decided below, once this scan no longer reads the table.
+                                None => {
+                                    unhashed.push((id, index, new_hash, sids));
+                                    continue;
+                                }
+                            }
+                        }
+                    },
+                };
+            if !kept {
                 orphan_candidates.extend(sids.iter().flatten());
                 removed_edge_ids.push(id);
-            } else if let Some(&index) = new_edges.get(id.as_str()) {
-                edge_stored[index] = true;
             }
+        }
+    }
+    // Rows stored without a hash (by a version from before the column, or an older writer
+    // since) are compared by decoding them once: an unchanged one is kept, with its hash
+    // recorded, instead of every such row being rewritten on the first update after an
+    // upgrade. One that differs, or does not decode, is rewritten from the new graph.
+    for (id, index, new_hash, sids) in unhashed {
+        let stored = tx
+            .prepare_cached(&format!("{} WHERE e.id = ?1", compact::EDGE_SELECT))
+            .map_err(storage_err)?
+            .query_row(params![&id], |row| Ok(compact::edge_from_row(row)))
+            .map_err(storage_err)?
+            .and_then(|edge| compact::edge_content_hash(&edge));
+        if matches!(stored, Ok(hash) if hash == new_hash) {
+            tx.prepare_cached("UPDATE graph_edges SET content_hash = ?2 WHERE id = ?1")
+                .map_err(storage_err)?
+                .execute(params![&id, new_hash])
+                .map_err(storage_err)?;
+            edge_stored[index] = true;
+        } else {
+            report.edges_rewritten += 1;
+            orphan_candidates.extend(sids.iter().flatten());
+            removed_edge_ids.push(id);
         }
     }
     for id in &removed_edge_ids {
@@ -4168,7 +4231,7 @@ fn insert_graph_rows<'a>(
         // the edge statement is prepared; `prepare_cached` makes the reborrow free.
         let row = compact::encode_edge(tx, strings, edge)?;
         tx.prepare_cached(
-            "INSERT INTO graph_edges(id, from_sid, to_sid, edge_type, confidence, source_type, source_sid, freshness, ev_id, ev_path_sid, ev_line_start, ev_line_end, ev_symbol_sid, ev_message_sid, ev_indexed_at_sid, extra_sid, window_rank) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO graph_edges(id, from_sid, to_sid, edge_type, confidence, source_type, source_sid, freshness, ev_id, ev_path_sid, ev_line_start, ev_line_end, ev_symbol_sid, ev_message_sid, ev_indexed_at_sid, extra_sid, window_rank, content_hash) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         )
         .map_err(storage_err)?
         .execute(params![
@@ -4189,6 +4252,7 @@ fn insert_graph_rows<'a>(
             row.ev_indexed_at_sid,
             row.extra_sid,
             row.window_rank,
+            row.content_hash,
         ])
         .map_err(storage_err)?;
     }
@@ -5099,6 +5163,14 @@ fn migrate_graph_schema(conn: &mut Connection, opener: StoreOpener) -> Result<()
     }
     if opener == StoreOpener::Writer {
         migrate_graph_edge_window_ranks(conn)?;
+        // No backfill here, where a full `ok index` would pay for it only to replace every
+        // row: the incremental writer decodes a row without a hash (every row of an index
+        // written before the column, and any an older Open Kioku inserts, naming no hash) the
+        // first time it reconciles it, and records the hash or rewrites the row.
+        add_column_if_not_exists(
+            conn,
+            "ALTER TABLE graph_edges ADD COLUMN content_hash INTEGER",
+        )?;
     }
 
     // The backfill full-scans both graph tables, so it must run once per store, not on every
@@ -7475,6 +7547,195 @@ mod tests {
         let clean = make_store();
         clean.replace_graph(&new_nodes, &new_edges).unwrap();
         assert_eq!(incremental, graph_counts(&clean));
+    }
+
+    /// An update that adds `src/other.rs` and nothing else, with `nodes` and `edges` as the
+    /// new snapshot's whole graph.
+    fn stage_added_file(
+        store: &SqliteStore,
+        manifest: &IndexManifest,
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+    ) -> super::GraphReconciliation {
+        let added = make_file("f3", "src/other.rs");
+        store
+            .stage_files_index_with_graph(
+                PartialIndexUpdate {
+                    manifest,
+                    changed_files: std::slice::from_ref(&added),
+                    deleted_file_ids: &[],
+                    symbols: &[],
+                    chunks: &[],
+                    tests: &[],
+                    imports: &[],
+                    occurrences: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                    graph_nodes: &[],
+                    graph_edges: &[],
+                },
+                nodes,
+                edges,
+            )
+            .unwrap()
+    }
+
+    /// `(rowid, window_rank, evidence indexed_at)` of the stored edge `id`.
+    fn stored_edge_row(store: &SqliteStore, id: &str) -> (i64, i64, String) {
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT e.rowid, e.window_rank, s.value FROM graph_edges e \
+                 JOIN graph_strings s ON s.sid = e.ev_indexed_at_sid WHERE e.id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    /// #581: a call between two unchanged files whose proof changed because a third file did
+    /// (a new same-named definition makes the callee ambiguous) keeps its id and its evidence
+    /// path. Reconciling by id alone kept the stored row, so its old unique proof and its
+    /// authoritative window rank outlived the evidence. The unchanged edge beside it must not
+    /// be rewritten: it keeps its row and its `indexed_at`.
+    #[test]
+    fn partial_replace_with_graph_rewrites_an_edge_whose_proofs_changed_under_the_same_id() {
+        let (store, manifest, _file1, _file2, sym1, sym2) = reconciliation_fixture();
+        let node1 = symbol_node(&sym1);
+        let node2 = symbol_node(&sym2);
+        let nodes = vec![node1.clone(), node2.clone()];
+        let proven = |candidates: usize, confidence: Confidence| {
+            let mut edge = calls(
+                "edge:main-calls-lib",
+                &node1,
+                &node2,
+                "src/main.rs",
+                "main_fn calls lib_fn",
+            );
+            edge.evidence.confidence = confidence;
+            let mut proof =
+                RelationshipProof::new(RelationshipProofKind::ExactCallSite, "call", candidates);
+            proof.source_symbol_id = Some(sym1.id.clone());
+            proof.target_symbol_id = Some(sym2.id.clone());
+            edge.set_relationship_proofs(vec![proof]).unwrap();
+            edge
+        };
+        let mut unchanged = calls(
+            "edge:lib-calls-main",
+            &node2,
+            &node1,
+            "src/lib.rs",
+            "lib_fn calls main_fn",
+        );
+        unchanged.evidence.indexed_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let before = proven(1, Confidence::High);
+        store
+            .replace_graph(&nodes, &[before.clone(), unchanged.clone()])
+            .unwrap();
+        let (_, before_rank, _) = stored_edge_row(&store, "edge:main-calls-lib");
+        let unchanged_before = stored_edge_row(&store, "edge:lib-calls-main");
+
+        let after = proven(2, Confidence::Medium);
+        let after_rank = i64::from(open_kioku_core::graph_edge_window_rank(&after));
+        assert_ne!(before_rank, after_rank, "the fixture must move the rank");
+        let mut unchanged_again = unchanged.clone();
+        unchanged_again.evidence.indexed_at = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
+        let report = stage_added_file(&store, &manifest, &nodes, &[after.clone(), unchanged_again]);
+        assert_eq!(report.edges_rewritten, 1, "{report:?}");
+        assert_eq!(report.edges_removed, 1, "{report:?}");
+        assert_eq!(report.edges_added, 1, "{report:?}");
+
+        let stored = store
+            .graph_edges_between(&node1.id.0, &node2.id.0, 10)
+            .unwrap();
+        let [stored] = stored.as_slice() else {
+            panic!("one stored call from main_fn to lib_fn: {stored:?}");
+        };
+        assert_eq!(stored.relationship_proofs(), after.relationship_proofs());
+        assert_eq!(stored.evidence.confidence, Confidence::Medium);
+        assert_eq!(
+            stored.relationship_authority(),
+            after.relationship_authority()
+        );
+        assert_eq!(stored_edge_row(&store, "edge:main-calls-lib").1, after_rank);
+        assert_eq!(
+            stored_edge_row(&store, "edge:lib-calls-main"),
+            unchanged_before,
+            "an unchanged edge keeps its row and its indexed_at"
+        );
+
+        // The same graph again changes nothing.
+        let report = stage_added_file(&store, &manifest, &nodes, &[after, unchanged]);
+        assert_eq!(report.edges_rewritten, 0, "{report:?}");
+        assert_eq!(report.edges_removed, 0, "{report:?}");
+        assert_eq!(report.edges_added, 0, "{report:?}");
+    }
+
+    /// A row inserted without a content hash (by an Open Kioku from before the column) is
+    /// never trusted unchecked: the next reconciliation decodes it, keeps it with its hash
+    /// recorded when it matches the new graph, and rewrites it when it does not.
+    #[test]
+    fn partial_replace_with_graph_checks_an_edge_stored_without_a_content_hash() {
+        let (store, manifest, _file1, _file2, sym1, sym2) = reconciliation_fixture();
+        let node1 = symbol_node(&sym1);
+        let node2 = symbol_node(&sym2);
+        let nodes = vec![node1.clone(), node2.clone()];
+        let kept = calls(
+            "edge:main-calls-lib",
+            &node1,
+            &node2,
+            "src/main.rs",
+            "main_fn calls lib_fn",
+        );
+        let changed = calls(
+            "edge:lib-calls-main",
+            &node2,
+            &node1,
+            "src/lib.rs",
+            "lib_fn calls main_fn",
+        );
+        store
+            .replace_graph(&nodes, &[kept.clone(), changed.clone()])
+            .unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute("UPDATE graph_edges SET content_hash = NULL", [])
+            .unwrap();
+        let kept_before = stored_edge_row(&store, "edge:main-calls-lib");
+        let mut changed_after = changed.clone();
+        changed_after.evidence.confidence = Confidence::High;
+        let report = stage_added_file(&store, &manifest, &nodes, &[kept.clone(), changed_after]);
+        assert_eq!(report.edges_rewritten, 1, "{report:?}");
+        assert_eq!(report.edges_removed, 1, "{report:?}");
+        assert_eq!(stored_edge_row(&store, "edge:main-calls-lib"), kept_before);
+        let conn = store.connection.lock().unwrap();
+        let hash = |id: &str| -> Option<i64> {
+            conn.query_row(
+                "SELECT content_hash FROM graph_edges WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            hash("edge:main-calls-lib"),
+            Some(compact::edge_content_hash(&kept).unwrap())
+        );
+        assert!(hash("edge:lib-calls-main").is_some());
+        let confidence: String = conn
+            .query_row(
+                "SELECT confidence FROM graph_edges WHERE id = 'edge:lib-calls-main'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(confidence, "High");
     }
 
     /// The previous manifest stays published through an incremental update; the caller

@@ -203,36 +203,79 @@ fn parse_receiver_kind(name: &str) -> Result<ReceiverKind> {
 
 // -- residual edge fields --------------------------------------------------------------
 
-/// Everything on a [`GraphEdge`] that has no column of its own.
+/// Everything on a [`GraphEdge`] that has no column of its own, as a reader decodes it.
 ///
 /// Serialized only when non-empty and interned like any other string: the four
 /// low-cardinality property keys the graph builder writes on most edges make the residual
-/// document 2.1x duplicated across edges on the measured corpus.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+/// document 2.1x duplicated across edges on the measured corpus. Written through
+/// [`EdgeExtraRef`], which must keep these fields' names, order and skip rules.
+#[derive(Default, serde::Deserialize)]
 struct EdgeExtra {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     properties: BTreeMap<String, serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     schema_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     source_pass: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     index_mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     extractor_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     ambiguity: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     quality_notes: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     confidence_score: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     confidence_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     evidence_freshness: Option<String>,
 }
 
-impl EdgeExtra {
+/// [`EdgeExtra`] borrowed from the edge, so writing it, and hashing it on every incremental
+/// update, clones nothing.
+#[derive(serde::Serialize)]
+struct EdgeExtraRef<'a> {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    properties: &'a BTreeMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_version: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_pass: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_mode: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extractor_version: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ambiguity: &'a Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    quality_notes: &'a Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence_reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence_freshness: Option<&'a str>,
+}
+
+impl<'a> EdgeExtraRef<'a> {
+    fn of(edge: &'a GraphEdge) -> Self {
+        let evidence = &edge.evidence;
+        Self {
+            properties: &edge.properties,
+            schema_version: edge.schema_version.as_deref(),
+            source_pass: edge.source_pass.as_deref(),
+            index_mode: edge.index_mode.as_deref(),
+            extractor_version: edge.extractor_version.as_deref(),
+            ambiguity: &edge.ambiguity,
+            quality_notes: &edge.quality_notes,
+            confidence_score: evidence.confidence_score,
+            confidence_reason: evidence.confidence_reason.as_deref(),
+            evidence_freshness: evidence.freshness.as_deref(),
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.properties.is_empty()
             && self.schema_version.is_none()
@@ -267,6 +310,151 @@ pub(crate) struct EdgeRow {
     pub(crate) extra_sid: Option<i64>,
     /// [`open_kioku_core::graph_edge_window_rank`], so a bounded read orders and limits in SQL.
     pub(crate) window_rank: i64,
+    /// [`edge_content_hash`], so the incremental writer can tell a stored edge whose evidence
+    /// changed under the same id from one it can keep.
+    pub(crate) content_hash: i64,
+}
+
+/// The evidence path as the row stores it. `SharedPath`'s serializer refuses non-UTF-8 rather
+/// than emitting something a reader cannot round-trip; the stored form matches it instead of
+/// quietly substituting replacement characters.
+fn evidence_path(edge: &GraphEdge) -> Result<Option<&str>> {
+    edge.evidence
+        .file_range
+        .as_ref()
+        .map(|range| {
+            range.path.to_str().ok_or_else(|| {
+                OkError::Storage(
+                    "evidence file range path contains invalid UTF-8 characters".into(),
+                )
+            })
+        })
+        .transpose()
+}
+
+/// FNV-1a over an edge's fields, streamed so hashing allocates nothing. Every field is
+/// followed by its length and a presence marker, so the byte stream reads back unambiguously
+/// from its end and no two distinct contents feed the hash the same bytes.
+struct ContentHash {
+    hash: u64,
+    field_len: u64,
+}
+
+impl ContentHash {
+    fn new() -> Self {
+        Self {
+            hash: 0xcbf2_9ce4_8422_2325,
+            field_len: 0,
+        }
+    }
+
+    fn mix(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.hash ^= u64::from(byte);
+            self.hash = self.hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    /// Close the field whose bytes were written since the last one.
+    fn end_field(&mut self) {
+        let len = std::mem::take(&mut self.field_len);
+        self.mix(&len.to_le_bytes());
+        self.mix(&[1]);
+    }
+
+    fn absent(&mut self) {
+        self.mix(&[0]);
+    }
+
+    fn text(&mut self, value: Option<&str>) {
+        match value {
+            Some(value) => {
+                self.write_bytes(value.as_bytes());
+                self.end_field();
+            }
+            None => self.absent(),
+        }
+    }
+
+    fn debug(&mut self, value: &impl std::fmt::Debug) {
+        use std::io::Write;
+        // Writing into the hasher cannot fail.
+        let _ = write!(self, "{value:?}");
+        self.end_field();
+    }
+
+    fn number(&mut self, value: Option<i64>) {
+        match value {
+            Some(value) => {
+                self.write_bytes(&value.to_le_bytes());
+                self.end_field();
+            }
+            None => self.absent(),
+        }
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        self.field_len += bytes.len() as u64;
+        self.mix(bytes);
+    }
+}
+
+impl std::io::Write for ContentHash {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.write_bytes(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Hash every column [`encode_edge`] writes except the id and `indexed_at`, in column order,
+/// with the residual document last; `extra` writes it, or reports it absent.
+fn hash_edge(
+    edge: &GraphEdge,
+    ev_path: Option<&str>,
+    extra: impl FnOnce(&mut ContentHash) -> Result<()>,
+) -> Result<i64> {
+    let evidence = &edge.evidence;
+    let lines = evidence
+        .file_range
+        .as_ref()
+        .and_then(|range| range.line_range.as_ref());
+    let mut hash = ContentHash::new();
+    hash.text(Some(&edge.from.0));
+    hash.text(Some(&edge.to.0));
+    hash.debug(&edge.edge_type);
+    hash.debug(&evidence.confidence);
+    hash.debug(&evidence.source_type);
+    hash.text(Some(evidence.source.as_str()));
+    hash.text(Some(&evidence.id.0));
+    hash.text(ev_path);
+    hash.number(lines.map(|range| i64::from(range.start)));
+    hash.number(lines.map(|range| i64::from(range.end)));
+    hash.text(evidence.symbol_id.as_ref().map(|id| id.0.as_str()));
+    hash.text(Some(evidence.message.as_str()));
+    extra(&mut hash)?;
+    Ok(hash.hash as i64)
+}
+
+/// A hash of everything [`encode_edge`] stores for `edge` except its id and its
+/// `indexed_at`, which is stamped per run and so is not content. Persisted: the incremental
+/// writer compares it with the new graph's edge of the same id, and keeps the stored row only
+/// when they match. Two different contents can collide only by a 64-bit hash collision
+/// between two versions of one edge.
+pub(crate) fn edge_content_hash(edge: &GraphEdge) -> Result<i64> {
+    let extra = EdgeExtraRef::of(edge);
+    hash_edge(edge, evidence_path(edge)?, |hash| {
+        if extra.is_empty() {
+            hash.absent();
+        } else {
+            serde_json::to_writer(&mut *hash, &extra)?;
+            hash.end_field();
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn encode_edge(
@@ -275,41 +463,26 @@ pub(crate) fn encode_edge(
     edge: &GraphEdge,
 ) -> Result<EdgeRow> {
     let evidence = &edge.evidence;
-    let extra = EdgeExtra {
-        properties: edge.properties.clone(),
-        schema_version: edge.schema_version.clone(),
-        source_pass: edge.source_pass.clone(),
-        index_mode: edge.index_mode.clone(),
-        extractor_version: edge.extractor_version.clone(),
-        ambiguity: edge.ambiguity.clone(),
-        quality_notes: edge.quality_notes.clone(),
-        confidence_score: evidence.confidence_score,
-        confidence_reason: evidence.confidence_reason.clone(),
-        evidence_freshness: evidence.freshness.clone(),
-    };
-    let extra_sid = if extra.is_empty() {
+    let extra = EdgeExtraRef::of(edge);
+    let extra = if extra.is_empty() {
         None
     } else {
-        Some(strings.intern(tx, &serde_json::to_string(&extra)?)?)
+        Some(serde_json::to_string(&extra)?)
     };
-    let (path_sid, line_start, line_end) = match &evidence.file_range {
-        Some(range) => (
-            // `SharedPath`'s serializer refuses non-UTF-8 rather than emitting something a
-            // reader cannot round-trip; the stored form matches it instead of quietly
-            // substituting replacement characters.
-            Some(strings.intern(
-                tx,
-                range.path.to_str().ok_or_else(|| {
-                    OkError::Storage(
-                        "evidence file range path contains invalid UTF-8 characters".into(),
-                    )
-                })?,
-            )?),
-            range.line_range.as_ref().map(|r| r.start as i64),
-            range.line_range.as_ref().map(|r| r.end as i64),
-        ),
-        None => (None, None, None),
-    };
+    let ev_path = evidence_path(edge)?;
+    // The same bytes `edge_content_hash` streams: the serialized residual document.
+    let content_hash = hash_edge(edge, ev_path, |hash| {
+        hash.text(extra.as_deref());
+        Ok(())
+    })?;
+    let line_range = evidence
+        .file_range
+        .as_ref()
+        .and_then(|range| range.line_range.as_ref());
+    // Interned in the order the rows were always written, so a dictionary's sids do not
+    // depend on which version of this function built it.
+    let extra_sid = strings.intern_opt(tx, extra.as_deref())?;
+    let ev_path_sid = strings.intern_opt(tx, ev_path)?;
     Ok(EdgeRow {
         id: edge.id.0.clone(),
         from_sid: strings.intern(tx, &edge.from.0)?,
@@ -320,9 +493,9 @@ pub(crate) fn encode_edge(
         source_sid: strings.intern_opt(tx, Some(evidence.source.as_str()))?,
         freshness: evidence.indexed_at.timestamp(),
         ev_id: evidence.id.0.clone(),
-        ev_path_sid: path_sid,
-        ev_line_start: line_start,
-        ev_line_end: line_end,
+        ev_path_sid,
+        ev_line_start: line_range.map(|r| i64::from(r.start)),
+        ev_line_end: line_range.map(|r| i64::from(r.end)),
         ev_symbol_sid: strings
             .intern_opt(tx, evidence.symbol_id.as_ref().map(|id| id.0.as_str()))?,
         ev_message_sid: strings.intern_opt(tx, Some(evidence.message.as_str()))?,
@@ -338,6 +511,7 @@ pub(crate) fn encode_edge(
         )?,
         extra_sid,
         window_rank: i64::from(open_kioku_core::graph_edge_window_rank(edge)),
+        content_hash,
     })
 }
 

@@ -132,9 +132,18 @@ changed files' rows and the complete graph of the new snapshot, in one transacti
    the new graph does not hold is removed, and every node and edge of the new graph the store
    does not hold is added. This is what handles edges whose target moved — a resolved call
    from an unchanged file into a symbol the changed file renamed ends at a node no file owns,
-   so step 1 cannot see it; the new graph no longer holds it, so step 2 removes it. The pass
-   reads every stored edge id once; it is proportional to the graph, not to the change, and
-   is what makes the incremental graph equal a clean rebuild rather than approximate it.
+   so step 1 cannot see it; the new graph no longer holds it, so step 2 removes it. An edge
+   id hashes only the edge type and its endpoints, so an edge can keep its id while its
+   content changes: a call between two unchanged files whose callee a third file made
+   ambiguous gets a different proof and confidence under the same id. Each row therefore
+   carries `content_hash`, a hash of everything the row stores except its id and
+   `indexed_at`, and a stored edge the new graph holds under the same id is kept only when the
+   hashes match; otherwise it is deleted and inserted again from the new graph, which also
+   recomputes its window rank (#581). A row without a hash (inserted by a version from before
+   the column) is decoded once and compared: kept with its hash recorded when it matches,
+   rewritten otherwise. The pass reads every stored edge id and hash once;
+   it is proportional to the graph, not to the change, and is what makes the incremental graph
+   equal a clean rebuild rather than approximate it.
 3. Unchanged edges keep their stored evidence, including `indexed_at`.
 
 ### Window ranks
