@@ -23,7 +23,7 @@
 
 use open_kioku_core::{
     CallSite, Confidence, Evidence, EvidenceId, EvidenceSourceType, FileRange, GraphEdge,
-    GraphEdgeType, LineRange, NodeId, SymbolId,
+    GraphEdgeType, GraphNode, LineRange, NodeId, SymbolId,
 };
 #[cfg(test)]
 use open_kioku_core::{CallSiteId, FileId, ReceiverKind, ScopeId, SourceRange};
@@ -455,6 +455,23 @@ pub(crate) fn edge_content_hash(edge: &GraphEdge) -> Result<i64> {
         }
         Ok(())
     })
+}
+
+/// A hash of the JSON document a `graph_nodes` row stores, which holds the whole node; the
+/// row's other columns are read out of it. Persisted beside the row for the same reason as
+/// [`edge_content_hash`]: a node id names the node, not what the builder merged into it.
+pub(crate) fn node_json_hash(json: &str) -> i64 {
+    let mut hash = ContentHash::new();
+    hash.text(Some(json));
+    hash.hash as i64
+}
+
+/// [`node_json_hash`] of `node`'s JSON document, streamed rather than built.
+pub(crate) fn node_content_hash(node: &GraphNode) -> Result<i64> {
+    let mut hash = ContentHash::new();
+    serde_json::to_writer(&mut hash, node)?;
+    hash.end_field();
+    Ok(hash.hash as i64)
 }
 
 pub(crate) fn encode_edge(
