@@ -65,6 +65,16 @@ qualified names, route names, relation kinds, package names, or resolver output.
 where a fact came from. `ambiguity` and `quality_notes` preserve uncertainty and
 quality caveats instead of flattening inferred facts into unsupported certainty.
 
+Several writes can describe one node: a file's own file node and the analysis facts that point
+at it (an import resolved to it, a file it co-changed with). The builder merges them so the
+result does not depend on the order they arrive in: the label comes from a write that carries
+the node's file or symbol id when there is one, and is otherwise the smallest; each optional
+field (`file_id`, `symbol_id`, `source_pass` and the other provenance fields) is the smallest
+value any write gave; a property two writes disagree on takes the value whose JSON text is
+smallest; `ambiguity` and `quality_notes` are sorted unions. A file node's `source_pass` is
+therefore the smallest source among the facts that point at it, such as the lexically first
+`git-history:<commits>` source, not a claim about which commit is most relevant.
+
 All of these fields are backward-compatible serde defaults on the wire: an MCP or
 `--json` consumer that has not seen a field still deserializes, and the serialized shape of
 a `GraphEdge` is unchanged by the 4.0 storage work.
