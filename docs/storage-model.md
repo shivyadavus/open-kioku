@@ -144,9 +144,17 @@ changed files' rows and the complete graph of the new snapshot, in one transacti
    hashes match; otherwise it is deleted and inserted again from the new graph, which also
    recomputes its window rank (#581). A row without a hash (inserted by a version from before
    the column) is decoded once and compared: kept with its hash recorded when it matches,
-   rewritten otherwise. The pass reads every stored edge id and hash once;
-   it is proportional to the graph, not to the change, and is what makes the incremental graph
-   equal a clean rebuild rather than approximate it.
+   rewritten otherwise. Nodes are reconciled the same way (#591): a node id names the node,
+   not what the builder merged into it, so a file node that co-change facts point at keeps
+   its id while its `source_pass` follows the commits. Each `graph_nodes` row carries
+   `content_hash`, a hash of the JSON document the row stores (the whole node; the row's other
+   columns are read out of it), and a stored node whose hash differs from the new graph's
+   node, or which has no hash and whose decoded document differs, is deleted and inserted
+   again. Edges name their endpoints through `graph_strings`, not through node rows, so
+   rewriting a node leaves its edges and their dictionary entries in place. The pass reads
+   every stored node and edge id and hash once; it is proportional to the graph, not to the
+   change, and is what makes the incremental graph equal a clean rebuild, node for node and
+   edge for edge, rather than approximate it.
 3. Unchanged edges keep their stored evidence, including `indexed_at`.
 
 ### Window ranks

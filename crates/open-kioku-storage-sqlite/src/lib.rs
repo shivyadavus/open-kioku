@@ -441,7 +441,8 @@ impl SqliteStore {
               symbol_id TEXT DEFAULT '',
               evidence_available BOOLEAN DEFAULT 0,
               freshness INTEGER DEFAULT 0,
-              json TEXT NOT NULL
+              json TEXT NOT NULL,
+              content_hash INTEGER
             );
             CREATE TABLE IF NOT EXISTS graph_strings (
               sid INTEGER PRIMARY KEY,
@@ -761,10 +762,12 @@ impl SqliteStore {
     /// from the store is added. An edge id names only the relationship's type and endpoints,
     /// so a stored edge the new graph holds under the same id is kept only when its stored
     /// content hash matches the new edge's; otherwise (a proof, confidence or evidence range
-    /// changed because another file did) it is rewritten from the new graph. That pass reads
-    /// every stored edge id and hash once, which is proportional to the graph rather than to
-    /// the change, and is what makes the stored graph match a clean rebuild rather than
-    /// approximate it. Unchanged edges keep their stored evidence, including its `indexed_at`.
+    /// changed because another file did) it is rewritten from the new graph. Nodes are
+    /// compared the same way, by a hash of their stored document, since what the builder
+    /// merges into a node can change under its id too. That pass reads every stored node and
+    /// edge id and hash once, which is proportional to the graph rather than to the change,
+    /// and is what makes the stored graph match a clean rebuild rather than approximate it.
+    /// Unchanged edges keep their stored evidence, including its `indexed_at`.
     ///
     /// The previous manifest stays published: readers are not told the repository is
     /// unindexed, and they read this update's rows and graph, under the previous manifest, as
@@ -3350,6 +3353,12 @@ pub struct GraphReconciliation {
     /// compare: removed and added again, so they are counted in `edges_removed` and
     /// `edges_added` too.
     pub edges_rewritten: usize,
+    /// Stored nodes the new graph holds under the same id with different content (a
+    /// `source_pass`, label or property the builder merged differently), or whose stored row
+    /// could not be decoded to compare: removed and added again, so they are counted in
+    /// `nodes_removed` and `nodes_added` too. A node row is not what an edge refers to (edges
+    /// name their endpoints through the string dictionary), so rewriting one leaves its edges.
+    pub nodes_rewritten: usize,
     /// Dictionary entries no surviving edge referenced.
     pub strings_removed: usize,
 }
@@ -3709,22 +3718,57 @@ fn replace_files_rows(
         })
         .unwrap_or_default();
     let mut node_stored = vec![false; new_nodes.len()];
-    if full_graph.is_some() {
+    if let Some((nodes, _)) = full_graph {
         let mut removed_node_ids = Vec::new();
+        let mut unhashed = Vec::new();
         let mut stmt = tx
-            .prepare("SELECT id FROM graph_nodes")
+            .prepare("SELECT id, content_hash FROM graph_nodes")
             .map_err(storage_err)?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(storage_err)?;
-        for row in rows {
-            let id = row.map_err(storage_err)?;
-            match new_nodes.get(id.as_str()) {
-                Some(&index) => node_stored[index] = true,
-                None => removed_node_ids.push(id),
+        let mut rows = stmt.query([]).map_err(storage_err)?;
+        // As for edges: an id names the node, and what the builder merged into it (the
+        // `source_pass` of a file node that co-change facts point at) can change while the id
+        // stays, so a stored node is kept only when its content matches too.
+        while let Some(row) = rows.next().map_err(storage_err)? {
+            let id: String = row.get(0).map_err(storage_err)?;
+            let stored_hash: Option<i64> = row.get(1).map_err(storage_err)?;
+            let Some(&index) = new_nodes.get(id.as_str()) else {
+                removed_node_ids.push(id);
+                continue;
+            };
+            let new_hash = compact::node_content_hash(&nodes[index])?;
+            match stored_hash {
+                Some(stored) if stored == new_hash => node_stored[index] = true,
+                Some(_) => {
+                    report.nodes_rewritten += 1;
+                    removed_node_ids.push(id);
+                }
+                None => unhashed.push((id, index, new_hash)),
             }
         }
+        drop(rows);
         drop(stmt);
+        // A row without a hash is decoded and compared once, as edges are: kept with its hash
+        // recorded when it matches, rewritten when it differs or does not decode.
+        for (id, index, new_hash) in unhashed {
+            let json: String = tx
+                .prepare_cached("SELECT json FROM graph_nodes WHERE id = ?1")
+                .map_err(storage_err)?
+                .query_row(params![&id], |row| row.get(0))
+                .map_err(storage_err)?;
+            let stored = serde_json::from_str::<GraphNode>(&json)
+                .map_err(OkError::from)
+                .and_then(|node| compact::node_content_hash(&node));
+            if matches!(stored, Ok(hash) if hash == new_hash) {
+                tx.prepare_cached("UPDATE graph_nodes SET content_hash = ?2 WHERE id = ?1")
+                    .map_err(storage_err)?
+                    .execute(params![&id, new_hash])
+                    .map_err(storage_err)?;
+                node_stored[index] = true;
+            } else {
+                report.nodes_rewritten += 1;
+                removed_node_ids.push(id);
+            }
+        }
         for id in &removed_node_ids {
             tx.execute("DELETE FROM graph_nodes WHERE id = ?1", params![id])
                 .map_err(storage_err)?;
@@ -4228,8 +4272,10 @@ fn insert_graph_rows<'a>(
     let mut edges = edges.into_iter().collect::<Vec<_>>();
     edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     {
-        let mut stmt = tx.prepare_cached("INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)").map_err(storage_err)?;
+        let mut stmt = tx.prepare_cached("INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json, content_hash) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)").map_err(storage_err)?;
         for node in nodes {
+            let json = serde_json::to_string(node)?;
+            let content_hash = compact::node_json_hash(&json);
             stmt.execute(params![
                 &node.id.0,
                 &node.label,
@@ -4238,7 +4284,8 @@ fn insert_graph_rows<'a>(
                 node.symbol_id.as_ref().map(|id| &id.0),
                 false,
                 0,
-                serde_json::to_string(node)?
+                json,
+                content_hash
             ])
             .map_err(storage_err)?;
         }
@@ -5187,6 +5234,12 @@ fn migrate_graph_schema(conn: &mut Connection, opener: StoreOpener) -> Result<()
         add_column_if_not_exists(
             conn,
             "ALTER TABLE graph_edges ADD COLUMN content_hash INTEGER",
+        )?;
+        // The same for nodes, outside `columns_added`: a new hash column is no reason to
+        // backfill the query columns.
+        add_column_if_not_exists(
+            conn,
+            "ALTER TABLE graph_nodes ADD COLUMN content_hash INTEGER",
         )?;
     }
 
@@ -7753,6 +7806,127 @@ mod tests {
             )
             .unwrap();
         assert_eq!(confidence, "High");
+    }
+
+    /// `(rowid, content_hash, json)` of the stored node `id`.
+    fn stored_node_row(store: &SqliteStore, id: &str) -> (i64, Option<i64>, String) {
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT rowid, content_hash, json FROM graph_nodes WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    /// #591: a node no file owns (a co-changed file, an import target) keeps its id while
+    /// what the builder merged into it changes with other files' facts. Reconciling by id
+    /// alone kept the stored node, so an incremental index served an older `source_pass` than
+    /// a clean one. Rewriting it must leave its edges and their dictionary entries, and must
+    /// not touch the unchanged node beside it.
+    #[test]
+    fn partial_replace_with_graph_rewrites_a_node_whose_content_changed_under_the_same_id() {
+        let (store, manifest, _file1, _file2, sym1, _sym2) = reconciliation_fixture();
+        let node1 = symbol_node(&sym1);
+        let target = |source_pass: &str| {
+            let mut node = analysis_node("co_changed");
+            node.source_pass = Some(source_pass.into());
+            node
+        };
+        let before = target("git-history:aaaa");
+        let edge = calls(
+            "edge:main-calls-target",
+            &node1,
+            &before,
+            "src/main.rs",
+            "main_fn calls co_changed",
+        );
+        store
+            .replace_graph(
+                &[node1.clone(), before.clone()],
+                std::slice::from_ref(&edge),
+            )
+            .unwrap();
+        let unchanged_before = stored_node_row(&store, &node1.id.0);
+
+        let after = target("git-history:bbbb");
+        let nodes = vec![node1.clone(), after.clone()];
+        let report = stage_added_file(&store, &manifest, &nodes, std::slice::from_ref(&edge));
+        assert_eq!(report.nodes_rewritten, 1, "{report:?}");
+        assert_eq!(report.nodes_removed, 1, "{report:?}");
+        assert_eq!(report.nodes_added, 1, "{report:?}");
+        assert_eq!(report.edges_removed, 0, "{report:?}");
+        assert_eq!(report.edges_added, 0, "{report:?}");
+        assert_eq!(report.strings_removed, 0, "{report:?}");
+
+        let (_, hash, json) = stored_node_row(&store, &after.id.0);
+        let stored: GraphNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(stored.source_pass.as_deref(), Some("git-history:bbbb"));
+        assert_eq!(hash, Some(compact::node_content_hash(&after).unwrap()));
+        assert_eq!(
+            stored_node_row(&store, &node1.id.0),
+            unchanged_before,
+            "an unchanged node keeps its row"
+        );
+        let edges = store
+            .graph_edges_between(&node1.id.0, &after.id.0, 10)
+            .unwrap();
+        assert_eq!(
+            edges.len(),
+            1,
+            "the rewritten node keeps its edge: {edges:?}"
+        );
+
+        // The same graph again changes nothing.
+        let report = stage_added_file(&store, &manifest, &nodes, std::slice::from_ref(&edge));
+        assert_eq!(report, super::GraphReconciliation::default());
+    }
+
+    /// A node row inserted without a content hash (by an Open Kioku from before the column)
+    /// is decoded and compared once: kept with its hash recorded when it matches, rewritten
+    /// when it does not.
+    #[test]
+    fn partial_replace_with_graph_checks_a_node_stored_without_a_content_hash() {
+        let (store, manifest, _file1, _file2, sym1, sym2) = reconciliation_fixture();
+        let kept = symbol_node(&sym1);
+        let changed = symbol_node(&sym2);
+        store
+            .replace_graph(&[kept.clone(), changed.clone()], &[])
+            .unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute("UPDATE graph_nodes SET content_hash = NULL", [])
+            .unwrap();
+        let (kept_rowid, _, _) = stored_node_row(&store, &kept.id.0);
+        let mut changed_after = changed.clone();
+        changed_after.source_pass = Some("tree_sitter".into());
+        let report = stage_added_file(
+            &store,
+            &manifest,
+            &[kept.clone(), changed_after.clone()],
+            &[],
+        );
+        assert_eq!(report.nodes_rewritten, 1, "{report:?}");
+        assert_eq!(report.nodes_removed, 1, "{report:?}");
+        assert_eq!(
+            stored_node_row(&store, &kept.id.0),
+            (
+                kept_rowid,
+                Some(compact::node_content_hash(&kept).unwrap()),
+                serde_json::to_string(&kept).unwrap()
+            )
+        );
+        let (_, hash, json) = stored_node_row(&store, &changed.id.0);
+        assert_eq!(
+            hash,
+            Some(compact::node_content_hash(&changed_after).unwrap())
+        );
+        assert_eq!(json, serde_json::to_string(&changed_after).unwrap());
     }
 
     /// The previous manifest stays published through an incremental update; the caller
