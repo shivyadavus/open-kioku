@@ -11,7 +11,8 @@
 //! a mapped path is only a candidate until the caller checks the `mod` declarations.
 
 use open_kioku_semantic_model::{CargoTargetKind, CargoTargets, ProjectRoot};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 /// Where a Rust package keeps the module trees of its crates.
@@ -398,6 +399,9 @@ pub(crate) struct RustUsePath {
     /// The path is `self::`/`super::`, so it is only as sound as `importer_module`, which a
     /// `#[path]` declaration or a missing `mod` declaration makes wrong.
     pub(crate) relative: bool,
+    /// The path is `self::` with no `super`, so it names the importer's own module or one below
+    /// it, which is the same file in every crate that compiles the importer at the same place.
+    pub(crate) within_importer: bool,
     /// Extension-less path of the crate root the importer is, when it is that root file itself.
     pub(crate) importer_root: Option<String>,
 }
@@ -453,12 +457,14 @@ pub(crate) fn map_rust_use_path(
         _ => return None,
     };
     let mut rest = parts.peekable();
+    let mut climbs = first == "super";
     while rest.peek() == Some(&"super") {
         if first == "crate" {
             return None;
         }
         rest.next();
         segments.pop()?;
+        climbs = true;
     }
     let rest = rest.collect::<Vec<_>>();
     let last = rest.len().checked_sub(1)?;
@@ -471,6 +477,7 @@ pub(crate) fn map_rust_use_path(
     Some(RustUsePath {
         segments: segments.into_iter().map(str::to_string).collect(),
         relative: first != "crate",
+        within_importer: first == "self" && !climbs,
         ..file
     })
 }
@@ -496,6 +503,7 @@ pub(crate) fn map_rust_module_file(tree: &RustCrateTree, file: &Path) -> Option<
         segments: Vec::new(),
         importer_module: module.into_iter().map(str::to_string).collect(),
         relative: false,
+        within_importer: false,
         importer_root,
     })
 }
@@ -573,8 +581,104 @@ pub(crate) fn map_rust_crate_name_path(
         segments: rest.into_iter().map(str::to_string).collect(),
         importer_module: Vec::new(),
         relative: false,
+        within_importer: false,
         // A crate name names the library crate, whichever file writes the path.
         importer_root: Some(library),
+    })
+}
+
+/// The largest crate root [`read_module_declarations`] reads; a larger one is left unread.
+const MAX_SCANNED_ROOT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// [`scan_module_declarations`] of the file at `path`. `None` when it is not a regular file,
+/// cannot be read, or is over [`MAX_SCANNED_ROOT_BYTES`].
+pub(crate) fn read_module_declarations(path: &Path) -> Option<HashSet<String>> {
+    // Discovery follows no symlink, and neither does this.
+    if !std::fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_SCANNED_ROOT_BYTES {
+        return None;
+    }
+    scan_module_declarations(BufReader::new(file.take(MAX_SCANNED_ROOT_BYTES)))
+}
+
+/// The module names a Rust crate root declares, read line by line without parsing the file:
+/// `mod name;` and `mod name {`, whatever visibility precedes them. Such a line inside an inline
+/// module, a macro body or a block comment is read too, which only adds names. `None` when the
+/// lines cannot tell: a `mod` whose name is not on its line or is a macro variable
+/// (`mod $name;`), a `path` attribute that may sit on a `mod` item, which mounts a module file
+/// the name does not spell, or an `include!` that may bring in declarations of its own. A module
+/// a macro declares without writing `mod` in this file is not seen.
+pub(crate) fn scan_module_declarations(reader: impl BufRead) -> Option<HashSet<String>> {
+    let mut names = HashSet::new();
+    // The text since the last line that ended an item or opened a block, where the attributes of
+    // the next item are written.
+    let mut attributes = String::new();
+    for line in reader.split(b'\n') {
+        let line = line.ok()?;
+        let line = String::from_utf8_lossy(&line);
+        let code = line.split("//").next().unwrap_or_default();
+        if code.contains("include!") {
+            return None;
+        }
+        let mut from = 0;
+        while let Some(found) = code[from..].find("mod") {
+            let at = from + found;
+            from = at + "mod".len();
+            let before = code[..at].chars().next_back();
+            if before.is_some_and(|ch| ch == '_' || ch == '#' || ch.is_alphanumeric()) {
+                continue;
+            }
+            match code[from..].chars().next() {
+                // `pub mod` with its name on the next line.
+                None => return None,
+                Some(ch) if ch.is_whitespace() => {}
+                Some(_) => continue,
+            }
+            let rest = code[from..].trim_start();
+            if rest.is_empty() || rest.starts_with('$') {
+                return None;
+            }
+            let ident = rest.strip_prefix("r#").unwrap_or(rest);
+            let end = ident
+                .find(|ch: char| ch != '_' && !ch.is_alphanumeric())
+                .unwrap_or(ident.len());
+            let (name, tail) = ident.split_at(end);
+            if name.is_empty() {
+                continue;
+            }
+            let tail = tail.trim();
+            if tail.is_empty() {
+                return None;
+            }
+            if !tail.starts_with([';', '{']) {
+                continue;
+            }
+            if has_path_attribute(&attributes) || has_path_attribute(&code[..at]) {
+                return None;
+            }
+            names.insert(name.to_string());
+        }
+        if code.trim_end().ends_with([';', '{', '}']) {
+            attributes.clear();
+        } else {
+            attributes.push_str(code);
+            attributes.push('\n');
+        }
+    }
+    Some(names)
+}
+
+/// Whether `text` holds the word `path` followed by `=`, as a `path` attribute does, directly or
+/// through `cfg_attr`.
+fn has_path_attribute(text: &str) -> bool {
+    text.match_indices("path").any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        !before.is_some_and(|ch| ch == '_' || ch.is_alphanumeric())
+            && text[at + "path".len()..].trim_start().starts_with('=')
+            && !text[at + "path".len()..].trim_start().starts_with("==")
     })
 }
 
@@ -1012,5 +1116,49 @@ mod tests {
             normalize_path("a/./b//c/../d.rs").as_deref(),
             Some("a/b/d.rs")
         );
+    }
+
+    fn scanned(source: &str) -> Option<Vec<String>> {
+        scan_module_declarations(source.as_bytes()).map(|names| {
+            let mut names = names.into_iter().collect::<Vec<_>>();
+            names.sort();
+            names
+        })
+    }
+
+    #[test]
+    fn a_crate_roots_mod_lines_name_the_modules_it_declares() {
+        assert_eq!(
+            scanned(
+                "//! mod doc;\nuse std::fmt; // mod note;\npub(crate) mod cli;\n#[cfg(test)]\nmod tests {\n    mod nested;\n}\nmod r#type;\nfn model() { let modulo = 1; }\n"
+            ),
+            Some(vec![
+                "cli".to_string(),
+                "nested".to_string(),
+                "tests".to_string(),
+                "type".to_string(),
+            ])
+        );
+        assert_eq!(scanned("fn main() {}\n"), Some(Vec::new()));
+        // A `path` binding elsewhere is no attribute on a `mod`.
+        assert_eq!(
+            scanned("fn main() {\n    let path = 1;\n}\nmod cli;\n"),
+            Some(vec!["cli".to_string()])
+        );
+    }
+
+    #[test]
+    fn mod_lines_that_cannot_tell_what_a_root_declares_read_as_unknown() {
+        for source in [
+            "#[path = \"other.rs\"]\nmod cli;\n",
+            "#[cfg_attr(unix,\n    path = \"unix.rs\")]\nmod sys;\n",
+            "#[path = \"x.rs\"] mod cli;\n",
+            "pub mod\n    cli;\n",
+            "mod cli\n{\n}\n",
+            "macro_rules! m { ($name:ident) => { mod $name; } }\n",
+            "include!(\"mods.rs\");\n",
+        ] {
+            assert_eq!(scanned(source), None, "{source}");
+        }
     }
 }

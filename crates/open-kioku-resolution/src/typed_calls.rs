@@ -179,11 +179,9 @@ fn resolve_rust_qualified_module_outcome(
     if let Some(outcome) = resolve_rust_crate_name_outcome(call, ctx, receiver) {
         return Some(outcome);
     }
+    let own = ctx.scopes.rust_module_placement(ctx.file_id);
     // A file another crate may compile too is read against no one crate.
-    let placement = ctx
-        .scopes
-        .rust_module_placement(ctx.file_id)
-        .filter(|placement| !placement.in_other_crates);
+    let mut placement = own.filter(|placement| !placement.in_other_crates);
     let (mut targets, strategy) = if receiver == "crate" || receiver.starts_with("crate::") {
         let names = rust_crate_path_member_names(placement?, receiver, &call.callee_name)?;
         (
@@ -200,6 +198,13 @@ fn resolve_rust_qualified_module_outcome(
                 RustModulePathStrategy::ModuleScope,
             ),
             RustRelativeModule::Outside { climbs, path } => {
+                // A path that climbs no higher than this file's own module ends below it, in the
+                // same file in every crate that compiles this one at the same place.
+                if climbs == 0 {
+                    placement = own.filter(|placement| {
+                        !placement.in_other_crates || placement.own_subtree_in_every_crate
+                    });
+                }
                 // The path is read off this file's module, which only a placed file has.
                 let names =
                     rust_outside_member_names(placement?, climbs, &path, &call.callee_name)?;
@@ -952,6 +957,7 @@ mod tests {
             crate_roots: roots.iter().map(|root| root.to_string()).collect(),
             module: module.map(|module| module.iter().map(|name| name.to_string()).collect()),
             in_other_crates: false,
+            own_subtree_in_every_crate: true,
         }
     }
 
@@ -1956,8 +1962,10 @@ mod tests {
         // `main.rs` declares `util`, and `lib.rs`, which the index could not read, may too:
         // `crate::helper` in `util.rs` would be the library's `helper` in that crate (#572).
         let bin = |module: &[&str]| placement("src", &["src::main"], Some(module));
+        // `main.rs` mounts it with `#[path]`, say, where its `mod` items are read elsewhere.
         let shared = RustModulePlacement {
             in_other_crates: true,
+            own_subtree_in_every_crate: false,
             ..bin(&["util"])
         };
         let items = [
@@ -1978,9 +1986,26 @@ mod tests {
             assert_eq!(at("self::inner", "f"), None);
         });
         // The binary's own paths still end in it.
-        with_rust_files("src/main.rs", &items, placements, |ctx| {
+        with_rust_files("src/main.rs", &items, placements.clone(), |ctx| {
             let call = module_path_call("scope:worker", "crate::util", "u");
             assert_eq!(proven_target(ctx, &call).as_deref(), Some("src::util::u"));
+        });
+
+        // Where every crate declares `util` at the same place, `util/inner.rs` is the same file in
+        // each, so a path that ends below `util` is read; one that leaves it is not (#576).
+        let mut in_place = placements;
+        in_place[1].1.own_subtree_in_every_crate = true;
+        with_rust_files("src/util.rs", &items, in_place, |ctx| {
+            let at = |receiver: &str, callee: &str| {
+                proven_target(ctx, &module_path_call("scope:worker", receiver, callee))
+            };
+            assert_eq!(
+                at("self::inner", "f").as_deref(),
+                Some("src::util::inner::f")
+            );
+            assert_eq!(at("crate", "helper"), None);
+            assert_eq!(at("super", "helper"), None);
+            assert_eq!(at("crate::util::inner", "f"), None);
         });
     }
 

@@ -68,7 +68,14 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// chunk binds, nor a path or import that leads elsewhere (`std::mem::take`, `use anyhow::Result;`);
 /// and it reads Python f-string fields as code. v15 indexes hold unique-name edges from those
 /// tokens and none from f-string fields.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v16";
+/// v17: in a module file another crate may also compile, a `self::`/`super::` path that ends
+/// below the file's own module is read when every crate compiles the file at the place its path
+/// spells; a crate root skipped for size shares only the modules its `mod` items declare; and the
+/// module files a `#[path]`-mounted file declares are shared with the mounting crate too. v16 indexes hold no `CALLS` edge
+/// or binding from such a `self::`/`super::` path, none from a module file a size-skipped root
+/// does not declare, and `CALLS` edges from a `crate::` path in a module file below a mounted
+/// `mod.rs` into one crate's item.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v17";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

@@ -247,10 +247,18 @@ fn rust_placement_notes(gaps: imports::RustPlacementGaps) -> Vec<QualityNote> {
         ));
     }
     if gaps.shared_files > 0 {
+        let unread_mounts = if gaps.unread_mounts > 0 {
+            format!(
+                "; {} of the `#[path]` attributes that mark them could not be read (a raw string, a macro, or a directory), so each may mount any file of its package",
+                gaps.unread_mounts
+            )
+        } else {
+            String::new()
+        };
         notes.push(QualityNote::new(
             QualityNoteKind::RelationshipResolution,
             format!(
-                "{} Rust source file(s) an indexed crate root declares may also be compiled into another crate (a crate root beside them was not indexed, or another crate mounts them with `#[path]`); `crate::`, `self::` and `super::` call paths in those files are left unresolved",
+                "{} Rust source file(s) an indexed crate root declares may also be compiled into another crate (a crate root beside them was not indexed, or another crate mounts them or a module above them with `#[path]`); `crate::`, `self::` and `super::` call paths in those files are left unresolved, except a `self::`/`super::` path ending below the file's own module where every crate compiles the file at the same place{unread_mounts}",
                 gaps.shared_files
             ),
         ));
@@ -757,6 +765,26 @@ impl Indexer {
                 .map(|skipped| skipped.path.as_path()),
         )
         .with_reexports(&import_sites);
+        let rust_modules = {
+            let unread = rust_modules.unread_crate_roots();
+            // Only a root skipped for its size has its `mod` lines read; a path policy's
+            // exclusion is never read around.
+            let scanned = skipped_paths
+                .iter()
+                .filter(|skipped| {
+                    skipped.reason == SkipReason::TooLarge
+                        && skipped.source == SkipSource::SizeLimit
+                        && skipped.safe_to_show
+                        && !open_kioku_core::is_secret_like_path(&skipped.path)
+                        && unread.contains(&skipped.path)
+                })
+                .map(|skipped| {
+                    let names = rust_use_path::read_module_declarations(&root.join(&skipped.path));
+                    (skipped.path.as_path(), names)
+                })
+                .collect::<Vec<_>>();
+            rust_modules.with_scanned_roots(scanned)
+        };
         scope_index.record_rust_module_placements(rust_modules.module_placements());
         scope_index.record_rust_crate_names(rust_modules.crate_names());
         let rust_placement_gaps = rust_modules.placement_gaps();
@@ -3713,6 +3741,68 @@ class Util {
             .iter()
             .any(|note| note.kind == QualityNoteKind::IndexMode
                 && note.message.contains("source parsing skipped")));
+    }
+
+    #[test]
+    fn a_crate_root_skipped_for_size_shares_only_the_modules_its_mod_lines_declare() {
+        // `main.rs` is over `max_file_size` and declares `util`, not `other`: only `util.rs` may
+        // be compiled into the binary too. Excluded by `.okignore` instead, it is never read,
+        // and both may be (#576).
+        let shared_note = |ignore: bool| {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fx\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("src/lib.rs"),
+                "mod util;\nmod other;\npub fn helper() {}\n",
+            )
+            .unwrap();
+            std::fs::write(root.join("src/util.rs"), "pub fn u() {}\n").unwrap();
+            std::fs::write(root.join("src/other.rs"), "pub fn o() {}\n").unwrap();
+            let padding = "// padding\n".repeat(64);
+            std::fs::write(
+                root.join("src/main.rs"),
+                format!("mod util;\n{padding}fn main() {{}}\n"),
+            )
+            .unwrap();
+            if ignore {
+                std::fs::write(root.join(".okignore"), "src/main.rs\n").unwrap();
+            }
+            let mut config = OkConfig::default();
+            config.scip.enabled = false;
+            config.history.enabled = false;
+            config.index.max_file_size = "256b".into();
+            let snapshot = Indexer::default()
+                .index_repo_with_mode(root, &config, IndexMode::Full)
+                .unwrap();
+            let expected = if ignore {
+                SkipReason::Ignored
+            } else {
+                SkipReason::TooLarge
+            };
+            assert!(snapshot.skipped_paths.iter().any(|skipped| skipped.path
+                == std::path::Path::new("src/main.rs")
+                && skipped.reason == expected));
+            snapshot
+                .manifest
+                .quality
+                .quality_notes
+                .iter()
+                .find(|note| {
+                    note.message
+                        .contains("may also be compiled into another crate")
+                })
+                .map(|note| note.message.clone())
+        };
+        let sized = shared_note(false).expect("util.rs is shared");
+        assert!(sized.starts_with("1 Rust source file(s)"), "{sized}");
+        let ignored = shared_note(true).expect("both modules are shared");
+        assert!(ignored.starts_with("2 Rust source file(s)"), "{ignored}");
     }
 
     #[test]
