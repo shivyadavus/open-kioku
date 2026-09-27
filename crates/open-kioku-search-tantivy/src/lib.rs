@@ -1694,6 +1694,21 @@ mod symbol_text_tests {
     }
 
     #[test]
+    fn the_declaring_path_is_searched_as_symbol_text() {
+        let (_temp, index) = index(Visibility::Private);
+        // `keys` is only in the declaring file's path, never in the symbol's name, qualified
+        // name or signature. `content` also starts with the path, so the symbol field is
+        // queried on its own.
+        let symbol_text = index.fields.symbol_text.unwrap();
+        let query = tantivy::query::QueryParser::for_index(&index.index, vec![symbol_text])
+            .parse_query("keys")
+            .unwrap();
+        let searcher = index.index.reader().unwrap().searcher();
+        let hits = searcher.search(&query, &tantivy::collector::Count).unwrap();
+        assert_eq!(hits, 1);
+    }
+
+    #[test]
     fn stored_symbol_metadata_does_not_move_scores() {
         // `tree_sitter` is two terms and `scip` one, so while the record was indexed this
         // changed the length of every document that has the symbol and moved its BM25 score.
