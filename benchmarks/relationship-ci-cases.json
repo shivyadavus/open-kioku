@@ -1611,6 +1611,176 @@
       "notes": "Regression case (#576): `tests/it.rs` mounts the library's `src/sub/mod.rs` with `#[path]`, so rustc compiles the `src/sub/child.rs` it declares into the test crate too, and `crate::target_fn()` there names a different function in each crate; no edge may be proven to either."
     },
     {
+      "id": "ci-rust-calls-78-generic_annotated_parameter_receiver",
+      "fixture_id": "ci/ri3/rust/calls/generic_annotated_parameter_receiver",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:generic_annotated_parameter_receiver:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "generic_annotated_parameter_receiver",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:generic_annotated_parameter_receiver:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#599): `w.target_fn()` on a parameter annotated `&Wrapper<u8>` reaches the method of `impl<T> Wrapper<T>`: the annotation is a `Wrapper`, seen through the reference and without its generic arguments."
+    },
+    {
+      "id": "ci-rust-calls-79-generic_annotated_let_receiver",
+      "fixture_id": "ci/ri3/rust/calls/generic_annotated_let_receiver",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:generic_annotated_let_receiver:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "generic_annotated_let_receiver",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:generic_annotated_let_receiver:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#599): `w.target_fn()` on `let mut w: Wrapper<u8>` reaches the method of `impl<T> Wrapper<T>`."
+    },
+    {
+      "id": "ci-rust-calls-80-generic_annotation_container_receiver",
+      "fixture_id": "ci/ri3/rust/calls/generic_annotation_container_receiver",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:generic_annotation_container_receiver:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "generic_annotation_container_receiver",
+      "notes": "Regression case (#599): `things: Vec<Thing>` is a `Vec`, so `things.target_fn()` is the extension trait's method on `Vec`, never `Thing`'s same-named method; stripping generic arguments must not type the receiver as the element type."
+    },
+    {
+      "id": "ci-rust-calls-81-generic_annotation_instantiations_same_method",
+      "fixture_id": "ci/ri3/rust/calls/generic_annotation_instantiations_same_method",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:generic_annotation_instantiations_same_method:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "generic_annotation_instantiations_same_method",
+      "notes": "Regression case (#599): `impl Wrapper<u8>` and `impl Wrapper<u16>` each declare `target_fn`, and the index does not match type arguments, so `w.target_fn()` on `w: &Wrapper<u8>` keeps both candidates and emits no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-82-crate_path_type_associated_fn",
+      "fixture_id": "ci/ri3/rust/calls/crate_path_type_associated_fn",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:crate_path_type_associated_fn:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "crate_path_type_associated_fn",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:crate_path_type_associated_fn:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name",
+        "containing_type"
+      ],
+      "notes": "Regression case (#599): `crate::engine::PlanEngine::target_fn()` reaches the associated function of the `PlanEngine` that `src/engine.rs` declares: the path's last segment names a type of the module the rest of the path reaches."
+    },
+    {
+      "id": "ci-rust-calls-83-dependency_crate_type_associated_fn",
+      "fixture_id": "ci/ri3/rust/calls/dependency_crate_type_associated_fn",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:dependency_crate_type_associated_fn:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "dependency_crate_type_associated_fn",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:dependency_crate_type_associated_fn:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name",
+        "containing_type"
+      ],
+      "notes": "Regression case (#599): `engine::PlanEngine::target_fn()` with no `use` reaches the associated function of the `PlanEngine` at the root of the declared dependency crate `engine`."
+    },
+    {
+      "id": "ci-rust-calls-84-crate_path_type_without_the_member",
+      "fixture_id": "ci/ri3/rust/calls/crate_path_type_without_the_member",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:crate_path_type_without_the_member:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "crate_path_type_without_the_member",
+      "notes": "Regression case (#599): `crate::engine::PlanEngine::target_fn()` names `PlanEngine`, which declares no `target_fn`; the same-named associated function of another type in that module must not take the edge."
+    },
+    {
+      "id": "ci-rust-calls-85-closure_parameter_after_the_closure",
+      "fixture_id": "ci/ri3/rust/calls/closure_parameter_after_the_closure",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:closure_parameter_after_the_closure:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "closure_parameter_after_the_closure",
+      "notes": "Regression case (#599): `|w: &Wrapper<u8>|` binds `w` in the closure alone, so `w.target_fn()` after the closure is a call on the function's `w: Vec<Thing>` and must not reach `Wrapper`'s `target_fn`."
+    },
+    {
       "id": "ci-rust-calls-86-cfg_attr_path_module_below_mounted_mod_rs_shared_with_test_crate",
       "fixture_id": "ci/ri3/rust/calls/cfg_attr_path_module_below_mounted_mod_rs_shared_with_test_crate",
       "split": "development",
