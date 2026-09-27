@@ -83,8 +83,10 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// library, a dependency the package's manifest places outside the repository (registry, git, or a
 /// `path` leaving it), or, unimported, the standard prelude. A method call on a Rust binding
 /// annotated with a generic type or a reference (`w: &Wrapper<u8>`, `x: &mut Foo`) is typed by
-/// the annotation's path without its generic arguments. Earlier indexes count those `IMPLEMENTS`
-/// as unresolved and hold none of those `CALLS` edges.
+/// the annotation's path without its generic arguments, and a call path whose last segment names
+/// a type of the module the rest reaches (`crate::a::Engine::new()`, `engine::Engine::new()`)
+/// reaches that type's associated function. Earlier indexes count those `IMPLEMENTS` as
+/// unresolved and hold none of those `CALLS` edges.
 pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v20";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
