@@ -685,6 +685,23 @@ impl SqliteStore {
         excluded_content_cleared(&conn)
     }
 
+    /// Whether the store's indexed content, a file or a document's sections, is read from
+    /// `path`: what a reader serving text quoted from a path asks before serving it (#585).
+    pub fn indexes_path(&self, path: &Path) -> Result<bool> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let path = path.to_string_lossy();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE path = ?1)
+                 OR EXISTS(SELECT 1 FROM document_sections WHERE path = ?1)",
+            params![path.as_ref()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(storage_err)
+    }
+
     /// Every repository-relative path the store's indexed content (files and document
     /// sections) and Git history name: [`stored_paths`](Self::stored_paths) without the graph
     /// scan, for a writer comparing what it replaced with what it wrote.

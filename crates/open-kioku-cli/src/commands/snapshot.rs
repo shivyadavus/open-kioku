@@ -253,6 +253,10 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
         || staged_free_pages > 0
         || temp_manifest.quality.pending_deleted_content_clearing;
     temp_manifest.quality.pending_deleted_content_clearing = false;
+    // The local vector store and context handles were built from the index this replaces, so
+    // the import owes a prune until the one after publication succeeds; the exporter's own
+    // record describes stores that did not travel with the artifact.
+    temp_manifest.quality.pending_derived_store_pruning = true;
     if let Err(err) = withhold_snapshot_manifest(&temp_db, compact) {
         remove_staged_db(&temp_db);
         return Err(err);

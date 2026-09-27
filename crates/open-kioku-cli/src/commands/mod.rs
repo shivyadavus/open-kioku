@@ -130,6 +130,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 if let Some(caveat) = deleted_content_caveat(&snapshot.manifest.quality) {
                     println!("deleted content: {caveat}");
                 }
+                if let Some(caveat) = derived_store_caveat(&snapshot.manifest.quality) {
+                    println!("derived stores: {caveat}");
+                }
                 if let Some(scip) = &snapshot.scip {
                     println!(
                         "SCIP: mode {:?}, imported {} index(es), {} exact references",
@@ -301,6 +304,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 );
                 if let Some(caveat) = deleted_content_caveat(&manifest.quality) {
                     println!("Deleted content: {caveat}");
+                }
+                if let Some(caveat) = derived_store_caveat(&manifest.quality) {
+                    println!("Derived stores: {caveat}");
                 }
                 if let Some(snapshot) = &manifest.snapshot {
                     println!("Snapshot: {}", snapshot_provenance_summary(snapshot));
@@ -1019,9 +1025,18 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Command::RetrieveContext { handle } => {
             // An unknown handle is an error, as it is for MCP `retrieve_context`: `null`
-            // under `--json` read as an empty snippet.
+            // under `--json` read as an empty snippet. A handle quoting a file the published
+            // index no longer holds is refused, whether or not a prune has deleted it yet.
+            // The index is opened only for a handle that exists; without one nothing is held.
             let retrieved = ContextHandleStore::open_repo_existing(&repo)?
-                .map(|store| store.retrieve(&ContextHandleId::new(&handle)))
+                .map(|store| {
+                    store.retrieve_indexed(&ContextHandleId::new(&handle), |path| {
+                        match SqliteStore::open_repo_index(&repo)? {
+                            Some(index) => index.indexes_path(path),
+                            None => Ok(false),
+                        }
+                    })
+                })
                 .transpose()?
                 .flatten()
                 .ok_or_else(|| {

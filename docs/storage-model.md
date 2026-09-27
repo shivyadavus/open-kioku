@@ -79,8 +79,11 @@ succeeds, set when the compaction or the checkpoint fails. While it is set, `ok 
 `repo_status` and `ok doctor` (a `deleted_content` warning) report that deleted content may
 remain until compaction succeeds, and the next `ok index` or watcher start retries the
 compaction. A file event under `ok watch` compacts only for what that event removed, so a
-compaction that keeps failing is not retried once per change. A compaction costs one rewrite
-of the database, with free disk space about its size while it runs. An older Open Kioku
+compaction that keeps failing is not retried once per change. A failed prune of the stores
+derived from the index (the semantic vector store and stored context handles;
+`docs/security-model.md`) is recorded apart, as `quality.pending_derived_store_pruning`, so
+it never costs a compaction. A compaction costs one rewrite of the database, with free disk
+space about its size while it runs. An older Open Kioku
 writing to a marked database does not clear what it deletes and leaves the record in place;
 after running one over an index, delete `.ok/` and re-index. None of this can scrub blocks
 the filesystem has already freed, such as a deleted write-ahead log's, a copy-on-write

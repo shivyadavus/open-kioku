@@ -195,6 +195,9 @@ fn render_status_markdown(
         if let Some(caveat) = deleted_content_caveat(&manifest.quality) {
             out.push_str(&format!("| Deleted content | {caveat} |\n"));
         }
+        if let Some(caveat) = derived_store_caveat(&manifest.quality) {
+            out.push_str(&format!("| Derived stores | {caveat} |\n"));
+        }
         if let Some(snapshot) = &manifest.snapshot {
             out.push_str(&format!(
                 "| Imported snapshot | {} |\n",
@@ -1495,6 +1498,16 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                         "Deleted content: run `ok index .` while no MCP server or `ok watch` holds a read open, so the database is compacted and its write-ahead log truncated.".into(),
                     );
                 }
+                if let Some(caveat) = derived_store_caveat(quality) {
+                    checks.push(DoctorCheck {
+                        name: "derived_stores",
+                        status: CheckStatus::Warn,
+                        message: caveat.to_string(),
+                    });
+                    next_steps.push(
+                        "Derived stores: run `ok index .` while no other process holds `.ok/context.sqlite`, so the vector store and stored context handles are pruned of removed paths.".into(),
+                    );
+                }
                 if let Some(snapshot) = &manifest.snapshot {
                     let (check, step) = snapshot_check(snapshot);
                     checks.push(check);
@@ -1642,9 +1655,21 @@ fn deleted_content_caveat(quality: &open_kioku_core::IndexQuality) -> Option<&'s
     quality.pending_deleted_content_clearing.then_some(
         "deleted content may remain until compaction succeeds: rows an index run removed, such \
          as a path the policy excluded after it was indexed, can still be read from the \
-         database file or its write-ahead log, or its text from the semantic vector store or \
-         stored context handles; run `ok index` with no other Open Kioku process reading the \
-         index",
+         database file or its write-ahead log; run `ok index` with no other Open Kioku process \
+         reading the index",
+    )
+}
+
+/// What `ok index`, `ok status`, and `ok doctor` say while removing the text of paths the
+/// index no longer holds from the stores derived from it has not succeeded (#564, #585);
+/// `None` once it has. The index itself, and its database files, are not what this is about.
+fn derived_store_caveat(quality: &open_kioku_core::IndexQuality) -> Option<&'static str> {
+    quality.pending_derived_store_pruning.then_some(
+        "removed paths' text may remain in derived stores until a prune succeeds: the semantic \
+         vector store (`.ok/vectors`) or stored context handles (`.ok/context.sqlite`, served by \
+         `ok retrieve-context`) can still hold text of a path the index no longer holds, such as \
+         a deleted file or one the policy now excludes; run `ok index` with no other Open Kioku \
+         process holding the context handle store",
     )
 }
 
