@@ -370,7 +370,36 @@ impl SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         conn.execute_batch("VACUUM;").map_err(storage_err)?;
-        record_excluded_content_cleared(&conn)
+        record_excluded_content_cleared(&conn)?;
+        clear_schema_meta_flag(&conn, DROPPED_INDEXED_PATH_FLAG)?;
+        clear_schema_meta_flag(&conn, GAINED_SECURITY_SKIP_FLAG)
+    }
+
+    /// Record what a run observed toward a move of content out of the index, and return what
+    /// has been observed since the last [`compact`](Self::compact), this run included: whether
+    /// an indexed path was removed, and whether the security rules began skipping a path. A
+    /// move split across runs (a copy into a denied directory in one, the original's deletion
+    /// in the next) shows each half in a different run (#567). Two flags, no path: nothing
+    /// here names what moved.
+    pub fn note_removal_evidence(
+        &self,
+        dropped_indexed_path: bool,
+        gained_security_skip: bool,
+    ) -> Result<(bool, bool)> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        if dropped_indexed_path {
+            set_schema_meta_flag(&conn, DROPPED_INDEXED_PATH_FLAG)?;
+        }
+        if gained_security_skip {
+            set_schema_meta_flag(&conn, GAINED_SECURITY_SKIP_FLAG)?;
+        }
+        Ok((
+            dropped_indexed_path || schema_meta_flag(&conn, DROPPED_INDEXED_PATH_FLAG)?,
+            gained_security_skip || schema_meta_flag(&conn, GAINED_SECURITY_SKIP_FLAG)?,
+        ))
     }
 
     /// Copy every committed page from the write-ahead log into the database file and truncate
@@ -5012,6 +5041,11 @@ fn add_column_if_not_exists(conn: &mut Connection, stmt: &str) -> Result<bool> {
 /// content as it removes it; see [`SqliteStore::excluded_content_cleared`].
 const EXCLUDED_CONTENT_CLEARED_FLAG: &str = "excluded_content_cleared_v1";
 
+/// Set when a run removed an indexed path, and when the security rules began skipping a path;
+/// both cleared by a compaction. See [`SqliteStore::note_removal_evidence`].
+const DROPPED_INDEXED_PATH_FLAG: &str = "dropped_indexed_path_since_compaction_v1";
+const GAINED_SECURITY_SKIP_FLAG: &str = "gained_security_skip_since_compaction_v1";
+
 /// Marker recording that the graph query-column backfill has completed for this store, so
 /// store open never rescans the graph tables once they are migrated.
 const GRAPH_QUERY_COLUMNS_FLAG: &str = "graph_query_columns_v2";
@@ -7721,6 +7755,37 @@ mod tests {
         assert!(!bytes
             .windows(19)
             .any(|window| window == b"quartz_removed_body"));
+    }
+
+    #[test]
+    fn removal_evidence_accumulates_across_runs_until_a_compaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(temp.path().join("index.sqlite")).unwrap();
+        assert_eq!(
+            store.note_removal_evidence(false, false).unwrap(),
+            (false, false)
+        );
+        assert_eq!(
+            store.note_removal_evidence(true, false).unwrap(),
+            (true, false)
+        );
+        assert_eq!(
+            store.note_removal_evidence(false, false).unwrap(),
+            (true, false)
+        );
+        assert_eq!(
+            store.note_removal_evidence(false, true).unwrap(),
+            (true, true)
+        );
+        store.compact().unwrap();
+        assert_eq!(
+            store.note_removal_evidence(false, false).unwrap(),
+            (false, false)
+        );
+        assert_eq!(
+            store.note_removal_evidence(false, true).unwrap(),
+            (false, true)
+        );
     }
 
     #[test]

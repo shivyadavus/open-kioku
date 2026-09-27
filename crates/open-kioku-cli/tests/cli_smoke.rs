@@ -2529,6 +2529,163 @@ fn index_compacts_once_a_database_an_earlier_version_left_deleted_rows_in() {
     assert!(!again.contains("compacting the database"), "{again}");
 }
 
+/// Move `from` to `to` in the checkout with `git mv`, as a rename is usually made.
+fn git_mv(repo: &std::path::Path, from: &str, to: &str) {
+    if let Some(parent) = std::path::Path::new(to).parent() {
+        fs::create_dir_all(repo.join(parent)).unwrap();
+    }
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["mv", from, to])
+        .status()
+        .unwrap();
+    assert!(status.success(), "git mv {from} {to} failed");
+}
+
+/// Index the vault fixture with `private/**` denied, while another connection holds the index
+/// open, then move the vault file to `to` and index again. The path the content leaves is one
+/// the policy still admits; where it goes, the security rules skip. That run compacts, and
+/// nothing on disk names the content afterwards (#567).
+fn assert_moved_vault_content_leaves_nothing_on_disk(to: &str) {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    fs::write(
+        repo.join("ok.toml"),
+        config.replacen("deny = [\n", "deny = [\n    \"private/**\",\n", 1),
+    )
+    .unwrap();
+    let reader = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+    let count = |reader: &rusqlite::Connection| -> i64 {
+        reader
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert!(count(&reader) > 0);
+    // Denying a path nothing is at removes nothing, so this run does not compact.
+    let stderr = index_repo_stderr(repo);
+    assert!(!stderr.contains("compacting the database"), "{stderr}");
+    let before = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(holds(&before, needle), "the first index lacks `{needle}`");
+    }
+
+    git_mv(repo, "internal/vault/keys.rs", to);
+    let stderr = index_repo_stderr(repo);
+    assert!(count(&reader) > 0);
+    let bytes = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(
+            !holds(&bytes, needle),
+            "the index holds `{needle}` after the vault moved to {to}"
+        );
+    }
+    assert!(stderr.contains("compacting the database"), "{stderr}");
+    drop(reader);
+
+    let again = index_repo_stderr(repo);
+    assert!(!again.contains("compacting the database"), "{again}");
+}
+
+#[test]
+fn index_after_content_moves_into_a_denied_directory_leaves_none_of_it_on_disk() {
+    assert_moved_vault_content_leaves_nothing_on_disk("private/keys.rs");
+}
+
+#[test]
+fn index_after_a_file_is_renamed_to_a_secret_like_name_leaves_none_of_it_on_disk() {
+    assert_moved_vault_content_leaves_nothing_on_disk("internal/vault/keys.pem");
+}
+
+/// A move made as two steps, each indexed on its own: the copy into a denied directory in one
+/// run and the original's deletion in the next, or the other way round. Neither run holds
+/// both halves, so the first does not compact and the second does, from what the store
+/// recorded between them (#567). Another connection holds the index open throughout.
+fn assert_split_move_leaves_nothing_on_disk(copy_first: bool) {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    fs::write(
+        repo.join("ok.toml"),
+        config.replacen("deny = [\n", "deny = [\n    \"private/**\",\n", 1),
+    )
+    .unwrap();
+    let reader = rusqlite::Connection::open(active_index_db(repo)).unwrap();
+    let count = |reader: &rusqlite::Connection| -> i64 {
+        reader
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert!(count(&reader) > 0);
+    let stderr = index_repo_stderr(repo);
+    assert!(!stderr.contains("compacting the database"), "{stderr}");
+
+    let original = repo.join("internal/vault/keys.rs");
+    let content = fs::read_to_string(&original).unwrap();
+    fs::create_dir_all(repo.join("private")).unwrap();
+    let copy = || fs::write(repo.join("private/keys.rs"), &content).unwrap();
+    if copy_first {
+        copy();
+    } else {
+        fs::remove_file(&original).unwrap();
+    }
+    let first = index_repo_stderr(repo);
+    assert!(!first.contains("compacting the database"), "{first}");
+    if copy_first {
+        fs::remove_file(&original).unwrap();
+    } else {
+        copy();
+    }
+    let second = index_repo_stderr(repo);
+    assert!(count(&reader) > 0);
+    let bytes = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(
+            !holds(&bytes, needle),
+            "the index holds `{needle}` after a move split over two runs"
+        );
+    }
+    assert!(second.contains("compacting the database"), "{second}");
+    drop(reader);
+
+    let again = index_repo_stderr(repo);
+    assert!(!again.contains("compacting the database"), "{again}");
+}
+
+#[test]
+fn index_after_a_copy_into_a_denied_directory_then_a_delete_leaves_none_of_it_on_disk() {
+    assert_split_move_leaves_nothing_on_disk(true);
+}
+
+#[test]
+fn index_after_a_delete_then_a_copy_into_a_denied_directory_leaves_none_of_it_on_disk() {
+    assert_split_move_leaves_nothing_on_disk(false);
+}
+
+/// Deleting, renaming within what the policy admits, and editing remove rows too, but none of
+/// them moves content somewhere the index policy excludes, so none of them costs a compaction.
+#[test]
+fn index_after_plain_edits_renames_and_deletes_does_not_compact() {
+    let temp = vault_fixture_repo();
+    let repo = temp.path();
+    fs::write(
+        repo.join("src/main.rs"),
+        "fn main() {\n    println!(\"steady\");\n}\n",
+    )
+    .unwrap();
+    let stderr = index_repo_stderr(repo);
+    assert!(!stderr.contains("compacting the database"), "{stderr}");
+
+    git_mv(repo, "internal/vault/keys.rs", "internal/vault/locks.rs");
+    let stderr = index_repo_stderr(repo);
+    assert!(!stderr.contains("compacting the database"), "{stderr}");
+
+    fs::remove_file(repo.join("internal/vault/locks.rs")).unwrap();
+    let stderr = index_repo_stderr(repo);
+    assert!(!stderr.contains("compacting the database"), "{stderr}");
+}
+
 /// A clearing that did not complete is recorded in the manifest, reported by `ok status` and
 /// `ok doctor`, and retried by the next `ok index`, which reports it settled (#553).
 #[test]

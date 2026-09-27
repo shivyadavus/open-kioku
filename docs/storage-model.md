@@ -39,11 +39,30 @@ second of those. Three measures close them (#553):
 - **A compaction** (`VACUUM`) after a run that removed a path the current policy excludes:
   the run compares the paths the store named before it with those it names after, and asks
   the policy about the ones that are gone (indexed content by every rule discovery applies,
-  Git history by the security rules). A run that removes nothing excluded does not compact.
-  The check judges the path that disappeared, not where its content went: a file moved into a
-  newly denied directory, or renamed to a secret-like name, drops a path the policy still
-  admits, so that run does not compact and the old rows' bytes can stay in free pages until a
-  later compaction (#567).
+  Git history by the security rules). Content moved into an excluded path (a file moved into
+  a denied directory, or renamed to a secret-like name) leaves from a path the policy still
+  admits, and a move can be split over two runs (a copy into the denied directory, then the
+  original's deletion, or the other way round), so neither run sees both ends (#567). The
+  store therefore keeps two flags in `schema_meta`, set as runs observe them and cleared by
+  a compaction: a run removed an indexed path, and a run's discovery skipped, under the
+  security rules (`[paths] deny` and secret-like names), a path the previous manifest did not
+  record as skipped. A run that sets either flag while the other is set compacts. The flags
+  name no path; the skipped-path comparison runs in memory over what the two manifests
+  already record, and the skipped file is not read.
+  It is an inference, not a match, and costs compactions a move did not cause: once any
+  indexed file has been deleted or renamed since the last compaction, the next new denied
+  or secret-like file (a new `.env`, say) compacts, and so does the next deletion after
+  one appeared; each compaction clears both flags. Edits, and deletes and renames within
+  what the policy admits, do not compact on their own. What it does not detect:
+  - A move over a path the security rules already skipped (a file moved onto an existing
+    denied file of the same name), which gains no skip.
+  - A rename to a secret-like name while another secret-like file disappears in the same
+    run: withheld paths are recorded only as `[redacted]` and compared by count.
+  - A move into a Git-ignored, hidden or `[index] exclude`d path. Build output and editor
+    files add such skips on most runs, so they are not counted. To have a path's content
+    removed from the index files, deny it with `[paths] deny`, not `.gitignore`.
+
+  The old rows' bytes in these cases can stay in free pages until a later compaction.
 - **A truncating WAL checkpoint** at the end of every `ok index` and `ok watch` run, which
   copies the log into the database file and empties it. A connection that is merely open,
   such as an idle MCP server's, does not block it; one inside a read transaction does.

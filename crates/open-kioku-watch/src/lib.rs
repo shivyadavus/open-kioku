@@ -324,6 +324,7 @@ pub fn reindex_repo_after_changes<'a>(
             &config,
             &store,
             &paths_before,
+            &snapshot.manifest.quality.skipped_paths,
             previous_manifest.as_ref(),
             ClearingScope::Incremental,
         )
@@ -446,6 +447,7 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         &config,
         &store,
         &paths_before,
+        &snapshot.manifest.quality.skipped_paths,
         previous_manifest.as_ref(),
         ClearingScope::Full,
     )
