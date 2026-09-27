@@ -111,7 +111,10 @@ The graph builder creates file-to-symbol `DEFINES` edges from extracted symbols 
 Symbol-registry name matches are read from code only: a word inside a comment or a string literal
 is not a use of anything. The registry finds them with a lexical pass per language, not a parse.
 It skips JavaScript and TypeScript regular-expression literals, reads a double-quoted SQL name as
-an identifier, and reads the names in an interpolated Python or Rust string as literal. JSON,
+an identifier, reads a Python f-string's `{...}` replacement fields as code (up to a `!r`
+conversion or `:` format spec, whose own nested fields are code too; `{{`, `}}` and a `\N{...}`
+named escape are text), and
+reads the names in a Rust format string as literal. JSON,
 Markdown and plain text have no such rules and are read whole; YAML and TOML lose only their `#`
 comments. A chunk is read from its first line as code: one that starts inside a block comment
 reads the comment's words as code up to its end, and one that starts inside a multi-line string or
@@ -121,6 +124,47 @@ name, suffix import reachability, fuzzy) never link a token to a symbol of anoth
 family; TypeScript and JavaScript are one family, and every other language is its own. A
 same-named definition in another language still counts against a unique-name match, so setting
 it aside never makes a common name look unique.
+
+A match by name alone (unique project name, suffix import reachability, fuzzy) is made only for
+a token whose place in the code lets it name that symbol. The same lexical pass reads each
+token's place, and where it cannot tell, the token is matched as before:
+
+- A name inside a Rust `#[...]` attribute, or the path of a `@decorator`, is not matched by name
+  alone. A Java `@Annotation` names a type, so it matches only a class or interface.
+- The member of `receiver.member` is not matched by name alone: without the receiver's type, the
+  one `contains` or `expect` in the repository is not evidence of the call's target. A receiver
+  that is a plain name (not itself a member, a call result, `self` or `this`) and names a
+  directory, module or type the candidate is defined under is that evidence: Go's
+  `structs.NewCheckID`, Java's `Constants.ACCESS_KEY` (a Java receiver must be capitalized, since
+  a lowercase one is a variable whose name may match a package's), a Python module's
+  `misc.format_size`. On an `import`, `from`, `package` or `use` line the dotted path names
+  modules, so no receiver counts there.
+- A field or parameter name (a Rust `name: value` or `Foo { name, .. }`, a JavaScript or
+  TypeScript object key or annotated name, a Go composite literal's `Key: value`, a Python keyword
+  argument) matches only a symbol of kind field.
+- A name the chunk binds as a local before the use (Rust `let`, `for`, closure and function
+  parameters; JavaScript `const`, `let` and `var`; Python assignments, `for`, `as`, `lambda` and
+  `def` parameters; Java typed declarations; Go `:=` and `var`) is not matched by name alone. A
+  `let`, `const`, `var`, `:=` or Python assignment binds once its statement's value is read, so
+  in `let config = config(dir);` the call is not of the local. Scoping is by position in the
+  chunk, not by block, and a Java call is never taken for a local.
+- A Rust path tail is matched by what its qualifier names. A module or crate of the repository
+  (`open_kioku_core::Language`, `generations::IndexWriteLock`) constrains nothing, since a module
+  may re-export the item; a repository type constrains the match to that type's members
+  (`SqliteStore::open` matches a method of `SqliteStore`, `ScopeKind::File` does not match the
+  `File` struct); and a qualifier that names nothing in the repository (`std::mem::take`,
+  `serde_json::to_value`) matches nothing. `crate::`, `self::`, `super::` and `Self::` constrain
+  nothing.
+- A name the file imports under that name from outside the repository (`use anyhow::Result;`,
+  `use std::process::Command;`) is not matched by name alone; a Java `static` import is read by
+  its path. The resolver's import model
+  supplies the name each import binds, so `use std::fs::File as FsFile;` leaves `File` alone, and
+  an unresolved import through the repository's own modules (`use crate::evidence::X;`, often a
+  re-export) constrains nothing.
+
+These tokens still resolve through a direct import or the use site's own file, and a token no
+strategy resolves keeps its caveat, which names the reason. The pass reads at most 80 tokens per
+chunk, keywords excluded, whatever their role.
 
 ### Bounded edge windows
 

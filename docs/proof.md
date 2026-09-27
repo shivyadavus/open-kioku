@@ -44,8 +44,8 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | --- | ---: |
 | Mode | `full` |
 | Analysis semantics | `Compatible` |
-| Stored semantics fingerprint | `31c601cd3d2d748dcaad47c768df6bc1d7f8c3107ca8e5a98cceb244f0789b45` |
-| Current semantics fingerprint | `31c601cd3d2d748dcaad47c768df6bc1d7f8c3107ca8e5a98cceb244f0789b45` |
+| Stored semantics fingerprint | `652f8f672f4546f8821ed4f65f538aca6cc9a37097863e8b7cdfb1c1c6d82985` |
+| Current semantics fingerprint | `652f8f672f4546f8821ed4f65f538aca6cc9a37097863e8b7cdfb1c1c6d82985` |
 | Graph rebuild required | `false` |
 | Files | 5 |
 | Symbols | 8 |
@@ -57,20 +57,20 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | Imports | 5 |
 | SCIP indexes imported | 0 |
 | SCIP exact references | 0 |
-| Static analysis facts | 29 |
+| Static analysis facts | 22 |
 
-Indexed at `2026-09-27 19:02:59.683318 UTC`.
+Indexed at `2026-09-27 19:27:02.827227 UTC`.
 
 Build systems: `cargo`.
 
 Local signal notes:
 - build systems detected: cargo
-- language static analysis facts detected: 29
+- language static analysis facts detected: 22
 - import resolver facts detected: 3
-- symbol registry facts detected: 17
+- symbol registry facts detected: 10
 - complexity/similarity relationship facts detected: 7
 
-Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unresolved: 65
+Quality notes (208): scip: 1, symbol_registry_caveat: 142, symbol_registry_unresolved: 65
 
 - [scip] SCIP disabled; symbol references use tree-sitter/import heuristics
 - [symbol_registry_caveat] symbol registry caveat for `10000` via unresolved: no registry candidate matched
@@ -93,7 +93,7 @@ Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `architecture` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `assert` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `auto_generate` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `aws` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `aws` via unresolved: member access without receiver evidence; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `backend` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `batch_size` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `bool` via unresolved: no registry candidate matched
@@ -101,11 +101,12 @@ Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `build` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `bun` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `cargo` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `cfg` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `cfg` via unresolved: attribute or annotation name; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `check` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `commands` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `contains` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `context` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `contains` via unresolved: member access without receiver evidence; a name-only match needs an import or same-file candidate
+- [symbol_registry_caveat] symbol registry caveat for `context` via unresolved: no field candidate matched a field name
+- [symbol_registry_caveat] symbol registry caveat for `context` via unresolved: the chunk binds this name locally; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `cosine` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `demo` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `deny_network` via unresolved: no registry candidate matched
@@ -116,7 +117,7 @@ Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `documents` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `edition` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `enabled` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `env` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `env` via unresolved: member access without receiver evidence; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `exact_reference` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `exact` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `exclude` via unresolved: no registry candidate matched
@@ -124,7 +125,7 @@ Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `flat` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `format` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `git_cochange` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `git` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `git` via unresolved: member access without receiver evidence; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `go` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `graph_proximity` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `hash` via unresolved: no registry candidate matched
@@ -136,15 +137,17 @@ Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `index_symbols` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `index` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `indexes` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `into` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `into` via unresolved: member access without receiver evidence; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `java` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `javascript` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `json` via unresolved: member access without receiver evidence; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `json` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `kioku` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `languages` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `local` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `lock` via unresolved: member access without receiver evidence; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `lock` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `lockb` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `lockb` via unresolved: member access without receiver evidence; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `max_file_size` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `mcp` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `memory_signal` via unresolved: no registry candidate matched
@@ -157,7 +160,7 @@ Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `node_modules` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `npm` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `off` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `ok` via unresolved: no registry candidate matched
+- [symbol_registry_caveat] symbol registry caveat for `ok` via unresolved: member access without receiver evidence; a name-only match needs an import or same-file candidate
 - [symbol_registry_caveat] symbol registry caveat for `only` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `open` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `path_quality` via unresolved: no registry candidate matched
@@ -169,10 +172,7 @@ Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unres
 - [symbol_registry_caveat] symbol registry caveat for `python` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `ranking` via unresolved: no registry candidate matched
 - [symbol_registry_caveat] symbol registry caveat for `read` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `redact_secrets` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `repo` via unresolved: no registry candidate matched
-- [symbol_registry_caveat] symbol registry caveat for `resolution_mode` via unresolved: no registry candidate matched
-- 98 additional quality notes omitted; use `ok status --markdown --full` or `ok status --json --full` for every note.
+- 108 additional quality notes omitted; use `ok status --markdown --full` or `ok status --json --full` for every note.
 
 ## Readiness Checks
 
@@ -180,9 +180,9 @@ Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unres
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
-| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-27 19:02:59.683318 UTC |
+| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-27 19:27:02.827227 UTC |
 | `pass` | `graph` | relationship graph present |
-| `pass` | `analysis-semantics` | compatible; fingerprint 31c601cd3d2d748dcaad47c768df6bc1d7f8c3107ca8e5a98cceb244f0789b45 |
+| `pass` | `analysis-semantics` | compatible; fingerprint 652f8f672f4546f8821ed4f65f538aca6cc9a37097863e8b7cdfb1c1c6d82985 |
 | `pass` | `generations` | legacy layout (adopts the generation layout on the next `ok index`) |
 | `pass` | `semantic-lifecycle` | semantic search is disabled in ok.toml (explicit local opt-in) |
 | `warn` | `quality` | SCIP exact references unavailable; 2 tests, 5 imports indexed |
@@ -246,7 +246,7 @@ target/debug/ok setup audit /tmp/open-kioku-proof --markdown
 | `pass` | `build` | detected cargo | None |
 | `pass` | `tests` | 2 indexed test target(s) | None |
 | `pass` | `imports` | 5 indexed import edge(s) | None |
-| `pass` | `static` | 29 language-specific static analysis fact(s) | None |
+| `pass` | `static` | 22 language-specific static analysis fact(s) | None |
 | `warn` | `git-history` | 0 git co-change fact(s) from local history | Keep repository history available and enable `[history].enabled = true`, then rerun `ok index .`. |
 | `pass` | `validation` | indexed validation candidates available | None |
 

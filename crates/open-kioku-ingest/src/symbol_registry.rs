@@ -37,6 +37,21 @@ pub struct SymbolRegistry {
     by_file_token: HashMap<(FileId, String), Vec<SymbolId>>,
     by_name_suffix: HashMap<String, Vec<SymbolId>>,
     qualified_name_normalized: HashMap<String, String>,
+    /// Every segment of a qualified name before its last (directories, files, modules), with a
+    /// crate's `-` spelled `_` as a path spells it.
+    places: HashSet<String>,
+}
+
+/// Where a token's path or import puts its target, for a match by name alone.
+#[derive(Clone, Copy)]
+enum Origin<'t> {
+    /// No spelling says, or a module does, which may re-export the item from anywhere.
+    Anywhere,
+    /// A path or import whose root is not in the repository: `std::`, `serde_json::`,
+    /// `use anyhow::Result;`.
+    Outside,
+    /// A path through a repository type, whose members are its own: `ScopeKind::File`.
+    MemberOf(&'t str),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,6 +90,49 @@ struct TokenUse {
     /// declares: only a bare name is looked up in the scopes around its use. A `mod` item's
     /// scope covers its own name, so that name would read as a use inside the module it declares.
     bare: bool,
+    role: TokenRole,
+    /// Rust: the segment before `::` when the token ends a path (`mem` of `std::mem::take`).
+    qualifier: Option<String>,
+    /// A member's receiver when it is a plain name, outside an import line: `structs` of
+    /// `structs.NewCheckID(..)`, `Constants` of `Constants.ACCESS_KEY`.
+    receiver: Option<String>,
+}
+
+/// What a token's place in the code says it can name, beyond its spelling (#582). Only a `Name`
+/// is matched by name alone across the repository; every role still resolves through an import
+/// or the use site's own file, which carry evidence a name match does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenRole {
+    Name,
+    /// Inside a Rust `#[...]` attribute, or the path of a `@decorator` or `@Annotation`.
+    Attribute,
+    /// The member of `receiver.member`: which one depends on the receiver's type, which a name
+    /// match does not know.
+    Member,
+    /// A field or parameter name: a Rust `name: value` or `Foo { name, .. }`, a JavaScript or
+    /// TypeScript object key or annotated name, a Python keyword argument. Only a field of that
+    /// name can be what it names.
+    Field,
+    /// A name the chunk binds as a local at or before this use.
+    Local,
+}
+
+impl TokenRole {
+    /// Why a name-only strategy did not match, for the caveat of a token no strategy resolved.
+    fn withheld_reason(self) -> Option<&'static str> {
+        match self {
+            TokenRole::Name | TokenRole::Field => None,
+            TokenRole::Attribute => Some(
+                "attribute or annotation name; a name-only match needs an import or same-file candidate",
+            ),
+            TokenRole::Member => Some(
+                "member access without receiver evidence; a name-only match needs an import or same-file candidate",
+            ),
+            TokenRole::Local => Some(
+                "the chunk binds this name locally; a name-only match needs an import or same-file candidate",
+            ),
+        }
+    }
 }
 
 /// The resolver's scope and import model, which lets a Rust bare name match a same-file item
@@ -434,6 +492,7 @@ impl SymbolRegistry {
             by_file_token: HashMap::new(),
             by_name_suffix: HashMap::new(),
             qualified_name_normalized: HashMap::new(),
+            places: HashSet::new(),
         };
         for (idx, import) in import_resolutions.iter().enumerate() {
             registry
@@ -478,6 +537,15 @@ impl SymbolRegistry {
                 .entry(module_name(&symbol.qualified_name))
                 .or_default()
                 .push(symbol.id.clone());
+            if let Some((path, _)) = symbol.qualified_name.rsplit_once("::") {
+                for segment in path.split("::") {
+                    if segment.contains('-') {
+                        registry.places.insert(segment.replace('-', "_"));
+                    } else if !registry.places.contains(segment) {
+                        registry.places.insert(segment.to_string());
+                    }
+                }
+            }
             let suffix = qualified_name_suffix(&symbol.qualified_name);
             registry
                 .by_name_suffix
@@ -497,7 +565,13 @@ impl SymbolRegistry {
         registry
     }
 
-    fn resolve(&self, chunk: &CodeChunk, token: &str, scope: &ScopeFilter<'_, '_>) -> Resolution {
+    fn resolve(
+        &self,
+        chunk: &CodeChunk,
+        token_use: &TokenUse,
+        scope: &ScopeFilter<'_, '_>,
+    ) -> Resolution {
+        let token = token_use.token.as_str();
         // An item of this file that Rust scoping keeps out of reach is not the target by any
         // strategy: the registry's imports are file-wide, so an import resolved to this file (a
         // `use super::*` beside `use mock_clock::now;`) would offer it again, and so would the
@@ -512,22 +586,169 @@ impl SymbolRegistry {
         if let Some(resolution) = self.resolve_same_module(chunk, token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_unique_project_name(chunk, token, &admits) {
+        let unresolved = |reason: &str| Resolution {
+            symbol: None,
+            strategy: "unresolved",
+            candidates: 0,
+            confidence: Confidence::Low,
+            ambiguity_reason: Some(reason.into()),
+            speculative: true,
+        };
+        // Past this point only the name links a token to a symbol anywhere in the repository,
+        // which the token's place in the code can rule out (#582).
+        match token_use.role {
+            TokenRole::Name => {}
+            TokenRole::Field => {
+                // Only a field can be named here; a same-named function is not a candidate.
+                let fields = |symbol: &Symbol| symbol.kind == SymbolKind::Field && admits(symbol);
+                return self
+                    .resolve_unique_project_name(chunk, token, &fields)
+                    .unwrap_or_else(|| unresolved("no field candidate matched a field name"));
+            }
+            TokenRole::Attribute if chunk.language == Language::Java => {
+                // A Java annotation names a type: `@Retries.RetryRaw` may name the repository's
+                // `Retries`, never a method or field of that name.
+                let types = |symbol: &Symbol| {
+                    matches!(symbol.kind, SymbolKind::Class | SymbolKind::Interface)
+                        && admits(symbol)
+                };
+                return self
+                    .resolve_unique_project_name(chunk, token, &types)
+                    .unwrap_or_else(|| {
+                        unresolved(TokenRole::Attribute.withheld_reason().unwrap_or_default())
+                    });
+            }
+            TokenRole::Member => {
+                // A receiver that names where the candidate is defined is evidence a bare
+                // member lacks: Go's `structs.NewCheckID`, Java's `Constants.ACCESS_KEY`.
+                // A lowercase Java receiver is a variable, whose name may match a package's.
+                let receiver = token_use.receiver.as_deref().filter(|receiver| {
+                    chunk.language != Language::Java || receiver.starts_with(char::is_uppercase)
+                });
+                let Some(receiver) = receiver else {
+                    return unresolved(TokenRole::Member.withheld_reason().unwrap_or_default());
+                };
+                let owned =
+                    |symbol: &Symbol| admits(symbol) && segment_locates(self, receiver, symbol);
+                return self
+                    .resolve_unique_project_name(chunk, token, &owned)
+                    .unwrap_or_else(|| {
+                        unresolved(TokenRole::Member.withheld_reason().unwrap_or_default())
+                    });
+            }
+            role => {
+                return unresolved(role.withheld_reason().unwrap_or_default());
+            }
+        }
+        // So can a path or an import that spells where the name comes from: in
+        // `std::mem::take(..)`, beside `use anyhow::Result;` or in `ScopeKind::File`, the one
+        // `take`, `Result` or `File` of the repository is not the target.
+        let origin = self.origin(chunk, token_use, scope.model);
+        let located = |symbol: &Symbol| {
+            admits(symbol)
+                && match origin {
+                    Origin::Anywhere => true,
+                    Origin::Outside => false,
+                    Origin::MemberOf(owner) => segment_locates(self, owner, symbol),
+                }
+        };
+        if let Some(resolution) = self.resolve_unique_project_name(chunk, token, &located) {
             return resolution;
         }
         if let Some(resolution) =
-            self.resolve_suffix_with_import_reachability(chunk, token, &admits)
+            self.resolve_suffix_with_import_reachability(chunk, token, &located)
         {
             return resolution;
         }
-        self.resolve_fuzzy(chunk, token, &admits)
-            .unwrap_or_else(|| Resolution {
-                symbol: None,
-                strategy: "unresolved",
-                candidates: 0,
-                confidence: Confidence::Low,
-                ambiguity_reason: Some("no registry candidate matched".into()),
-                speculative: true,
+        self.resolve_fuzzy(chunk, token, &located)
+            .unwrap_or_else(|| {
+                unresolved(match origin {
+                    Origin::Anywhere => "no registry candidate matched",
+                    Origin::Outside => "the name's path or import leads outside the repository",
+                    Origin::MemberOf(_) => {
+                        "no registry candidate belongs to the type its path names"
+                    }
+                })
+            })
+    }
+
+    /// Where the path or import spelling a token says its target is.
+    fn origin<'t>(
+        &self,
+        chunk: &CodeChunk,
+        token_use: &'t TokenUse,
+        model: Option<&RegistryScopeModel<'_>>,
+    ) -> Origin<'t> {
+        if let Some(qualifier) = token_use.qualifier.as_deref() {
+            if matches!(qualifier, "crate" | "self" | "super" | "Self") || self.is_module(qualifier)
+            {
+                // A module may re-export the item from anywhere.
+                return Origin::Anywhere;
+            }
+            let names_type = self.by_simple_name.get(qualifier).is_some_and(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.by_id.get(id))
+                    .any(|symbol| {
+                        matches!(
+                            symbol.kind,
+                            SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface
+                        )
+                    })
+            });
+            return if names_type {
+                Origin::MemberOf(qualifier)
+            } else {
+                Origin::Outside
+            };
+        }
+        // Most tokens name nothing any strategy below could match; they need no import lookup.
+        let token = token_use.token.as_str();
+        if self.by_simple_name.len() > MAX_SIMPLE_NAMES_FOR_FUZZY
+            && !self.by_simple_name.contains_key(token)
+            && !self.by_name_suffix.contains_key(token)
+        {
+            return Origin::Anywhere;
+        }
+        // The file's own import of the name, by the name it binds (`use std::fs::File as FsFile;`
+        // binds `FsFile`, not `File`), when the resolver's import model is at hand.
+        let imported_from_outside = model.is_some_and(|model| {
+            let bindings = model.file_imports(&chunk.file_id, token);
+            !bindings.is_empty()
+                && bindings.iter().all(|binding| {
+                    // A Java static import keeps its keyword: `static org.x.Constants.NAME`.
+                    let source = binding.source_module.as_str();
+                    let source = source
+                        .strip_prefix("static ")
+                        .unwrap_or(source)
+                        .trim_start();
+                    let root = source
+                        .split([':', '.', '/'])
+                        .find(|segment| !segment.is_empty())
+                        .unwrap_or_default();
+                    !binding.is_glob
+                        && binding.target_symbol.is_none()
+                        && binding.target_file.is_none()
+                        && !source.starts_with('.')
+                        && !matches!(root, "crate" | "self" | "super" | "Self")
+                        && !self.is_module(root)
+                        && !self.by_simple_name.contains_key(root)
+                })
+        });
+        if imported_from_outside {
+            Origin::Outside
+        } else {
+            Origin::Anywhere
+        }
+    }
+
+    /// Whether `name` is a place in the repository a path can go through: a directory, file or
+    /// module of some symbol's qualified name (a crate's `-` spelled `_`), or a module symbol.
+    fn is_module(&self, name: &str) -> bool {
+        self.places.contains(name)
+            || self.by_simple_name.get(name).is_some_and(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.by_id.get(id))
+                    .any(|symbol| matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package))
             })
     }
 
@@ -827,7 +1048,7 @@ fn resolve_chunk(
         .iter()
         .map(|token_use| {
             let scope = ScopeFilter::new(scope_model, chunk, token_use);
-            let resolution = registry.resolve(chunk, &token_use.token, &scope);
+            let resolution = registry.resolve(chunk, token_use, &scope);
             for id in scope.ruled_out.take() {
                 ruled_out.insert((token_use.token.clone(), token_use.line, id));
             }
@@ -1026,23 +1247,48 @@ fn quality_note(token: &str, resolution: &Resolution) -> Option<QualityNote> {
 fn token_uses(text: &str, language: &Language) -> Vec<TokenUse> {
     let mut uses = Vec::new();
     let mut lexer = CodeLexer::new(language);
+    let mut context = TokenContext::new(language);
     for (line_index, line) in text.lines().enumerate() {
+        context.start_line(line);
+        let mut previous_end = None;
         for span in lexer.code_spans(line) {
+            if previous_end.is_some_and(|end| end < span.start) {
+                context.literal();
+            }
+            previous_end = Some(span.end);
             let mut token: Option<(usize, usize)> = None;
             for (offset, ch) in line[span.clone()].char_indices() {
                 let idx = span.start + offset;
                 if ch.is_alphanumeric() || ch == '_' || ch == '$' {
                     let start = token.map_or(idx, |(start, _)| start);
                     token = Some((start, idx + ch.len_utf8()));
-                } else if let Some((start, end)) = token.take() {
-                    push_code_token(&mut uses, language, line, start..end, line_index);
+                    continue;
                 }
+                if let Some((start, end)) = token.take() {
+                    push_code_token(
+                        &mut uses,
+                        &mut context,
+                        language,
+                        line,
+                        start..end,
+                        line_index,
+                    );
+                }
+                context.punct(line, idx, ch);
             }
             if let Some((start, end)) = token {
-                push_code_token(&mut uses, language, line, start..end, line_index);
+                push_code_token(
+                    &mut uses,
+                    &mut context,
+                    language,
+                    line,
+                    start..end,
+                    line_index,
+                );
             }
         }
     }
+    context.mark_locals(&mut uses);
     uses
 }
 
@@ -1050,6 +1296,7 @@ fn token_uses(text: &str, language: &Language) -> Vec<TokenUse> {
 /// as a name beside the literal it opens.
 fn push_code_token(
     uses: &mut Vec<TokenUse>,
+    context: &mut TokenContext,
     language: &Language,
     line: &str,
     token: Range<usize>,
@@ -1060,9 +1307,576 @@ fn push_code_token(
         && line[token.end..].starts_with(['"', '\''])
         && text.len() <= 2
         && text.chars().all(|ch| "bBrRfFuUcC".contains(ch));
-    if !opens_literal {
-        push_token_use(uses, text, line, token.end, line_index);
+    if opens_literal {
+        return;
     }
+    let role = context.word(line, token.clone(), line_index);
+    push_token_use(uses, language, line, token, line_index, role);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Dialect {
+    Rust,
+    /// JavaScript and TypeScript.
+    Script,
+    Python,
+    Java,
+    Go,
+    Other,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Bracket {
+    Paren,
+    Square,
+    /// The `[` of a Rust `#[` or `#![` attribute.
+    Attribute,
+    /// A `{`; `fields` when it opens a Rust struct literal, pattern or item body, whose entries
+    /// are field or variant names.
+    Brace {
+        fields: bool,
+    },
+}
+
+/// The few kinds of word the words after them depend on.
+#[derive(Clone, Copy, PartialEq)]
+enum Word {
+    Mut,
+    Move,
+    As,
+    Var,
+    /// Java: a capitalized name or primitive type, before a declared name.
+    Type,
+    Other,
+}
+
+impl Word {
+    fn of(text: &str) -> Self {
+        match text {
+            "mut" => Word::Mut,
+            "move" => Word::Move,
+            "as" => Word::As,
+            "var" => Word::Var,
+            "int" | "long" | "short" | "byte" | "char" | "boolean" | "float" | "double" => {
+                Word::Type
+            }
+            _ if text.starts_with(char::is_uppercase) => Word::Type,
+            _ => Word::Other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Annotation {
+    None,
+    /// After `@` or a `.` of its path: the next word names the decorator or annotation.
+    Name,
+    /// After a word of the path: a `.` continues it.
+    Dot,
+}
+
+/// A lexical reading of where each token stands, carried across a chunk's lines: open brackets,
+/// the punctuation just before a word, attribute and annotation paths, and the local bindings
+/// the chunk shows (#582). Like `CodeLexer`, it is not a parse. It reads only what a line spells
+/// plainly and leaves a token a `Name` wherever it is unsure, which keeps the registry's earlier
+/// behavior for that token.
+struct TokenContext {
+    dialect: Dialect,
+    brackets: Vec<Bracket>,
+    /// The last code character since the last word, other than whitespace.
+    last_punct: Option<char>,
+    /// Rust: 1 after `#`, 2 after `#!`, when a `[` would open an attribute.
+    hash: u8,
+    annotation: Annotation,
+    /// The last word, when nothing but whitespace follows it yet.
+    previous_word: Option<Word>,
+    /// The bracket depth of an open binding pattern: Rust `let`, `for` and closure parameters,
+    /// JavaScript `const`, `let` and `var`, Python `for`, `lambda` and `as`.
+    pattern: Option<usize>,
+    /// The open pattern is a `let`, `const` or `var`, whose names are bound only once the
+    /// statement's value is: in `let path = path.join(..);` the second `path` is not the local.
+    pattern_defers: bool,
+    /// Bindings not yet in effect, by index into `bindings`, with the bracket depth of their
+    /// statement.
+    deferred: Vec<(usize, usize)>,
+    /// The 1-based line being read.
+    line_number: u32,
+    /// Where a deferred binding's own name stands.
+    binding_sites: Vec<(u32, u32)>,
+    /// Python: a `def` whose parameter list has not opened yet, then that list's depth.
+    def_pending: bool,
+    def_params: Option<usize>,
+    /// Python: where a plain assignment's `=` (or an annotation's `:`) is on this line, when
+    /// every word before it is a target.
+    assignment_end: Option<usize>,
+    bindings: Vec<(String, u32, u32)>,
+}
+
+impl TokenContext {
+    fn new(language: &Language) -> Self {
+        let dialect = match language {
+            Language::Rust => Dialect::Rust,
+            Language::TypeScript | Language::JavaScript => Dialect::Script,
+            Language::Python => Dialect::Python,
+            Language::Java => Dialect::Java,
+            Language::Go => Dialect::Go,
+            _ => Dialect::Other,
+        };
+        Self {
+            dialect,
+            brackets: Vec::new(),
+            last_punct: None,
+            hash: 0,
+            annotation: Annotation::None,
+            previous_word: None,
+            pattern: None,
+            pattern_defers: false,
+            deferred: Vec::new(),
+            line_number: 0,
+            binding_sites: Vec::new(),
+            def_pending: false,
+            def_params: None,
+            assignment_end: None,
+            bindings: Vec::new(),
+        }
+    }
+
+    fn start_line(&mut self, line: &str) {
+        self.line_number += 1;
+        // A Python or JavaScript statement may end with its line; a Rust one ends at its `;`.
+        if self.dialect != Dialect::Rust {
+            self.bind_deferred(0);
+        }
+        self.hash = 0;
+        self.annotation = Annotation::None;
+        self.assignment_end = None;
+        if self.dialect == Dialect::Go {
+            self.pattern = None;
+            self.assignment_end = go_short_declaration_end(line);
+        }
+        if self.dialect == Dialect::Python {
+            // A Python statement ends with its line unless a bracket is open.
+            if self.brackets.is_empty() {
+                self.pattern = None;
+                self.assignment_end = python_assignment_end(line);
+            }
+            if self.def_params.is_none() {
+                self.def_pending = false;
+            }
+        }
+    }
+
+    /// A literal or comment between two code spans of a line: an operand, as far as the
+    /// punctuation around the next word goes.
+    fn literal(&mut self) {
+        self.last_punct = Some('"');
+        self.previous_word = None;
+        self.hash = 0;
+        self.annotation = Annotation::None;
+    }
+
+    fn punct(&mut self, line: &str, idx: usize, ch: char) {
+        let rest = &line[idx..];
+        match ch {
+            '#' if self.dialect == Dialect::Rust => {
+                self.hash = 1;
+                return;
+            }
+            '!' if self.hash == 1 => {
+                self.hash = 2;
+                return;
+            }
+            '@' if self.dialect != Dialect::Rust => {
+                // A Python `@` elsewhere multiplies matrices; a decorator starts its line.
+                if self.dialect != Dialect::Python || line[..idx].trim().is_empty() {
+                    self.annotation = Annotation::Name;
+                }
+                return;
+            }
+            '.' if self.annotation == Annotation::Dot => self.annotation = Annotation::Name,
+            _ => self.annotation = Annotation::None,
+        }
+        let opens_attribute = ch == '[' && self.hash > 0;
+        self.hash = 0;
+        if ch.is_whitespace() {
+            return;
+        }
+        let previous_word = self.previous_word.take();
+        match ch {
+            '(' | '[' | '{' => {
+                let bracket = match ch {
+                    '(' => Bracket::Paren,
+                    '[' if opens_attribute => Bracket::Attribute,
+                    '[' => Bracket::Square,
+                    _ => Bracket::Brace {
+                        fields: self.dialect == Dialect::Rust && rust_field_brace(&line[..idx]),
+                    },
+                };
+                if bracket == (Bracket::Brace { fields: false })
+                    && self.dialect == Dialect::Rust
+                    && self.pattern == Some(self.brackets.len())
+                {
+                    // `impl Trait for Type {`: the body is no pattern.
+                    self.pattern = None;
+                }
+                if ch == '{' {
+                    // `if let Some(x) = x {`: the block sees the local.
+                    self.bind_deferred(idx as u32 + 1);
+                }
+                self.brackets.push(bracket);
+                if ch == '(' && self.def_pending {
+                    self.def_pending = false;
+                    self.def_params = Some(self.brackets.len());
+                }
+            }
+            ')' | ']' | '}' => {
+                self.brackets.pop();
+                let depth = self.brackets.len();
+                if self.pattern.is_some_and(|start| depth < start) {
+                    self.pattern = None;
+                }
+                if self.def_params.is_some_and(|params| depth < params) {
+                    self.def_params = None;
+                }
+            }
+            '=' => {
+                let before = line[..idx].chars().next_back();
+                let comparison = rest.starts_with("==")
+                    || rest.starts_with("=>")
+                    || before.is_some_and(|before| "=!<>".contains(before));
+                if !comparison && self.pattern == Some(self.brackets.len()) {
+                    self.pattern = None;
+                }
+            }
+            ';' => {
+                self.pattern = None;
+                self.bind_deferred(idx as u32 + 1);
+            }
+            '|' if self.dialect == Dialect::Rust => {
+                let depth = self.brackets.len();
+                if self.pattern == Some(depth) {
+                    // The `|` that closes a closure's parameters (or `||`, which has none).
+                    self.pattern = None;
+                } else if self.last_punct.is_some_and(|ch| "(,={[:&".contains(ch))
+                    || previous_word == Some(Word::Move)
+                {
+                    // A `|` where an operand goes opens a closure's parameters; after an operand
+                    // it is an or.
+                    self.pattern = Some(depth);
+                    self.pattern_defers = false;
+                }
+            }
+            ':' if self.dialect == Dialect::Python && self.pattern == Some(self.brackets.len()) => {
+                // The end of a `lambda`'s parameters.
+                self.pattern = None;
+            }
+            _ => {}
+        }
+        self.last_punct = Some(ch);
+    }
+
+    /// Reads a word (keywords included) and returns the role of the token it spells.
+    fn word(&mut self, line: &str, token: Range<usize>, line_index: usize) -> TokenRole {
+        let text = &line[token.clone()];
+        let before = line[..token.start].trim_end();
+        let after = line[token.end..].trim_start();
+        // `0.25` is a number, not a member `25`.
+        let member = before.ends_with('.')
+            && !before.ends_with("..")
+            && !text.starts_with(|ch: char| ch.is_ascii_digit());
+        let in_attribute =
+            self.brackets.contains(&Bracket::Attribute) || self.annotation == Annotation::Name;
+        self.annotation = if self.annotation == Annotation::Name {
+            Annotation::Dot
+        } else {
+            Annotation::None
+        };
+        self.hash = 0;
+        let innermost = self.brackets.last().copied();
+        let starts_entry =
+            |opening: &[char]| self.last_punct.is_some_and(|ch| opening.contains(&ch));
+        let colon_follows = after.starts_with(':') && !after.starts_with("::");
+        let field = match self.dialect {
+            Dialect::Rust => {
+                colon_follows
+                    || (innermost == Some(Bracket::Brace { fields: true })
+                        && starts_entry(&['{', ','])
+                        && (after.is_empty() || after.starts_with([',', '}'])))
+            }
+            Dialect::Script => {
+                (colon_follows || after.starts_with("?:"))
+                    && matches!(innermost, Some(Bracket::Brace { .. } | Bracket::Paren))
+                    && starts_entry(&['{', ',', '('])
+            }
+            Dialect::Python => {
+                innermost == Some(Bracket::Paren)
+                    && starts_entry(&['(', ','])
+                    && after.starts_with('=')
+                    && !after.starts_with("==")
+            }
+            // A composite literal's `Key: value`; `case X:` follows a word, not an entry.
+            Dialect::Go => {
+                colon_follows
+                    && !after.starts_with(":=")
+                    && matches!(innermost, Some(Bracket::Brace { .. }))
+                    && starts_entry(&['{', ','])
+            }
+            Dialect::Java | Dialect::Other => false,
+        };
+        if !member && self.binds(text, before, after, colon_follows, token.end) {
+            let depth = self.brackets.len();
+            let defer = match self.dialect {
+                Dialect::Rust | Dialect::Script => {
+                    self.pattern_defers && self.pattern.is_some_and(|start| depth >= start)
+                }
+                Dialect::Python => {
+                    self.assignment_end.is_some_and(|at| token.end <= at) && depth == 0
+                }
+                Dialect::Go => self.assignment_end.is_some_and(|at| token.end <= at),
+                Dialect::Java | Dialect::Other => false,
+            };
+            if defer {
+                let statement_depth = self.pattern.unwrap_or(depth);
+                self.deferred.push((self.bindings.len(), statement_depth));
+                self.bindings.push((text.to_string(), u32::MAX, u32::MAX));
+                // The name it declares is no use of anything else.
+                self.binding_sites
+                    .push((line_index as u32 + 1, token.start as u32 + 1));
+            } else {
+                self.bindings.push((
+                    text.to_string(),
+                    line_index as u32 + 1,
+                    token.start as u32 + 1,
+                ));
+            }
+        }
+        self.after_word(text);
+        if in_attribute {
+            TokenRole::Attribute
+        } else if member {
+            TokenRole::Member
+        } else if field {
+            TokenRole::Field
+        } else {
+            TokenRole::Name
+        }
+    }
+
+    /// Whether the word at hand is a local binding the chunk shows: a pattern of a binding
+    /// statement, a parameter, a Python assignment target or a Java declaration.
+    fn binds(
+        &self,
+        text: &str,
+        before: &str,
+        after: &str,
+        colon_follows: bool,
+        end: usize,
+    ) -> bool {
+        let lowercase = text.starts_with(|ch: char| ch.is_lowercase() || ch == '_');
+        let depth = self.brackets.len();
+        let in_pattern = self.pattern.is_some_and(|start| depth >= start);
+        match self.dialect {
+            Dialect::Rust => {
+                let names_item = after.starts_with(['(', '!', '{']) || after.starts_with("::");
+                let param = colon_follows
+                    && self.brackets.last() == Some(&Bracket::Paren)
+                    && (self.last_punct.is_some_and(|ch| ch == '(' || ch == ',')
+                        || self.previous_word == Some(Word::Mut));
+                lowercase
+                    && !before.ends_with("::")
+                    && ((in_pattern && !names_item && self.last_punct != Some(':')) || param)
+            }
+            Dialect::Script => {
+                let annotation = self.pattern == Some(depth) && self.last_punct == Some(':');
+                in_pattern && !colon_follows && !annotation && !after.starts_with('(')
+            }
+            Dialect::Python => {
+                let param = self.def_params == Some(depth)
+                    && self.last_punct.is_none_or(|ch| "(,*".contains(ch));
+                let target = self.assignment_end.is_some_and(|at| end <= at) && depth == 0;
+                (in_pattern && !after.starts_with(['(', '.'])) || param || target
+            }
+            Dialect::Java => {
+                let typed = matches!(self.previous_word, Some(Word::Type | Word::Var))
+                    || (self.last_punct.is_some_and(|ch| ch == '>' || ch == ']')
+                        && after.starts_with(['=', ';']));
+                let ends = after.starts_with([';', ',', ')', ':'])
+                    || (after.starts_with('=') && !after.starts_with("=="));
+                lowercase && typed && ends
+            }
+            Dialect::Go => {
+                let declared = self.assignment_end.is_some_and(|at| end <= at);
+                let var = self.pattern.is_some_and(|start| depth >= start)
+                    && self.previous_word == Some(Word::Var);
+                declared || var
+            }
+            Dialect::Other => false,
+        }
+    }
+
+    fn after_word(&mut self, text: &str) {
+        let depth = self.brackets.len();
+        match (self.dialect, text) {
+            (Dialect::Rust, "let" | "for")
+            | (Dialect::Script, "const" | "let" | "var")
+            | (Dialect::Python, "for" | "lambda" | "as")
+            | (Dialect::Go, "var") => {
+                self.pattern = Some(depth);
+                self.pattern_defers = matches!(text, "let" | "const" | "var");
+            }
+            (Dialect::Rust | Dialect::Python, "in") | (Dialect::Script, "of" | "in")
+                if self.pattern == Some(depth) =>
+            {
+                self.pattern = None
+            }
+            (Dialect::Python, "def") => self.def_pending = true,
+            (Dialect::Python, _)
+                if self.pattern == Some(depth) && self.previous_word == Some(Word::As) =>
+            {
+                // `as` binds one name.
+                self.pattern = None;
+            }
+            _ => {}
+        }
+        self.previous_word = Some(Word::of(text));
+        self.last_punct = None;
+    }
+
+    /// Puts the deferred bindings whose statement ends here in effect from `column` of this
+    /// line (0 at the start of a line).
+    fn bind_deferred(&mut self, column: u32) {
+        let depth = self.brackets.len();
+        let line = self.line_number;
+        let bindings = &mut self.bindings;
+        self.deferred.retain(|(index, statement_depth)| {
+            if *statement_depth < depth {
+                return true;
+            }
+            if let Some(binding) = bindings.get_mut(*index) {
+                binding.1 = line;
+                binding.2 = column;
+            }
+            false
+        });
+    }
+
+    /// Marks each plain name the chunk bound as a local at or before its use. A Java call is
+    /// never of a local, so it keeps its role.
+    fn mark_locals(&self, uses: &mut [TokenUse]) {
+        if self.bindings.is_empty() {
+            return;
+        }
+        // Where each name is first bound: a use at or after it is of the local.
+        let mut first_bound = HashMap::<&str, (u32, u32)>::new();
+        for (name, line, column) in &self.bindings {
+            first_bound
+                .entry(name.as_str())
+                .and_modify(|at| *at = (*at).min((*line, *column)))
+                .or_insert((*line, *column));
+        }
+        for token_use in uses.iter_mut() {
+            if token_use.role != TokenRole::Name
+                || !token_use.bare
+                || (self.dialect == Dialect::Java && token_use.is_call)
+            {
+                continue;
+            }
+            let bound = first_bound
+                .get(token_use.token.as_str())
+                .is_some_and(|at| *at <= (token_use.line, token_use.column))
+                || self
+                    .binding_sites
+                    .contains(&(token_use.line, token_use.column));
+            if bound {
+                token_use.role = TokenRole::Local;
+            }
+        }
+    }
+}
+
+/// Whether a Rust `{` after `before` (its line up to the brace) opens a struct literal, struct
+/// pattern or struct or enum body: a type path (`Foo`, `Self`, `a::Foo`) in a place an
+/// expression, pattern or item name goes. `impl Foo {`, `-> Foo {`, `where T: Foo {` and
+/// `x == MAX {` open blocks.
+fn rust_field_brace(before: &str) -> bool {
+    let before = before.trim_end();
+    let path_start =
+        trailing_run_start(before, |ch| ch.is_alphanumeric() || ch == '_' || ch == ':');
+    let path = &before[path_start..];
+    let type_named = path
+        .rsplit("::")
+        .next()
+        .is_some_and(|last| last.starts_with(char::is_uppercase));
+    if !type_named {
+        return false;
+    }
+    let lead = before[..path_start].trim_end();
+    // Only the words since the last brace or `;` qualify this one: `fn new() -> Self { Self {`.
+    let statement = lead
+        .rfind(['{', '}', ';'])
+        .map_or(lead, |idx| &lead[idx + 1..]);
+    let words = statement
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .collect::<Vec<_>>();
+    if words
+        .iter()
+        .any(|word| matches!(*word, "fn" | "impl" | "trait" | "mod" | "where" | "for"))
+    {
+        return false;
+    }
+    let Some(last) = lead.chars().next_back() else {
+        return true;
+    };
+    if last.is_alphanumeric() || last == '_' {
+        let word = words.last().copied().unwrap_or_default();
+        return matches!(
+            word,
+            "let" | "return" | "enum" | "struct" | "union" | "mut" | "yield" | "break"
+        );
+    }
+    match last {
+        '(' | ',' | '{' | '[' | '|' | ':' => true,
+        '>' => lead.ends_with("=>"),
+        '=' => !lead[..lead.len() - 1].ends_with(['=', '!', '<', '>']),
+        '&' => !lead.ends_with("&&"),
+        _ => false,
+    }
+}
+
+/// Where a Go line's short variable declaration (`x := ...`, `a, b := ...`, also after `if`, `for`
+/// or `switch`) puts its `:=`, when every word before it is a target name.
+fn go_short_declaration_end(line: &str) -> Option<usize> {
+    let end = line.find(":=")?;
+    let targets = line[..end].trim();
+    let targets = ["} else if ", "for ", "if ", "switch "]
+        .iter()
+        .find_map(|keyword| targets.strip_prefix(keyword))
+        .unwrap_or(targets);
+    let names = targets.split(',').all(|target| {
+        let target = target.trim();
+        !target.is_empty()
+            && target.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+            && !target.starts_with(|ch: char| ch.is_ascii_digit())
+    });
+    names.then_some(end)
+}
+
+/// Where a Python line's plain assignment (`a = ...`, `a, b = ...`, `a: int = ...`) puts its `=`
+/// or annotation `:`, when every word before it is a target name.
+fn python_assignment_end(line: &str) -> Option<usize> {
+    let targets_end = line
+        .find(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == ',' || ch.is_whitespace()))?;
+    let targets = &line[..targets_end];
+    let rest = &line[targets_end..];
+    let assigns = (rest.starts_with('=') && !rest.starts_with("=="))
+        || (rest.starts_with(':') && !rest[1..].trim().is_empty());
+    let names = targets.split(',').all(|target| {
+        let target = target.trim();
+        !target.is_empty()
+            && !target.contains(char::is_whitespace)
+            && !target.starts_with(|ch: char| ch.is_ascii_digit())
+    });
+    (assigns && names && !is_keyword_or_literal(targets.trim())).then_some(targets_end)
 }
 
 /// Where a chunk's code is, as opposed to its comments and string literals, whose words name
@@ -1075,8 +1889,9 @@ fn push_code_token(
 /// and one that starts inside a multi-line string or template reads that text as code, after
 /// which the closing quote opens a literal and the code that follows reads as literal up to the
 /// next quote. A language it has no rules for (JSON, Markdown, plain text) is read whole, as
-/// before; YAML and TOML lose only their `#` comments. Interpolated Python and Rust strings are
-/// not modeled: an f-string's or format string's names read as literal.
+/// before; YAML and TOML lose only their `#` comments. A Python f-string's replacement fields are
+/// code up to their conversion or format spec (#582); a Rust format string's names read as
+/// literal.
 struct CodeLexer {
     syntax: LexicalSyntax,
     /// Innermost last. Empty is code outside any template interpolation.
@@ -1099,6 +1914,8 @@ struct LexicalSyntax {
     multiline_strings: bool,
     /// JavaScript: a `/` where an operand is expected opens a regular-expression literal.
     regex_literals: bool,
+    /// Python: a literal with an `f` prefix holds `{...}` replacement fields, which are code.
+    format_strings: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1124,6 +1941,18 @@ enum LexState {
     },
     GoRaw,
     Template,
+    /// A Python f-string; `raw` when an `r` prefix keeps its backslashes.
+    FormatStr {
+        quote: u8,
+        triple: bool,
+        raw: bool,
+    },
+    /// Code inside an f-string replacement field, with the depth of brackets opened in it: at
+    /// depth 0 a `:` starts the format spec and a `}` closes the field.
+    FormatField(u32),
+    /// The format spec after a field's `:`, text except for nested `{...}` fields. Its `}` closes
+    /// the field it belongs to.
+    FormatSpec,
 }
 
 enum LexStep {
@@ -1149,6 +1978,7 @@ impl CodeLexer {
             backtick: Backtick::Code,
             multiline_strings: false,
             regex_literals: false,
+            format_strings: false,
         };
         let plain = LexicalSyntax {
             line_comment: None,
@@ -1182,6 +2012,7 @@ impl CodeLexer {
                 line_comment: Some("#"),
                 block_comments: false,
                 triple_quotes: true,
+                format_strings: true,
                 ..c_like
             },
             // A double-quoted SQL name is an identifier, not a literal.
@@ -1211,7 +2042,9 @@ impl CodeLexer {
         let mut idx = 0;
         while idx < line.len() {
             let step = match self.stack.last().copied() {
-                None | Some(LexState::Interpolation(_)) => self.code_step(line, idx),
+                None | Some(LexState::Interpolation(_) | LexState::FormatField(_)) => {
+                    self.code_step(line, idx)
+                }
                 Some(state) => self.literal_step(state, &line.as_bytes()[idx..]),
             };
             match step {
@@ -1245,10 +2078,15 @@ impl CodeLexer {
         }
         close_span(&mut spans, &mut code_start, line.len());
         // A literal that cannot span lines ends with its line, closed or not, so one stray quote
-        // does not hide the rest of the chunk.
+        // does not hide the rest of the chunk. An f-string's open fields end with it.
         if !self.syntax.multiline_strings {
-            while let Some(LexState::Str { triple: false, .. }) = self.stack.last() {
-                self.stack.pop();
+            if let Some(open) = self.stack.iter().position(|state| {
+                matches!(
+                    state,
+                    LexState::Str { triple: false, .. } | LexState::FormatStr { triple: false, .. }
+                )
+            }) {
+                self.stack.truncate(open);
             }
         }
         spans
@@ -1284,7 +2122,18 @@ impl CodeLexer {
                     return LexStep::Advance(1);
                 }
                 let triple = syntax.triple_quotes && rest.starts_with(&[quote; 3]);
-                LexStep::Push(LexState::Str { quote, triple }, if triple { 3 } else { 1 })
+                let len = if triple { 3 } else { 1 };
+                match string_prefix(&line[..idx]).filter(|_| syntax.format_strings) {
+                    Some(prefix) if prefix.contains(['f', 'F']) => LexStep::Push(
+                        LexState::FormatStr {
+                            quote,
+                            triple,
+                            raw: prefix.contains(['r', 'R']),
+                        },
+                        len,
+                    ),
+                    _ => LexStep::Push(LexState::Str { quote, triple }, len),
+                }
             }
             b'/' if syntax.regex_literals && regex_may_start(&line[..idx]) => {
                 regex_literal_len(rest).map_or(LexStep::Advance(1), LexStep::Skip)
@@ -1294,6 +2143,11 @@ impl CodeLexer {
                 Backtick::Raw => LexStep::Push(LexState::GoRaw, 1),
                 Backtick::Code => LexStep::Advance(1),
             },
+            bracket @ (b'(' | b'[' | b'{' | b')' | b']' | b'}' | b':')
+                if matches!(self.stack.last(), Some(LexState::FormatField(_))) =>
+            {
+                self.format_field_step(bracket)
+            }
             brace @ (b'{' | b'}') => match self.stack.last_mut() {
                 Some(LexState::Interpolation(0)) if brace == b'}' => LexStep::Pop(1),
                 Some(LexState::Interpolation(depth)) => {
@@ -1360,13 +2214,66 @@ impl CodeLexer {
                     LexStep::Advance(1)
                 }
             }
+            LexState::FormatStr { quote, triple, raw } => {
+                if rest.starts_with(b"\\N{") && !raw {
+                    // A named escape, `\N{BULLET}`, is text.
+                    let close = rest.iter().position(|byte| *byte == b'}');
+                    LexStep::Advance(close.map_or(rest.len(), |idx| idx + 1))
+                } else if rest[0] == b'\\' && !raw {
+                    LexStep::Advance(2.min(rest.len()))
+                } else if triple && rest.starts_with(&[quote; 3]) {
+                    LexStep::Pop(3)
+                } else if !triple && rest[0] == quote {
+                    LexStep::Pop(1)
+                } else if rest.starts_with(b"{{") || rest.starts_with(b"}}") {
+                    LexStep::Advance(2)
+                } else if rest[0] == b'{' {
+                    LexStep::Push(LexState::FormatField(0), 1)
+                } else {
+                    LexStep::Advance(1)
+                }
+            }
+            LexState::FormatSpec => match rest[0] {
+                b'{' => LexStep::Push(LexState::FormatField(0), 1),
+                b'}' => LexStep::Pop(1),
+                _ => LexStep::Advance(1),
+            },
             // Code states are stepped by `code_step`.
-            LexState::Interpolation(_) => LexStep::Advance(1),
+            LexState::Interpolation(_) | LexState::FormatField(_) => LexStep::Advance(1),
+        }
+    }
+
+    /// A bracket or `:` inside an f-string replacement field. Only one at the field's own depth
+    /// ends its code: `}` closes the field, and `:` starts the format spec, whose `}` closes it.
+    /// A `!r` conversion reads as code, and its one letter names nothing.
+    fn format_field_step(&mut self, byte: u8) -> LexStep {
+        let Some(LexState::FormatField(depth)) = self.stack.last().copied() else {
+            return LexStep::Advance(1);
+        };
+        match (byte, depth) {
+            (b'}', 0) => LexStep::Pop(1),
+            (b':', 0) => {
+                // The spec is text, so the field's code ends at the `:`.
+                self.stack.pop();
+                LexStep::Push(LexState::FormatSpec, 1)
+            }
+            (b':', _) => LexStep::Advance(1),
+            (b'(' | b'[' | b'{', _) => {
+                self.replace_top(LexState::FormatField(depth + 1));
+                LexStep::Advance(1)
+            }
+            _ => {
+                self.replace_top(LexState::FormatField(depth.saturating_sub(1)));
+                LexStep::Advance(1)
+            }
         }
     }
 
     fn in_code(&self) -> bool {
-        matches!(self.stack.last(), None | Some(LexState::Interpolation(_)))
+        matches!(
+            self.stack.last(),
+            None | Some(LexState::Interpolation(_) | LexState::FormatField(_))
+        )
     }
 
     fn replace_top(&mut self, state: LexState) {
@@ -1460,6 +2367,15 @@ fn raw_string_open(bytes: &[u8], idx: usize) -> Option<(usize, usize)> {
     (bytes.get(idx + 1 + hashes) == Some(&b'"')).then_some((hashes, hashes + 2))
 }
 
+/// The string prefix (`f`, `rb`, `Rf`...) that ends `before`, the line up to a quote: its last
+/// word, when that is at most two prefix letters.
+fn string_prefix(before: &str) -> Option<&str> {
+    let start = trailing_run_start(before, |ch| ch.is_alphanumeric() || ch == '_');
+    let word = &before[start..];
+    (!word.is_empty() && word.len() <= 2 && word.chars().all(|ch| "bBrRfFuU".contains(ch)))
+        .then_some(word)
+}
+
 /// After a Rust `'`: whether a character literal follows (one character or an escape, then `'`)
 /// rather than a lifetime or label.
 fn opens_char_literal(after_quote: &str) -> bool {
@@ -1500,14 +2416,23 @@ fn in_language_family(chunk: &CodeChunk, candidates: Vec<Symbol>) -> Vec<Symbol>
 
 fn push_token_use(
     uses: &mut Vec<TokenUse>,
-    token: &str,
+    language: &Language,
     line: &str,
-    token_end: usize,
+    range: Range<usize>,
     line_index: usize,
+    role: TokenRole,
 ) {
+    let token = &line[range.clone()];
+    let token_end = range.end;
     if is_keyword_or_literal(token) || token.len() < 2 {
         return;
     }
+    let qualifier = (*language == Language::Rust)
+        .then(|| path_qualifier(&line[..range.start]))
+        .flatten();
+    let receiver = (role == TokenRole::Member)
+        .then(|| member_receiver(line, range.start))
+        .flatten();
     let is_call = line[token_end..]
         .chars()
         .find(|ch| !ch.is_whitespace())
@@ -1526,7 +2451,79 @@ fn push_token_use(
         column: token_start as u32 + 1,
         is_call,
         bare,
+        role,
+        qualifier,
+        receiver,
     });
+}
+
+/// The plain name before the `.` of a member at `start`: a word not itself a member or the
+/// result of a call or index, and not `self`, `this`, `super` or `cls`. `None` on an import or
+/// package line, whose dotted path names modules rather than members.
+fn member_receiver(line: &str, start: usize) -> Option<String> {
+    let statement = line.trim_start();
+    if ["import ", "from ", "package ", "use ", "pub use "]
+        .iter()
+        .any(|keyword| statement.starts_with(keyword))
+    {
+        return None;
+    }
+    let before = line[..start].trim_end();
+    let before = before
+        .strip_suffix("?.")
+        .or_else(|| before.strip_suffix('.'))?
+        .trim_end();
+    let word_start =
+        trailing_run_start(before, |ch| ch.is_alphanumeric() || ch == '_' || ch == '$');
+    let word = &before[word_start..];
+    let head = !before[..word_start].trim_end().ends_with(['.', '?']);
+    (head
+        && !word.is_empty()
+        && !word.starts_with(|ch: char| ch.is_ascii_digit())
+        && !matches!(word, "self" | "this" | "super" | "cls" | "Self"))
+    .then(|| word.to_string())
+}
+
+/// Where the run of characters `keep` accepts that ends `text` starts, as a byte offset on a
+/// character boundary: the character before the run may be any width (`·`, `—`).
+fn trailing_run_start(text: &str, keep: impl Fn(char) -> bool) -> usize {
+    text.char_indices()
+        .rev()
+        .find(|(_, ch)| !keep(*ch))
+        .map_or(0, |(idx, ch)| idx + ch.len_utf8())
+}
+
+/// The path segment a Rust token is the tail of: `mem` before `take` in `std::mem::take(..)`.
+/// `None` for a bare name, and for a path whose segment is not a plain name (`Vec::<u8>::new`,
+/// `<T as Trait>::name`), which is matched as before.
+fn path_qualifier(before: &str) -> Option<String> {
+    let path = before.trim_end().strip_suffix("::")?.trim_end();
+    let start = trailing_run_start(path, |ch| ch.is_alphanumeric() || ch == '_');
+    let segment = &path[start..];
+    (!segment.is_empty()).then(|| segment.to_string())
+}
+
+/// Whether a path segment spelled at a use site (`open_kioku_core`, `generations`, `SqliteStore`)
+/// is part of where `symbol` is defined: a segment of its qualified name, where a crate's `-`
+/// is spelled `_`, or the name of the item it belongs to.
+fn segment_locates(registry: &SymbolRegistry, segment: &str, symbol: &Symbol) -> bool {
+    let same = |candidate: &str| {
+        candidate.len() == segment.len()
+            && candidate
+                .bytes()
+                .zip(segment.bytes())
+                .all(|(a, b)| a == b || (a == b'-' && b == b'_'))
+    };
+    let path = symbol
+        .qualified_name
+        .rsplit_once("::")
+        .map_or("", |(path, _)| path);
+    path.split("::").any(same)
+        || symbol
+            .parent_symbol_id
+            .as_ref()
+            .and_then(|parent| registry.by_id.get(parent))
+            .is_some_and(|parent| parent.name == segment)
 }
 
 fn symbol_matches_token(symbol: &Symbol, token: &str) -> bool {
@@ -2002,7 +2999,7 @@ mod tests {
 
     #[test]
     fn unique_project_name_matches_only_its_own_language_family() {
-        // The one `now` in the repository is JavaScript: a Rust `Utc::now()` is not a call of it.
+        // The one `now` in the repository is JavaScript: a Rust `now()` is not a call of it.
         let javascript_now = with_language(
             symbol("js-now", "site", "now", "site::now", SymbolKind::Function),
             Language::JavaScript,
@@ -2011,7 +3008,7 @@ mod tests {
             rust_symbol("caller", "entry", "main", "app::main"),
             javascript_now,
         ];
-        let rust_call = chunk_in(Language::Rust, "let at = Utc::now();");
+        let rust_call = chunk_in(Language::Rust, "let at = now();");
         let report =
             resolve_symbol_edges(std::slice::from_ref(&rust_call), &symbols, &[], false, None);
         assert_eq!(targets(&report), vec![], "{:?}", report.analysis_facts);
@@ -2348,5 +3345,680 @@ mod tests {
         let fact = report.analysis_facts.first().unwrap();
         assert_eq!(fact.confidence, Confidence::Medium);
         assert!(fact.message.contains("scip_available=true"));
+    }
+
+    fn reference(target: &str, line: u32) -> (String, GraphEdgeType, u32) {
+        (target.to_string(), GraphEdgeType::References, line)
+    }
+
+    /// Symbols of `language`: the caller, and one function per name in another file, so each
+    /// name is unique in the repository.
+    fn unique_functions(language: Language, names: &[&str]) -> Vec<Symbol> {
+        let mut symbols = vec![with_language(
+            symbol("caller", "entry", "main", "app::main", SymbolKind::Function),
+            language.clone(),
+        )];
+        for name in names {
+            symbols.push(with_language(
+                symbol(
+                    &format!("fn-{name}"),
+                    "util",
+                    name,
+                    &format!("util::{name}"),
+                    SymbolKind::Function,
+                ),
+                language.clone(),
+            ));
+        }
+        symbols
+    }
+
+    fn resolve_text(language: Language, text: &str, symbols: &[Symbol]) -> RegistryReport {
+        resolve_symbol_edges(&[chunk_in(language, text)], symbols, &[], false, None)
+    }
+
+    /// `targets`, ordered within a line by target, since facts come in id order.
+    fn line_targets(report: &RegistryReport) -> Vec<(String, GraphEdgeType, u32)> {
+        let mut targets = targets(report);
+        targets.sort_by(|a, b| (a.2, &a.0).cmp(&(b.2, &b.0)));
+        targets
+    }
+
+    #[test]
+    fn attribute_and_annotation_names_are_not_matched_by_name_alone() {
+        let symbols = unique_functions(Language::Rust, &["test", "derive", "helper"]);
+        let text = "#[test]\n#[derive(\n    Debug,\n    helper,\n)]\nfn check() { helper(); }";
+        let report = resolve_text(Language::Rust, text, &symbols);
+        assert_eq!(line_targets(&report), vec![call("util::helper", 6)]);
+        assert!(report.quality_notes.iter().any(|note| note
+            .message
+            .contains("caveat for `test` via unresolved: attribute or annotation name")));
+
+        let mut symbols = unique_functions(Language::Java, &["Override", "Inject", "helper"]);
+        let text = "@Override\npublic void run(@Inject Foo foo) { helper(); }\n@Retries.Raw";
+        let report = resolve_text(Language::Java, text, &symbols);
+        assert_eq!(line_targets(&report), vec![call("util::helper", 2)]);
+
+        // A Java annotation names a type, so a repository annotation type is its target.
+        symbols.push(with_language(
+            symbol(
+                "retries",
+                "retries",
+                "Retries",
+                "org::Retries",
+                SymbolKind::Class,
+            ),
+            Language::Java,
+        ));
+        let report = resolve_text(Language::Java, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("util::helper", 2), reference("org::Retries", 3)]
+        );
+
+        // A Python `@` that does not start its line multiplies matrices.
+        let symbols = unique_functions(Language::Python, &["cached", "weights"]);
+        let text = "@cached\ndef f(x):\n    return x @ weights";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(line_targets(&report), vec![reference("util::weights", 3)]);
+    }
+
+    #[test]
+    fn an_attribute_still_resolves_through_its_import() {
+        let symbols = unique_functions(Language::Rust, &["traced"]);
+        let report = resolve_symbol_edges(
+            &[chunk_in(Language::Rust, "#[traced]\nfn run() {}")],
+            &symbols,
+            &[import_resolution("entry", "crate::util::traced", "util")],
+            false,
+            None,
+        );
+        let fact = report
+            .analysis_facts
+            .first()
+            .expect("an import-backed fact");
+        assert_eq!(fact.target, "util::traced");
+        assert!(fact.source.ends_with("direct-import"));
+    }
+
+    #[test]
+    fn member_access_is_not_matched_by_name_alone() {
+        let symbols = unique_functions(Language::Rust, &["contains", "expect", "helper"]);
+        let text = "let found = items.contains(&x).then(|| 1).expect(\"x\");\nlet y = cfg\n    .contains(1);\nhelper(found);";
+        let report = resolve_text(Language::Rust, text, &symbols);
+        assert_eq!(line_targets(&report), vec![call("util::helper", 4)]);
+        assert!(report
+            .quality_notes
+            .iter()
+            .any(|note| note.message.contains(
+                "caveat for `contains` via unresolved: member access without receiver evidence"
+            )));
+
+        // The same member resolves where the file imports the module that defines it.
+        let report = resolve_symbol_edges(
+            &[chunk_in(Language::Rust, "items.contains(&x)")],
+            &symbols,
+            &[import_resolution("entry", "crate::util::contains", "util")],
+            false,
+            None,
+        );
+        assert_eq!(line_targets(&report), vec![call("util::contains", 1)]);
+
+        let symbols = unique_functions(Language::TypeScript, &["render"]);
+        let report = resolve_text(
+            Language::TypeScript,
+            "view?.render(); this.render();",
+            &symbols,
+        );
+        assert_eq!(line_targets(&report), vec![]);
+    }
+
+    #[test]
+    fn field_names_match_only_fields() {
+        let symbols = unique_functions(Language::Rust, &["name", "limit", "value"]);
+        let text = "let Options { name, .. } = options;\nlet query = Query {\n    limit,\n    name: value,\n};";
+        let report = resolve_text(Language::Rust, text, &symbols);
+        // `value` is the one name here used as a value.
+        assert_eq!(line_targets(&report), vec![reference("util::value", 4)]);
+
+        // A parameter is a field-like name too, and a function of that name is not its target.
+        let report = resolve_text(Language::Rust, "fn f(limit: usize) {}", &symbols);
+        assert_eq!(line_targets(&report), vec![]);
+
+        // Where the repository has a field of that name, the field is the target.
+        let mut with_field = symbols.clone();
+        with_field.push(with_language(
+            symbol(
+                "field-limit",
+                "opts",
+                "limit",
+                "opts::Query::limit",
+                SymbolKind::Field,
+            ),
+            Language::Rust,
+        ));
+        with_field.retain(|symbol| symbol.id.0 != "fn-limit");
+        let report = resolve_text(Language::Rust, "Query { limit: 1 }", &with_field);
+        assert_eq!(
+            line_targets(&report),
+            vec![reference("opts::Query::limit", 1)]
+        );
+
+        // A block is not a struct literal: `if ready { value }` uses `value`.
+        let report = resolve_text(Language::Rust, "if ready { value } else { 0 }", &symbols);
+        assert_eq!(line_targets(&report), vec![reference("util::value", 1)]);
+
+        let symbols = unique_functions(Language::Python, &["timeout", "retries"]);
+        let report = resolve_text(Language::Python, "connect(timeout=retries)", &symbols);
+        assert_eq!(line_targets(&report), vec![reference("util::retries", 1)]);
+
+        let symbols = unique_functions(Language::TypeScript, &["render", "view"]);
+        let report = resolve_text(
+            Language::TypeScript,
+            "const o = { render: view };",
+            &symbols,
+        );
+        assert_eq!(line_targets(&report), vec![reference("util::view", 1)]);
+    }
+
+    #[test]
+    fn a_name_the_chunk_binds_locally_is_not_matched_by_name_alone() {
+        let symbols = unique_functions(Language::Rust, &["path", "token", "entry", "helper"]);
+        let text = "helper(path);\nlet path = dir.join(\"x\");\nhelper(path);\nitems.iter().map(|(token, _)| token.len());\nfor entry in list { entry.touch(); }";
+        let report = resolve_text(Language::Rust, text, &symbols);
+        // Before its `let`, `path` is not yet the local.
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                call("util::helper", 1),
+                reference("util::path", 1),
+                call("util::helper", 3),
+            ]
+        );
+
+        // A parameter is a local of the function body.
+        let report = resolve_text(
+            Language::Rust,
+            "fn run(mut path: PathBuf) {\n    helper(&mut path);\n}",
+            &symbols,
+        );
+        assert_eq!(line_targets(&report), vec![call("util::helper", 2)]);
+
+        let symbols = unique_functions(Language::Python, &["config", "item", "handle", "err"]);
+        let text = "def run(config, *handle):\n    for item in config:\n        print(item, handle)\n    try:\n        pass\n    except Exception as err:\n        log(err)";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(line_targets(&report), vec![]);
+
+        let symbols = unique_functions(Language::TypeScript, &["state", "load"]);
+        let report = resolve_text(
+            Language::TypeScript,
+            "const { state } = store;\nload(state);",
+            &symbols,
+        );
+        assert_eq!(line_targets(&report), vec![call("util::load", 2)]);
+
+        // A Java call is never of a local variable.
+        let symbols = unique_functions(Language::Java, &["count"]);
+        let report = resolve_text(
+            Language::Java,
+            "int count = 0;\nreturn count + count();",
+            &symbols,
+        );
+        assert_eq!(line_targets(&report), vec![call("util::count", 2)]);
+    }
+
+    #[test]
+    fn python_f_string_fields_are_read_as_code() {
+        let symbols = unique_functions(
+            Language::Python,
+            &["helper", "width", "hidden", "value", "key", "spec_text"],
+        );
+        let text = "a = f\"{helper(1)} and {{hidden}}\"\nb = f'{value!r:>{width}} {value:spec_text}'\nc = f\"{d['key']}\" + rf\"\\{value}\"";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                call("util::helper", 1),
+                reference("util::value", 2),
+                reference("util::width", 2),
+                reference("util::value", 3),
+            ]
+        );
+
+        // A triple-quoted f-string's fields span its lines; an unclosed one-line f-string ends
+        // with its line.
+        let text = "doc = f\"\"\"\n{helper()} {{hidden}}\n\"\"\"\nx = f\"{value\nhelper()";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                call("util::helper", 2),
+                reference("util::value", 4),
+                call("util::helper", 5),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_matches_by_name_only_a_symbol_it_leads_to() {
+        let mut symbols = unique_functions(Language::Rust, &["take", "Document"]);
+        symbols.push(with_language(
+            symbol(
+                "open-index",
+                "store",
+                "open_repo_index",
+                "crates::open-kioku-store::src::lib::open_repo_index",
+                SymbolKind::Method,
+            ),
+            Language::Rust,
+        ));
+        symbols.push(with_language(
+            symbol(
+                "store-type",
+                "store",
+                "SqliteStore",
+                "crates::open-kioku-store::src::lib::SqliteStore",
+                SymbolKind::Class,
+            ),
+            Language::Rust,
+        ));
+        symbols
+            .iter_mut()
+            .find(|symbol| symbol.id.0 == "open-index")
+            .expect("the method")
+            .parent_symbol_id = Some(SymbolId::new("store-type"));
+        let text = "let parts = std::mem::take(&mut parts);\nlet doc: roxmltree::Document = parse();\nlet kind = SourceKind::Document;\nlet store = SqliteStore::open_repo_index(dir);\nlet same = open_kioku_store::SqliteStore::open_repo_index(dir);\nlet local = crate::util::take(1);";
+        let report = resolve_text(Language::Rust, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                reference("crates::open-kioku-store::src::lib::SqliteStore", 4),
+                call("crates::open-kioku-store::src::lib::open_repo_index", 4),
+                reference("crates::open-kioku-store::src::lib::SqliteStore", 5),
+                call("crates::open-kioku-store::src::lib::open_repo_index", 5),
+                call("util::take", 6),
+            ]
+        );
+        assert!(report.quality_notes.iter().any(|note| note.message.contains(
+            "caveat for `take` via unresolved: the name's path or import leads outside the repository"
+        )));
+    }
+
+    /// The registry's report over `text` with a resolver import model holding `imports`, each a
+    /// `(local name, source module)` of the chunk's file that resolved to nothing.
+    fn resolve_with_imports(
+        text: &str,
+        symbols: &[Symbol],
+        imports: &[(&str, &str)],
+    ) -> RegistryReport {
+        resolve_with_imports_in(Language::Rust, text, symbols, imports)
+    }
+
+    fn resolve_with_imports_in(
+        language: Language,
+        text: &str,
+        symbols: &[Symbol],
+        imports: &[(&str, &str)],
+    ) -> RegistryReport {
+        let mut repository = SemanticRepository::new();
+        for (local, source) in imports {
+            repository
+                .imports
+                .by_file_local_name
+                .entry((FileId::new("entry"), local.to_string()))
+                .or_default()
+                .push(ImportBinding {
+                    file_id: FileId::new("entry"),
+                    scope_id: ScopeId::new("entry:scope"),
+                    local_name: local.to_string(),
+                    imported_name: source
+                        .rsplit(['.', ':'])
+                        .next()
+                        .unwrap_or(source)
+                        .to_string(),
+                    source_module: source.to_string(),
+                    resolved_module: None,
+                    target_file: None,
+                    target_symbol: None,
+                    origin: open_kioku_semantic_model::ImportOrigin::Unknown,
+                    is_type_only: false,
+                    is_glob: false,
+                    evidence: Vec::new(),
+                    rule: Default::default(),
+                });
+        }
+        let (symbol_index, scopes, bindings, inheritance) = (
+            SymbolIndex::default(),
+            ScopeIndex::default(),
+            BindingIndex::default(),
+            InheritanceIndex::default(),
+        );
+        let model = RegistryScopeModel::new(
+            &[],
+            &repository,
+            &symbol_index,
+            &scopes,
+            &bindings,
+            &inheritance,
+        );
+        resolve_symbol_edges(
+            &[chunk_in(language, text)],
+            symbols,
+            &[],
+            false,
+            Some(&model),
+        )
+    }
+
+    #[test]
+    fn a_name_the_file_imports_from_elsewhere_is_not_the_repositorys_same_named_symbol() {
+        let symbols = unique_functions(Language::Rust, &["Result", "Command", "File"]);
+        let text = "fn run(f: &File) -> Result<()> {\n    Command::new(\"git\");\n}";
+        let report = resolve_with_imports(
+            text,
+            &symbols,
+            &[
+                ("Result", "anyhow::Result"),
+                ("Command", "std::process::Command"),
+                // An alias binds another name: `File` is still the repository's.
+                ("FsFile", "std::fs::File"),
+            ],
+        );
+        assert_eq!(line_targets(&report), vec![reference("util::File", 1)]);
+        assert!(report.quality_notes.iter().any(|note| note.message.contains(
+            "caveat for `Result` via unresolved: the name's path or import leads outside the repository"
+        )));
+
+        // An unresolved import through the repository's own modules may be a re-export
+        // (`use crate::evidence::Result;` of `pub use util::Result;`), so it keeps the match.
+        let report = resolve_with_imports(
+            text,
+            &symbols,
+            &[
+                ("Result", "crate::evidence::Result"),
+                ("Command", "util::Command"),
+            ],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                reference("util::File", 1),
+                reference("util::Result", 1),
+                reference("util::Command", 2),
+            ]
+        );
+
+        // Without the import model the registry does not know what the file binds.
+        let report = resolve_text(Language::Rust, text, &symbols);
+        assert_eq!(line_targets(&report).len(), 3);
+    }
+
+    fn symbol_in(
+        language: Language,
+        id: &str,
+        name: &str,
+        qualified: &str,
+        kind: SymbolKind,
+    ) -> Symbol {
+        with_language(symbol(id, id, name, qualified, kind), language)
+    }
+
+    #[test]
+    fn a_java_static_import_of_a_repository_member_is_not_from_outside() {
+        let symbols = vec![
+            symbol_in(
+                Language::Java,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Java,
+                "key",
+                "ACCESS_KEY",
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                SymbolKind::Field,
+            ),
+        ];
+        let text = "String key = ACCESS_KEY;";
+        let report = resolve_with_imports_in(
+            Language::Java,
+            text,
+            &symbols,
+            &[("ACCESS_KEY", "static org.example.Constants.ACCESS_KEY")],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![reference(
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                1
+            )]
+        );
+
+        // A static import from a library still leads outside the repository.
+        let report = resolve_with_imports_in(
+            Language::Java,
+            text,
+            &symbols,
+            &[("ACCESS_KEY", "static com.vendor.Keys.ACCESS_KEY")],
+        );
+        assert_eq!(line_targets(&report), vec![]);
+    }
+
+    #[test]
+    fn a_member_matches_by_name_where_its_receiver_names_the_symbols_place() {
+        let symbols = vec![
+            symbol_in(
+                Language::Go,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Go,
+                "new-check",
+                "NewCheckID",
+                "agent::structs::checks::NewCheckID",
+                SymbolKind::Function,
+            ),
+        ];
+        let text = "id := structs.NewCheckID(name)\nother := check.NewCheckID(name)";
+        let report = resolve_text(Language::Go, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("agent::structs::checks::NewCheckID", 1)]
+        );
+
+        let symbols = vec![
+            symbol_in(
+                Language::Java,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Java,
+                "key",
+                "ACCESS_KEY",
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                SymbolKind::Field,
+            ),
+        ];
+        let text = "String a = Constants.ACCESS_KEY;\nString b = config.ACCESS_KEY;\nimport org.example.Constants.ACCESS_KEY;\nString c = example.ACCESS_KEY;";
+        let report = resolve_text(Language::Java, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![reference(
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                1
+            )]
+        );
+
+        // A receiver that is itself a member, a call result or `self` says nothing.
+        let symbols = vec![
+            symbol_in(
+                Language::Python,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Python,
+                "fmt",
+                "format_size",
+                "pkg::utils::misc::format_size",
+                SymbolKind::Function,
+            ),
+        ];
+        let text = "a = misc.format_size(1)\nb = self.misc.format_size(1)\nc = misc().format_size(1)\nimport pkg.misc.format_size";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("pkg::utils::misc::format_size", 1)]
+        );
+    }
+
+    #[test]
+    fn a_type_qualifier_matches_only_that_types_members() {
+        let mut symbols = vec![
+            rust_symbol("caller", "entry", "main", "app::main"),
+            symbol_in(
+                Language::Rust,
+                "file",
+                "File",
+                "core::lib::File",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Rust,
+                "scope-kind",
+                "ScopeKind",
+                "core::lib::ScopeKind",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Rust,
+                "store",
+                "Store",
+                "db::lib::Store",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Rust,
+                "cache",
+                "Cache",
+                "db::lib::Cache",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Rust,
+                "open",
+                "open",
+                "db::lib::open",
+                SymbolKind::Method,
+            ),
+        ];
+        symbols
+            .iter_mut()
+            .find(|symbol| symbol.id.0 == "open")
+            .expect("the method")
+            .parent_symbol_id = Some(SymbolId::new("store"));
+        let text = "let kind = ScopeKind::File;\nlet cache = Cache::open(dir);\nlet store = Store::open(dir);";
+        let report = resolve_text(Language::Rust, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                reference("core::lib::ScopeKind", 1),
+                reference("db::lib::Cache", 2),
+                reference("db::lib::Store", 3),
+                call("db::lib::open", 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_let_binds_its_name_only_after_its_value() {
+        let symbols = unique_functions(Language::Rust, &["config"]);
+        let text = "let config = config(dir);\nuse_it(config);";
+        let report = resolve_text(Language::Rust, text, &symbols);
+        assert_eq!(line_targets(&report), vec![call("util::config", 1)]);
+
+        let symbols = unique_functions(Language::Python, &["config"]);
+        let text = "config = config(path)\nuse_it(config)";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(line_targets(&report), vec![call("util::config", 1)]);
+    }
+
+    #[test]
+    fn a_named_escape_in_an_f_string_is_text() {
+        let symbols = unique_functions(Language::Python, &["BULLET", "item"]);
+        let text = "line = f\"\\N{BULLET} {item}\"";
+        let report = resolve_text(Language::Python, text, &symbols);
+        assert_eq!(line_targets(&report), vec![reference("util::item", 1)]);
+    }
+
+    #[test]
+    fn go_composite_literal_keys_and_short_declarations_are_not_matched_by_name_alone() {
+        let symbols = vec![
+            symbol_in(
+                Language::Go,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Go,
+                "ports",
+                "ports",
+                "topology::ports",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Go,
+                "reason",
+                "Reason",
+                "gate::Reason",
+                SymbolKind::Class,
+            ),
+            symbol_in(
+                Language::Go,
+                "limit",
+                "parseLimit",
+                "api::parseLimit",
+                SymbolKind::Function,
+            ),
+            symbol_in(Language::Go, "kind", "Kind", "api::Kind", SymbolKind::Class),
+        ];
+        let text = "ports := []string{\"8500\"}\nuse(ports)\nresp := Response{\n    Reason: \"x\",\n}\nif err := parseLimit(req); err != nil {\n}\nswitch k {\ncase Kind:\n}";
+        let report = resolve_text(Language::Go, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("api::parseLimit", 6), reference("api::Kind", 9)]
+        );
+    }
+
+    #[test]
+    fn a_wide_character_before_a_member_path_quote_or_brace_reads_without_panicking() {
+        // A character wider than a byte just before a word used to leave a slice mid-character.
+        let text = "x = a·.join(b)\ny = —.lower()\nz = ·f'{v}'\nw = Ω::new()\nlet s = é·Foo { a, b };\nv := ·pkg.Call()";
+        for language in [
+            Language::Rust,
+            Language::Python,
+            Language::JavaScript,
+            Language::TypeScript,
+            Language::Java,
+            Language::Go,
+            Language::Markdown,
+        ] {
+            let _ = token_uses(text, &language);
+        }
+        let symbols = unique_functions(Language::Python, &["join", "value"]);
+        let report = resolve_text(Language::Python, "z = ·f'{value}'", &symbols);
+        assert_eq!(line_targets(&report), vec![reference("util::value", 1)]);
     }
 }
