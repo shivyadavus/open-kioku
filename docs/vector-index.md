@@ -37,6 +37,7 @@ What follows:
 - allowlist search only returns IDs from the supplied allowlist
 - target-kind filters can restrict search to chunks, symbols, or future target classes
 - persisted indexes load from `.ok/vectors/current/index.json`
+- a target whose path the index no longer holds is removed by rewriting the generation, not by `remove` on the loaded index: an HNSW graph keeps a removed vector's slot, and its bytes, in the file it saves, so the index is rebuilt from the kept vectors (`open_kioku_semantic::prune_vector_store`, `docs/semantic-search.md`)
 
 ## Atomic Promotion
 
