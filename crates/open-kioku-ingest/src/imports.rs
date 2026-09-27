@@ -6,16 +6,17 @@ use open_kioku_core::{
     File, FileId, ImportSite, Language, ModuleDeclarationSite, ScopeId, ScopeKind, SymbolId,
     SymbolKind,
 };
-use open_kioku_resolution::RustModulePlacement;
+use open_kioku_resolution::{RustCrateNames, RustModulePlacement};
+use open_kioku_semantic_model::{CargoImporter, ProjectModel, ProjectRoot};
 pub use open_kioku_semantic_model::{
     ExportBinding, ExportIndex, ImportBinding, ImportBindingRule, ImportIndex, ImportOrigin,
     GLOB_IMPORT_LOCAL_NAME,
 };
-use open_kioku_semantic_model::{ProjectModel, ProjectRoot};
 use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 pub type FileMap = HashMap<String, Vec<FileId>>;
 
@@ -71,6 +72,22 @@ pub(crate) struct RustModuleTree<'a> {
     path_mounts: Vec<(String, PathMount)>,
     /// [`RustModuleTree::find_shared_files`], computed on first use.
     shared_files: OnceCell<HashSet<String>>,
+    /// The `pub use` sites of each Rust file, which other crates reach items through.
+    reexports: HashMap<FileId, Vec<ImportSite>>,
+}
+
+/// How many `pub use` re-exports one path is followed through before it is left unresolved.
+const MAX_REEXPORT_HOPS: usize = 8;
+
+/// What a Rust path names, as the declared module tree proves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RustPathTarget {
+    /// The file of the module the path names.
+    module_file: Option<FileId>,
+    /// The module-level item the path names, when it names no module file.
+    item: Option<SymbolId>,
+    /// Reached through at least one `pub use` of the crate the path starts in.
+    reexport: bool,
 }
 
 /// The file a `#[path]` attribute on a `mod` item mounts, as far as the index can tell.
@@ -218,7 +235,249 @@ impl<'a> RustModuleTree<'a> {
             unindexed_stems: HashSet::new(),
             path_mounts,
             shared_files: OnceCell::new(),
+            reexports: HashMap::new(),
         }
+    }
+
+    /// Records the `pub use` sites a path through a crate name may be re-exported by.
+    pub(crate) fn with_reexports(mut self, sites: &[ImportSite]) -> Self {
+        for site in sites
+            .iter()
+            .filter(|site| site.reexported && self.files.contains_key(&site.file_id))
+        {
+            self.reexports
+                .entry(site.file_id.clone())
+                .or_default()
+                .push(site.clone());
+        }
+        self
+    }
+
+    /// Which dependencies code in `importer` can name: a package's build script only its build
+    /// dependencies.
+    fn cargo_importer(&self, importer: &Path) -> CargoImporter {
+        let package = self.package_of(importer);
+        let build_script = importer.file_name().is_some_and(|name| name == "build.rs")
+            && importer.parent() == package;
+        if build_script {
+            CargoImporter::BuildScript
+        } else {
+            CargoImporter::Crate
+        }
+    }
+
+    /// `source` as a path through a crate name written in `importer`: the importer's own package
+    /// (`demo_crate::auth`, legal from its tests, examples and binaries), or a dependency its
+    /// manifest declares on a package of the repository, followed from that crate's library root.
+    fn crate_name_path(&self, importer: &Path, source: &str) -> Option<RustUsePath> {
+        let root = self.project.nearest_root_for(importer, Language::Rust)?;
+        let first = source.split("::").next()?;
+        if let Some(package) = root.package_name.as_deref() {
+            if package.replace('-', "_") == first {
+                return map_rust_crate_name_path(
+                    &RustPackageLayout::of(Some(root)),
+                    package,
+                    source,
+                );
+            }
+        }
+        let dependency =
+            self.project
+                .rust_dependency(root, first, self.cargo_importer(importer))?;
+        map_rust_crate_name_path(&RustPackageLayout::of(Some(dependency)), first, source)
+    }
+
+    /// Whether `source` starts with the name of a dependency `importer`'s package declares on a
+    /// package of the repository.
+    fn names_dependency(&self, importer: &Path, source: &str) -> bool {
+        let Some(root) = self.project.nearest_root_for(importer, Language::Rust) else {
+            return false;
+        };
+        source.split("::").next().is_some_and(|first| {
+            self.project
+                .rust_dependency(root, first, self.cargo_importer(importer))
+                .is_some()
+        })
+    }
+
+    /// `source`, written in `importer` in `scope`, mapped onto a crate module tree: through a
+    /// crate name, or `crate::`/`self::`/`super::` in the importer's own crate. The flag is set for
+    /// a crate-name path, whose items may be reached through that crate's `pub use` re-exports.
+    fn rust_path(
+        &self,
+        importer: &Path,
+        scope: Option<&ScopeId>,
+        source: &str,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> Option<(RustUsePath, bool)> {
+        self.project.nearest_root_for(importer, Language::Rust)?;
+        if let Some(path) = self.crate_name_path(importer, source) {
+            return Some((path, true));
+        }
+        // `self` and `super` are read off the importer's file path, which cannot see an inline
+        // `mod` block: in `mod tests { use super::*; }` `super` is the file's own module.
+        if !source.starts_with("crate::")
+            && scope.is_some_and(|scope| is_inside_inline_module(scope, scopes))
+        {
+            return None;
+        }
+        let path = map_rust_use_path(&self.crate_tree(importer)?, importer, source)?;
+        if path.relative && !self.declares_file_modules(&path, &path.importer_module) {
+            return None;
+        }
+        Some((path, false))
+    }
+
+    /// What `path` names: the file of a declared module, or else the one module-level item of
+    /// its name in the declared parent module. A path naming both a module file and an item
+    /// names the module. When the parent declares no item of the name and `follow_reexports` is
+    /// set, the `pub use` sites of the parent are followed instead.
+    fn rust_path_target(
+        &self,
+        path: &RustUsePath,
+        follow_reexports: bool,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+        hops: usize,
+    ) -> Option<RustPathTarget> {
+        let (item_name, parent) = path.segments.split_last()?;
+        if let Some(module_file) = self.module_file(path, &path.segments) {
+            return Some(RustPathTarget {
+                module_file: Some(module_file),
+                item: None,
+                reexport: false,
+            });
+        }
+        if !self.declares_file_modules(path, parent) {
+            return None;
+        }
+        let items = rust_module_items(&self.module_stems(path, parent), item_name, symbols);
+        match items.as_slice() {
+            [item] => Some(RustPathTarget {
+                module_file: None,
+                item: Some(item.clone()),
+                reexport: false,
+            }),
+            // An item defined in the module is the name; a `pub use` of the same name beside it
+            // does not compile, so it is followed only where the module defines none.
+            [] if follow_reexports => self.reexported_target(path, symbols, scopes, hops),
+            _ => None,
+        }
+    }
+
+    /// What the last segment of `path` names through the `pub use` sites of its parent module,
+    /// followed from the re-exporting file. A named re-export shadows a glob one; the name is
+    /// bound only when every re-export of it the module holds agrees, and one the tree cannot
+    /// follow leaves it unbound.
+    fn reexported_target(
+        &self,
+        path: &RustUsePath,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+        hops: usize,
+    ) -> Option<RustPathTarget> {
+        if hops >= MAX_REEXPORT_HOPS {
+            return None;
+        }
+        let (name, parent) = path.segments.split_last()?;
+        if name == "*" {
+            return None;
+        }
+        let mut named = Vec::new();
+        let mut named_unresolved = false;
+        let mut globbed = Vec::new();
+        let mut glob_unresolved = false;
+        for file in self
+            .module_stems(path, parent)
+            .iter()
+            .filter_map(|stem| self.files_by_stem.get(stem))
+        {
+            let Some(importer) = self.files.get(file) else {
+                continue;
+            };
+            for site in self.reexports.get(file).into_iter().flatten() {
+                // A `pub use` inside an inline `mod` re-exports from that module, not this one.
+                if site
+                    .scope_id
+                    .as_ref()
+                    .is_some_and(|scope| is_inside_inline_module(scope, scopes))
+                {
+                    continue;
+                }
+                if site.is_glob {
+                    let Some(prefix) = site.source.strip_suffix("::*") else {
+                        continue;
+                    };
+                    let source = format!("{prefix}::{name}");
+                    match self
+                        .reexport_source_target(importer, &source, name, symbols, scopes, hops)
+                    {
+                        Some(target) => globbed.push(target),
+                        None => glob_unresolved = true,
+                    }
+                    continue;
+                }
+                for binding in site
+                    .bindings
+                    .iter()
+                    .filter(|binding| binding.local == *name)
+                {
+                    match self.reexport_source_target(
+                        importer,
+                        &site.source,
+                        &binding.imported,
+                        symbols,
+                        scopes,
+                        hops,
+                    ) {
+                        Some(target) => named.push(target),
+                        None => named_unresolved = true,
+                    }
+                }
+            }
+        }
+        // A glob the tree cannot follow may supply the name too, unless a named one shadows it.
+        let (mut targets, unresolved) = if named.is_empty() && !named_unresolved {
+            (globbed, glob_unresolved)
+        } else {
+            (named, named_unresolved)
+        };
+        targets.dedup();
+        match (targets.as_slice(), unresolved) {
+            ([target], false) => Some(RustPathTarget {
+                reexport: true,
+                ..target.clone()
+            }),
+            _ => None,
+        }
+    }
+
+    /// What the path a `pub use` in `importer` names, when its last segment is `imported`. Such a
+    /// path may also be a Rust 2018 path from the re-exporting module (`pub use auth::Token;`
+    /// beside `mod auth;`).
+    fn reexport_source_target(
+        &self,
+        importer: &Path,
+        source: &str,
+        imported: &str,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+        hops: usize,
+    ) -> Option<RustPathTarget> {
+        let first = source.split("::").next()?;
+        let declares_first = rust_file_stem(importer).is_some_and(|stem| {
+            self.file_modules
+                .contains(&(stem, module_name(first).to_string()))
+        });
+        let (path, _) = if declares_first {
+            self.rust_path(importer, None, &format!("self::{source}"), scopes)?
+        } else {
+            self.rust_path(importer, None, source, scopes)?
+        };
+        if path.segments.last().map(String::as_str) != Some(imported) {
+            return None;
+        }
+        self.rust_path_target(&path, true, symbols, scopes, hops + 1)
     }
 
     /// Records the repository-relative paths discovery skipped; only Rust files matter.
@@ -386,6 +645,78 @@ impl<'a> RustModuleTree<'a> {
                 ))
             })
             .collect()
+    }
+
+    /// The library crates each Rust file names by crate name: the dependencies its package
+    /// declares that are visible to it, each placed at its crate root, and its own package's
+    /// library for a file only another crate of the package compiles (a binary, integration test,
+    /// example or bench). Library code cannot name its own crate that way, nor can a build script,
+    /// and a file the library may compile is treated as library code. Shared by every file of one
+    /// package, importer kind and library membership.
+    pub(crate) fn crate_names(&self) -> HashMap<FileId, Arc<RustCrateNames>> {
+        let mut by_package = HashMap::<(&Path, CargoImporter, bool), Arc<RustCrateNames>>::new();
+        let mut names = HashMap::new();
+        for (id, path) in &self.files {
+            let Some(root) = self.project.nearest_root_for(path, Language::Rust) else {
+                continue;
+            };
+            let kind = self.cargo_importer(path);
+            let names_own_library =
+                kind == CargoImporter::Crate && self.outside_the_library(root, path);
+            let crates = by_package
+                .entry((root.path.as_path(), kind, names_own_library))
+                .or_insert_with(|| {
+                    let mut crates = RustCrateNames::new();
+                    let dependencies = root
+                        .cargo_manifest
+                        .iter()
+                        .flat_map(|manifest| &manifest.dependencies)
+                        .filter(|dependency| dependency.visible_to(kind))
+                        .filter_map(|dependency| dependency.crate_name.as_deref());
+                    for name in dependencies {
+                        if let Some(placement) = self
+                            .project
+                            .rust_dependency(root, name, kind)
+                            .and_then(library_placement)
+                        {
+                            crates.insert(name.to_string(), placement);
+                        }
+                    }
+                    if let Some(package) =
+                        root.package_name.as_deref().filter(|_| names_own_library)
+                    {
+                        if let Some(placement) = library_placement(root) {
+                            crates.entry(package.replace('-', "_")).or_insert(placement);
+                        }
+                    }
+                    Arc::new(crates)
+                })
+                .clone();
+            if !crates.is_empty() {
+                names.insert(id.clone(), crates);
+            }
+        }
+        names
+    }
+
+    /// Whether `path`, a file of the package at `root`, is compiled only into crates other than
+    /// the package's library: the crate roots that declare it are known, none is the library's,
+    /// and no other crate may compile it too.
+    fn outside_the_library(&self, root: &ProjectRoot, path: &Path) -> bool {
+        let Some(library) = RustPackageLayout::of(Some(root)).library_stem() else {
+            return false;
+        };
+        let Some(file) = self.module_file_of(path) else {
+            return false;
+        };
+        if file.importer_root.is_none() && self.shared_files().contains(&importer_stem(&file)) {
+            return false;
+        }
+        let roots = match &file.importer_root {
+            Some(own) => vec![own.clone()],
+            None => self.declared_placement(&file).1,
+        };
+        !roots.is_empty() && !roots.contains(&library)
     }
 
     /// Whether the declared module tree places `file` at its path, and the crate roots whose
@@ -585,6 +916,20 @@ impl<'a> RustModuleTree<'a> {
     }
 }
 
+/// Where the library crate root of the package at `root` sits, for paths through its crate name.
+/// `None` when the layout does not follow the library's module tree.
+fn library_placement(root: &ProjectRoot) -> Option<RustModulePlacement> {
+    let layout = RustPackageLayout::of(Some(root));
+    let library = layout.library_stem()?;
+    let qualified = |stem: &str| stem.replace('/', "::");
+    Some(RustModulePlacement {
+        crate_dir: qualified(&layout.src_root),
+        crate_roots: vec![qualified(&library)],
+        module: Some(Vec::new()),
+        in_other_crates: false,
+    })
+}
+
 /// The extension-less path of the file `path` was mapped from, for a file below its crate root.
 fn importer_stem(path: &RustUsePath) -> String {
     join_dir(&path.tree.module_dir, &path.importer_module.join("/"))
@@ -760,15 +1105,14 @@ impl ImportRegistry {
                 binding.target_file = target.module_file;
                 binding.target_symbol = target.item;
                 binding.origin = ImportOrigin::Internal;
-                binding.rule = ImportBindingRule::RustModulePath;
+                binding.rule = if target.reexport {
+                    ImportBindingRule::RustReexport
+                } else {
+                    ImportBindingRule::RustModulePath
+                };
             }
         }
     }
-}
-
-struct RustImportTarget {
-    module_file: Option<FileId>,
-    item: Option<SymbolId>,
 }
 
 fn rust_import_target(
@@ -777,53 +1121,26 @@ fn rust_import_target(
     symbols: &open_kioku_resolution::SymbolIndex,
     scopes: &open_kioku_resolution::ScopeIndex,
     modules: &RustModuleTree<'_>,
-) -> Option<RustImportTarget> {
-    // `self` and `super` are read off the importer's file path, which cannot see an inline `mod`
-    // block: in `mod tests { use super::helper; }` `super` is the file's own module.
-    if !binding.source_module.starts_with("crate::")
-        && is_inside_inline_module(&binding.scope_id, scopes)
-    {
-        return None;
-    }
-    modules.project.nearest_root_for(importer, Language::Rust)?;
-    let path = map_rust_use_path(
-        &modules.crate_tree(importer)?,
+) -> Option<RustPathTarget> {
+    let (path, crate_name) = modules.rust_path(
         importer,
+        Some(&binding.scope_id),
         &binding.source_module,
+        scopes,
     )?;
-    if path.relative && !modules.declares_file_modules(&path, &path.importer_module) {
-        return None;
-    }
-    let (item_name, parent) = path.segments.split_last()?;
+    let (item_name, _) = path.segments.split_last()?;
     if *item_name != binding.imported_name {
         return None;
     }
-
-    let module_file = modules.module_file(&path, &path.segments);
-    let item = if modules.declares_file_modules(&path, parent) {
-        rust_module_item(&modules.module_stems(&path, parent), item_name, symbols)
-    } else {
-        None
-    };
-    match (module_file, item) {
-        (None, None) => None,
-        (Some(module_file), _) => Some(RustImportTarget {
-            module_file: Some(module_file),
-            item: None,
-        }),
-        (None, Some(item)) => Some(RustImportTarget {
-            module_file: None,
-            item: Some(item),
-        }),
-    }
+    modules.rust_path_target(&path, crate_name, symbols, scopes, 0)
 }
 
-/// The one module-level Rust item named `item` in the files at `module_stems`.
-fn rust_module_item(
+/// The module-level Rust items named `item` in the files at `module_stems`.
+fn rust_module_items(
     module_stems: &[String],
     item: &str,
     symbols: &open_kioku_resolution::SymbolIndex,
-) -> Option<SymbolId> {
+) -> Vec<SymbolId> {
     let mut targets = module_stems
         .iter()
         .filter_map(|stem| {
@@ -843,10 +1160,7 @@ fn rust_module_item(
         .collect::<Vec<_>>();
     targets.sort_by(|left, right| left.0.cmp(&right.0));
     targets.dedup();
-    match targets.as_slice() {
-        [target] => Some(target.clone()),
-        _ => None,
-    }
+    targets
 }
 
 /// Where each Rust `use` path in a file points, for that file's `IMPORTS` edge.
@@ -875,6 +1189,9 @@ pub const RUST_ITEM_MODULE_STRATEGY: &str = "rust-item-module";
 /// A relative path written inside an inline `mod` block that cannot leave the file it is written
 /// in. The file imports its own module, which is no dependency, so no edge is emitted.
 pub const RUST_SELF_MODULE_STRATEGY: &str = "rust-self-module";
+/// A path through a crate name whose item is reached by following that crate's `pub use`
+/// re-exports reaches the file that defines the item, or the module file it names.
+pub const RUST_REEXPORT_STRATEGY: &str = "rust-reexport";
 
 impl RustImportEdgeTargets {
     /// The file `path` names in `file`, when the module tree proves one.
@@ -913,14 +1230,19 @@ impl RustImportEdgeTargets {
 }
 
 /// Follows every Rust `use` path through the declared module tree of the importing file's own
-/// crate, for the file-level `IMPORTS` edge.
+/// crate, or of a crate its package depends on, for the file-level `IMPORTS` edge.
 ///
 /// - a path naming a declared module file reaches that file;
 /// - a glob reaches the file of the module it opens;
 /// - an item reaches the file of the module declaring it, which is the crate root only when the
-///   item is declared there; an item reachable only through a re-export stays unresolved;
-/// - a path the tree cannot answer is left unresolved, including a relative path written inside an
-///   inline `mod` block, whose module the importing file's path cannot tell.
+///   item is declared there;
+/// - an item a crate-name path reaches only through that crate's `pub use` re-exports reaches the
+///   file declaring it, with its own strategy; an in-crate path through a re-export stays
+///   unresolved;
+/// - a path of the importer's own crate the tree cannot answer is left unresolved, including a
+///   relative path written inside an inline `mod` block, whose module the importing file's path
+///   cannot tell. A path into a dependency the tree cannot answer is not recorded, and resolves
+///   as any other path naming another crate does.
 ///
 /// Import sites are read rather than the stored import rows because only a site carries the scope
 /// its path is written in.
@@ -938,18 +1260,25 @@ pub(crate) fn rust_import_edge_targets(
         let Some(root) = modules.project.nearest_root_for(importer, Language::Rust) else {
             continue;
         };
-        if !is_rust_in_crate_path(&site.source, root.package_name.as_deref()) {
+        let in_crate = is_rust_in_crate_path(&site.source, root.package_name.as_deref());
+        if !in_crate && !modules.names_dependency(importer, &site.source) {
             continue;
         }
-        let edge = if rust_self_module_site(site, scopes) {
+        let edge = if in_crate && rust_self_module_site(site, scopes) {
             Some(RustImportEdge {
                 file: site.file_id.clone(),
                 strategy: RUST_SELF_MODULE_STRATEGY,
             })
         } else {
-            rust_use_path_for_site(site, importer, root, scopes, modules)
-                .and_then(|path| rust_import_edge(&path, symbols, modules))
+            modules
+                .rust_path(importer, site.scope_id.as_ref(), &site.source, scopes)
+                .and_then(|(path, crate_name)| {
+                    rust_import_edge(&path, crate_name, symbols, scopes, modules)
+                })
         };
+        if !in_crate && edge.is_none() {
+            continue;
+        }
         targets.record(site.file_id.clone(), &site.source, edge);
     }
     targets
@@ -1009,39 +1338,11 @@ fn rust_self_module_site(site: &ImportSite, scopes: &open_kioku_resolution::Scop
     }
 }
 
-fn rust_use_path_for_site(
-    site: &ImportSite,
-    importer: &Path,
-    root: &ProjectRoot,
-    scopes: &open_kioku_resolution::ScopeIndex,
-    modules: &RustModuleTree<'_>,
-) -> Option<RustUsePath> {
-    let layout = RustPackageLayout::of(Some(root));
-    if let Some(package) = root.package_name.as_deref() {
-        if let Some(path) = map_rust_crate_name_path(&layout, package, &site.source) {
-            return Some(path);
-        }
-    }
-    // `self` and `super` are read off the importer's file path, which cannot see an inline `mod`
-    // block: in `mod tests { use super::*; }` `super` is the file's own module.
-    if !site.source.starts_with("crate::")
-        && site
-            .scope_id
-            .as_ref()
-            .is_some_and(|scope| is_inside_inline_module(scope, scopes))
-    {
-        return None;
-    }
-    let path = map_rust_use_path(&modules.crate_tree(importer)?, importer, &site.source)?;
-    if path.relative && !modules.declares_file_modules(&path, &path.importer_module) {
-        return None;
-    }
-    Some(path)
-}
-
 fn rust_import_edge(
     path: &RustUsePath,
+    follow_reexports: bool,
     symbols: &open_kioku_resolution::SymbolIndex,
+    scopes: &open_kioku_resolution::ScopeIndex,
     modules: &RustModuleTree<'_>,
 ) -> Option<RustImportEdge> {
     let module_edge = |file| RustImportEdge {
@@ -1052,19 +1353,22 @@ fn rust_import_edge(
     if last == "*" {
         return modules.module_or_root_file(path, parent).map(module_edge);
     }
+    let target = modules.rust_path_target(path, follow_reexports, symbols, scopes, 0)?;
+    let strategy = if target.reexport {
+        RUST_REEXPORT_STRATEGY
+    } else if target.module_file.is_some() {
+        RUST_MODULE_PATH_STRATEGY
+    } else {
+        RUST_ITEM_MODULE_STRATEGY
+    };
     // A path naming both a module file and an item names the module: the item is reached through
     // that module, not by this path.
-    if let Some(file) = modules.module_file(path, &path.segments) {
-        return Some(module_edge(file));
-    }
-    if !modules.declares_file_modules(path, parent) {
-        return None;
-    }
-    let item = rust_module_item(&modules.module_stems(path, parent), last, symbols)?;
-    Some(RustImportEdge {
-        file: symbols.get(&item)?.file_id.clone(),
-        strategy: RUST_ITEM_MODULE_STRATEGY,
-    })
+    let file = match (target.module_file, target.item) {
+        (Some(file), _) => file,
+        (None, Some(item)) => symbols.get(&item)?.file_id.clone(),
+        (None, None) => return None,
+    };
+    Some(RustImportEdge { file, strategy })
 }
 
 fn is_inside_inline_module(scope_id: &ScopeId, scopes: &open_kioku_resolution::ScopeIndex) -> bool {
@@ -1092,7 +1396,10 @@ mod tests {
         Confidence, EvidenceSourceType, FileId, ImportSite, ImportedName, Language, RepositoryId,
         Scope, SourceRange, Symbol, SymbolId, SymbolKind,
     };
-    use open_kioku_semantic_model::{CargoTargetKind, CargoTargets, ProjectRoot};
+    use open_kioku_semantic_model::{
+        CargoDependency, CargoDependencyKind, CargoManifest, CargoTargetKind, CargoTargets,
+        ProjectRoot,
+    };
     use std::path::PathBuf;
 
     fn one_file_map(key: &str, file_id: &str) -> FileMap {
@@ -1114,6 +1421,7 @@ mod tests {
             }],
             is_glob: false,
             is_type_only: false,
+            reexported: false,
             range: SourceRange {
                 start_line: 1,
                 start_column: 1,
@@ -1152,6 +1460,7 @@ mod tests {
             }],
             is_glob: false,
             is_type_only: false,
+            reexported: false,
             range: SourceRange {
                 start_line: 1,
                 start_column: 1,
@@ -1182,6 +1491,7 @@ mod tests {
             }],
             is_glob: false,
             is_type_only: false,
+            reexported: false,
             range: SourceRange {
                 start_line: 1,
                 start_column: 1,
@@ -1214,6 +1524,7 @@ mod tests {
             }],
             is_glob: false,
             is_type_only: false,
+            reexported: false,
             range: SourceRange {
                 start_line: 1,
                 start_column: 1,
@@ -1344,6 +1655,7 @@ mod tests {
             }],
             is_glob: false,
             is_type_only: false,
+            reexported: false,
             range: SourceRange {
                 start_line: 1,
                 start_column: 1,
@@ -1425,6 +1737,7 @@ mod tests {
                 source_roots: Vec::new(),
                 library_root: None,
                 cargo_targets: Default::default(),
+                cargo_manifest: None,
             }));
         let scopes = open_kioku_resolution::ScopeIndex::build(scopes);
         let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
@@ -1818,6 +2131,7 @@ mod tests {
             source_roots: Vec::new(),
             library_root: None,
             cargo_targets: Default::default(),
+            cargo_manifest: None,
         });
         let declarations = vec![
             mod_decl("src/lib.rs", "w"),
@@ -1891,6 +2205,7 @@ mod tests {
                 source_roots: Vec::new(),
                 library_root: library.map(PathBuf::from),
                 cargo_targets: Default::default(),
+                cargo_manifest: None,
             }));
         project
     }
@@ -2943,6 +3258,7 @@ mod tests {
                 source_roots: Vec::new(),
                 library_root: None,
                 cargo_targets: Default::default(),
+                cargo_manifest: None,
             }));
         let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
         let scopes = open_kioku_resolution::ScopeIndex::build(scopes);
@@ -3317,5 +3633,314 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A dependency of the package being built on the package in `dir`, written `crate_name`.
+    fn path_dependency(crate_name: &str, dir: &str, kind: CargoDependencyKind) -> CargoDependency {
+        CargoDependency {
+            crate_name: Some(crate_name.into()),
+            key: crate_name.into(),
+            package: crate_name.into(),
+            manifest_dir: PathBuf::from(dir),
+            kind,
+            target_specific: false,
+            inherited: false,
+        }
+    }
+
+    /// Two workspaces each with a package named `engine`, and packages depending on the first:
+    /// `crates/app` (with dev and build dependencies too), `crates/renamed` (writing it
+    /// `core_alias`), and `crates/nodep`, which declares no dependency at all.
+    fn cross_crate_project() -> ProjectModel {
+        let package = |dir: &str, name: &str, dependencies: Vec<CargoDependency>| ProjectRoot {
+            path: PathBuf::from(dir),
+            language: Language::Rust,
+            package_name: Some(name.into()),
+            source_roots: Vec::new(),
+            library_root: None,
+            cargo_targets: Default::default(),
+            cargo_manifest: Some(CargoManifest {
+                package: Some(name.into()),
+                dependencies,
+                ..Default::default()
+            }),
+        };
+        let mut project = ProjectModel::new();
+        project.roots.extend([
+            package("crates/engine", "engine", Vec::new()),
+            package("other/engine", "engine", Vec::new()),
+            package("crates/fixtures", "fixtures", Vec::new()),
+            package(
+                "crates/app",
+                "app",
+                vec![
+                    path_dependency("engine", "crates/engine", CargoDependencyKind::Normal),
+                    path_dependency("fixtures", "crates/fixtures", CargoDependencyKind::Build),
+                ],
+            ),
+            package(
+                "crates/renamed",
+                "renamed",
+                vec![path_dependency(
+                    "core_alias",
+                    "crates/engine",
+                    CargoDependencyKind::Normal,
+                )],
+            ),
+            package("crates/nodep", "nodep", Vec::new()),
+        ]);
+        project
+    }
+
+    const CROSS_CRATE_FILES: [&str; 11] = [
+        "crates/engine/src/lib.rs",
+        "crates/engine/src/plan.rs",
+        "crates/engine/src/util.rs",
+        "crates/engine/src/util/deep.rs",
+        "other/engine/src/lib.rs",
+        "other/engine/src/plan.rs",
+        "crates/fixtures/src/lib.rs",
+        "crates/app/src/main.rs",
+        "crates/app/build.rs",
+        "crates/renamed/src/lib.rs",
+        "crates/nodep/src/lib.rs",
+    ];
+
+    /// `engine`'s root declares `plan` and `util`, defines `run`, re-exports `PlanEngine` by a
+    /// Rust 2018 path and everything of `util` by a glob; `util` re-exports `deep::Deep`. The
+    /// other workspace's `engine` defines a `PlanEngine` and a `run` of its own.
+    fn cross_crate_fixture() -> (Vec<ModuleDeclarationSite>, Vec<ImportSite>, Vec<Symbol>) {
+        let reexport = |importer: &str, source: &str| ImportSite {
+            reexported: true,
+            ..rust_use_site(importer, source, source.rsplit("::").next().unwrap(), None)
+        };
+        let declarations = vec![
+            mod_decl("crates/engine/src/lib.rs", "plan"),
+            mod_decl("crates/engine/src/lib.rs", "util"),
+            mod_decl("crates/engine/src/util.rs", "deep"),
+            mod_decl("other/engine/src/lib.rs", "plan"),
+        ];
+        let reexports = vec![
+            reexport("crates/engine/src/lib.rs", "plan::PlanEngine"),
+            ImportSite {
+                reexported: true,
+                ..rust_glob_site("crates/engine/src/lib.rs", "crate::util::*", None)
+            },
+            reexport("crates/engine/src/util.rs", "self::deep::Deep"),
+            reexport("other/engine/src/lib.rs", "plan::PlanEngine"),
+        ];
+        let symbols = vec![
+            rust_symbol("crates/engine/src/lib.rs", "run"),
+            rust_symbol("crates/engine/src/plan.rs", "PlanEngine"),
+            rust_symbol("crates/engine/src/util.rs", "helper"),
+            rust_symbol("crates/engine/src/util/deep.rs", "Deep"),
+            rust_symbol("other/engine/src/lib.rs", "run"),
+            rust_symbol("other/engine/src/plan.rs", "PlanEngine"),
+            rust_symbol("crates/fixtures/src/lib.rs", "sample"),
+        ];
+        (declarations, reexports, symbols)
+    }
+
+    #[test]
+    fn rust_imports_through_a_declared_dependency_bind_that_crates_items() {
+        let (declarations, mut sites, symbols) = cross_crate_fixture();
+        let uses = [
+            ("crates/app/src/main.rs", "engine::run"),
+            ("crates/app/src/main.rs", "engine::PlanEngine"),
+            ("crates/app/src/main.rs", "engine::plan::PlanEngine"),
+            ("crates/app/src/main.rs", "engine::helper"),
+            ("crates/app/src/main.rs", "engine::Deep"),
+            ("crates/app/src/main.rs", "engine::missing"),
+            ("crates/app/src/main.rs", "fixtures::sample"),
+            ("crates/app/build.rs", "fixtures::sample"),
+            ("crates/app/build.rs", "engine::run"),
+            ("crates/renamed/src/lib.rs", "core_alias::run"),
+            ("crates/renamed/src/lib.rs", "engine::PlanEngine"),
+            ("crates/nodep/src/lib.rs", "engine::run"),
+        ];
+        sites.extend(uses.iter().map(|(importer, source)| {
+            rust_use_site(importer, source, source.rsplit("::").next().unwrap(), None)
+        }));
+        let files = CROSS_CRATE_FILES.map(source_file);
+        let project = cross_crate_project();
+        let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules =
+            RustModuleTree::new(&files, &project, &declarations, &scopes).with_reexports(&sites);
+        let mut registry = ImportRegistry::default();
+        for site in &sites {
+            registry.insert_unresolved_site(site);
+        }
+        registry.resolve_rust_imports(&symbols, &scopes, &modules);
+        let bound = |importer: &str, local: &str| {
+            let binding = registry
+                .index
+                .lookup(&FileId::new(format!("file:{importer}")), None, local)
+                .into_iter()
+                .find(|binding| !binding.source_module.starts_with("crate::"))
+                .map(|binding| (binding.target_symbol.clone(), binding.rule))
+                .unwrap();
+            binding.0.map(|id| (id.0, binding.1))
+        };
+        let main = "crates/app/src/main.rs";
+        assert_eq!(
+            bound(main, "run"),
+            Some((
+                "symbol:crates/engine/src/lib.rs:run".into(),
+                ImportBindingRule::RustModulePath
+            )),
+            "an item of the dependency's crate root"
+        );
+        assert_eq!(
+            bound(main, "PlanEngine"),
+            Some((
+                "symbol:crates/engine/src/plan.rs:PlanEngine".into(),
+                ImportBindingRule::RustReexport
+            )),
+            "a crate-root `pub use` by a Rust 2018 path, in the dependency's own workspace"
+        );
+        assert_eq!(
+            bound(main, "helper"),
+            Some((
+                "symbol:crates/engine/src/util.rs:helper".into(),
+                ImportBindingRule::RustReexport
+            )),
+            "a glob re-export"
+        );
+        assert_eq!(
+            bound(main, "Deep"),
+            Some((
+                "symbol:crates/engine/src/util/deep.rs:Deep".into(),
+                ImportBindingRule::RustReexport
+            )),
+            "a glob re-export of a module that re-exports the item itself"
+        );
+        assert_eq!(bound(main, "missing"), None);
+        assert_eq!(
+            bound(main, "sample"),
+            None,
+            "a build dependency is not the binary's to name"
+        );
+        assert_eq!(
+            bound("crates/app/build.rs", "sample"),
+            Some((
+                "symbol:crates/fixtures/src/lib.rs:sample".into(),
+                ImportBindingRule::RustModulePath
+            ))
+        );
+        assert_eq!(bound("crates/app/build.rs", "run"), None);
+        assert_eq!(
+            bound("crates/renamed/src/lib.rs", "run"),
+            Some((
+                "symbol:crates/engine/src/lib.rs:run".into(),
+                ImportBindingRule::RustModulePath
+            )),
+            "a renamed dependency is named by its new name"
+        );
+        assert_eq!(
+            bound("crates/renamed/src/lib.rs", "PlanEngine"),
+            None,
+            "and not by its package's"
+        );
+        assert_eq!(
+            bound("crates/nodep/src/lib.rs", "run"),
+            None,
+            "a package that declares no dependency on `engine` names no `engine` crate"
+        );
+    }
+
+    #[test]
+    fn rust_import_edges_through_a_declared_dependency_reach_the_file_declaring_the_item() {
+        let (declarations, mut sites, symbols) = cross_crate_fixture();
+        let main = "crates/app/src/main.rs";
+        for source in [
+            "engine::run",
+            "engine::plan",
+            "engine::PlanEngine",
+            "engine::Deep",
+            "engine::missing",
+        ] {
+            sites.push(rust_use_site(
+                main,
+                source,
+                source.rsplit("::").next().unwrap(),
+                None,
+            ));
+        }
+        sites.push(rust_glob_site(main, "engine::util::*", None));
+        sites.push(rust_use_site(
+            "crates/nodep/src/lib.rs",
+            "engine::run",
+            "run",
+            None,
+        ));
+        let files = CROSS_CRATE_FILES.map(source_file);
+        let project = cross_crate_project();
+        let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules =
+            RustModuleTree::new(&files, &project, &declarations, &scopes).with_reexports(&sites);
+        let targets = rust_import_edge_targets(&sites, &symbols, &scopes, &modules);
+
+        let edge = |importer: &str, path: &str| edge_target(&targets, importer, path);
+        assert_eq!(
+            edge(main, "engine::run").as_deref(),
+            Some("rust-item-module:file:crates/engine/src/lib.rs")
+        );
+        assert_eq!(
+            edge(main, "engine::plan").as_deref(),
+            Some("rust-module-path:file:crates/engine/src/plan.rs")
+        );
+        assert_eq!(
+            edge(main, "engine::PlanEngine").as_deref(),
+            Some("rust-reexport:file:crates/engine/src/plan.rs")
+        );
+        assert_eq!(
+            edge(main, "engine::Deep").as_deref(),
+            Some("rust-reexport:file:crates/engine/src/util/deep.rs")
+        );
+        assert_eq!(
+            edge(main, "engine::util::*").as_deref(),
+            Some("rust-module-path:file:crates/engine/src/util.rs")
+        );
+        // A dependency path the tree cannot answer is left to the resolver's other rules, as is
+        // one naming a crate the importer's package does not declare.
+        let main_id = FileId::new(format!("file:{main}"));
+        assert!(!targets.is_in_crate(&main_id, "engine::missing"));
+        assert!(!targets.is_in_crate(&FileId::new("file:crates/nodep/src/lib.rs"), "engine::run"));
+    }
+
+    #[test]
+    fn a_package_names_its_own_library_only_from_its_other_crates() {
+        // `crates/engine` has a library (`lib.rs` declaring `util`), a binary, an integration
+        // test and a build script; `crates/app` depends on it.
+        let files = [
+            "crates/engine/src/lib.rs",
+            "crates/engine/src/util.rs",
+            "crates/engine/src/main.rs",
+            "crates/engine/tests/it.rs",
+            "crates/engine/build.rs",
+            "crates/app/src/lib.rs",
+        ]
+        .map(source_file);
+        let project = cross_crate_project();
+        let declarations = vec![mod_decl("crates/engine/src/lib.rs", "util")];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let names = modules.crate_names();
+        let named = |path: &str| {
+            names
+                .get(&FileId::new(format!("file:{path}")))
+                .map(|crates| crates.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        // Library code cannot write its own crate's name, and a build script names only its
+        // build dependencies.
+        assert!(named("crates/engine/src/lib.rs").is_empty());
+        assert!(named("crates/engine/src/util.rs").is_empty());
+        assert!(named("crates/engine/build.rs").is_empty());
+        assert_eq!(named("crates/engine/src/main.rs"), vec!["engine"]);
+        assert_eq!(named("crates/engine/tests/it.rs"), vec!["engine"]);
+        assert_eq!(named("crates/app/src/lib.rs"), vec!["engine"]);
     }
 }

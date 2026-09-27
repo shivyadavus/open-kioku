@@ -545,10 +545,36 @@ impl InMemoryGraph {
                     path: paths.intern(&file.path),
                     line_range: Some(range.clone()),
                 });
-                proof.evidence_ids.push(evidence_id);
+                proof.evidence_ids.push(evidence_id.clone());
                 proof.details.insert("package".into(), json!(fact.target));
                 edge.set_relationship_proofs(vec![proof])
                     .expect("resolved package dependency proof must serialize to JSON");
+            }
+            // A Cargo manifest's dependency on another package of the repository is declared
+            // source, read by a TOML parser and placed by its `path`: the same binding a resolved
+            // package import proves, between the two manifests.
+            if fact.edge_type == GraphEdgeType::DependsOn
+                && fact.target_kind == GraphNodeType::File
+                && fact
+                    .source
+                    .starts_with(open_kioku_core::cargo_manifest::CARGO_MANIFEST_SOURCE_PREFIX)
+                && fact.confidence == Confidence::Exact
+            {
+                let mut proof = RelationshipProof::new(
+                    RelationshipProofKind::ModuleOrPackageBinding,
+                    fact.source.clone(),
+                    1,
+                );
+                proof.source_range = Some(FileRange {
+                    path: paths.intern(&file.path),
+                    line_range: None,
+                });
+                proof.evidence_ids.push(evidence_id.clone());
+                proof
+                    .details
+                    .insert("target_path".into(), json!(fact.target));
+                edge.set_relationship_proofs(vec![proof])
+                    .expect("declared Cargo dependency proof must serialize to JSON");
             }
             buffer.insert_edge(edge);
         }
@@ -1629,6 +1655,51 @@ mod ri3_static_import_authority_tests {
         assert!(edge.is_authoritative_relationship());
         assert!(edge.has_relationship_proof_kind(RelationshipProofKind::ModuleOrPackageBinding));
         assert_eq!(edge.relationship_proofs().len(), 1);
+    }
+
+    #[test]
+    fn a_declared_cargo_dependency_links_the_two_manifests_with_a_package_binding() {
+        let manifest = |path: &str| File {
+            id: FileId::new(format!("file:{path}")),
+            repository_id: RepositoryId::new("repo:test"),
+            path: PathBuf::from(path),
+            language: Language::Unknown,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let files = [
+            manifest("crates/app/Cargo.toml"),
+            manifest("crates/engine/Cargo.toml"),
+        ];
+        let fact = |confidence| open_kioku_core::AnalysisFact {
+            id: "fact:dependency".into(),
+            file_id: files[0].id.clone(),
+            symbol_id: None,
+            target: "crates/engine/Cargo.toml".into(),
+            target_kind: open_kioku_core::GraphNodeType::File,
+            edge_type: GraphEdgeType::DependsOn,
+            range: None,
+            confidence,
+            source: open_kioku_core::cargo_manifest::CARGO_DEPENDENCY_SOURCE.into(),
+            source_type: open_kioku_core::EvidenceSourceType::StaticAnalysis,
+            message: "declares package `engine`".into(),
+        };
+        let edge_of = |confidence| {
+            InMemoryGraph::from_index_with_analysis(&files, &[], &[], &[], &[], &[fact(confidence)])
+                .edges
+                .into_iter()
+                .find(|edge| edge.edge_type == GraphEdgeType::DependsOn)
+                .expect("a dependency fact emits a DEPENDS_ON edge")
+        };
+        let edge = edge_of(Confidence::Exact);
+        assert_eq!(edge.from.0, "file:crates/app/Cargo.toml");
+        assert_eq!(edge.to.0, "file:crates/engine/Cargo.toml");
+        assert!(edge.is_authoritative_relationship());
+        assert!(edge.has_relationship_proof_kind(RelationshipProofKind::ModuleOrPackageBinding));
+        // Only the exact fact a parsed manifest states carries the binding.
+        assert!(!edge_of(Confidence::Medium).is_authoritative_relationship());
     }
 }
 

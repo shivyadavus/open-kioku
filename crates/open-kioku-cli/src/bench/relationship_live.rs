@@ -670,6 +670,13 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
     const PACKAGE_B: &str = "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
     const ROOT_WORKSPACE_PACKAGE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"crates/a\"]\n";
     const SESSION_B: &str = "use crate::auth::issue_token;\n\npub fn caller_fn() {\n    issue_token();\n}\n";
+    const DEPENDENCY_WORKSPACE: &str = "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n\n[workspace.dependencies]\nengine = { path = \"crates/engine\" }\n";
+    const ENGINE: &str = "[package]\nname = \"engine\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    const APP_INHERITS_ENGINE: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nengine.workspace = true\n";
+    const APP_RENAMES_ENGINE: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ncore_alias = { package = \"engine\", path = \"../engine\" }\n";
+    const THING_CLOSURE_CALLER: &str = "pub struct Thing;\n\nimpl Thing {\n    pub fn target_fn(&self) {}\n}\n\npub fn caller_fn(things: &[Thing]) {\n    things.iter().for_each(|engine| engine.target_fn());\n}\n";
+    const ENGINE_CALLER: &str =
+        "use engine::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
     const LIB_AND_BIN_BESIDE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n\n[[bin]]\nname = \"app\"\npath = \"main.rs\"\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
         "cross_module_item_import" => (
@@ -983,6 +990,168 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                     "tests/support/util.rs",
                     "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
                 ),
+            ],
+            false,
+        ),
+        // A path through a crate the caller's package declares, by a `workspace = true` entry,
+        // reaches that crate's item; another workspace's package of the same name defines one too.
+        "workspace_dependency_item_import" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                ("crates/app/src/lib.rs", ENGINE_CALLER),
+                ("other/Cargo.toml", "[workspace]\nmembers = [\"engine\"]\n"),
+                ("other/engine/Cargo.toml", ENGINE),
+                ("other/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // The dependency's `api` module re-exports an item of a private module.
+        "workspace_dependency_nested_reexport" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "mod inner;\npub mod api;\n"),
+                ("crates/engine/src/inner.rs", "pub fn target_fn() {}\n"),
+                ("crates/engine/src/api.rs", "pub use crate::inner::target_fn;\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "use engine::api::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // The dependency's crate root re-exports a private module's items by a glob.
+        "workspace_dependency_glob_reexport" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "mod inner;\npub use inner::*;\n"),
+                ("crates/engine/src/inner.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                ("crates/app/src/lib.rs", ENGINE_CALLER),
+            ],
+            true,
+        ),
+        // A call path through the declared crate's module, with no `use`.
+        "workspace_dependency_path_call" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub mod inner;\n"),
+                ("crates/engine/src/inner.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub fn caller_fn() {\n    engine::inner::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // The caller's package declares no dependency on `engine`, so `engine` names no crate
+        // of the repository, whatever its workspace holds.
+        "workspace_undeclared_dependency" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                (
+                    "crates/app/Cargo.toml",
+                    "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                ),
+                ("crates/app/src/lib.rs", ENGINE_CALLER),
+            ],
+            false,
+        ),
+        // `engine = "1"` is a registry dependency: the repository's own package named `engine`,
+        // outside the caller's workspace, is not it.
+        "workspace_registry_dependency_same_name" => (
+            vec![
+                ("Cargo.toml", "[workspace]\nmembers = [\"crates/app\"]\n"),
+                (
+                    "crates/app/Cargo.toml",
+                    "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nengine = \"1\"\n",
+                ),
+                ("crates/app/src/lib.rs", ENGINE_CALLER),
+                ("third_party/engine/Cargo.toml", ENGINE),
+                ("third_party/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // A renamed dependency is written under its new name, never its package's.
+        "workspace_renamed_dependency_package_name" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_RENAMES_ENGINE),
+                ("crates/app/src/lib.rs", ENGINE_CALLER),
+            ],
+            false,
+        ),
+        "workspace_renamed_dependency" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_RENAMES_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "use core_alias::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A single-segment call path through the declared crate, with no `use`.
+        "workspace_dependency_root_path_call" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub fn caller_fn() {\n    engine::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `engine.target_fn()` on a closure parameter named like the declared crate is a method
+        // of the value, which has the receiver text of `engine::target_fn()`.
+        "closure_value_named_like_dependency" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                ("crates/app/src/lib.rs", THING_CLOSURE_CALLER),
+            ],
+            false,
+        ),
+        // The same through an `if let` binding, which records no binding either.
+        "pattern_value_named_like_dependency" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub struct Thing;\n\nimpl Thing {\n    pub fn target_fn(&self) {}\n}\n\npub fn caller_fn(first: Option<Thing>) {\n    if let Some(engine) = first {\n        engine.target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // Inside package `engine`'s own library, a closure parameter named `engine`: library
+        // code cannot name its own crate, and a value is no path in any case.
+        "closure_value_named_like_own_crate" => (
+            vec![
+                ("Cargo.toml", ENGINE),
+                ("src/lib.rs", "pub mod util;\n\npub fn target_fn() {}\n"),
+                ("src/util.rs", THING_CLOSURE_CALLER),
             ],
             false,
         ),
@@ -1715,6 +1884,29 @@ fn rust_import_edge_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
                 "src/session.rs",
                 "use crate::auth::*;\n\npub fn open_session() {\n    issue_token();\n}\n",
             ),
+        ],
+        // A crate the importer's package declares re-exports the item from its root: the edge
+        // names the file declaring it, in that crate.
+        "workspace_dependency_reexport" => vec![
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/*\"]\n",
+            ),
+            (
+                "crates/engine/Cargo.toml",
+                "[package]\nname = \"engine\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            ("crates/engine/src/lib.rs", "pub mod auth;\n\npub use auth::issue_token;\n"),
+            ("crates/engine/src/auth.rs", AUTH),
+            (
+                "crates/app/Cargo.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nengine = { path = \"../engine\" }\n",
+            ),
+            (
+                "crates/app/src/session.rs",
+                "use engine::issue_token;\n\npub fn open_session() {\n    issue_token();\n}\n",
+            ),
+            ("crates/app/src/lib.rs", "pub mod session;\n"),
         ],
         // `crate::issue_token` reaches the item only through the crate root's re-export, which no
         // module declaration proves; the crate root must not absorb the edge.

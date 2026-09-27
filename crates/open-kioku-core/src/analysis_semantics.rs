@@ -50,7 +50,16 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// name-only strategies (same module, unique project name, suffix reachability, fuzzy) never match
 /// a symbol of another language family; v12 indexes hold registry edges from comment and literal
 /// words and across languages (a Rust `Utc::now()` to a JavaScript `now`).
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v13";
+/// v15 (v14 is taken by the symbol registry's unique-name precision change): a Rust path whose
+/// first segment is a crate name the importer's package declares as a
+/// dependency on a package of the repository (by `path`, directly or through
+/// `[workspace.dependencies]`) is followed through that package's library module tree, and a
+/// crate-name path, the importer's own package's included, follows the `pub use` re-exports of the
+/// modules it passes through; `engine::run()` through such a name is a call into that crate. v13
+/// indexes hold no `IMPORTS` edge, import binding or `CALLS` edge across crates, and no binding
+/// for a path through the importer's own crate name. A call path or a call through an imported
+/// module never ends in a module symbol.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v15";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -73,7 +82,12 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// v6: a Rust trait item takes the trait's visibility and a trait `impl` member the narrower of
 /// the trait's and the implementing type's, and a Java interface or annotation-type member with
 /// no access keyword is public; a v5 index records them as private and package.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v6";
+/// v7: a Rust `use` import site records whether it is a `pub use` re-export, and a Rust
+/// `path::name()` call whose path starts with a lowercase segment has a module receiver (a
+/// primitive type's, a type receiver), never a value one: `engine::run()` and `engine.run()` share
+/// the receiver text `engine`. A v6 index's sites record no re-export, and its calls read such a
+/// path as a value.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v7";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

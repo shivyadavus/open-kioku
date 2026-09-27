@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod cargo_facts;
 pub mod derived;
 mod git_ignore;
 pub mod path_policy;
@@ -696,6 +697,7 @@ impl Indexer {
 
         use crate::project_model::ProjectModelDiscovery;
         let project_model = open_kioku_semantic_model::ProjectModel::discover(&root);
+        analysis_facts.extend(cargo_facts::cargo_manifest_facts(&project_model, &files));
         let mut import_registry = imports::ImportRegistry::default();
         let mut file_map: imports::FileMap = HashMap::new();
         fn register_file_key(map: &mut imports::FileMap, key: String, file_id: &FileId) {
@@ -753,8 +755,10 @@ impl Indexer {
                 .iter()
                 .filter(|skipped| skipped.safe_to_show)
                 .map(|skipped| skipped.path.as_path()),
-        );
+        )
+        .with_reexports(&import_sites);
         scope_index.record_rust_module_placements(rust_modules.module_placements());
+        scope_index.record_rust_crate_names(rust_modules.crate_names());
         let rust_placement_gaps = rust_modules.placement_gaps();
         import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
         // Import bindings and file-level import edges follow the same declared module tree, and

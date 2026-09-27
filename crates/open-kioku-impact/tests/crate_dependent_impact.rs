@@ -1,21 +1,24 @@
 //! Impact across the crates of a Cargo workspace, from a real repository through indexing and
 //! SQLite into `ImpactEngine`.
 //!
-//! The import resolver answers only paths of the importer's own crate, so `use engine::PlanEngine`
-//! in a downstream crate reached neither an exact reference nor a relationship edge, and the
-//! dependents of a crate's public API were reported only when a keyword search happened to
-//! find them. Keyword search also found the same name in crates that cannot depend on the
-//! changed one and in fixture trees no package compiles, and reported those as impacts.
+//! The import resolver used to answer only paths of the importer's own crate, so
+//! `use engine::PlanEngine` in a downstream crate reached neither an exact reference nor a
+//! relationship edge, and the dependents of a crate's public API were reported only when a keyword
+//! search happened to find them. Keyword search also found the same name in crates that cannot
+//! depend on the changed one and in fixture trees no package compiles, and reported those as
+//! impacts. Impact now reads the package model and import resolutions indexing stored, keyed by
+//! manifest path, so a package of the same name in another workspace is another package.
 
 use open_kioku_config::OkConfig;
-use open_kioku_core::{ImpactReport, SearchResult};
+use open_kioku_core::{GraphEdgeType, ImpactReport, RelationshipAuthority, SearchResult};
+use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ingest::Indexer;
-use open_kioku_storage::{IndexData, MetadataStore};
+use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
 use open_kioku_storage_sqlite::SqliteStore;
 use std::path::{Path, PathBuf};
 
-const FILES: [(&str, &str); 23] = [
+const FILES: [(&str, &str); 28] = [
     (
         "Cargo.toml",
         "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n",
@@ -120,6 +123,28 @@ const FILES: [(&str, &str); 23] = [
         "fixtures/demo/src/lib.rs",
         "pub fn demo() -> usize {\n    PlanEngine::new(2).limit\n}\n",
     ),
+    // A second workspace with its own `plan-engine`, and a crate depending on that one: the
+    // same package name, another package.
+    (
+        "vendored/Cargo.toml",
+        "[workspace]\nmembers = [\"engine\", \"consumer\"]\n",
+    ),
+    (
+        "vendored/engine/Cargo.toml",
+        "[package]\nname = \"plan-engine\"\nversion = \"0.2.0\"\nedition = \"2021\"\n",
+    ),
+    (
+        "vendored/engine/src/lib.rs",
+        "pub struct PlanEngine;\n\nimpl PlanEngine {\n    pub fn new(_limit: usize) -> Self {\n        PlanEngine\n    }\n}\n",
+    ),
+    (
+        "vendored/consumer/Cargo.toml",
+        "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nplan-engine = { path = \"../engine\" }\n",
+    ),
+    (
+        "vendored/consumer/src/lib.rs",
+        "use plan_engine::PlanEngine;\n\npub fn consume() -> PlanEngine {\n    PlanEngine::new(8)\n}\n",
+    ),
 ];
 
 fn indexed_workspace(root: &Path) -> SqliteStore {
@@ -149,6 +174,17 @@ fn indexed_workspace(root: &Path) -> SqliteStore {
             call_sites: &snapshot.call_sites,
         })
         .unwrap();
+    let graph = InMemoryGraph::from_index_with_resolved_relationships(
+        &snapshot.files,
+        &snapshot.symbols,
+        &snapshot.chunks,
+        &snapshot.occurrences,
+        &snapshot.imports,
+        &snapshot.analysis_facts,
+        &snapshot.resolved_relationships,
+    );
+    let nodes = graph.nodes.into_values().collect::<Vec<_>>();
+    store.replace_graph(&nodes, &graph.edges).unwrap();
     store
 }
 
@@ -267,6 +303,8 @@ fn lexical_matches_no_dependency_path_reaches_are_left_out_and_counted() {
         "crates/other/src/lib.rs",
         "crates/stray/src/lib.rs",
         "fixtures/demo/src/lib.rs",
+        "vendored/engine/src/lib.rs",
+        "vendored/consumer/src/lib.rs",
     ] {
         assert!(
             !paths.contains(&PathBuf::from(unreachable)),
@@ -275,7 +313,7 @@ fn lexical_matches_no_dependency_path_reaches_are_left_out_and_counted() {
     }
     assert!(
         report.risk_report.reasons.iter().any(|reason| reason
-            .starts_with("3 lexical match(es) left out: Rust files in no workspace package, or in packages with no Cargo dependency path to `plan-engine` (e.g. ")),
+            .starts_with("5 lexical match(es) left out: Rust files in no workspace package, or in packages with no Cargo dependency path to `plan_engine` (`crates/engine`) (e.g. ")),
         "{:?}",
         report.risk_report.reasons
     );
@@ -356,7 +394,7 @@ fn a_file_crate_import_analysis_cannot_cover_says_so() {
         ),
         (
             "crates/engine/src/bin/tool.rs",
-            "downstream crates were not measured: the file is not a module of an indexed library crate of `plan-engine`",
+            "downstream crates were not measured: the file is not a module of an indexed library crate of `plan_engine` (`crates/engine`)",
         ),
     ] {
         let report = ImpactEngine::new(&store).for_file(Path::new(path)).unwrap();
@@ -379,4 +417,77 @@ fn a_file_crate_import_analysis_cannot_cover_says_so() {
         .reasons
         .iter()
         .any(|reason| reason.starts_with("downstream crates were not measured")));
+}
+
+#[test]
+fn a_package_of_the_same_name_in_another_workspace_is_not_a_dependency() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = indexed_workspace(dir.path());
+
+    // `vendored/consumer` depends on `vendored/engine`, which is also named `plan-engine`.
+    let report = ImpactEngine::new(&store)
+        .for_file(Path::new("crates/engine/src/lib.rs"))
+        .unwrap();
+    assert!(
+        !listed_paths(&report).contains(&PathBuf::from("vendored/consumer/src/lib.rs")),
+        "{:?}",
+        report.direct_impacts
+    );
+    let vendored = ImpactEngine::new(&store)
+        .for_file(Path::new("vendored/engine/src/lib.rs"))
+        .unwrap();
+    let importers = vendored
+        .direct_impacts
+        .iter()
+        .filter(|result| has_signal(result, "crate_import"))
+        .map(|result| result.path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        importers,
+        vec![PathBuf::from("vendored/consumer/src/lib.rs")],
+        "{:?}",
+        vendored.direct_impacts
+    );
+}
+
+#[test]
+fn a_downstream_call_through_an_imported_item_is_proven_impact() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = indexed_workspace(dir.path());
+
+    let report = ImpactEngine::new(&store)
+        .with_graph_store(Some(&store))
+        .for_file(Path::new("crates/engine/src/lib.rs"))
+        .unwrap();
+    // `PlanEngine::new(4)` in `aliased` resolves through `use engine::PlanEngine;` and the
+    // renamed dependency to the engine's `new`; the same call in the other workspace's consumer,
+    // and in the package that never declares the dependency, does not.
+    let calls = report
+        .proven_impact
+        .iter()
+        .filter(|impact| impact.edge_type == GraphEdgeType::Calls)
+        .map(|impact| {
+            assert_eq!(impact.authority, RelationshipAuthority::Authoritative);
+            (impact.path.clone(), impact.symbol.clone())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        calls.contains(&(
+            PathBuf::from("crates/aliased/src/lib.rs"),
+            Some("crates::aliased::src::lib::aliased".into())
+        )),
+        "{calls:?} / {:?}",
+        report.proven_impact
+    );
+    for elsewhere in ["vendored/consumer/src/lib.rs", "crates/stray/src/lib.rs"] {
+        assert!(
+            !report
+                .proven_impact
+                .iter()
+                .chain(&report.possible_impact)
+                .any(|impact| impact.path == Path::new(elsewhere)),
+            "{elsewhere}: {:?}",
+            report.proven_impact
+        );
+    }
 }
