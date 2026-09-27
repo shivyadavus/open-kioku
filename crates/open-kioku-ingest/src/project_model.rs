@@ -692,14 +692,13 @@ fn cargo_workspace_root_dir(
         let workspace = manifests.get(ancestor)?.get("workspace")?.as_table()?;
         Some((ancestor, workspace))
     });
-    // Cargo takes the nearest workspace above a package as its root only when that workspace's
-    // `members` cover the package and its `exclude` does not; an excluded package, or one no
-    // member names, is a root of its own.
+    // A package the nearest workspace above it excludes is a root of its own. Every other package
+    // there belongs to that workspace: `members` need not list it, since a path dependency inside
+    // the workspace is an implicit member, and a package that is neither does not build.
     Some(match nearest {
-        Some((root, _)) if root == dir => dir.to_path_buf(),
         Some((root, workspace))
-            if path_is_under_any(dir, &workspace_path_prefixes(workspace, "members", root))
-                && !path_is_under_any(
+            if root == dir
+                || !path_is_under_any(
                     dir,
                     &workspace_path_prefixes(workspace, "exclude", root),
                 ) =>
@@ -1106,40 +1105,102 @@ mod tests {
     }
 
     #[test]
-    fn a_package_the_workspace_excludes_or_does_not_list_is_its_own_patch_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let write = |path: &str, content: &str| {
-            let path = dir.path().join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, content).unwrap();
-        };
-        write(
-            "Cargo.toml",
-            "[workspace]\nmembers = [\"crates/*\"]\nexclude = [\"tools/solo\"]\n",
-        );
-        write("tools/util/Cargo.toml", "[package]\nname = \"util\"\n");
-        let own_patch =
-            "[dependencies]\nutil = \"1\"\n\n[patch.crates-io]\nutil = { path = \"../util\" }\n";
-        write(
-            "tools/solo/Cargo.toml",
-            &format!("[package]\nname = \"solo\"\n\n{own_patch}"),
-        );
-        write(
-            "tools/unlisted/Cargo.toml",
-            &format!("[package]\nname = \"unlisted\"\n\n{own_patch}"),
-        );
-        let model = ProjectModel::discover(dir.path());
-        for package in ["tools/solo", "tools/unlisted"] {
-            let manifest = model
+    fn the_nearest_workspace_is_the_patch_root_unless_it_excludes_the_package() {
+        let external_of = |files: &[(&str, &str)], package: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            for (path, content) in files {
+                let path = dir.path().join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, content).unwrap();
+            }
+            let model = ProjectModel::discover(dir.path());
+            model
                 .rust_root_at(Path::new(package))
                 .and_then(|root| root.cargo_manifest.as_ref())
-                .unwrap();
-            assert!(
-                manifest.external_dependencies.is_empty(),
-                "{package}: {:?}",
-                manifest.external_dependencies
+                .unwrap()
+                .external_dependencies
+                .iter()
+                .map(|dependency| dependency.crate_name.clone())
+                .collect::<Vec<_>>()
+        };
+        let util = ("crates/util/Cargo.toml", "[package]\nname = \"util\"\n");
+        let helper = (
+            "crates/helper/Cargo.toml",
+            "[package]\nname = \"helper\"\n\n[dependencies]\nutil = \"1\"\n",
+        );
+        let patch = "[patch.crates-io]\nutil = { path = \"crates/util\" }\n";
+        // An excluded package is its own root, and its own `[patch]` applies.
+        let excluded = external_of(
+            &[
+                (
+                    "Cargo.toml",
+                    "[workspace]\nmembers = [\"crates/*\"]\nexclude = [\"tools/solo\"]\n",
+                ),
+                ("tools/util/Cargo.toml", "[package]\nname = \"util\"\n"),
+                (
+                    "tools/solo/Cargo.toml",
+                    "[package]\nname = \"solo\"\n\n[dependencies]\nutil = \"1\"\n\n[patch.crates-io]\nutil = { path = \"../util\" }\n",
+                ),
+            ],
+            "tools/solo",
+        );
+        assert!(excluded.is_empty(), "{excluded:?}");
+        // A path dependency inside the workspace is an implicit member, whether `members` lists
+        // other packages, is absent, or only `default-members` is set, so the root's `[patch]`
+        // applies to it.
+        let listed_root =
+            format!("[workspace]\nmembers = [\"crates/app\", \"crates/util\"]\n\n{patch}");
+        let mut implicit = vec![(
+            "members lists others",
+            external_of(
+                &[
+                    ("Cargo.toml", listed_root.as_str()),
+                    (
+                        "crates/app/Cargo.toml",
+                        "[package]\nname = \"app\"\n\n[dependencies]\nhelper = { path = \"../helper\" }\n",
+                    ),
+                    util,
+                    helper,
+                ],
+                "crates/helper",
+            ),
+        )];
+        for (case, workspace) in [
+            ("no members", "[workspace]\n"),
+            (
+                "default-members only",
+                "[workspace]\ndefault-members = [\"crates/helper\"]\n",
+            ),
+        ] {
+            let root = format!(
+                "[package]\nname = \"root\"\n\n[dependencies]\nhelper = {{ path = \"crates/helper\" }}\n\n{workspace}\n{patch}"
             );
+            implicit.push((
+                case,
+                external_of(
+                    &[("Cargo.toml", root.as_str()), util, helper],
+                    "crates/helper",
+                ),
+            ));
         }
+        implicit.retain(|(_, external)| !external.is_empty());
+        assert!(implicit.is_empty(), "{implicit:?}");
+        // `exclude = ["a"]` does not exclude `ab`.
+        let prefix_root = format!(
+            "[workspace]\nmembers = [\"ab\", \"crates/util\"]\nexclude = [\"a\"]\n\n{patch}"
+        );
+        let prefix = external_of(
+            &[
+                ("Cargo.toml", prefix_root.as_str()),
+                (
+                    "ab/Cargo.toml",
+                    "[package]\nname = \"ab\"\n\n[dependencies]\nutil = \"1\"\n",
+                ),
+                util,
+            ],
+            "ab",
+        );
+        assert!(prefix.is_empty(), "{prefix:?}");
     }
 
     #[test]
