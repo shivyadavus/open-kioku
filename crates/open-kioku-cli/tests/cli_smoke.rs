@@ -8616,6 +8616,224 @@ fn tantivy_stored_texts_and_terms(index_dir: &std::path::Path) -> Vec<String> {
     texts
 }
 
+/// A path that `ok index` stops holding, because `[paths] deny` now covers it or the file was
+/// deleted, leaves the semantic vector store and the stored context handles in the same run:
+/// no semantic answer and no retrieved handle serves its text, and no file the store keeps
+/// holds it (#564).
+#[test]
+fn index_removes_denied_and_deleted_paths_from_the_vector_store_and_context_handles() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let denied_marker = "zebra_payroll_marker";
+    let deleted_marker = "okapi_obsolete_marker";
+    fs::create_dir_all(repo.join("src/payroll")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn render_invoice_total() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/payroll/rates.rs"),
+        format!("pub fn {denied_marker}() -> u32 {{ 7 }}\n"),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/obsolete.rs"),
+        format!("pub fn {deleted_marker}() -> u32 {{ 9 }}\n"),
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    // The local hashing provider, which downloads nothing.
+    run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("semantic").arg("index");
+        command
+    });
+    let mut handles = Vec::new();
+    for marker in [denied_marker, deleted_marker] {
+        let compressed: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "context", "--compressed", marker]);
+            command
+        }))
+        .unwrap();
+        let handle = compressed["handles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|handle| handle["summary"].as_str().unwrap().contains(marker))
+            .unwrap_or_else(|| panic!("a handle quotes `{marker}`: {compressed}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        handles.push(handle);
+    }
+    let holders = |needle: &str, under: &[&str]| -> Vec<PathBuf> {
+        under
+            .iter()
+            .flat_map(|dir| walkdir::WalkDir::new(repo.join(".ok").join(dir)))
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .filter(|entry| {
+                fs::read(entry.path())
+                    .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+                    .unwrap_or(false)
+            })
+            .map(|entry| entry.path().to_path_buf())
+            .collect()
+    };
+    let vectors_root = open_kioku_storage::generations::resolve_index_location(repo)
+        .vectors_root()
+        .strip_prefix(repo.join(".ok"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let derived = [vectors_root.as_str(), "context.sqlite"];
+    for marker in [denied_marker, deleted_marker] {
+        assert_eq!(
+            holders(marker, &derived).len(),
+            2,
+            "the vector store and the context store hold `{marker}` before the run"
+        );
+    }
+
+    let config = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    assert!(config.contains("deny = [\n"));
+    fs::write(
+        repo.join("ok.toml"),
+        config.replacen("deny = [\n", "deny = [\n    \"src/payroll/**\",\n", 1),
+    )
+    .unwrap();
+    fs::remove_file(repo.join("src/obsolete.rs")).unwrap();
+    let (_, stderr) = run_ok_with_stderr({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    assert!(
+        stderr.contains("semantic target(s) for 2 path(s) the index no longer embeds")
+            && stderr.contains("stored context handle(s) quoting paths the index no longer holds"),
+        "{stderr}"
+    );
+
+    // The denied path's rows are compacted out of the database (#555), so nothing under
+    // `.ok` holds its text. A deleted file is not a policy exclusion and its rows are left to
+    // SQLite's page reuse, so for it the derived stores are what is checked.
+    assert_eq!(holders(denied_marker, &[""]), Vec::<PathBuf>::new());
+    assert_eq!(holders(deleted_marker, &derived), Vec::<PathBuf>::new());
+    for handle in &handles {
+        let (_, stderr) = run_failure({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["retrieve-context", handle]);
+            command
+        });
+        assert!(stderr.contains("no context handle"), "{stderr}");
+    }
+    // The pruned store still describes the earlier index, so it is refused until rebuilt.
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "--semantic", denied_marker]);
+        command
+    });
+    assert!(stderr.contains("semantic index is stale"), "{stderr}");
+    let (_, stderr) = run_ok_with_stderr({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("semantic").arg("index");
+        command
+    });
+    // The kept file's embeddings survived the prune.
+    assert!(
+        stderr.contains("reused=") && !stderr.contains("reused=0/"),
+        "{stderr}"
+    );
+    for marker in [denied_marker, deleted_marker] {
+        let served = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", "--semantic", marker]);
+            command
+        });
+        assert!(
+            !served.contains(marker) && !served.contains("payroll") && !served.contains("obsolete"),
+            "{served}"
+        );
+    }
+    assert_eq!(holders(denied_marker, &[""]), Vec::<PathBuf>::new());
+}
+
+/// A prune that fails, here over a context store that is not a database, does not fail
+/// `ok index`, whose index is correct either way: it is recorded as outstanding clearing, which
+/// status reports, and the next run that succeeds clears it (#564).
+#[test]
+fn index_records_a_failed_prune_as_outstanding_instead_of_failing() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    fs::write(
+        repo.join(".ok/context.sqlite"),
+        "not a database, long enough to be read as one's header\n".repeat(4),
+    )
+    .unwrap();
+
+    let (_, stderr) = run_ok_with_stderr({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    assert!(
+        stderr.contains("context handle store failed") && stderr.contains("`ok doctor` reports it"),
+        "{stderr}"
+    );
+    let status = status_json(repo);
+    assert_eq!(
+        status["quality"]["pending_deleted_content_clearing"], true,
+        "{status}"
+    );
+
+    fs::remove_file(repo.join(".ok/context.sqlite")).unwrap();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let status = status_json(repo);
+    assert!(
+        status["quality"]["pending_deleted_content_clearing"].is_null(),
+        "{status}"
+    );
+}
+
 fn assert_secrets_absent(label: &str, haystack: &str, secrets: &[&str]) {
     let lowered = haystack.to_ascii_lowercase();
     for secret in secrets {

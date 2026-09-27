@@ -35,8 +35,12 @@ use open_kioku_memory::extract_entities;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
+
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// SQLite-backed store that maps context handle ids to their original text.
 ///
@@ -70,6 +74,10 @@ struct StoredContext {
     handle: ContextHandle,
     original: String,
     created_at: chrono::DateTime<Utc>,
+    /// The file the original was read from. A handle carries a file range only when its
+    /// result had a line range, so pruning a removed path needs the path recorded here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<PathBuf>,
 }
 
 impl ContextHandleStore {
@@ -91,6 +99,9 @@ impl ContextHandleStore {
                 .map_err(|err| OkError::Storage(format!("create context dir: {err}")))?;
         }
         let connection = Connection::open(path).map_err(storage_err)?;
+        // A `retrieve_context` read or a `compress_pack` write overlapping an index run's
+        // pruning waits for it rather than failing it; the index store waits as long.
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(storage_err)?;
         let store = Self {
             connection: Mutex::new(connection),
         };
@@ -154,7 +165,7 @@ impl ContextHandleStore {
                 test.command.as_deref().unwrap_or("manual validation"),
                 test.reason
             );
-            handles.push(self.store_original("test", &test.name, None, &original)?);
+            handles.push(self.store_original("test", &test.name, None, None, &original)?);
         }
 
         handles.sort_by(|a, b| a.id.cmp(&b.id));
@@ -245,7 +256,13 @@ impl ContextHandleStore {
             path: result.path.clone().into(),
             line_range: Some(line_range),
         });
-        self.store_original(kind, &title, file_range, &result.snippet)
+        self.store_original(
+            kind,
+            &title,
+            file_range,
+            Some(result.path.clone()),
+            &result.snippet,
+        )
     }
 
     fn store_original(
@@ -253,6 +270,7 @@ impl ContextHandleStore {
         kind: &str,
         title: &str,
         file_range: Option<FileRange>,
+        path: Option<PathBuf>,
         original: &str,
     ) -> Result<ContextHandle> {
         let summary = summarize(kind, title, original);
@@ -273,6 +291,7 @@ impl ContextHandleStore {
             handle: handle.clone(),
             original: original.into(),
             created_at: Utc::now(),
+            path,
         };
         let conn = self
             .connection
@@ -291,6 +310,68 @@ impl ContextHandleStore {
         Ok(handle)
     }
 
+    /// Deletes every stored original read from a file outside `indexed_paths`, the paths the
+    /// published index holds, and returns how many it deleted. A handle whose file was deleted
+    /// or is now excluded by the index policy would otherwise keep serving that file's text
+    /// through `retrieve_context` (#564). Test handles name a test rather than a file and are
+    /// kept; a row written before paths were recorded, with no file range to read one from,
+    /// cannot be checked and is deleted.
+    ///
+    /// Deleted rows are zeroed (`secure_delete`) and, when any were deleted, the database is
+    /// compacted, so no file under `.ok` keeps their text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OkError::Storage`] if reading, deleting or compacting fails.
+    pub fn prune_removed_paths(&self, indexed_paths: &HashSet<PathBuf>) -> Result<usize> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("context sqlite mutex poisoned".into()))?;
+        let mut statement = conn
+            .prepare("SELECT id, kind, json FROM context_handles")
+            .map_err(storage_err)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(storage_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_err)?;
+        drop(statement);
+        let stale = rows
+            .into_iter()
+            .filter(|(_, kind, json)| !handle_path_still_indexed(kind, json, indexed_paths))
+            .map(|(id, _, _)| id)
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(storage_err)?;
+        let deleted = (|| {
+            let mut statement = conn
+                .prepare("DELETE FROM context_handles WHERE id = ?1")
+                .map_err(storage_err)?;
+            for id in &stale {
+                statement.execute(params![id]).map_err(storage_err)?;
+            }
+            Ok::<_, OkError>(())
+        })();
+        match deleted {
+            Ok(()) => conn.execute_batch("COMMIT").map_err(storage_err)?,
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(err);
+            }
+        }
+        conn.execute_batch("VACUUM").map_err(storage_err)?;
+        Ok(stale.len())
+    }
+
     fn initialize(&self) -> Result<()> {
         let conn = self
             .connection
@@ -298,6 +379,7 @@ impl ContextHandleStore {
             .map_err(|_| OkError::Storage("context sqlite mutex poisoned".into()))?;
         conn.execute_batch(
             "
+            PRAGMA secure_delete = ON;
             CREATE TABLE IF NOT EXISTS context_handles (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -387,6 +469,25 @@ fn stable_hash(value: &str, len: usize) -> String {
         .collect()
 }
 
+/// Whether a stored row still describes a file the index holds; see
+/// [`ContextHandleStore::prune_removed_paths`].
+fn handle_path_still_indexed(kind: &str, json: &str, indexed_paths: &HashSet<PathBuf>) -> bool {
+    let Ok(stored) = serde_json::from_str::<StoredContext>(json) else {
+        return false;
+    };
+    let path = stored.path.or_else(|| {
+        stored
+            .handle
+            .file_range
+            .as_ref()
+            .map(|range| range.path.to_path_buf())
+    });
+    match path {
+        Some(path) => indexed_paths.contains(&path),
+        None => kind == "test",
+    }
+}
+
 fn storage_err(err: rusqlite::Error) -> OkError {
     OkError::Storage(err.to_string())
 }
@@ -400,13 +501,10 @@ mod tests {
     fn compresses_and_retrieves_context_handles() {
         let dir = tempfile::tempdir().unwrap();
         let store = ContextHandleStore::open_repo(dir.path()).unwrap();
-        let pack = ContextPack {
-            task: "token".into(),
-            intent: "code_change".into(),
-            primary_files: vec![SearchResult {
-                path: "src/auth.rs".into(),
-                line_range: Some(LineRange { start: 1, end: 18 }),
-                snippet: r#"pub fn issue_token(user: &User, grants: &[Grant]) -> Result<String> {
+        let pack = pack(vec![SearchResult {
+            path: "src/auth.rs".into(),
+            line_range: Some(LineRange { start: 1, end: 18 }),
+            snippet: r#"pub fn issue_token(user: &User, grants: &[Grant]) -> Result<String> {
     let subject = user.subject().ok_or(AuthError::MissingSubject)?;
     let audience = grants
         .iter()
@@ -421,21 +519,34 @@ mod tests {
     };
     signer::sign_claims(&claims).map_err(AuthError::from)
 }"#
-                .into(),
-                symbol: None,
-                score: 1.0,
-                match_reason: "test".into(),
-                evidence: Vec::new(),
-                evidence_refs: Vec::new(),
-                confidence: 1.0,
-                score_breakdown: vec![ScoreComponent::single(
-                    "test_score",
-                    1.0,
-                    Vec::new(),
-                    "test fixture",
-                )],
-                exact_reference_provenance: None,
-            }],
+            .into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "test".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 1.0,
+            score_breakdown: vec![ScoreComponent::single(
+                "test_score",
+                1.0,
+                Vec::new(),
+                "test fixture",
+            )],
+            exact_reference_provenance: None,
+        }]);
+
+        let compressed = store.compress_pack(&pack).unwrap();
+        let retrieved = store.retrieve(&compressed.handles[0].id).unwrap().unwrap();
+
+        assert!(compressed.compression_ratio < 1.0);
+        assert!(retrieved.original.contains("issue_token"));
+    }
+
+    fn pack(primary_files: Vec<SearchResult>) -> ContextPack {
+        ContextPack {
+            task: "token".into(),
+            intent: "code_change".into(),
+            primary_files,
             primary_symbols: Vec::new(),
             supporting_files: Vec::new(),
             dependency_edges: Vec::new(),
@@ -465,12 +576,156 @@ mod tests {
             confidence_summary: "test".into(),
             confidence_breakdown: open_kioku_core::ConfidenceBreakdown::default(),
             retrieval_diagnostics: Default::default(),
+        }
+    }
+
+    fn result(path: &str, line_range: Option<LineRange>, snippet: &str) -> SearchResult {
+        SearchResult {
+            path: path.into(),
+            line_range,
+            snippet: snippet.into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "test".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
+        }
+    }
+
+    /// Every stored original read from a path the index no longer holds is deleted, with or
+    /// without a line range, and its text is gone from the database file (#564).
+    #[test]
+    fn prune_removed_paths_deletes_originals_of_paths_the_index_no_longer_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ContextHandleStore::open_repo(dir.path()).unwrap();
+        let compressed = store
+            .compress_pack(&pack(vec![
+                result(
+                    "src/invoice.rs",
+                    Some(LineRange { start: 1, end: 3 }),
+                    "pub fn render_invoice_total() {}",
+                ),
+                result(
+                    "src/payroll.rs",
+                    Some(LineRange { start: 1, end: 3 }),
+                    "pub fn zebra_payroll_marker() {}",
+                ),
+                result("config/payroll.toml", None, "okapi_rate_marker = 3"),
+            ]))
+            .unwrap();
+        let handle = |needle: &str| {
+            compressed
+                .handles
+                .iter()
+                .find(|handle| handle.summary.contains(needle))
+                .unwrap()
+                .id
+                .clone()
+        };
+        let (kept, removed, removed_without_range) = (
+            handle("render_invoice_total"),
+            handle("zebra_payroll_marker"),
+            handle("okapi_rate_marker"),
+        );
+        let indexed = [PathBuf::from("src/invoice.rs")].into_iter().collect();
+
+        assert_eq!(store.prune_removed_paths(&indexed).unwrap(), 2);
+
+        assert!(store.retrieve(&kept).unwrap().is_some());
+        assert!(store.retrieve(&removed).unwrap().is_none());
+        assert!(store.retrieve(&removed_without_range).unwrap().is_none());
+        assert_eq!(store.prune_removed_paths(&indexed).unwrap(), 0);
+        drop(store);
+        for entry in std::fs::read_dir(dir.path().join(".ok")).unwrap() {
+            let path = entry.unwrap().path();
+            let bytes = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+            for needle in ["zebra_payroll_marker", "okapi_rate_marker", "payroll"] {
+                assert!(
+                    !bytes.contains(needle),
+                    "{} holds `{needle}`",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// A row written before paths were recorded is judged by its file range, and one with no
+    /// file range cannot be checked, so it goes; test handles name no file and stay.
+    #[test]
+    fn prune_removed_paths_judges_rows_without_a_recorded_path() {
+        let indexed = [PathBuf::from("src/invoice.rs")].into_iter().collect();
+        let legacy = |kind: &str, file_range: Option<&str>| {
+            serde_json::json!({
+                "handle": {
+                    "id": "ctx:legacy",
+                    "kind": kind,
+                    "summary": "legacy",
+                    "file_range": file_range.map(|path| serde_json::json!({
+                        "path": path,
+                        "line_range": {"start": 1, "end": 2}
+                    })),
+                    "entities": [],
+                    "original_tokens_estimate": 1,
+                    "compressed_tokens_estimate": 1
+                },
+                "original": "text",
+                "created_at": Utc::now()
+            })
+            .to_string()
         };
 
-        let compressed = store.compress_pack(&pack).unwrap();
-        let retrieved = store.retrieve(&compressed.handles[0].id).unwrap().unwrap();
+        assert!(handle_path_still_indexed(
+            "primary",
+            &legacy("primary", Some("src/invoice.rs")),
+            &indexed
+        ));
+        assert!(!handle_path_still_indexed(
+            "primary",
+            &legacy("primary", Some("src/payroll.rs")),
+            &indexed
+        ));
+        assert!(!handle_path_still_indexed(
+            "primary",
+            &legacy("primary", None),
+            &indexed
+        ));
+        assert!(handle_path_still_indexed(
+            "test",
+            &legacy("test", None),
+            &indexed
+        ));
+        assert!(!handle_path_still_indexed("primary", "not json", &indexed));
+    }
 
-        assert!(compressed.compression_ratio < 1.0);
-        assert!(retrieved.original.contains("issue_token"));
+    /// A reader holding the database when an index run prunes is waited out instead of
+    /// failing the prune with "database is locked". Held past rusqlite's default 5 s busy
+    /// timeout, which is what the store's own timeout replaces.
+    #[test]
+    fn prune_removed_paths_waits_for_a_reader_holding_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ContextHandleStore::open_repo(dir.path()).unwrap();
+        store
+            .compress_pack(&pack(vec![result(
+                "src/payroll.rs",
+                Some(LineRange { start: 1, end: 3 }),
+                "pub fn zebra_payroll_marker() {}",
+            )]))
+            .unwrap();
+        let reader = Connection::open(default_context_path(dir.path())).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let rows: i64 = reader
+            .query_row("SELECT COUNT(*) FROM context_handles", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        let released = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            reader.execute_batch("COMMIT").unwrap();
+        });
+
+        assert_eq!(store.prune_removed_paths(&HashSet::new()).unwrap(), 1);
+        released.join().unwrap();
     }
 }

@@ -19,6 +19,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub mod clearing;
+pub mod derived;
 
 use clearing::ClearingScope;
 
@@ -391,6 +392,15 @@ pub fn reindex_repo_after_changes<'a>(
         compaction_owed || compacted,
     )?;
     maintain_semantic_index(root, &store, &config);
+    // Only a run that removed a path owes this; a partial update that only changed files
+    // skips reading the vector store on every event.
+    if !partial
+        || deleted_file_count > 0
+        || compaction_owed
+        || snapshot.manifest.quality.pending_deleted_content_clearing
+    {
+        prune_derived_stores(root, &store, &mut snapshot.manifest)?;
+    }
 
     Ok(WatchIndexStatus {
         files: snapshot.manifest.file_count,
@@ -486,6 +496,7 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         true,
     )?;
     maintain_semantic_index(root, &store, &config);
+    prune_derived_stores(root, &store, &mut snapshot.manifest)?;
 
     Ok(WatchIndexStatus {
         files: snapshot.manifest.file_count,
@@ -496,6 +507,19 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         changed_files: snapshot.manifest.file_count,
         deleted_files: 0,
     })
+}
+
+/// After the semantic refresh, which already leaves removed paths out when it succeeds, so
+/// this finds nothing to do then; see [`derived`]. A failure is recorded in the manifest.
+fn prune_derived_stores(
+    root: &Path,
+    store: &SqliteStore,
+    manifest: &mut open_kioku_core::IndexManifest,
+) -> Result<()> {
+    if let Some(line) = derived::prune_and_record(root, store, manifest)? {
+        eprintln!("watch: {line}");
+    }
+    Ok(())
 }
 
 fn maintain_semantic_index(root: &Path, store: &SqliteStore, config: &OkConfig) {

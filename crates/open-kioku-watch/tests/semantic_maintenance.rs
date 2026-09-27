@@ -175,3 +175,44 @@ fn git(repo: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// With semantic refresh off, nothing rebuilds the vector store after a watch event, so a file
+/// the event deleted must be pruned from it in the same run (#564).
+#[test]
+fn watch_prunes_a_deleted_file_from_a_vector_store_it_does_not_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    initialize_repo(repo);
+    reindex_repo(repo).unwrap();
+    let vectors = open_kioku_storage::generations::resolve_index_location(repo).vectors_root();
+    let holders = |needle: &str| {
+        let mut found = Vec::new();
+        let mut pending = vec![vectors.clone()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if String::from_utf8_lossy(&fs::read(&path).unwrap()).contains(needle) {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    };
+    assert!(!holders("billing_watch_token").is_empty());
+
+    let mut config = semantic_config(repo);
+    config.semantic.enabled = false;
+    write_config(repo, &config);
+    let billing = repo.join("src/billing.rs");
+    fs::remove_file(&billing).unwrap();
+    let status = reindex_repo_after_changes(repo, [billing.as_path()]).unwrap();
+
+    assert_eq!(status.deleted_files, 1);
+    assert_eq!(
+        holders("billing_watch_token"),
+        Vec::<std::path::PathBuf>::new()
+    );
+    assert!(!holders("alpha_watch_token").is_empty());
+}

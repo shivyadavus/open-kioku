@@ -262,15 +262,15 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
         let _ = fs::remove_file(&temp_db);
         return Err(err);
     }
-    let publish = || -> anyhow::Result<()> {
+    let publish = || {
         let store = open_store_for_write(&repo)?;
         rebuild_search_from_store(&repo, &store)?;
         store.put_manifest(&temp_manifest)?;
-        Ok(())
+        anyhow::Ok(store)
     };
     // The previous database is gone from here on. Without a manifest the imported rows read
     // as unindexed, never as an index whose search side is missing.
-    publish().with_context(|| {
+    let store = publish().with_context(|| {
         format!(
             "the imported index was not published, so reads report the repository as \
              unindexed; run `ok snapshot import` again or `ok index {}`",
@@ -278,6 +278,8 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
         )
     })?;
 
+    // The vector store and stored context handles were built from the replaced index (#564).
+    let pruned = open_kioku_watch::derived::prune_and_record(&repo, &store, &mut temp_manifest)?;
     let mut caveats = Vec::new();
     caveats.extend(provenance.caveat());
     if filtered.paths_removed > 0 {
@@ -287,6 +289,7 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
             filtered.paths_removed
         ));
     }
+    caveats.extend(pruned);
     caveats.extend(filtered.scip_caveat.clone());
     caveats.extend(filtered.resolution_caveat.clone());
     Ok(SnapshotImportReport {
