@@ -58,6 +58,23 @@ Test selection is deliberately not wired to it: `find_tests_for_change` already 
 to its subject by the same file-stem convention, and a `test-pairing` edge carries no proof,
 so it could not raise a test above `Optional` anyway.
 
+Each indexed `Cargo.toml` that parses stores the Cargo package model as analysis facts on its
+file row (`source` prefixed `open-kioku-cargo-manifest/`, exact confidence, contract in
+`open_kioku_core::cargo_manifest`), which become graph edges from the manifest's file node: a
+`DEFINES` edge to a build-target node `<crate>@<dir>` for its package (`package` or
+`proc-macro-package`) or `workspace@<dir>` for a virtual workspace, a `DEFINES` edge to its
+indexed library root file, a `CONTAINS` edge to a directory node per workspace member prefix, and
+a `DEPENDS_ON` edge to the `Cargo.toml` of each dependency its `path` places in the repository
+(`dependency`, `dev-dependency`, `build-dependency`; `workspace = true` entries are read from the
+workspace's table). A `DEPENDS_ON` edge carries a `module_or_package_binding` proof: the
+dependency is declared source read by a TOML parser. Packages are keyed by manifest path, so two
+workspaces with a package of one name are two nodes, and a dependency without a `path` (a
+registry or git dependency) has no edge. A manifest that does not parse states nothing. The import
+resolver reads the same model to follow `use dep::module::Item` into the dependency's library
+module tree and its `pub use` re-exports (import strategy `rust-reexport` when it took one), and
+impact reads the stored facts back for Cargo reachability instead of parsing manifests
+(`docs/ranking.md`, `crate_import`).
+
 Nodes and edges also support additive metadata fields. `properties` stores
 structured queryable facts that are specific to the node or edge family, such as
 qualified names, route names, relation kinds, package names, or resolver output.

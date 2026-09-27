@@ -1694,6 +1694,44 @@ impl MetadataStore for SqliteStore {
         Ok(rows)
     }
 
+    fn analysis_facts_targeting(
+        &self,
+        target: &str,
+        source_type: Option<EvidenceSourceType>,
+        limit: usize,
+    ) -> Result<Vec<AnalysisFact>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let rows = if let Some(source_type) = source_type {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT json FROM analysis_facts WHERE target = ?1 AND source_type = ?2 ORDER BY file_id, id LIMIT ?3",
+                )
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(
+                    params![target, source_type_name(&source_type), limit],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(storage_err)?;
+            collect_json(rows)?
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT json FROM analysis_facts WHERE target = ?1 ORDER BY file_id, id LIMIT ?2",
+                )
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(params![target, limit], |row| row.get::<_, String>(0))
+                .map_err(storage_err)?;
+            collect_json(rows)?
+        };
+        Ok(rows)
+    }
+
     fn analysis_facts_for_file(
         &self,
         file_id: &FileId,
@@ -8670,6 +8708,28 @@ mod tests {
         assert_eq!(implementations.len(), 1);
         assert_eq!(implementations[0].id, implementation_fact.id);
         assert_eq!(implementations[0].target, implementation_fact.target);
+        // By exact target, optionally of one source type.
+        let targeting = |target: &str, source_type| {
+            store
+                .analysis_facts_targeting(target, source_type, 10)
+                .unwrap()
+                .into_iter()
+                .map(|fact| fact.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targeting("tests/handler_test.rs", None), vec!["git-1"]);
+        assert_eq!(
+            targeting(
+                "tests/handler_test.rs",
+                Some(EvidenceSourceType::StaticAnalysis)
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            targeting("orders", Some(EvidenceSourceType::StaticAnalysis)),
+            vec!["static-1"]
+        );
+        assert_eq!(targeting("tests/handler", None), Vec::<String>::new());
     }
 
     #[test]

@@ -131,6 +131,22 @@ pub trait MetadataStore: Send + Sync {
             .take(limit)
             .collect())
     }
+    /// Facts whose `target` is exactly `target`, such as the import resolutions that name one
+    /// file. Stores with an index on `target` should override this: the default scans every fact
+    /// of the source type.
+    fn analysis_facts_targeting(
+        &self,
+        target: &str,
+        source_type: Option<EvidenceSourceType>,
+        limit: usize,
+    ) -> Result<Vec<AnalysisFact>> {
+        Ok(self
+            .analysis_facts(source_type, usize::MAX)?
+            .into_iter()
+            .filter(|fact| fact.target == target)
+            .take(limit)
+            .collect())
+    }
     fn implementation_facts_for_target(
         &self,
         target: &str,

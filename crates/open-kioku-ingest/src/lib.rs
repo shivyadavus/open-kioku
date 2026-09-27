@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod cargo_facts;
 pub mod derived;
 mod git_ignore;
 pub mod path_policy;
@@ -696,6 +697,7 @@ impl Indexer {
 
         use crate::project_model::ProjectModelDiscovery;
         let project_model = open_kioku_semantic_model::ProjectModel::discover(&root);
+        analysis_facts.extend(cargo_facts::cargo_manifest_facts(&project_model, &files));
         let mut import_registry = imports::ImportRegistry::default();
         let mut file_map: imports::FileMap = HashMap::new();
         fn register_file_key(map: &mut imports::FileMap, key: String, file_id: &FileId) {
