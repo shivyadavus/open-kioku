@@ -1041,12 +1041,15 @@ fn push_code_token(
 /// Where a chunk's code is, as opposed to its comments and string literals, whose words name
 /// nothing: `// the clock's now` and `"now"` are not uses of `now` (#563).
 ///
-/// A lexical pass, not a parse. It knows each language's comment and literal delimiters and
-/// carries block comments, multi-line literals and template interpolations across lines. A chunk
-/// is read from its first line, so one that starts inside a literal is read as code there. A
-/// language it has no rules for (JSON, Markdown, plain text) is read as code throughout, as
-/// before. Regular-expression literals and interpolated Python and Rust strings are not
-/// modeled: a regex reads as code, and an f-string's or format string's names read as literal.
+/// A lexical pass, not a parse. It knows each language's comment and literal delimiters, carries
+/// block comments, multi-line literals and template interpolations across lines, and skips
+/// JavaScript and TypeScript regular-expression literals. A chunk is read from its first line as
+/// code: one that starts inside a block comment reads the comment's words as code up to its end,
+/// and one that starts inside a multi-line string or template reads that text as code, after
+/// which the closing quote opens a literal and the code that follows reads as literal up to the
+/// next quote. A language it has no rules for (JSON, Markdown, plain text) is read whole, as
+/// before; YAML and TOML lose only their `#` comments. Interpolated Python and Rust strings are
+/// not modeled: an f-string's or format string's names read as literal.
 struct CodeLexer {
     syntax: LexicalSyntax,
     /// Innermost last. Empty is code outside any template interpolation.
@@ -1058,6 +1061,7 @@ struct LexicalSyntax {
     line_comment: Option<&'static str>,
     block_comments: bool,
     nested_block_comments: bool,
+    double_quote_strings: bool,
     /// `'` opens a literal; with `lifetimes`, only when a character literal closes it.
     single_quote_strings: bool,
     lifetimes: bool,
@@ -1066,6 +1070,8 @@ struct LexicalSyntax {
     backtick: Backtick,
     /// A `"` or `'` literal may continue on the next line.
     multiline_strings: bool,
+    /// JavaScript: a `/` where an operand is expected opens a regular-expression literal.
+    regex_literals: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1095,6 +1101,8 @@ enum LexState {
 
 enum LexStep {
     Advance(usize),
+    /// A literal that closes on this line, such as a regular expression: not code, no state.
+    Skip(usize),
     Push(LexState, usize),
     Pop(usize),
     LineComment,
@@ -1106,16 +1114,19 @@ impl CodeLexer {
             line_comment: Some("//"),
             block_comments: true,
             nested_block_comments: false,
+            double_quote_strings: true,
             single_quote_strings: true,
             lifetimes: false,
             raw_strings: false,
             triple_quotes: false,
             backtick: Backtick::Code,
             multiline_strings: false,
+            regex_literals: false,
         };
         let plain = LexicalSyntax {
             line_comment: None,
             block_comments: false,
+            double_quote_strings: false,
             single_quote_strings: false,
             ..c_like
         };
@@ -1129,6 +1140,7 @@ impl CodeLexer {
             },
             Language::TypeScript | Language::JavaScript => LexicalSyntax {
                 backtick: Backtick::Template,
+                regex_literals: true,
                 ..c_like
             },
             Language::Java => LexicalSyntax {
@@ -1148,6 +1160,7 @@ impl CodeLexer {
             // A double-quoted SQL name is an identifier, not a literal.
             Language::Sql => LexicalSyntax {
                 line_comment: Some("--"),
+                double_quote_strings: false,
                 multiline_strings: true,
                 ..c_like
             },
@@ -1176,6 +1189,11 @@ impl CodeLexer {
             };
             match step {
                 LexStep::Advance(len) => idx += len,
+                LexStep::Skip(len) => {
+                    close_span(&mut spans, &mut code_start, idx);
+                    idx += len;
+                    code_start = Some(idx);
+                }
                 LexStep::Push(state, len) => {
                     close_span(&mut spans, &mut code_start, idx);
                     idx += len;
@@ -1227,7 +1245,12 @@ impl CodeLexer {
                     LexStep::Push(LexState::RawStr { hashes }, len)
                 }),
             quote @ (b'"' | b'\'') => {
-                if quote == b'\'' && !syntax.single_quote_strings {
+                let opens = if quote == b'"' {
+                    syntax.double_quote_strings
+                } else {
+                    syntax.single_quote_strings
+                };
+                if !opens {
                     return LexStep::Advance(1);
                 }
                 if quote == b'\'' && syntax.lifetimes && !opens_char_literal(&line[idx + 1..]) {
@@ -1235,6 +1258,9 @@ impl CodeLexer {
                 }
                 let triple = syntax.triple_quotes && rest.starts_with(&[quote; 3]);
                 LexStep::Push(LexState::Str { quote, triple }, if triple { 3 } else { 1 })
+            }
+            b'/' if syntax.regex_literals && regex_may_start(&line[..idx]) => {
+                regex_literal_len(rest).map_or(LexStep::Advance(1), LexStep::Skip)
             }
             b'`' => match syntax.backtick {
                 Backtick::Template => LexStep::Push(LexState::Template, 1),
@@ -1321,6 +1347,62 @@ impl CodeLexer {
             *top = state;
         }
     }
+}
+
+/// Whether a `/` after `before` (its line up to the `/`) starts a regular expression rather than
+/// dividing: where an operand is expected, after an operator, an opening bracket, the start of
+/// the line or a keyword that takes an expression.
+fn regex_may_start(before: &str) -> bool {
+    let before = before.trim_end();
+    let Some(last) = before.chars().next_back() else {
+        return true;
+    };
+    if "(,=:[!&|?{};+-*%<>~^".contains(last) {
+        return true;
+    }
+    let word = before
+        .rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+        .next()
+        .unwrap_or_default();
+    matches!(
+        word,
+        "return"
+            | "typeof"
+            | "case"
+            | "do"
+            | "else"
+            | "in"
+            | "of"
+            | "yield"
+            | "await"
+            | "void"
+            | "delete"
+            | "throw"
+    )
+}
+
+/// The length of the regular-expression literal opening at `rest[0]`, flags included, when its
+/// closing `/` (unescaped, outside a `[...]` class) is on this line; otherwise the `/` divides.
+fn regex_literal_len(rest: &[u8]) -> Option<usize> {
+    let mut idx = 1;
+    let mut in_class = false;
+    while idx < rest.len() {
+        match rest[idx] {
+            b'\\' => idx += 1,
+            b'[' => in_class = true,
+            b']' => in_class = false,
+            b'/' if !in_class => {
+                let flags = rest[idx + 1..]
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_alphabetic())
+                    .count();
+                return Some(idx + 1 + flags);
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
 }
 
 fn close_span(spans: &mut Vec<Range<usize>>, code_start: &mut Option<usize>, end: usize) {
@@ -2057,6 +2139,111 @@ mod tests {
             .quality_notes
             .iter()
             .any(|note| note.message.contains("`rb`")));
+    }
+
+    #[test]
+    fn javascript_regex_literals_hide_no_code_after_them() {
+        let symbols = vec![
+            symbol("caller", "entry", "main", "app::main", SymbolKind::Function),
+            symbol(
+                "target",
+                "util",
+                "helper",
+                "util::helper",
+                SymbolKind::Function,
+            ),
+        ];
+        // Each regex holds a delimiter that would open a template, comment or string; the code
+        // after it on its line and on the next must still be read, and the regex body must not.
+        for regex in [
+            r"/`/",
+            r"/\/*/",
+            r#"/"/"#,
+            r"/'/g",
+            r"/a\/\/b/",
+            r"/[/`]helper/i",
+            "/x/",
+        ] {
+            let text =
+                format!("const re = {regex}; helper();\nreturn {regex}.test(s) && helper();");
+            let report = resolve_symbol_edges(
+                &[chunk_in(Language::TypeScript, &text)],
+                &symbols,
+                &[],
+                false,
+                None,
+            );
+            assert_eq!(
+                targets(&report),
+                vec![call("util::helper", 1), call("util::helper", 2)],
+                "{text}"
+            );
+        }
+        // A `/` after an operand divides, and a call between two of them is code.
+        let report = resolve_symbol_edges(
+            &[chunk_in(
+                Language::JavaScript,
+                "const r = total / helper() / 2;",
+            )],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(targets(&report), vec![call("util::helper", 1)]);
+    }
+
+    #[test]
+    fn languages_without_literal_rules_are_read_whole() {
+        for language in [Language::Json, Language::Markdown, Language::Text] {
+            let symbols = vec![with_language(
+                symbol(
+                    "target",
+                    "util",
+                    "helper",
+                    "util::helper",
+                    SymbolKind::Function,
+                ),
+                language.clone(),
+            )];
+            let report = resolve_symbol_edges(
+                &[chunk_in(language.clone(), r#"{"helper": "value"}"#)],
+                &symbols,
+                &[],
+                false,
+                None,
+            );
+            assert_eq!(
+                targets(&report),
+                vec![("util::helper".to_string(), GraphEdgeType::References, 1)],
+                "{language:?}"
+            );
+        }
+        // A double-quoted SQL name is an identifier; a single-quoted one is a literal.
+        let symbols = vec![with_language(
+            symbol(
+                "target",
+                "db",
+                "orders",
+                "db::orders",
+                SymbolKind::DatabaseTable,
+            ),
+            Language::Sql,
+        )];
+        let report = resolve_symbol_edges(
+            &[chunk_in(
+                Language::Sql,
+                "SELECT * FROM \"orders\";\nSELECT 'orders'; -- orders",
+            )],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(
+            targets(&report),
+            vec![("db::orders".to_string(), GraphEdgeType::References, 1)]
+        );
     }
 
     #[test]
