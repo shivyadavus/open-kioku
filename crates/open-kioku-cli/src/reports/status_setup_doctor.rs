@@ -1642,8 +1642,9 @@ fn deleted_content_caveat(quality: &open_kioku_core::IndexQuality) -> Option<&'s
     quality.pending_deleted_content_clearing.then_some(
         "deleted content may remain until compaction succeeds: rows an index run removed, such \
          as a path the policy excluded after it was indexed, can still be read from the \
-         database file or its write-ahead log; run `ok index` with no other Open Kioku process \
-         reading the index",
+         database file or its write-ahead log, or its text from the semantic vector store or \
+         stored context handles; run `ok index` with no other Open Kioku process reading the \
+         index",
     )
 }
 

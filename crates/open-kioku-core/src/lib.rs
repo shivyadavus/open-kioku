@@ -4674,7 +4674,9 @@ pub struct IndexQuality {
     pub pending_pre_redaction_compaction: bool,
     /// Rows this or an earlier run deleted may still be readable in the database file or its
     /// write-ahead log: the compaction after a path the policy excludes lost its rows, or the
-    /// truncating checkpoint every run ends with, did not complete. Set before the manifest
+    /// truncating checkpoint every run ends with, did not complete; or text of a path the index
+    /// no longer holds may remain in the semantic vector store or stored context handles,
+    /// because removing it from them failed (#564). Set before the manifest
     /// is published and cleared once that work succeeds, so a crash or a blocked checkpoint
     /// stays reported and the next `ok index` retries it (#553). Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

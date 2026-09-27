@@ -279,10 +279,7 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
     })?;
 
     // The vector store and stored context handles were built from the replaced index (#564).
-    let pruned = open_kioku_watch::derived::prune_removed_paths(&repo, &store).with_context(|| {
-        "the imported index was published, but removing the text of paths it no longer holds \
-         from the semantic vector store and context handle store failed; rerun `ok index`"
-    })?;
+    let pruned = open_kioku_watch::derived::prune_and_record(&repo, &store, &mut temp_manifest)?;
     let mut caveats = Vec::new();
     caveats.extend(provenance.caveat());
     if filtered.paths_removed > 0 {
@@ -292,7 +289,7 @@ fn snapshot_import(repo: &Path, allow_foreign: bool) -> anyhow::Result<SnapshotI
             filtered.paths_removed
         ));
     }
-    caveats.extend(pruned.summary());
+    caveats.extend(pruned);
     caveats.extend(filtered.scip_caveat.clone());
     caveats.extend(filtered.resolution_caveat.clone());
     Ok(SnapshotImportReport {

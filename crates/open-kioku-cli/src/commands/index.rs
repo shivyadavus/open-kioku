@@ -218,15 +218,10 @@ fn index_repo_with_config(
     }
     open_kioku_watch::clearing::record_clearing(&store, &mut snapshot.manifest, &outcome, true)?;
     // The vector store and stored context handles quote file text too (#564).
-    let pruned = open_kioku_watch::derived::prune_removed_paths(repo, &store)
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "the index was published, but removing the text of paths it no longer holds from \
-                 the semantic vector store and context handle store failed: {err}; rerun `ok index`"
-            )
-        })?;
-    if let Some(summary) = pruned.summary() {
-        report_index_stage(&reporter, "prune", summary);
+    if let Some(line) =
+        open_kioku_watch::derived::prune_and_record(repo, &store, &mut snapshot.manifest)?
+    {
+        report_index_stage(&reporter, "prune", line);
     }
     report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)

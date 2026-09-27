@@ -8781,6 +8781,59 @@ fn index_removes_denied_and_deleted_paths_from_the_vector_store_and_context_hand
     assert_eq!(holders(denied_marker, &[""]), Vec::<PathBuf>::new());
 }
 
+/// A prune that fails, here over a context store that is not a database, does not fail
+/// `ok index`, whose index is correct either way: it is recorded as outstanding clearing, which
+/// status reports, and the next run that succeeds clears it (#564).
+#[test]
+fn index_records_a_failed_prune_as_outstanding_instead_of_failing() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    fs::write(
+        repo.join(".ok/context.sqlite"),
+        "not a database, long enough to be read as one's header\n".repeat(4),
+    )
+    .unwrap();
+
+    let (_, stderr) = run_ok_with_stderr({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    assert!(
+        stderr.contains("context handle store failed") && stderr.contains("`ok doctor` reports it"),
+        "{stderr}"
+    );
+    let status = status_json(repo);
+    assert_eq!(
+        status["quality"]["pending_deleted_content_clearing"], true,
+        "{status}"
+    );
+
+    fs::remove_file(repo.join(".ok/context.sqlite")).unwrap();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let status = status_json(repo);
+    assert!(
+        status["quality"]["pending_deleted_content_clearing"].is_null(),
+        "{status}"
+    );
+}
+
 fn assert_secrets_absent(label: &str, haystack: &str, secrets: &[&str]) {
     let lowered = haystack.to_ascii_lowercase();
     for secret in secrets {
