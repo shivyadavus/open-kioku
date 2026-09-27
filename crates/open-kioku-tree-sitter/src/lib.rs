@@ -759,17 +759,21 @@ fn rust_trait_impl_visibility(
     )
 }
 
-/// `Hidden` for `&Hidden`, `&mut Hidden`, `Box<Hidden>`, `Rc<Hidden>`, `Arc<Hidden>` and any
-/// nesting of them. A file that declares its own `Box`, `Rc` or `Arc` keeps that type.
+/// `Hidden` for `&Hidden`, `&mut Hidden`, `Box<Hidden>`, `Rc<Hidden>`, `Arc<Hidden>`,
+/// `Pin<Hidden>` and any nesting of them. A file that declares its own `Box`, `Rc`, `Arc` or `Pin`
+/// keeps that type.
 fn rust_pointee_type<'tree>(
     content: &str,
     mut node: Node<'tree>,
     declared: &HashMap<String, Option<Visibility>>,
 ) -> Node<'tree> {
-    const POINTERS: [&str; 9] = [
+    const POINTERS: [&str; 12] = [
         "Box",
         "Rc",
         "Arc",
+        "Pin",
+        "std::pin::Pin",
+        "core::pin::Pin",
         "std::boxed::Box",
         "std::rc::Rc",
         "std::sync::Arc",
@@ -819,6 +823,11 @@ fn rust_declared_type_visibility(
     match node.kind() {
         "type_identifier" => {
             let name = node.utf8_text(content.as_bytes()).ok()?;
+            // `impl<Hidden> Cache for Box<Hidden>` is a blanket impl over any type, whatever the
+            // file declares under the parameter's name.
+            if rust_impl_declares_type_parameter(content, impl_node, name) {
+                return None;
+            }
             declared.get(name).copied().flatten()
         }
         "scoped_type_identifier" => {
@@ -832,6 +841,21 @@ fn rust_declared_type_visibility(
         }
         _ => None,
     }
+}
+
+fn rust_impl_declares_type_parameter(content: &str, impl_node: Node<'_>, name: &str) -> bool {
+    let Some(parameters) = impl_node.child_by_field_name("type_parameters") else {
+        return false;
+    };
+    let mut cursor = parameters.walk();
+    let declares = parameters.named_children(&mut cursor).any(|parameter| {
+        parameter.kind() == "type_parameter"
+            && parameter
+                .child_by_field_name("name")
+                .and_then(|parameter_name| parameter_name.utf8_text(content.as_bytes()).ok())
+                == Some(name)
+    });
+    declares
 }
 
 /// The in-file module a `self`, `super` or `crate` path names from `from`, as the node holding
@@ -2574,6 +2598,10 @@ mod tests {
                 "    impl super::Cache for Inner { fn evict(&self) {} }\n",
                 "    impl crate::Store for Inner { fn load(&self) {} }\n",
                 "}\n",
+                "impl Store for std::pin::Pin<Box<Hidden>> { fn load(&self) {} }\n",
+                // A type parameter named like a private type is any type: a blanket impl.
+                "impl<Hidden> Cache for Box<Hidden> { fn evict(&self) {} }\n",
+                "impl<Hidden: Clone> Store for Hidden { fn load(&self) {} }\n",
             ),
         );
         let expected = [
@@ -2587,6 +2615,9 @@ mod tests {
             (12, "load", Visibility::Private),
             (15, "evict", Visibility::Crate),
             (16, "load", Visibility::Public),
+            (18, "load", Visibility::Private),
+            (19, "evict", Visibility::Crate),
+            (20, "load", Visibility::Public),
         ];
         for (line, name, visibility) in expected {
             assert!(
