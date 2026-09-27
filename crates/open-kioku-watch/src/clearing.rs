@@ -2,11 +2,10 @@
 //!
 //! The store deletes with `secure_delete = FAST`, which zeroes a row's bytes in the page it
 //! leaves and in a page it reuses, but not in the pages it frees. A run that removed a path
-//! the policy now excludes, or removed a path while the security rules began excluding a new
-//! one (content moved out of the index, #567), therefore compacts the database with `VACUUM`,
-//! and every run ends
-//! with a truncating checkpoint so the write-ahead log keeps no page an earlier transaction
-//! wrote. `ok index` and both `ok watch` writers go through here, so they clear the same
+//! the policy now excludes, or that completes both halves of a possible move out of the index
+//! since the last compaction (an indexed path removed, a new skip by the security rules;
+//! #567), therefore compacts the database with `VACUUM`, and every run ends with a truncating
+//! checkpoint so the write-ahead log keeps no page an earlier transaction wrote. `ok index` and both `ok watch` writers go through here, so they clear the same
 //! things under the same conditions.
 
 use open_kioku_config::OkConfig;
@@ -82,13 +81,20 @@ pub enum ClearingScope {
 
 /// Whether this run owes a compaction, read after its rows are written and before its manifest
 /// is published: it removed a path the policy excludes (indexed content by every rule
-/// discovery applies, Git history by the security rules), it removed an indexed path while
-/// the security rules skip a path they did not skip before (`skipped_now`, this run's
-/// discovery; content moved or renamed into a denied or secret-like path leaves from a path
-/// the policy still admits, #567), the database was written by an earlier Open Kioku that did
-/// not compact after such a removal, the previous run's clearing did not finish, or the
-/// previous run was interrupted before it published (its removals are unknown). A policy that
-/// cannot be evaluated counts as owing it.
+/// discovery applies, Git history by the security rules); content may have moved out of the
+/// index into a denied or secret-like path (below); the database was written by an earlier
+/// Open Kioku that did not compact after such a removal; the previous run's clearing did not
+/// finish; or the previous run was interrupted before it published (its removals are
+/// unknown). A policy that cannot be evaluated counts as owing it.
+///
+/// A move into a denied or secret-like path leaves from a path the policy still admits
+/// (#567). Where the content went is not asked of the files: a skipped secret-like file is
+/// never read, not even to compare its hash. Instead the store keeps two flags, set as runs
+/// observe them and cleared by a compaction: an indexed path was removed, and the security
+/// rules began skipping a path (`skipped_now`, this run's discovery, against the previous
+/// manifest's record). Once both are set, a move may have happened, in one run or split over
+/// two (a copy, then the original's deletion), and a run that set either compacts. So this
+/// records state in the store as well as answering.
 pub fn compaction_owed(
     root: &Path,
     config: &OkConfig,
@@ -113,6 +119,19 @@ pub fn compaction_owed(
         .difference(&indexed)
         .cloned()
         .collect::<Vec<_>>();
+    // Git-ignored, hidden and `[index] exclude`d skips are not counted: build output and
+    // editor files add them on most runs, and a compaction rewrites the whole database.
+    let gained = gained_security_skip(&before.security_skips, &security_skips(skipped_now));
+    let dropped = !dropped_indexed.is_empty();
+    if dropped || gained {
+        let (dropped_since, gained_since) = store.note_removal_evidence(dropped, gained)?;
+        // Only a run that observed one half compacts for it: an incremental run whose
+        // compaction keeps failing is then not retried on every file event, and the manifest
+        // records it for the next full run.
+        if dropped_since && gained_since {
+            return Ok(true);
+        }
+    }
     let security = match SecurityPathPolicy::new(config) {
         Ok(policy) => policy,
         Err(_) => return Ok(true),
@@ -124,16 +143,8 @@ pub fn compaction_owed(
     {
         return Ok(true);
     }
-    if dropped_indexed.is_empty() {
+    if !dropped {
         return Ok(false);
-    }
-    // Where removed content went is not asked of the files: a skipped secret-like file is
-    // never read, not even to compare its hash. A removal in the same run as a new skip by the
-    // security rules is taken as a move into it. Git-ignored, hidden and `[index] exclude`d
-    // skips are not counted: build output and editor files add them on most runs, and a
-    // compaction rewrites the whole database.
-    if gained_security_skip(&before.security_skips, &security_skips(skipped_now)) {
-        return Ok(true);
     }
     let policy = match IndexPathPolicy::for_paths(root, config, &dropped_indexed) {
         Ok(policy) => policy,

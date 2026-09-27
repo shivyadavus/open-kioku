@@ -223,6 +223,69 @@ fn watch_reindex_after_a_file_is_renamed_to_a_secret_like_name_leaves_none_of_it
     assert_watched_move_leaves_nothing_on_disk("internal/vault/keys.pem");
 }
 
+/// A move the watcher sees as two events: the copy into a denied directory, then the
+/// original's deletion, or the other way round. Neither event holds both halves; the second
+/// compacts from what the store recorded after the first (#567).
+fn assert_watched_split_move_leaves_nothing_on_disk(copy_first: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    initialize_repo(repo);
+    let mut config = OkConfig::load_from_repo(repo).unwrap();
+    config.paths.deny.push("private/**".into());
+    fs::write(
+        repo.join("ok.toml"),
+        toml::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+    reindex_repo(repo).unwrap();
+    let db = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    let reader = rusqlite::Connection::open(&db).unwrap();
+    let count = |reader: &rusqlite::Connection| -> i64 {
+        reader
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert!(count(&reader) > 0);
+    reindex_repo(repo).unwrap();
+    assert!(holds(&index_bytes(repo), "rotate_sealed_material"));
+
+    let original = repo.join("internal/vault/keys.rs");
+    let moved = repo.join("private/keys.rs");
+    let content = fs::read_to_string(&original).unwrap();
+    fs::create_dir_all(repo.join("private")).unwrap();
+    let copy = || fs::write(&moved, &content).unwrap();
+    if copy_first {
+        copy();
+        reindex_repo_after_changes(repo, [moved.as_path()]).unwrap();
+        fs::remove_file(&original).unwrap();
+        reindex_repo_after_changes(repo, [original.as_path()]).unwrap();
+    } else {
+        fs::remove_file(&original).unwrap();
+        reindex_repo_after_changes(repo, [original.as_path()]).unwrap();
+        copy();
+        reindex_repo_after_changes(repo, [moved.as_path()]).unwrap();
+    }
+    assert!(count(&reader) > 0);
+    let bytes = index_bytes(repo);
+    for needle in VAULT_ONLY_NAMES {
+        assert!(
+            !holds(&bytes, needle),
+            "the watched index holds `{needle}` after a move split over two events"
+        );
+    }
+    drop(reader);
+}
+
+#[test]
+fn watch_reindex_after_a_copy_into_a_denied_directory_then_a_delete_leaves_none_of_it() {
+    assert_watched_split_move_leaves_nothing_on_disk(true);
+}
+
+#[test]
+fn watch_reindex_after_a_delete_then_a_copy_into_a_denied_directory_leaves_none_of_it() {
+    assert_watched_split_move_leaves_nothing_on_disk(false);
+}
+
 /// A file deleted or renamed within what the policy admits leaves its pages on the free list
 /// for SQLite to reuse: no compaction, whose cost is a rewrite of the whole database.
 #[test]
