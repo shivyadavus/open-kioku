@@ -114,6 +114,7 @@ fn index_repo_with_config(
             &config,
             &store,
             &paths_before,
+            &snapshot.manifest.quality.skipped_paths,
             previous.as_ref(),
             open_kioku_watch::clearing::ClearingScope::Full,
         )

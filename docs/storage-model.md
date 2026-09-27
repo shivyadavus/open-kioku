@@ -39,11 +39,20 @@ second of those. Three measures close them (#553):
 - **A compaction** (`VACUUM`) after a run that removed a path the current policy excludes:
   the run compares the paths the store named before it with those it names after, and asks
   the policy about the ones that are gone (indexed content by every rule discovery applies,
-  Git history by the security rules). A run that removes nothing excluded does not compact.
-  The check judges the path that disappeared, not where its content went: a file moved into a
-  newly denied directory, or renamed to a secret-like name, drops a path the policy still
-  admits, so that run does not compact and the old rows' bytes can stay in free pages until a
-  later compaction (#567).
+  Git history by the security rules). Content moved into an excluded path (a file moved into
+  a denied directory, or renamed to a secret-like name) leaves from a path the policy still
+  admits, so a run also compacts when it removed an indexed path and its discovery skipped,
+  under the security rules (`[paths] deny` and secret-like names), a path the previous
+  manifest did not record as skipped (#567). The comparison is of the skipped paths the two
+  manifests already record, in memory; the skipped file is not read, and nothing new is
+  stored. It is an inference, not a match: a delete in the same run as a new denied or
+  secret-like file also compacts. Withheld secret-like paths are recorded only as
+  `[redacted]`, so they are compared by count, and a run in which one disappears while an
+  indexed file is renamed to another does not compact. A move into a Git-ignored, hidden or
+  `[index] exclude`d path is not counted, because build output and editor files add such
+  skips on most runs; its old rows' bytes can stay in free pages until a later compaction. A
+  run that removes nothing, or only edits, deletes and renames within what the policy
+  admits, does not compact.
 - **A truncating WAL checkpoint** at the end of every `ok index` and `ok watch` run, which
   copies the log into the database file and empties it. A connection that is merely open,
   such as an idle MCP server's, does not block it; one inside a read transaction does.
