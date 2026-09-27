@@ -3142,6 +3142,7 @@ version = "4.0.0"
 dependencies = [
  "notify",
  "open-kioku-config",
+ "open-kioku-context-compress",
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-graph",

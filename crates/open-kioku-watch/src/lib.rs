@@ -19,6 +19,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub mod clearing;
+pub mod derived;
 
 use clearing::ClearingScope;
 
@@ -391,6 +392,11 @@ pub fn reindex_repo_after_changes<'a>(
         compaction_owed || compacted,
     )?;
     maintain_semantic_index(root, &store, &config);
+    // Only a run that removed a path owes this; a partial update that only changed files
+    // skips reading the vector store on every event.
+    if !partial || deleted_file_count > 0 || compaction_owed {
+        prune_derived_stores(root, &store);
+    }
 
     Ok(WatchIndexStatus {
         files: snapshot.manifest.file_count,
@@ -486,6 +492,7 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         true,
     )?;
     maintain_semantic_index(root, &store, &config);
+    prune_derived_stores(root, &store);
 
     Ok(WatchIndexStatus {
         files: snapshot.manifest.file_count,
@@ -496,6 +503,21 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         changed_files: snapshot.manifest.file_count,
         deleted_files: 0,
     })
+}
+
+/// After the semantic refresh, which already leaves removed paths out when it succeeds, so
+/// this finds nothing to do then; see [`derived`].
+fn prune_derived_stores(root: &Path, store: &SqliteStore) {
+    match derived::prune_removed_paths(root, store) {
+        Ok(pruned) => {
+            if let Some(summary) = pruned.summary() {
+                eprintln!("watch: {summary}");
+            }
+        }
+        Err(err) => eprintln!(
+            "watch: removing the text of paths the index no longer holds from the vector store and context handle store failed ({err}); the next `ok index` retries it"
+        ),
+    }
 }
 
 fn maintain_semantic_index(root: &Path, store: &SqliteStore, config: &OkConfig) {
