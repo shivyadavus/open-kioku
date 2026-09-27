@@ -153,6 +153,11 @@ pub struct RustModulePlacement {
     /// file a `#[path]` mounts, or one declared inside an inline `mod` or a macro: its `self::`
     /// and `super::` paths cannot be read off its path, and a path must not end in it.
     pub module: Option<Vec<String>>,
+    /// The file may also be compiled into a crate other than those of `crate_roots`: a crate
+    /// root the index could not read may declare it, or another crate mounts it with `#[path]`.
+    /// A `crate::`, `self::` or `super::` path written in it names an item of each crate, so none
+    /// is read from it; a path from one of `crate_roots` still ends in it.
+    pub in_other_crates: bool,
 }
 
 /// What the `mod` item a module symbol names turned out to be.

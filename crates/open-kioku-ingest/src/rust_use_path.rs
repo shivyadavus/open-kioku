@@ -88,7 +88,7 @@ impl RustPackageLayout {
         match library_root {
             None => layout.library = Some("lib".to_string()),
             Some(file) => {
-                let stem = slash_path(file);
+                let stem = layout.manifest_path(file);
                 let stem = stem.strip_suffix(".rs").unwrap_or(&stem);
                 match strip_dir(stem, &layout.src_root) {
                     Some(name) if !name.contains('/') && name != "main" => {
@@ -107,7 +107,7 @@ impl RustPackageLayout {
             }
         }
         for root in &targets.roots {
-            let root = slash_path(root);
+            let root = layout.manifest_path(root);
             let modeled = root
                 .strip_suffix(".rs")
                 .filter(|stem| layout.follows_target_root(stem))
@@ -127,6 +127,16 @@ impl RustPackageLayout {
             }
         }
         layout
+    }
+
+    /// A crate root path the manifest names, with `.` and `..` resolved while it stays in the
+    /// package: `src/../lib.rs` is the `lib.rs` beside `Cargo.toml`, and is placed as that file.
+    /// A path leaving the package keeps its spelling, which no module tree follows.
+    fn manifest_path(&self, path: &Path) -> String {
+        let path = slash_path(path);
+        normalize_path(&path)
+            .filter(|normal| strip_dir(normal, &self.package_dir).is_some())
+            .unwrap_or(path)
     }
 
     /// Whether the module tree of the target root `stem` is one the layout follows: the root is
@@ -493,13 +503,32 @@ fn slash_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// `path`, repository-relative with `/` separators, with its `.` and `..` components resolved.
+/// `None` for an absolute path or one that climbs above the repository root.
+pub(crate) fn normalize_path(path: &str) -> Option<String> {
+    if path.starts_with('/') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
 /// The directory of a repository-relative path, `""` at the repository root.
-fn parent_dir(path: &str) -> &str {
+pub(crate) fn parent_dir(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
 /// `path` below `dir`, both repository-relative; any path is below the repository root `""`.
-fn strip_dir<'p>(path: &'p str, dir: &str) -> Option<&'p str> {
+pub(crate) fn strip_dir<'p>(path: &'p str, dir: &str) -> Option<&'p str> {
     if dir.is_empty() {
         return Some(path);
     }
@@ -923,6 +952,64 @@ mod tests {
                 "examples/demo/main".to_string(),
                 "examples/demo/lib".to_string()
             ])
+        );
+    }
+
+    #[test]
+    fn manifest_named_roots_are_placed_by_their_normalised_path_inside_the_package() {
+        // `src/../lib.rs` is the `lib.rs` beside `Cargo.toml`, so beside `[[bin]] path =
+        // "main.rs"` it is a root of the package directory's tree, as `lib.rs` is (#572).
+        let bin_beside = CargoTargets {
+            roots: vec![PathBuf::from("crates/app/./main.rs")],
+            not_autodiscovered: Vec::new(),
+        };
+        let layout = RustPackageLayout::new(
+            Path::new("crates/app"),
+            Some(Path::new("crates/app/src/../lib.rs")),
+            &bin_beside,
+        );
+        let tree = layout
+            .crate_tree("crates/app/util", &HashMap::new())
+            .expect("the binary roots a tree beside it");
+        assert_eq!(tree.roots, vec!["crates/app/main", "crates/app/lib"]);
+        assert_eq!(layout.main_tree().unmodeled_roots, Vec::<String>::new());
+
+        // `src/./app_lib.rs` is the library root in `src/`.
+        let layout = RustPackageLayout::new(
+            Path::new("crates/app"),
+            Some(Path::new("crates/app/src/./app_lib.rs")),
+            &CargoTargets::default(),
+        );
+        assert!(layout.places_all_roots());
+        assert_eq!(
+            layout.main_tree().roots,
+            vec!["crates/app/src/app_lib", "crates/app/src/main"]
+        );
+
+        // A path that leaves the package is not followed, however it is spelled.
+        for escaping in [
+            "crates/app/../other/lib.rs",
+            "crates/app/src/../../other/lib.rs",
+        ] {
+            let layout = RustPackageLayout::new(
+                Path::new("crates/app"),
+                Some(Path::new(escaping)),
+                &bin_beside,
+            );
+            assert!(!layout.places_all_roots(), "{escaping}");
+            assert_eq!(
+                layout
+                    .crate_tree("crates/app/util", &HashMap::new())
+                    .map(|tree| tree.roots),
+                Some(vec!["crates/app/main".to_string()]),
+                "{escaping}"
+            );
+        }
+        assert_eq!(normalize_path("a/../../b"), None);
+        assert_eq!(normalize_path("/abs/lib.rs"), None);
+        assert_eq!(
+            normalize_path("a/./b//c/../d.rs").as_deref(),
+            Some("a/b/d.rs")
         );
     }
 }

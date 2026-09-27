@@ -245,6 +245,15 @@ fn rust_placement_notes(gaps: imports::RustPlacementGaps) -> Vec<QualityNote> {
             ),
         ));
     }
+    if gaps.shared_files > 0 {
+        notes.push(QualityNote::new(
+            QualityNoteKind::RelationshipResolution,
+            format!(
+                "{} Rust source file(s) an indexed crate root declares may also be compiled into another crate (a crate root beside them was not indexed, or another crate mounts them with `#[path]`); `crate::`, `self::` and `super::` call paths in those files are left unresolved",
+                gaps.shared_files
+            ),
+        ));
+    }
     notes
 }
 

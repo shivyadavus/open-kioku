@@ -39,7 +39,11 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// crate roots; v9 indexes hold `CALLS` edges from such a shared module into the other root's item,
 /// none from a module only that library declares, and none through a nested module of a module
 /// tree at the repository root.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v10";
+/// v11: a manifest-named crate root path is placed by its `.`/`..`-normalised form inside the
+/// package, and a module file another crate may also compile (declared beside a crate root the
+/// index could not read, or mounted by another crate with `#[path]`) has no module path read from
+/// it; v10 indexes hold `CALLS` edges from such files into one crate's item.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v11";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

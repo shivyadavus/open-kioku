@@ -1647,6 +1647,7 @@ fn extract_rust_module_declaration(
         name: name.to_string(),
         has_body: node.child_by_field_name("body").is_some(),
         has_path_attribute: rust_item_has_path_attribute(node, source),
+        path_attributes: rust_item_path_attributes(node, source),
         range: node_source_range(node),
     });
 }
@@ -1674,6 +1675,56 @@ fn rust_item_has_path_attribute(node: Node<'_>, source: &[u8]) -> bool {
         sibling = previous.prev_named_sibling();
     }
     false
+}
+
+/// The string literals the `path` attributes before an item set, as written. A crate other than
+/// the declaring one may compile the file a `path` names, which the module tree reads to tell a
+/// file shared by two crates from one crate's own.
+fn rust_item_path_attributes(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut sibling = node.prev_named_sibling();
+    while let Some(previous) = sibling {
+        match previous.kind() {
+            "attribute_item" => {
+                paths.extend(attribute_path_literals(
+                    previous.utf8_text(source).unwrap_or_default(),
+                ));
+            }
+            "line_comment" | "block_comment" => {}
+            _ => break,
+        }
+        sibling = previous.prev_named_sibling();
+    }
+    paths.reverse();
+    paths
+}
+
+/// The literals of each `path = "..."` in an attribute's text. A literal with an escape is
+/// skipped: `\\` is the only one a path needs, and a skipped literal only leaves the path unknown.
+fn attribute_path_literals(text: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("path") {
+        let before = rest[..at].chars().next_back();
+        let after = rest[at + "path".len()..].trim_start();
+        rest = &rest[at + "path".len()..];
+        if before.is_some_and(|ch| ch == '_' || ch.is_alphanumeric()) {
+            continue;
+        }
+        let Some(value) = after.strip_prefix('=').map(str::trim_start) else {
+            continue;
+        };
+        let Some(literal) = value.strip_prefix('"') else {
+            continue;
+        };
+        if let Some(end) = literal.find('"') {
+            let literal = &literal[..end];
+            if !literal.contains('\\') {
+                literals.push(literal.to_string());
+            }
+        }
+    }
+    literals
 }
 
 /// One path a Rust `use` declaration imports, with its `as` alias.
@@ -2418,7 +2469,7 @@ mod ri3_rust_module_receiver_tests {
 
 #[cfg(test)]
 mod ri3_rust_use_import_site_tests {
-    use super::parse_file;
+    use super::{attribute_path_literals, parse_file};
     use open_kioku_core::{File, FileId, ImportSite, ImportedName, Language, RepositoryId};
 
     fn rust_import_sites(source: &str) -> Vec<ImportSite> {
@@ -2525,6 +2576,26 @@ mod ri3_rust_use_import_site_tests {
         );
         assert!(declaration("store").has_path_attribute);
         assert!(declaration("platform").has_path_attribute);
+        assert!(auth.path_attributes.is_empty());
+        assert_eq!(declaration("store").path_attributes, vec!["store_v2.rs"]);
+        assert_eq!(declaration("platform").path_attributes, vec!["unix.rs"]);
+    }
+
+    #[test]
+    fn attribute_path_literals_read_each_path_value() {
+        assert_eq!(
+            attribute_path_literals("#[path = \"a/b.rs\"]"),
+            vec!["a/b.rs"]
+        );
+        assert_eq!(
+            attribute_path_literals(
+                "#[cfg_attr(unix, path=\"unix.rs\")] #[cfg_attr(windows, path = \"win.rs\")]"
+            ),
+            vec!["unix.rs", "win.rs"]
+        );
+        assert!(attribute_path_literals("#[doc = \"xpath = \\\"x\\\"\"]").is_empty());
+        assert!(attribute_path_literals("#[path = \"a\\\\b.rs\"]").is_empty());
+        assert!(attribute_path_literals("#[path = concat!(\"a\", \".rs\")]").is_empty());
     }
 
     #[test]
