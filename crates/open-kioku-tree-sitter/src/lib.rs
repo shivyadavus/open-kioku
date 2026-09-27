@@ -494,8 +494,7 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
     if file.language == Language::Rust && node.kind() == "impl_item" && pushed_type.is_none() {
         let source_bytes = content.as_bytes();
         if let Some(type_node) = node.child_by_field_name("type") {
-            if let Ok(type_name) = type_node.utf8_text(source_bytes) {
-                let type_name = type_name.trim().to_string();
+            if let Some(type_name) = rust_impl_owner_name(content, type_node) {
                 let type_sym_id =
                     SymbolId::new(format!("{}:impl_owner:{}", file.path.display(), type_name));
 
@@ -752,6 +751,20 @@ fn narrower_rust_visibility(left: Visibility, right: Visibility) -> Visibility {
     } else {
         left
     }
+}
+
+/// The type an `impl` block's members belong to: `Store` for `impl<'a> Store<'a>` and
+/// `a::b::Store` for `impl<T> a::b::Store<T>`. Generic arguments pick an instantiation of the
+/// type, not another type, so every `impl` of `Store<..>` owns members of `Store`. Any other form,
+/// such as `&T`, `dyn Trait`, a tuple or a slice, keeps its written text and so names no declared
+/// type: an `impl` for a reference or a trait object is not an `impl` of the referent.
+fn rust_impl_owner_name<'a>(content: &'a str, type_node: Node<'_>) -> Option<&'a str> {
+    let node = if type_node.kind() == "generic_type" {
+        type_node.child_by_field_name("type").unwrap_or(type_node)
+    } else {
+        type_node
+    };
+    node.utf8_text(content.as_bytes()).ok().map(str::trim)
 }
 
 /// `Store` or `Store<T>`; `None` for a path, reference, tuple or other type form.
@@ -2066,6 +2079,73 @@ mod tests {
         assert!(symbols
             .iter()
             .all(|symbol| symbol.provenance == open_kioku_core::EvidenceSourceType::TreeSitter));
+    }
+
+    #[test]
+    fn rust_generic_impl_members_belong_to_the_type_without_its_generic_arguments() {
+        let file = File {
+            id: FileId::new("file_generic_impl"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/lib.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            concat!(
+                "pub struct PlanEngine<'a> { store: &'a str }\n",
+                "impl<'a> PlanEngine<'a> {\n",
+                "    pub fn new(store: &'a str) -> Self { PlanEngine { store } }\n",
+                "}\n",
+                "pub struct Wrapper<T>(T);\n",
+                "impl<T> Wrapper<T> { pub fn get(&self) -> &T { &self.0 } }\n",
+                "impl<T: Clone> Clone for Wrapper<T> { fn clone(&self) -> Self { Wrapper(self.0.clone()) } }\n",
+                "pub trait Render { fn paint(&self); }\n",
+                "impl<'a> Render for &'a Wrapper<u8> { fn paint(&self) {} }\n",
+                "impl dyn Render { pub fn draw(&self) {} }\n",
+            ),
+        )
+        .unwrap();
+        let id_of = |name: &str| {
+            facts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .map(|symbol| symbol.id.clone())
+                .unwrap()
+        };
+        let parent_of = |name: &str| {
+            facts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .and_then(|symbol| symbol.parent_symbol_id.clone())
+                .unwrap()
+        };
+        assert_eq!(parent_of("new"), id_of("PlanEngine"));
+        assert_eq!(parent_of("get"), id_of("Wrapper"));
+        assert_eq!(parent_of("clone"), id_of("Wrapper"));
+        let clone_impl = facts
+            .inheritance
+            .iter()
+            .find(|site| site.parent_name == "Clone")
+            .unwrap();
+        assert_eq!(clone_impl.child_symbol_id, id_of("Wrapper"));
+        // An `impl` for a reference or a trait object is not an `impl` of the referent or the
+        // trait: its members stay off both.
+        let paint_impl = facts
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.name == "paint" && symbol.parent_symbol_id != Some(id_of("Render"))
+            })
+            .and_then(|symbol| symbol.parent_symbol_id.clone())
+            .unwrap();
+        assert_ne!(paint_impl, id_of("Wrapper"));
+        assert_ne!(parent_of("draw"), id_of("Render"));
     }
 
     fn visibility_of(language: Language, path: &str, source: &str) -> Vec<(String, Visibility)> {
