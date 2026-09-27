@@ -293,6 +293,7 @@
       "risk_report": {
         "level": "low",
         "reasons": [
+          "downstream crates were not measured: the file is not a module of an indexed library crate of `rust-fixture` (a binary, test, bench, example or build target, or a package with no library), which other crates cannot import; a library module it is included into is not traced; an absent crate-import impact is not evidence that no other crate depends on this file",
           "2 complexity/hot-path risk signal(s) touch this file"
         ],
         "score": 0.0
@@ -641,6 +642,7 @@
     "risk": {
       "level": "medium",
       "reasons": [
+        "downstream crates were not measured: the file is not a module of an indexed library crate of `rust-fixture` (a binary, test, bench, example or build target, or a package with no library), which other crates cannot import; a library module it is included into is not traced; an absent crate-import impact is not evidence that no other crate depends on this file",
         "2 complexity/hot-path risk signal(s) touch this file",
         "Evidence quality caveat: exact symbol/reference evidence is unavailable",
         "Evidence quality caveat: runtime evidence is unavailable",
@@ -660,7 +662,8 @@
           "risk:reason:2",
           "risk:reason:3",
           "risk:reason:4",
-          "risk:reason:5"
+          "risk:reason:5",
+          "risk:reason:6"
         ],
         "normalized_value": 0.0,
         "rationale": "plan risk is `medium` from merged context and impact risk",
