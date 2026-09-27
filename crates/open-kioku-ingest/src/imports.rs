@@ -68,12 +68,15 @@ pub(crate) struct RustModuleTree<'a> {
     /// unreadable), by repository-relative path without `.rs`. A crate root among them owns
     /// modules the index cannot place.
     unindexed_stems: HashSet<String>,
-    /// The module names crate roots discovery skipped for size declare, by extension-less path,
-    /// as [`scan_module_declarations`] read them: `None` where the lines could not tell. A root
-    /// not scanned (one a path policy excluded is never read) may declare any module.
+    /// The module names Rust files discovery skipped for size declare, by extension-less path,
+    /// as [`scan_module_declarations`] read them: `None` where the lines could not tell. Only
+    /// the files whose `mod` items decide a placement are read: crate roots, and files a
+    /// `#[path]` attribute mounts or that sit below one. A root not scanned (one a path policy
+    /// excluded is never read) may declare any module, and a mounted file not scanned may mount
+    /// any file of its package.
     ///
     /// [`scan_module_declarations`]: crate::rust_use_path::scan_module_declarations
-    scanned_roots: HashMap<String, Option<HashSet<String>>>,
+    scanned_files: HashMap<String, Option<HashSet<String>>>,
     /// What each `#[path]` attribute mounts, by the extension-less path of the declaring file.
     path_mounts: Vec<(String, PathMount)>,
     /// [`RustModuleTree::find_shared_files`], computed on first use.
@@ -154,6 +157,12 @@ struct SharedFiles {
     /// `#[path]` attributes the index could not read that marked a file, since they may mount
     /// any file of their package.
     unread_mounts: usize,
+    /// Unindexed files in a mounted subtree whose `mod` items were not read and that marked a
+    /// file, since each may mount any file of its package.
+    unread_mounted_files: usize,
+    /// Unindexed files in a mounted subtree with no [`RustModuleTree::scanned_files`] entry:
+    /// reading those skipped for size tells which files below them the mount reaches.
+    unscanned: HashSet<String>,
 }
 
 /// What [`RustModuleTree::mounted_subtree`] finds below a `#[path]`-mounted file.
@@ -163,6 +172,8 @@ struct MountedSubtree {
     /// The `#[path]` attributes of the subtree the index cannot read, by their index in
     /// `path_mounts`, with the file declaring each.
     unread_mounts: Vec<(usize, String)>,
+    /// The unindexed files of the subtree whose `mod` items were not read.
+    unread_files: Vec<String>,
 }
 
 /// Rust files whose module paths the index leaves unresolved because it cannot tell which crate
@@ -183,6 +194,9 @@ pub(crate) struct RustPlacementGaps {
     /// `#[path]` attributes the index could not read (a raw string, a macro, a directory on an
     /// inline module), each of which marked files of its package as shared.
     pub(crate) unread_mounts: usize,
+    /// Files a `#[path]` attribute mounts, or below one, that were not indexed and whose `mod`
+    /// items could not be read, each of which marked files of its package as shared.
+    pub(crate) unread_mounted_files: usize,
 }
 
 impl<'a> RustModuleTree<'a> {
@@ -263,7 +277,7 @@ impl<'a> RustModuleTree<'a> {
             project,
             file_modules,
             unindexed_stems: HashSet::new(),
-            scanned_roots: HashMap::new(),
+            scanned_files: HashMap::new(),
             path_mounts,
             shared_files: OnceCell::new(),
             reexports: HashMap::new(),
@@ -543,16 +557,36 @@ impl<'a> RustModuleTree<'a> {
         roots
     }
 
-    /// Records the module names crate roots skipped for size declare, as
+    /// The skipped files whose `mod` items decide which files another crate may compile and that
+    /// have not been read yet: the [`unread_crate_roots`], and the files a `#[path]` attribute
+    /// mounts, or that sit below one, that were not indexed. Reading one can reach another
+    /// below it, so a caller reads until none is left that it can read.
+    ///
+    /// [`unread_crate_roots`]: RustModuleTree::unread_crate_roots
+    pub(crate) fn unscanned_module_files(&self) -> HashSet<PathBuf> {
+        let mut files = self.unread_crate_roots();
+        files.retain(|path| {
+            rust_file_stem(path).is_some_and(|stem| !self.scanned_files.contains_key(&stem))
+        });
+        files.extend(
+            self.shared_files()
+                .unscanned
+                .iter()
+                .map(|stem| PathBuf::from(format!("{stem}.rs"))),
+        );
+        files
+    }
+
+    /// Records the module names Rust files skipped for size declare, as
     /// [`scan_module_declarations`] read them (`None` where it could not tell).
     ///
     /// [`scan_module_declarations`]: crate::rust_use_path::scan_module_declarations
-    pub(crate) fn with_scanned_roots<'p>(
+    pub(crate) fn with_scanned_files<'p>(
         mut self,
-        roots: impl IntoIterator<Item = (&'p Path, Option<HashSet<String>>)>,
+        files: impl IntoIterator<Item = (&'p Path, Option<HashSet<String>>)>,
     ) -> Self {
-        self.scanned_roots.extend(
-            roots
+        self.scanned_files.extend(
+            files
                 .into_iter()
                 .filter_map(|(path, names)| Some((rust_file_stem(path)?, names))),
         );
@@ -856,6 +890,8 @@ impl<'a> RustModuleTree<'a> {
         // Per mounted file: the crates of each mount, and whether it keeps the file in place.
         let mut mounted = HashMap::<String, Vec<(Vec<String>, bool)>>::new();
         let mut unread_mounts = Vec::new();
+        let mut unread_files = Vec::new();
+        let mut unscanned = HashSet::new();
         for (at, (declaring, mount)) in self.path_mounts.iter().enumerate() {
             let crates = self.crates_of(declaring);
             let Some(files) = self.mounted_files(declaring, mount) else {
@@ -870,11 +906,19 @@ impl<'a> RustModuleTree<'a> {
                         .or_default()
                         .push((crates.clone(), in_place));
                 }
-                // A mount below the mounted file the index cannot read may mount any file of
-                // its package into these crates too.
+                // A mount below the mounted file the index cannot read, or an unindexed file
+                // there whose `mod` items were not read, may mount any file of its package into
+                // these crates too.
                 for (below, declaring) in subtree.unread_mounts {
                     let package = self.package_of_stem(&declaring);
                     unread_mounts.push((below, package, crates.clone(), false));
+                }
+                for file in subtree.unread_files {
+                    if !self.scanned_files.contains_key(&file) {
+                        unscanned.insert(file.clone());
+                    }
+                    let package = self.package_of_stem(&file);
+                    unread_files.push((file, package, crates.clone(), false));
                 }
             }
         }
@@ -904,7 +948,7 @@ impl<'a> RustModuleTree<'a> {
                 let Some(below) = strip_dir(&stem, parent_dir(root)) else {
                     continue;
                 };
-                match self.scanned_roots.get(root) {
+                match self.scanned_files.get(root) {
                     Some(Some(names)) => {
                         let top = below.split('/').next().unwrap_or(below);
                         if names.contains(module_name(top)) {
@@ -925,8 +969,17 @@ impl<'a> RustModuleTree<'a> {
                     .map(|(_, in_place)| *in_place),
             );
             let package = self.package_of(path);
-            // A mount the index cannot read is read within its own package.
-            for (_, declaring, crates, fired) in &mut unread_mounts {
+            // A mount the index cannot read, or a mounted file it could not read, is read within
+            // its own package.
+            let unread = unread_mounts
+                .iter_mut()
+                .map(|(_, declaring, crates, fired)| (&*declaring, &*crates, fired))
+                .chain(
+                    unread_files
+                        .iter_mut()
+                        .map(|(_, declaring, crates, fired)| (&*declaring, &*crates, fired)),
+                );
+            for (declaring, crates, fired) in unread {
                 if *declaring == package && foreign(crates) {
                     *fired = true;
                     reasons.push(false);
@@ -948,6 +1001,13 @@ impl<'a> RustModuleTree<'a> {
                 .map(|(at, ..)| at)
                 .collect::<HashSet<_>>()
                 .len(),
+            unread_mounted_files: unread_files
+                .iter()
+                .filter(|(_, _, _, fired)| *fired)
+                .map(|(file, ..)| file)
+                .collect::<HashSet<_>>()
+                .len(),
+            unscanned,
         }
     }
 
@@ -961,6 +1021,7 @@ impl<'a> RustModuleTree<'a> {
                 let mut files = self
                     .files_by_stem
                     .keys()
+                    .chain(&self.unindexed_stems)
                     .filter(|stem| mount.may_mount(stem) && self.package_of_stem(stem) == package)
                     .cloned()
                     .collect::<Vec<_>>();
@@ -979,6 +1040,10 @@ impl<'a> RustModuleTree<'a> {
     /// A `#[path]` inside the subtree, including each alternative of a `cfg_attr(.., path = ..)`
     /// since the configuration is unknown, mounts its file into the mounting crate as well, read
     /// relative to the declaring file just as in its own crate.
+    ///
+    /// A file of the subtree discovery saw but did not index has its `mod` items read from
+    /// [`RustModuleTree::scanned_files`]; where they were not read, or could not tell, the file
+    /// is recorded as unread, since it may mount any file of its package (#610).
     fn mounted_subtree(
         &self,
         mounted: &str,
@@ -988,13 +1053,33 @@ impl<'a> RustModuleTree<'a> {
         let mut subtree = MountedSubtree {
             files: vec![(mounted.to_string(), is_mod_rs(mounted))],
             unread_mounts: Vec::new(),
+            unread_files: Vec::new(),
+        };
+        let known = |stem: &str| {
+            self.files_by_stem.contains_key(stem) || self.unindexed_stems.contains(stem)
         };
         let mut seen = HashSet::from([mounted.to_string()]);
         let mut pending = vec![(mounted.to_string(), parent_dir(mounted).to_string())];
         while let Some((file, dir)) = pending.pop() {
-            for name in modules_by_file.get(file.as_str()).into_iter().flatten() {
+            let names = if self.files_by_stem.contains_key(&file) {
+                modules_by_file
+                    .get(file.as_str())
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>()
+            } else if !self.unindexed_stems.contains(&file) {
+                // A path naming no file discovery saw mounts nothing the index holds.
+                Vec::new()
+            } else if let Some(Some(names)) = self.scanned_files.get(&file) {
+                names.iter().map(String::as_str).collect()
+            } else {
+                subtree.unread_files.push(file.clone());
+                Vec::new()
+            };
+            for name in names {
                 for child in [join_dir(&dir, name), join_dir(&dir, &format!("{name}/mod"))] {
-                    if !self.files_by_stem.contains_key(&child) || !seen.insert(child.clone()) {
+                    if !known(&child) || !seen.insert(child.clone()) {
                         continue;
                     }
                     let child_dir = if is_mod_rs(&child) {
@@ -1012,7 +1097,7 @@ impl<'a> RustModuleTree<'a> {
                     continue;
                 };
                 for child in children {
-                    if !self.files_by_stem.contains_key(&child) || !seen.insert(child.clone()) {
+                    if !known(&child) || !seen.insert(child.clone()) {
                         continue;
                     }
                     let child_dir = parent_dir(&child).to_string();
@@ -1095,6 +1180,7 @@ impl<'a> RustModuleTree<'a> {
             withheld_files,
             shared_files: self.shared_files().files.len(),
             unread_mounts: self.shared_files().unread_mounts,
+            unread_mounted_files: self.shared_files().unread_mounted_files,
         }
     }
 
@@ -2670,6 +2756,7 @@ mod tests {
                 withheld_files: 1,
                 shared_files: 1,
                 unread_mounts: 0,
+                unread_mounted_files: 0,
             }
         );
 
@@ -2797,6 +2884,7 @@ mod tests {
                 withheld_files: 1,
                 shared_files: 0,
                 unread_mounts: 0,
+                unread_mounted_files: 0,
             }
         );
     }
@@ -3178,7 +3266,7 @@ mod tests {
             marked
         };
         let declared = HashSet::from(["util".to_string()]);
-        let scanned = modules().with_scanned_roots([(Path::new("src/main.rs"), Some(declared))]);
+        let scanned = modules().with_scanned_files([(Path::new("src/main.rs"), Some(declared))]);
         assert_eq!(
             marked(&scanned),
             vec![("file:src/util.rs".to_string(), true)]
@@ -3195,7 +3283,7 @@ mod tests {
             ]
         );
         // Lines that could not tell (a `path` attribute, say) may mount any of them anywhere.
-        let unknown = modules().with_scanned_roots([(Path::new("src/main.rs"), None)]);
+        let unknown = modules().with_scanned_files([(Path::new("src/main.rs"), None)]);
         assert_eq!(
             marked(&unknown),
             vec![
@@ -3392,6 +3480,72 @@ mod tests {
     }
 
     #[test]
+    fn a_mounted_file_skipped_for_size_shares_the_modules_its_mod_lines_declare() {
+        // `tests/it.rs` mounts `src/m.rs`, which was over `max_file_size`, with `#[path]`; read
+        // from `src/`, as a mounted file's items are, its `mod b;` is the library's `src/b.rs`,
+        // so the test crate compiles that file too (#610).
+        let files = ["src/lib.rs", "src/b.rs", "src/c.rs", "tests/it.rs"].map(source_file);
+        let project = rust_project(&[("", None)]);
+        let declarations = vec![
+            mod_decl("src/lib.rs", "b"),
+            mod_decl("src/lib.rs", "c"),
+            ModuleDeclarationSite {
+                has_path_attribute: true,
+                path_attributes: vec!["../src/m.rs".to_string()],
+                ..mod_decl("tests/it.rs", "m")
+            },
+        ];
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = || {
+            RustModuleTree::new(&files, &project, &declarations, &scopes)
+                .with_unindexed_files([Path::new("src/m.rs")])
+        };
+        let marked = |modules: &RustModuleTree<'_>| {
+            let mut marked = modules
+                .module_placements()
+                .into_iter()
+                .filter(|(_, placement)| placement.in_other_crates)
+                .map(|(id, _)| id.0)
+                .collect::<Vec<_>>();
+            marked.sort();
+            marked
+        };
+        // Its lines are asked for before anything is marked from them.
+        assert_eq!(
+            modules().unscanned_module_files(),
+            HashSet::from([PathBuf::from("src/m.rs")])
+        );
+
+        let declared = HashSet::from(["b".to_string()]);
+        let scanned = modules().with_scanned_files([(Path::new("src/m.rs"), Some(declared))]);
+        assert!(scanned.unscanned_module_files().is_empty());
+        assert_eq!(marked(&scanned), vec!["file:src/b.rs".to_string()]);
+        let gaps = scanned.placement_gaps();
+        assert_eq!((gaps.shared_files, gaps.unread_mounted_files), (1, 0));
+        let registry = bind_crate_paths(&scanned, &["src/b.rs"], &["src/lib.rs"]);
+        assert_eq!(bound_target(&registry, "src/b.rs", "helper"), None);
+
+        // Unread (a path policy excluded it) or unreadable (a `path` attribute of its own), it
+        // may mount any file of the package, and says so.
+        for modules in [
+            modules(),
+            modules().with_scanned_files([(Path::new("src/m.rs"), None)]),
+        ] {
+            assert_eq!(
+                marked(&modules),
+                vec!["file:src/b.rs".to_string(), "file:src/c.rs".to_string()]
+            );
+            let gaps = modules.placement_gaps();
+            assert_eq!((gaps.shared_files, gaps.unread_mounted_files), (2, 1));
+        }
+
+        // A mount of a file discovery never saw reaches nothing and reads nothing.
+        let absent = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        assert!(absent.unscanned_module_files().is_empty());
+        assert!(marked(&absent).is_empty());
+    }
+
+    #[test]
     fn modules_below_a_crate_tree_at_the_repository_root_are_placed() {
         // The package is the repository root, so the module tree of `lib.rs` and `main.rs` is
         // `""`: `lib.rs`'s `pub mod tools;` is `tools/mod.rs`, whose `pub mod inner;` is
@@ -3481,6 +3635,7 @@ mod tests {
                 withheld_files: 1,
                 shared_files: 0,
                 unread_mounts: 0,
+                unread_mounted_files: 0,
             }
         );
     }

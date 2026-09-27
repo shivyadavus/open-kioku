@@ -88,7 +88,11 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// a type of the module the rest reaches (`crate::a::Engine::new()`, `engine::Engine::new()`)
 /// reaches that type's associated function. Earlier indexes count those `IMPLEMENTS` as
 /// unresolved and hold none of those `CALLS` edges.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v20";
+/// v22: a Rust file a `#[path]` attribute mounts, or one below it, that was skipped for size has
+/// its `mod` items read, so the module files it declares are shared with the mounting crate too;
+/// one skipped and not read may mount any file of its package. Earlier indexes hold `CALLS`
+/// edges from a `crate::` path in such a module file into one crate's item.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v22";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
