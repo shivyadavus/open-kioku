@@ -46,7 +46,11 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// v12: the symbol-registry pass records a line's use of a target as `CALLS` when any use of it on
 /// the line is a call (`let path = dir.path();`), and rules an item out of a whole line whichever
 /// use comes first; v11 kept whichever edge the line spelled first.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v12";
+/// v13: the symbol-registry pass reads no token inside a comment or string literal, and its
+/// name-only strategies (same module, unique project name, suffix reachability, fuzzy) never match
+/// a symbol of another language family; v12 indexes hold registry edges from comment and literal
+/// words and across languages (a Rust `Utc::now()` to a JavaScript `now`).
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v13";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
