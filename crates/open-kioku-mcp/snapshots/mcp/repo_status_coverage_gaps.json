@@ -24,20 +24,20 @@
         },
         "project_resolver_version": "project-resolver-v1",
         "proof_policy_version": "ri3-proof-policy-v1",
-        "relationship_resolver_version": "ri3-relationship-resolver-v17",
+        "relationship_resolver_version": "ri3-relationship-resolver-v19",
         "stable_identity_version": "stable-identity-v2",
         "version": 1
       },
-      "fingerprint": "26043464c4cf0acb094f0268f9abf0d00754979b786aaec587eeea85e06de1ae"
+      "fingerprint": "3fc89fa9b2c49ea4872982045c97069db56bd63681cd53cf6063c26d2d4c0fc7"
     },
     "analysis_semantics_status": {
       "affected_components": [],
       "affected_languages": [],
-      "current_fingerprint": "26043464c4cf0acb094f0268f9abf0d00754979b786aaec587eeea85e06de1ae",
+      "current_fingerprint": "3fc89fa9b2c49ea4872982045c97069db56bd63681cd53cf6063c26d2d4c0fc7",
       "reasons": [],
       "recommended_action": "none",
       "status": "compatible",
-      "stored_fingerprint": "26043464c4cf0acb094f0268f9abf0d00754979b786aaec587eeea85e06de1ae"
+      "stored_fingerprint": "3fc89fa9b2c49ea4872982045c97069db56bd63681cd53cf6063c26d2d4c0fc7"
     },
     "chunk_count": 1,
     "coverage": {

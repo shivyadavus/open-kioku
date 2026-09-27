@@ -1422,6 +1422,28 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // The mounted `sys/mod.rs` picks its `imp` with `cfg_attr(.., path = ..)`, so the test
+        // crate compiles `sys/unix.rs` too, whichever configuration it is built for (#604).
+        "cfg_attr_path_module_below_mounted_mod_rs_shared_with_test_crate" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n\npub fn target_fn() {}\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(unix, path = \"unix.rs\")]\n#[cfg_attr(windows, path = \"windows.rs\")]\nmod imp;\n",
+                ),
+                (
+                    "src/sys/unix.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
+                ("src/sys/windows.rs", "pub fn other_fn() {}\n"),
+                (
+                    "tests/it.rs",
+                    "#[path = \"../src/sys/mod.rs\"]\nmod sys;\n\nfn target_fn() {}\n\n#[test]\nfn t() {}\n",
+                ),
+            ],
+            false,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![

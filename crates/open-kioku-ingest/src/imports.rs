@@ -156,6 +156,15 @@ struct SharedFiles {
     unread_mounts: usize,
 }
 
+/// What [`RustModuleTree::mounted_subtree`] finds below a `#[path]`-mounted file.
+struct MountedSubtree {
+    /// Each file with whether it keeps the place its file path spells.
+    files: Vec<(String, bool)>,
+    /// The `#[path]` attributes of the subtree the index cannot read, by their index in
+    /// `path_mounts`, with the file declaring each.
+    unread_mounts: Vec<(usize, String)>,
+}
+
 /// Rust files whose module paths the index leaves unresolved because it cannot tell which crate
 /// they belong to.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -825,8 +834,8 @@ impl<'a> RustModuleTree<'a> {
     ///   declare every module below its directory, each at the place its file path spells;
     /// - a file a `#[path]` attribute mounts from a file of a crate the declaring roots are not,
     ///   or from a file whose crate is unknown, such as a build script, and the module files the
-    ///   mounted file declares below it. A `#[path]` the index cannot follow may mount any file of
-    ///   its package.
+    ///   mounted file declares below it, through `mod name;` or a `#[path]` of its own. A `#[path]`
+    ///   the index cannot follow may mount any file of its package.
     ///
     /// Each is recorded with whether every other crate compiles it at the place its path spells:
     /// not so for a file a `#[path]` mounts other than a `mod.rs`, whose own `mod` items are read
@@ -837,31 +846,35 @@ impl<'a> RustModuleTree<'a> {
         for (file, name) in &self.file_modules {
             modules_by_file.entry(file).or_default().push(name);
         }
+        let mut mounts_by_file = HashMap::<&str, Vec<(usize, &PathMount)>>::new();
+        for (at, (declaring, mount)) in self.path_mounts.iter().enumerate() {
+            mounts_by_file
+                .entry(declaring)
+                .or_default()
+                .push((at, mount));
+        }
         // Per mounted file: the crates of each mount, and whether it keeps the file in place.
         let mut mounted = HashMap::<String, Vec<(Vec<String>, bool)>>::new();
         let mut unread_mounts = Vec::new();
-        for (declaring, mount) in &self.path_mounts {
+        for (at, (declaring, mount)) in self.path_mounts.iter().enumerate() {
             let crates = self.crates_of(declaring);
-            let package = self.package_of_stem(declaring);
-            let files = match mount {
-                PathMount::File(file) => vec![file.clone()],
-                PathMount::Below { .. } => self
-                    .files_by_stem
-                    .keys()
-                    .filter(|stem| mount.may_mount(stem) && self.package_of_stem(stem) == package)
-                    .cloned()
-                    .collect(),
-                PathMount::Unknown => {
-                    unread_mounts.push((package, crates, false));
-                    continue;
-                }
+            let Some(files) = self.mounted_files(declaring, mount) else {
+                unread_mounts.push((at, self.package_of_stem(declaring), crates, false));
+                continue;
             };
             for file in files {
-                for (stem, in_place) in self.mounted_subtree(&file, &modules_by_file) {
+                let subtree = self.mounted_subtree(&file, &modules_by_file, &mounts_by_file);
+                for (stem, in_place) in subtree.files {
                     mounted
                         .entry(stem)
                         .or_default()
                         .push((crates.clone(), in_place));
+                }
+                // A mount below the mounted file the index cannot read may mount any file of
+                // its package into these crates too.
+                for (below, declaring) in subtree.unread_mounts {
+                    let package = self.package_of_stem(&declaring);
+                    unread_mounts.push((below, package, crates.clone(), false));
                 }
             }
         }
@@ -913,7 +926,7 @@ impl<'a> RustModuleTree<'a> {
             );
             let package = self.package_of(path);
             // A mount the index cannot read is read within its own package.
-            for (declaring, crates, fired) in &mut unread_mounts {
+            for (_, declaring, crates, fired) in &mut unread_mounts {
                 if *declaring == package && foreign(crates) {
                     *fired = true;
                     reasons.push(false);
@@ -928,7 +941,33 @@ impl<'a> RustModuleTree<'a> {
         }
         SharedFiles {
             files: shared,
-            unread_mounts: unread_mounts.iter().filter(|(_, _, fired)| *fired).count(),
+            // An attribute reached from several mounts is still one attribute.
+            unread_mounts: unread_mounts
+                .iter()
+                .filter(|(_, _, _, fired)| *fired)
+                .map(|(at, ..)| at)
+                .collect::<HashSet<_>>()
+                .len(),
+        }
+    }
+
+    /// The extension-less paths of the indexed files `mount`, declared in `declaring`, may mount,
+    /// or `None` for a `#[path]` the index cannot read, which may mount any file of its package.
+    fn mounted_files(&self, declaring: &str, mount: &PathMount) -> Option<Vec<String>> {
+        match mount {
+            PathMount::File(file) => Some(vec![file.clone()]),
+            PathMount::Below { .. } => {
+                let package = self.package_of_stem(declaring);
+                let mut files = self
+                    .files_by_stem
+                    .keys()
+                    .filter(|stem| mount.may_mount(stem) && self.package_of_stem(stem) == package)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                files.sort();
+                Some(files)
+            }
+            PathMount::Unknown => None,
         }
     }
 
@@ -936,12 +975,20 @@ impl<'a> RustModuleTree<'a> {
     /// `mod name;` items declare, each with whether it keeps the place its file path spells. The
     /// mounted file's own items are read from its directory, as a `mod.rs` file's are, so a file
     /// other than a `mod.rs` is not in place, though the modules it declares are.
+    ///
+    /// A `#[path]` inside the subtree, including each alternative of a `cfg_attr(.., path = ..)`
+    /// since the configuration is unknown, mounts its file into the mounting crate as well, read
+    /// relative to the declaring file just as in its own crate.
     fn mounted_subtree(
         &self,
         mounted: &str,
         modules_by_file: &HashMap<&str, Vec<&str>>,
-    ) -> Vec<(String, bool)> {
-        let mut found = vec![(mounted.to_string(), is_mod_rs(mounted))];
+        mounts_by_file: &HashMap<&str, Vec<(usize, &PathMount)>>,
+    ) -> MountedSubtree {
+        let mut subtree = MountedSubtree {
+            files: vec![(mounted.to_string(), is_mod_rs(mounted))],
+            unread_mounts: Vec::new(),
+        };
         let mut seen = HashSet::from([mounted.to_string()]);
         let mut pending = vec![(mounted.to_string(), parent_dir(mounted).to_string())];
         while let Some((file, dir)) = pending.pop() {
@@ -955,12 +1002,26 @@ impl<'a> RustModuleTree<'a> {
                     } else {
                         child.clone()
                     };
-                    found.push((child.clone(), true));
+                    subtree.files.push((child.clone(), true));
+                    pending.push((child, child_dir));
+                }
+            }
+            for (at, mount) in mounts_by_file.get(file.as_str()).into_iter().flatten() {
+                let Some(children) = self.mounted_files(&file, mount) else {
+                    subtree.unread_mounts.push((*at, file.clone()));
+                    continue;
+                };
+                for child in children {
+                    if !self.files_by_stem.contains_key(&child) || !seen.insert(child.clone()) {
+                        continue;
+                    }
+                    let child_dir = parent_dir(&child).to_string();
+                    subtree.files.push((child.clone(), is_mod_rs(&child)));
                     pending.push((child, child_dir));
                 }
             }
         }
-        found
+        subtree
     }
 
     /// The crate roots of the crates `declaring`, an extension-less path, is compiled into as far
@@ -3218,6 +3279,93 @@ mod tests {
         assert_eq!(at("src/util/child.rs"), (false, true));
         let registry = bind_crate_paths(&modules, &["src/util.rs"], &["src/lib.rs"]);
         assert_eq!(bound_target(&registry, "src/util.rs", "helper"), None);
+    }
+
+    #[test]
+    fn cfg_attr_path_modules_below_a_mounted_file_are_shared_too() {
+        let path_decl = |file: &str, name: &str, paths: &[&str]| ModuleDeclarationSite {
+            has_path_attribute: true,
+            path_attributes: paths.iter().map(|path| path.to_string()).collect(),
+            ..mod_decl(file, name)
+        };
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let project = rust_project(&[("", None)]);
+        let files = [
+            "src/lib.rs",
+            "src/sys/mod.rs",
+            "src/sys/unix.rs",
+            "src/sys/windows.rs",
+            "src/sys/fd.rs",
+            "src/other.rs",
+            "tests/it.rs",
+            "tests/more.rs",
+        ]
+        .map(source_file);
+        // `sys/mod.rs` declares `#[cfg_attr(unix, path = "unix.rs")]
+        // #[cfg_attr(windows, path = "windows.rs")] mod imp;`, and `unix.rs`, read from `sys/`
+        // as a mounted file is, declares `mod fd;`.
+        let own = vec![
+            mod_decl("src/lib.rs", "sys"),
+            mod_decl("src/lib.rs", "other"),
+            path_decl("src/sys/mod.rs", "imp", &["unix.rs", "windows.rs"]),
+            mod_decl("src/sys/unix.rs", "fd"),
+        ];
+        let modules = RustModuleTree::new(&files, &project, &own, &scopes);
+        assert!(modules
+            .module_placements()
+            .values()
+            .all(|placement| !placement.in_other_crates));
+
+        // `tests/it.rs` mounts `sys/mod.rs`, so the test crate compiles every file its `imp`
+        // may be, whichever configuration it is built for (#604).
+        let mut declarations = own.clone();
+        declarations.push(path_decl("tests/it.rs", "sys", &["../src/sys/mod.rs"]));
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let placements = modules.module_placements();
+        let at = |file: &str| {
+            let placement = &placements[&FileId::new(format!("file:{file}"))];
+            (
+                placement.in_other_crates,
+                placement.own_subtree_in_every_crate,
+            )
+        };
+        assert_eq!(at("src/sys/mod.rs"), (true, true));
+        assert_eq!(at("src/sys/unix.rs"), (true, false));
+        assert_eq!(at("src/sys/windows.rs"), (true, false));
+        assert_eq!(at("src/sys/fd.rs"), (true, true));
+        assert_eq!(at("src/other.rs"), (false, true));
+        assert_eq!(modules.placement_gaps().shared_files, 4);
+        let registry = bind_crate_paths(&modules, &["src/sys/unix.rs"], &["src/lib.rs"]);
+        assert_eq!(bound_target(&registry, "src/sys/unix.rs", "helper"), None);
+
+        // Each alternative of a `cfg_attr` path on the mount itself is followed as well.
+        let mut declarations = own.clone();
+        declarations.push(path_decl(
+            "tests/it.rs",
+            "imp",
+            &["../src/sys/unix.rs", "../src/sys/windows.rs"],
+        ));
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let placements = modules.module_placements();
+        for file in ["src/sys/unix.rs", "src/sys/windows.rs", "src/sys/fd.rs"] {
+            assert!(
+                placements[&FileId::new(format!("file:{file}"))].in_other_crates,
+                "{file}"
+            );
+        }
+        assert!(!placements[&FileId::new("file:src/sys/mod.rs")].in_other_crates);
+
+        // A `path` below the mounted file the index cannot read may mount any file of the
+        // package into the test crate; mounted from two test crates it is still one attribute.
+        let mut declarations = own.clone();
+        declarations.push(path_decl("src/sys/mod.rs", "raw", &[]));
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        assert_eq!(modules.placement_gaps().unread_mounts, 0);
+        declarations.push(path_decl("tests/it.rs", "sys", &["../src/sys/mod.rs"]));
+        declarations.push(path_decl("tests/more.rs", "sys", &["../src/sys/mod.rs"]));
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        assert_eq!(modules.placement_gaps().unread_mounts, 1);
+        assert!(modules.module_placements()[&FileId::new("file:src/other.rs")].in_other_crates);
     }
 
     #[test]
