@@ -787,7 +787,7 @@ async fn dispatch(
             let retrieved = ContextHandleStore::open_repo_existing(repo)?
                 .map(|handles| {
                     handles.retrieve_indexed(&ContextHandleId::new(handle), |path| {
-                        Ok(store.get_file_by_path(path)?.is_some())
+                        store.indexes_path(path)
                     })
                 })
                 .transpose()?

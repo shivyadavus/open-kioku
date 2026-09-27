@@ -1027,11 +1027,14 @@ pub async fn run_cli() -> anyhow::Result<()> {
             // An unknown handle is an error, as it is for MCP `retrieve_context`: `null`
             // under `--json` read as an empty snippet. A handle quoting a file the published
             // index no longer holds is refused, whether or not a prune has deleted it yet.
-            let index = open_store(&repo)?;
+            // The index is opened only for a handle that exists; without one nothing is held.
             let retrieved = ContextHandleStore::open_repo_existing(&repo)?
                 .map(|store| {
                     store.retrieve_indexed(&ContextHandleId::new(&handle), |path| {
-                        Ok(index.get_file_by_path(path)?.is_some())
+                        match SqliteStore::open_repo_index(&repo)? {
+                            Some(index) => index.indexes_path(path),
+                            None => Ok(false),
+                        }
                     })
                 })
                 .transpose()?

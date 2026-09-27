@@ -5606,6 +5606,32 @@ fn memory_and_compressed_context_are_available() {
         command
     });
     assert!(retrieved.contains("token"));
+    // Every handle quotes a file or a document the index holds, so neither a reader nor the
+    // prune after the next index run treats one as removed; the README's sections are a
+    // document, not a file (#585).
+    let handles = parsed["handles"].as_array().unwrap();
+    assert!(
+        handles
+            .iter()
+            .any(|handle| handle["file_range"]["path"] == "README.md"),
+        "{parsed}"
+    );
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+    for handle in handles {
+        run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(&repo)
+                .arg("retrieve-context")
+                .arg(handle["id"].as_str().unwrap());
+            command
+        });
+    }
 
     let plan_toon = run({
         let mut command = ok();

@@ -59,9 +59,11 @@ pub fn prune_removed_paths(root: &Path, store: &SqliteStore) -> Result<DerivedSt
     let vectors = open_kioku_semantic::prune_vector_store(root, &files)?;
     let context_handles = match ContextHandleStore::open_repo_existing(root)? {
         Some(handles) => {
-            let indexed = files
+            // Documents too: a context pack quotes a README's sections as it quotes a file.
+            let indexed = store
+                .repository_paths()?
+                .0
                 .into_iter()
-                .map(|file| file.path)
                 .collect::<HashSet<_>>();
             handles.prune_removed_paths(&indexed)?
         }
