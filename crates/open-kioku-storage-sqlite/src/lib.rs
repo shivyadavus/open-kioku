@@ -4723,6 +4723,15 @@ fn ranked_edge_window(
     offset: usize,
     limit: usize,
 ) -> Result<(Vec<GraphEdge>, usize)> {
+    // The candidate ids and the edges they name are read by separate statements. A deferred read
+    // transaction holds one snapshot across both, so an `ok watch` commit from another process
+    // between them cannot delete an edge the first statement listed. A caller already inside a
+    // transaction has its own snapshot. Dropping it without a commit ends the read.
+    let _snapshot = if conn.is_autocommit() {
+        Some(conn.unchecked_transaction().map_err(storage_err)?)
+    } else {
+        None
+    };
     let mut stmt = conn
         .prepare_cached(&format!(
             "{WINDOW_CANDIDATE_SELECT} WHERE {filter} \
@@ -8595,7 +8604,7 @@ mod tests {
     }
 
     /// The early-settling window read returns exactly the prefix a full decode and sort would,
-    /// for every page, over a mix of every tier, both SQL groups and every confidence.
+    /// for every page, over a mix of every tier, all three SQL groups and every confidence.
     #[test]
     fn a_settled_window_matches_the_fully_sorted_edges_for_every_page() {
         let store = make_current_store();
@@ -8631,7 +8640,7 @@ mod tests {
             };
             edge.evidence.confidence = confidences[index % 4];
             match index % 6 {
-                // Proven.
+                // Proven: SQL group 0.
                 0 => edge
                     .set_relationship_proofs(vec![RelationshipProof::new(
                         RelationshipProofKind::ImportBinding,
@@ -8647,7 +8656,7 @@ mod tests {
                         2,
                     )])
                     .unwrap(),
-                // Corroborated.
+                // Corroborated: SQL group 0.
                 2 => edge
                     .set_relationship_proofs(vec![RelationshipProof::new(
                         RelationshipProofKind::QualifiedName,
@@ -8655,17 +8664,17 @@ mod tests {
                         1,
                     )])
                     .unwrap(),
-                // Parsed containment.
+                // Parsed containment: SQL group 1.
                 3 => {
                     edge.edge_type = GraphEdgeType::Defines;
                     edge.evidence.source_type = EvidenceSourceType::TreeSitter;
                 }
-                // Regex containment: SQL group 0, heuristic tier.
+                // Regex containment: SQL group 2, heuristic tier.
                 4 => {
                     edge.edge_type = GraphEdgeType::Defines;
                     edge.evidence.source_type = EvidenceSourceType::Regex;
                 }
-                // Proofless: SQL group 1.
+                // Proofless, with no extension record: SQL group 2.
                 _ => {}
             }
             edges.push(edge);
@@ -8720,6 +8729,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The window read holds its own read transaction when the connection has none, ends it, and
+    /// reuses a caller's transaction rather than failing to open a nested one.
+    #[test]
+    fn a_window_read_brackets_its_two_statements_in_one_snapshot() {
+        let store = make_current_store();
+        let conn = store.connection.lock().unwrap();
+        assert!(conn.is_autocommit());
+        super::ranked_edge_window(&conn, "1 = 1", &[], 0, 10).unwrap();
+        assert!(
+            conn.is_autocommit(),
+            "the read transaction must end with the read"
+        );
+        conn.execute_batch("BEGIN DEFERRED").unwrap();
+        super::ranked_edge_window(&conn, "1 = 1", &[], 0, 10).unwrap();
+        assert!(
+            !conn.is_autocommit(),
+            "a caller's transaction must be left open"
+        );
+        conn.execute_batch("COMMIT").unwrap();
     }
 
     /// Of two routes of equal length, the one whose first hop is proven is returned, whichever
