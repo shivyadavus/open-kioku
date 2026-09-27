@@ -4,7 +4,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const ANALYSIS_SEMANTICS_DESCRIPTOR_VERSION: u32 = 1;
-pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v1";
+/// v2: an analysis-fact target's node id hashes its label as spelled (only SQL table names fold
+/// case), so case-variant names such as a `TempDir` type and a `tempdir` function are separate
+/// nodes; a v1 index merged them into one node and attached both items' edges to it.
+pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v2";
 pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// v3: a Rust `use` path inside the importing file's own crate resolves through that crate's
 /// declared module tree, so its `IMPORTS` edge names the file declaring the module or the item;
