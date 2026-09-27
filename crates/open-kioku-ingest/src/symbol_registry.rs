@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::Path;
 
 const COMMON_NAME_CAP: usize = 32;
@@ -490,7 +491,7 @@ impl SymbolRegistry {
         if let Some(resolution) = self.resolve_same_module(chunk, token, &admits) {
             return resolution;
         }
-        if let Some(resolution) = self.resolve_unique_project_name(token, &admits) {
+        if let Some(resolution) = self.resolve_unique_project_name(chunk, token, &admits) {
             return resolution;
         }
         if let Some(resolution) =
@@ -498,7 +499,7 @@ impl SymbolRegistry {
         {
             return resolution;
         }
-        self.resolve_fuzzy(token, &admits)
+        self.resolve_fuzzy(chunk, token, &admits)
             .unwrap_or_else(|| Resolution {
                 symbol: None,
                 strategy: "unresolved",
@@ -581,11 +582,18 @@ impl SymbolRegistry {
             .filter(|symbol| symbol_matches_token(symbol, token))
             .cloned()
             .collect::<Vec<_>>();
-        scoped_resolution("same-module", candidates, admits, Confidence::Medium, false)
+        scoped_resolution(
+            "same-module",
+            in_language_family(chunk, candidates),
+            admits,
+            Confidence::Medium,
+            false,
+        )
     }
 
     fn resolve_unique_project_name(
         &self,
+        chunk: &CodeChunk,
         token: &str,
         admits: &dyn Fn(&Symbol) -> bool,
     ) -> Option<Resolution> {
@@ -610,7 +618,7 @@ impl SymbolRegistry {
             .collect::<Vec<_>>();
         scoped_resolution(
             "unique-project-name",
-            symbols,
+            in_language_family(chunk, symbols),
             admits,
             Confidence::Medium,
             true,
@@ -648,14 +656,19 @@ impl SymbolRegistry {
             .collect::<Vec<_>>();
         scoped_resolution(
             "suffix-import-reachability",
-            candidates,
+            in_language_family(chunk, candidates),
             admits,
             Confidence::Low,
             true,
         )
     }
 
-    fn resolve_fuzzy(&self, token: &str, admits: &dyn Fn(&Symbol) -> bool) -> Option<Resolution> {
+    fn resolve_fuzzy(
+        &self,
+        chunk: &CodeChunk,
+        token: &str,
+        admits: &dyn Fn(&Symbol) -> bool,
+    ) -> Option<Resolution> {
         if token.len() <= 3 || self.by_simple_name.len() > MAX_SIMPLE_NAMES_FOR_FUZZY {
             return None;
         }
@@ -670,7 +683,13 @@ impl SymbolRegistry {
             .take(COMMON_NAME_CAP + 1)
             .cloned()
             .collect::<Vec<_>>();
-        scoped_resolution("fuzzy-fallback", candidates, admits, Confidence::Low, true)
+        scoped_resolution(
+            "fuzzy-fallback",
+            in_language_family(chunk, candidates),
+            admits,
+            Confidence::Low,
+            true,
+        )
     }
 }
 
@@ -767,7 +786,7 @@ fn resolve_chunk(
         .as_ref()
         .and_then(|id| registry.by_id.get(id))
         .map(|symbol| symbol.name.as_str());
-    let uses = token_uses(&chunk.text)
+    let uses = token_uses(&chunk.text, &chunk.language)
         .into_iter()
         .take(MAX_TOKENS_PER_CHUNK)
         .filter(|token_use| own_name != Some(token_use.token.as_str()))
@@ -977,25 +996,479 @@ fn quality_note(token: &str, resolution: &Resolution) -> Option<QualityNote> {
     })
 }
 
-fn token_uses(text: &str) -> Vec<TokenUse> {
+fn token_uses(text: &str, language: &Language) -> Vec<TokenUse> {
     let mut uses = Vec::new();
+    let mut lexer = CodeLexer::new(language);
     for (line_index, line) in text.lines().enumerate() {
-        let mut current = String::new();
-        let mut token_end = 0usize;
-        for (idx, ch) in line.char_indices() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '$' {
-                current.push(ch);
-                token_end = idx + ch.len_utf8();
-            } else if !current.is_empty() {
-                push_token_use(&mut uses, &current, line, token_end, line_index);
-                current.clear();
+        for span in lexer.code_spans(line) {
+            let mut token: Option<(usize, usize)> = None;
+            for (offset, ch) in line[span.clone()].char_indices() {
+                let idx = span.start + offset;
+                if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+                    let start = token.map_or(idx, |(start, _)| start);
+                    token = Some((start, idx + ch.len_utf8()));
+                } else if let Some((start, end)) = token.take() {
+                    push_code_token(&mut uses, language, line, start..end, line_index);
+                }
             }
-        }
-        if !current.is_empty() {
-            push_token_use(&mut uses, &current, line, token_end, line_index);
+            if let Some((start, end)) = token {
+                push_code_token(&mut uses, language, line, start..end, line_index);
+            }
         }
     }
     uses
+}
+
+/// A code token, unless it is a string prefix such as Rust's `br` or Python's `rb`, which reads
+/// as a name beside the literal it opens.
+fn push_code_token(
+    uses: &mut Vec<TokenUse>,
+    language: &Language,
+    line: &str,
+    token: Range<usize>,
+    line_index: usize,
+) {
+    let text = &line[token.clone()];
+    let opens_literal = matches!(language, Language::Rust | Language::Python)
+        && line[token.end..].starts_with(['"', '\''])
+        && text.len() <= 2
+        && text.chars().all(|ch| "bBrRfFuUcC".contains(ch));
+    if !opens_literal {
+        push_token_use(uses, text, line, token.end, line_index);
+    }
+}
+
+/// Where a chunk's code is, as opposed to its comments and string literals, whose words name
+/// nothing: `// the clock's now` and `"now"` are not uses of `now` (#563).
+///
+/// A lexical pass, not a parse. It knows each language's comment and literal delimiters, carries
+/// block comments, multi-line literals and template interpolations across lines, and skips
+/// JavaScript and TypeScript regular-expression literals. A chunk is read from its first line as
+/// code: one that starts inside a block comment reads the comment's words as code up to its end,
+/// and one that starts inside a multi-line string or template reads that text as code, after
+/// which the closing quote opens a literal and the code that follows reads as literal up to the
+/// next quote. A language it has no rules for (JSON, Markdown, plain text) is read whole, as
+/// before; YAML and TOML lose only their `#` comments. Interpolated Python and Rust strings are
+/// not modeled: an f-string's or format string's names read as literal.
+struct CodeLexer {
+    syntax: LexicalSyntax,
+    /// Innermost last. Empty is code outside any template interpolation.
+    stack: Vec<LexState>,
+}
+
+#[derive(Clone, Copy)]
+struct LexicalSyntax {
+    line_comment: Option<&'static str>,
+    block_comments: bool,
+    nested_block_comments: bool,
+    double_quote_strings: bool,
+    /// `'` opens a literal; with `lifetimes`, only when a character literal closes it.
+    single_quote_strings: bool,
+    lifetimes: bool,
+    raw_strings: bool,
+    triple_quotes: bool,
+    backtick: Backtick,
+    /// A `"` or `'` literal may continue on the next line.
+    multiline_strings: bool,
+    /// JavaScript: a `/` where an operand is expected opens a regular-expression literal.
+    regex_literals: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Backtick {
+    Code,
+    /// A JavaScript template literal, whose `${...}` interpolations are code.
+    Template,
+    /// A Go raw string.
+    Raw,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LexState {
+    /// Code inside a template interpolation, with the depth of braces opened in it.
+    Interpolation(u32),
+    BlockComment(u32),
+    Str {
+        quote: u8,
+        triple: bool,
+    },
+    RawStr {
+        hashes: usize,
+    },
+    GoRaw,
+    Template,
+}
+
+enum LexStep {
+    Advance(usize),
+    /// A literal that closes on this line, such as a regular expression: not code, no state.
+    Skip(usize),
+    Push(LexState, usize),
+    Pop(usize),
+    LineComment,
+}
+
+impl CodeLexer {
+    fn new(language: &Language) -> Self {
+        let c_like = LexicalSyntax {
+            line_comment: Some("//"),
+            block_comments: true,
+            nested_block_comments: false,
+            double_quote_strings: true,
+            single_quote_strings: true,
+            lifetimes: false,
+            raw_strings: false,
+            triple_quotes: false,
+            backtick: Backtick::Code,
+            multiline_strings: false,
+            regex_literals: false,
+        };
+        let plain = LexicalSyntax {
+            line_comment: None,
+            block_comments: false,
+            double_quote_strings: false,
+            single_quote_strings: false,
+            ..c_like
+        };
+        let syntax = match language {
+            Language::Rust => LexicalSyntax {
+                nested_block_comments: true,
+                lifetimes: true,
+                raw_strings: true,
+                multiline_strings: true,
+                ..c_like
+            },
+            Language::TypeScript | Language::JavaScript => LexicalSyntax {
+                backtick: Backtick::Template,
+                regex_literals: true,
+                ..c_like
+            },
+            Language::Java => LexicalSyntax {
+                triple_quotes: true,
+                ..c_like
+            },
+            Language::Go => LexicalSyntax {
+                backtick: Backtick::Raw,
+                ..c_like
+            },
+            Language::Python => LexicalSyntax {
+                line_comment: Some("#"),
+                block_comments: false,
+                triple_quotes: true,
+                ..c_like
+            },
+            // A double-quoted SQL name is an identifier, not a literal.
+            Language::Sql => LexicalSyntax {
+                line_comment: Some("--"),
+                double_quote_strings: false,
+                multiline_strings: true,
+                ..c_like
+            },
+            Language::Yaml | Language::Toml => LexicalSyntax {
+                line_comment: Some("#"),
+                ..plain
+            },
+            _ => plain,
+        };
+        Self {
+            syntax,
+            stack: Vec::new(),
+        }
+    }
+
+    /// The byte ranges of `line` that are code, continuing from the previous line's state. Every
+    /// range starts and ends beside an ASCII delimiter, so it is a valid slice of `line`.
+    fn code_spans(&mut self, line: &str) -> Vec<Range<usize>> {
+        let mut spans = Vec::new();
+        let mut code_start = self.in_code().then_some(0);
+        let mut idx = 0;
+        while idx < line.len() {
+            let step = match self.stack.last().copied() {
+                None | Some(LexState::Interpolation(_)) => self.code_step(line, idx),
+                Some(state) => self.literal_step(state, &line.as_bytes()[idx..]),
+            };
+            match step {
+                LexStep::Advance(len) => idx += len,
+                LexStep::Skip(len) => {
+                    close_span(&mut spans, &mut code_start, idx);
+                    idx += len;
+                    code_start = Some(idx);
+                }
+                LexStep::Push(state, len) => {
+                    close_span(&mut spans, &mut code_start, idx);
+                    idx += len;
+                    self.stack.push(state);
+                    if self.in_code() {
+                        code_start = Some(idx);
+                    }
+                }
+                LexStep::Pop(len) => {
+                    close_span(&mut spans, &mut code_start, idx);
+                    idx += len;
+                    self.stack.pop();
+                    if self.in_code() {
+                        code_start = Some(idx);
+                    }
+                }
+                LexStep::LineComment => {
+                    close_span(&mut spans, &mut code_start, idx);
+                    idx = line.len();
+                }
+            }
+        }
+        close_span(&mut spans, &mut code_start, line.len());
+        // A literal that cannot span lines ends with its line, closed or not, so one stray quote
+        // does not hide the rest of the chunk.
+        if !self.syntax.multiline_strings {
+            while let Some(LexState::Str { triple: false, .. }) = self.stack.last() {
+                self.stack.pop();
+            }
+        }
+        spans
+    }
+
+    fn code_step(&mut self, line: &str, idx: usize) -> LexStep {
+        let syntax = self.syntax;
+        let rest = &line.as_bytes()[idx..];
+        if syntax
+            .line_comment
+            .is_some_and(|marker| rest.starts_with(marker.as_bytes()))
+        {
+            return LexStep::LineComment;
+        }
+        if syntax.block_comments && rest.starts_with(b"/*") {
+            return LexStep::Push(LexState::BlockComment(1), 2);
+        }
+        match rest[0] {
+            b'r' if syntax.raw_strings => raw_string_open(line.as_bytes(), idx)
+                .map_or(LexStep::Advance(1), |(hashes, len)| {
+                    LexStep::Push(LexState::RawStr { hashes }, len)
+                }),
+            quote @ (b'"' | b'\'') => {
+                let opens = if quote == b'"' {
+                    syntax.double_quote_strings
+                } else {
+                    syntax.single_quote_strings
+                };
+                if !opens {
+                    return LexStep::Advance(1);
+                }
+                if quote == b'\'' && syntax.lifetimes && !opens_char_literal(&line[idx + 1..]) {
+                    return LexStep::Advance(1);
+                }
+                let triple = syntax.triple_quotes && rest.starts_with(&[quote; 3]);
+                LexStep::Push(LexState::Str { quote, triple }, if triple { 3 } else { 1 })
+            }
+            b'/' if syntax.regex_literals && regex_may_start(&line[..idx]) => {
+                regex_literal_len(rest).map_or(LexStep::Advance(1), LexStep::Skip)
+            }
+            b'`' => match syntax.backtick {
+                Backtick::Template => LexStep::Push(LexState::Template, 1),
+                Backtick::Raw => LexStep::Push(LexState::GoRaw, 1),
+                Backtick::Code => LexStep::Advance(1),
+            },
+            brace @ (b'{' | b'}') => match self.stack.last_mut() {
+                Some(LexState::Interpolation(0)) if brace == b'}' => LexStep::Pop(1),
+                Some(LexState::Interpolation(depth)) => {
+                    if brace == b'{' {
+                        *depth += 1;
+                    } else {
+                        *depth -= 1;
+                    }
+                    LexStep::Advance(1)
+                }
+                _ => LexStep::Advance(1),
+            },
+            _ => LexStep::Advance(1),
+        }
+    }
+
+    fn literal_step(&mut self, state: LexState, rest: &[u8]) -> LexStep {
+        match state {
+            LexState::BlockComment(depth) => {
+                if rest.starts_with(b"*/") {
+                    if depth == 1 {
+                        return LexStep::Pop(2);
+                    }
+                    self.replace_top(LexState::BlockComment(depth - 1));
+                    LexStep::Advance(2)
+                } else if self.syntax.nested_block_comments && rest.starts_with(b"/*") {
+                    self.replace_top(LexState::BlockComment(depth + 1));
+                    LexStep::Advance(2)
+                } else {
+                    LexStep::Advance(1)
+                }
+            }
+            LexState::Str { quote, triple } => {
+                if rest[0] == b'\\' {
+                    LexStep::Advance(2.min(rest.len()))
+                } else if triple && rest.starts_with(&[quote; 3]) {
+                    LexStep::Pop(3)
+                } else if !triple && rest[0] == quote {
+                    LexStep::Pop(1)
+                } else {
+                    LexStep::Advance(1)
+                }
+            }
+            LexState::RawStr { hashes } => {
+                let closes = rest[0] == b'"'
+                    && rest.len() > hashes
+                    && rest[1..=hashes].iter().all(|byte| *byte == b'#');
+                if closes {
+                    LexStep::Pop(1 + hashes)
+                } else {
+                    LexStep::Advance(1)
+                }
+            }
+            LexState::GoRaw if rest[0] == b'`' => LexStep::Pop(1),
+            LexState::GoRaw => LexStep::Advance(1),
+            LexState::Template => {
+                if rest[0] == b'\\' {
+                    LexStep::Advance(2.min(rest.len()))
+                } else if rest[0] == b'`' {
+                    LexStep::Pop(1)
+                } else if rest.starts_with(b"${") {
+                    LexStep::Push(LexState::Interpolation(0), 2)
+                } else {
+                    LexStep::Advance(1)
+                }
+            }
+            // Code states are stepped by `code_step`.
+            LexState::Interpolation(_) => LexStep::Advance(1),
+        }
+    }
+
+    fn in_code(&self) -> bool {
+        matches!(self.stack.last(), None | Some(LexState::Interpolation(_)))
+    }
+
+    fn replace_top(&mut self, state: LexState) {
+        if let Some(top) = self.stack.last_mut() {
+            *top = state;
+        }
+    }
+}
+
+/// Whether a `/` after `before` (its line up to the `/`) starts a regular expression rather than
+/// dividing: where an operand is expected, after an operator, an opening bracket, the start of
+/// the line or a keyword that takes an expression.
+fn regex_may_start(before: &str) -> bool {
+    let before = before.trim_end();
+    let Some(last) = before.chars().next_back() else {
+        return true;
+    };
+    // Not `<`: in JSX `</Tag>` closes an element, and a regex after `<` is rare enough to lose.
+    if "(,=:[!&|?{};+-*%>~^".contains(last) {
+        return true;
+    }
+    let word = before
+        .rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+        .next()
+        .unwrap_or_default();
+    matches!(
+        word,
+        "return"
+            | "typeof"
+            | "case"
+            | "do"
+            | "else"
+            | "in"
+            | "of"
+            | "yield"
+            | "await"
+            | "void"
+            | "delete"
+            | "throw"
+    )
+}
+
+/// The length of the regular-expression literal opening at `rest[0]`, flags included, when its
+/// closing `/` (unescaped, outside a `[...]` class) is on this line; otherwise the `/` divides.
+fn regex_literal_len(rest: &[u8]) -> Option<usize> {
+    let mut idx = 1;
+    let mut in_class = false;
+    while idx < rest.len() {
+        match rest[idx] {
+            b'\\' => idx += 1,
+            b'[' => in_class = true,
+            b']' => in_class = false,
+            b'/' if !in_class => {
+                let flags = rest[idx + 1..]
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_alphabetic())
+                    .count();
+                return Some(idx + 1 + flags);
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn close_span(spans: &mut Vec<Range<usize>>, code_start: &mut Option<usize>, end: usize) {
+    if let Some(start) = code_start.take() {
+        if start < end {
+            spans.push(start..end);
+        }
+    }
+}
+
+/// `r"`, `r#"`, `br##"` and the like at `idx`, the `r`: the number of `#`s and the length of the
+/// opening delimiter from `r` on. `r#type` is a raw identifier, not a string.
+fn raw_string_open(bytes: &[u8], idx: usize) -> Option<(usize, usize)> {
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii();
+    let prefix_ok = match idx.checked_sub(1).map(|before| bytes[before]) {
+        None => true,
+        Some(b'b' | b'c') => idx < 2 || !is_word(bytes[idx - 2]),
+        Some(byte) => !is_word(byte),
+    };
+    if !prefix_ok {
+        return None;
+    }
+    let hashes = bytes[idx + 1..]
+        .iter()
+        .take_while(|byte| **byte == b'#')
+        .count();
+    (bytes.get(idx + 1 + hashes) == Some(&b'"')).then_some((hashes, hashes + 2))
+}
+
+/// After a Rust `'`: whether a character literal follows (one character or an escape, then `'`)
+/// rather than a lifetime or label.
+fn opens_char_literal(after_quote: &str) -> bool {
+    let mut chars = after_quote.chars();
+    match chars.next() {
+        Some('\\') => true,
+        Some(_) => chars.next() == Some('\''),
+        None => false,
+    }
+}
+
+/// TypeScript and JavaScript import each other and share one module system, so a name defined
+/// in one is used from the other. No other pair of indexed languages reaches the other's names
+/// without an explicit binding layer, so every other language is a family of its own.
+fn language_family(language: &Language) -> &'static str {
+    match language {
+        Language::TypeScript | Language::JavaScript => "javascript",
+        other => other.key(),
+    }
+}
+
+/// The candidates of a name-only strategy, or none when not one is in the token's language
+/// family: a Rust `Utc::now()` is not a call of the one JavaScript `now` in the repository (#563).
+/// A candidate in another language still counts against the match when one in the family
+/// exists: that the name is defined twice says it is common, whichever definition the token can
+/// reach, and dropping the other would turn `x.find(..)` into a call of the one Rust `find`.
+fn in_language_family(chunk: &CodeChunk, candidates: Vec<Symbol>) -> Vec<Symbol> {
+    let family = language_family(&chunk.language);
+    if candidates
+        .iter()
+        .any(|symbol| language_family(&symbol.language) == family)
+    {
+        candidates
+    } else {
+        Vec::new()
+    }
 }
 
 fn push_token_use(
@@ -1458,6 +1931,372 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(edges, vec![GraphEdgeType::Calls], "{text}");
         }
+    }
+
+    fn with_language(mut symbol: Symbol, language: Language) -> Symbol {
+        symbol.language = language;
+        symbol
+    }
+
+    fn rust_symbol(id: &str, file: &str, name: &str, qualified: &str) -> Symbol {
+        with_language(
+            symbol(id, file, name, qualified, SymbolKind::Function),
+            Language::Rust,
+        )
+    }
+
+    fn chunk_in(language: Language, text: &str) -> CodeChunk {
+        CodeChunk {
+            language,
+            ..chunk("c1", "entry", Some("caller"), text)
+        }
+    }
+
+    /// Each fact's target, edge type and line, in line order.
+    fn targets(report: &RegistryReport) -> Vec<(String, GraphEdgeType, u32)> {
+        let mut targets = report
+            .analysis_facts
+            .iter()
+            .map(|fact| {
+                (
+                    fact.target.clone(),
+                    fact.edge_type.clone(),
+                    fact.range.as_ref().map_or(0, |range| range.start),
+                )
+            })
+            .collect::<Vec<_>>();
+        targets.sort_by_key(|(_, _, line)| *line);
+        targets
+    }
+
+    fn call(target: &str, line: u32) -> (String, GraphEdgeType, u32) {
+        (target.to_string(), GraphEdgeType::Calls, line)
+    }
+
+    #[test]
+    fn unique_project_name_matches_only_its_own_language_family() {
+        // The one `now` in the repository is JavaScript: a Rust `Utc::now()` is not a call of it.
+        let javascript_now = with_language(
+            symbol("js-now", "site", "now", "site::now", SymbolKind::Function),
+            Language::JavaScript,
+        );
+        let mut symbols = vec![
+            rust_symbol("caller", "entry", "main", "app::main"),
+            javascript_now,
+        ];
+        let rust_call = chunk_in(Language::Rust, "let at = Utc::now();");
+        let report =
+            resolve_symbol_edges(std::slice::from_ref(&rust_call), &symbols, &[], false, None);
+        assert_eq!(targets(&report), vec![], "{:?}", report.analysis_facts);
+
+        // A TypeScript file reaches JavaScript's names, so the family match still links it.
+        let typescript_call = chunk_in(Language::TypeScript, "const at = now();");
+        let report = resolve_symbol_edges(&[typescript_call], &symbols, &[], false, None);
+        assert_eq!(targets(&report), vec![call("site::now", 1)]);
+
+        // Beside a Rust `now` the name is defined twice, so it is not unique: the JavaScript
+        // definition cannot be the target, and it still says the name is common.
+        symbols.push(rust_symbol("rs-now", "clock", "now", "clock::now"));
+        let report = resolve_symbol_edges(&[rust_call], &symbols, &[], false, None);
+        assert_eq!(targets(&report), vec![]);
+        assert!(report.quality_notes.iter().any(|note| note
+            .message
+            .contains("2 candidates matched via unique-project-name")));
+    }
+
+    #[test]
+    fn name_fallbacks_do_not_cross_languages_either() {
+        // Same qualified-name module, suffix reachability and fuzzy matching are name-only too.
+        let python_lines = with_language(
+            symbol(
+                "py",
+                "tool",
+                "read_lines",
+                "app::read_lines",
+                SymbolKind::Function,
+            ),
+            Language::Python,
+        );
+        let symbols = vec![
+            rust_symbol("caller", "entry", "main", "app::main"),
+            python_lines,
+        ];
+        let report = resolve_symbol_edges(
+            &[chunk_in(Language::Rust, "read_lines(); lines();")],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(targets(&report), vec![], "{:?}", report.analysis_facts);
+    }
+
+    #[test]
+    fn tokens_in_comments_resolve_to_nothing() {
+        let symbols = vec![
+            rust_symbol("caller", "entry", "main", "app::main"),
+            rust_symbol("target", "util", "helper", "util::helper"),
+        ];
+        let text = "// helper() runs first\n/// see helper()\n/* outer /* helper() */ still helper() */\nlet x = 1; // helper()";
+        let report = resolve_symbol_edges(
+            &[chunk_in(Language::Rust, text)],
+            &symbols,
+            &[import_resolution("entry", "crate::util::helper", "util")],
+            false,
+            None,
+        );
+        assert_eq!(targets(&report), vec![], "{:?}", report.analysis_facts);
+        // Nor does a name in prose surface as unresolved.
+        assert!(!report
+            .quality_notes
+            .iter()
+            .any(|note| note.message.contains("`runs`")));
+
+        let python = chunk_in(Language::Python, "# helper() here\nvalue = 1  # helper()");
+        let report = resolve_symbol_edges(&[python], &symbols, &[], false, None);
+        assert_eq!(targets(&report), vec![]);
+    }
+
+    #[test]
+    fn tokens_in_string_literals_resolve_to_nothing() {
+        let symbols = vec![
+            symbol("caller", "entry", "main", "app::main", SymbolKind::Function),
+            symbol(
+                "target",
+                "util",
+                "helper",
+                "util::helper",
+                SymbolKind::Function,
+            ),
+        ];
+        for text in [
+            r#"log("helper() failed");"#,
+            "log('helper() failed');",
+            "log(`helper() failed`);",
+            "log(\"a \\\" helper()\");",
+        ] {
+            let report = resolve_symbol_edges(
+                &[chunk_in(Language::TypeScript, text)],
+                &symbols,
+                &[],
+                false,
+                None,
+            );
+            assert_eq!(targets(&report), vec![], "{text}");
+        }
+        // A template interpolation is code, and so is what follows the literal.
+        let report = resolve_symbol_edges(
+            &[chunk_in(
+                Language::TypeScript,
+                "log(`helper ${helper({ a: 1 })} helper`);\nhelper;",
+            )],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(
+            targets(&report),
+            vec![
+                call("util::helper", 1),
+                ("util::helper".to_string(), GraphEdgeType::References, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_and_python_literals_are_read_by_their_own_delimiters() {
+        let symbols = vec![
+            rust_symbol("caller", "entry", "main", "app::main"),
+            rust_symbol("target", "util", "helper", "util::helper"),
+        ];
+        // Lifetimes open no literal; raw strings, byte strings and multi-line strings close
+        // where Rust closes them, and code after them is still read.
+        let text = "fn f<'a>(x: &'a str) -> char {\nlet s = r#\"helper() \"quoted\" \"#;\nlet b = br\"helper()\";\nlet m = \"first\nhelper() second\";\nlet c = '\"'; let q = '\\'';\nhelper()\n}";
+        let report = resolve_symbol_edges(
+            &[chunk_in(Language::Rust, text)],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(targets(&report), vec![call("util::helper", 7)]);
+
+        let python_symbols = symbols
+            .iter()
+            .cloned()
+            .map(|symbol| with_language(symbol, Language::Python))
+            .collect::<Vec<_>>();
+        let text = "doc = \"\"\"\nhelper() is documented\n\"\"\"\nname = rb'helper()'\nhelper()";
+        let report = resolve_symbol_edges(
+            &[chunk_in(Language::Python, text)],
+            &python_symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(targets(&report), vec![call("util::helper", 5)]);
+        assert!(!report
+            .quality_notes
+            .iter()
+            .any(|note| note.message.contains("`rb`")));
+    }
+
+    #[test]
+    fn javascript_regex_literals_hide_no_code_after_them() {
+        let symbols = vec![
+            symbol("caller", "entry", "main", "app::main", SymbolKind::Function),
+            symbol(
+                "target",
+                "util",
+                "helper",
+                "util::helper",
+                SymbolKind::Function,
+            ),
+        ];
+        // Each regex holds a delimiter that would open a template, comment or string; the code
+        // after it on its line and on the next must still be read, and the regex body must not.
+        for regex in [
+            r"/`/",
+            r"/\/*/",
+            r#"/"/"#,
+            r"/'/g",
+            r"/a\/\/b/",
+            r"/[/`]helper/i",
+            "/x/",
+        ] {
+            let text =
+                format!("const re = {regex}; helper();\nreturn {regex}.test(s) && helper();");
+            let report = resolve_symbol_edges(
+                &[chunk_in(Language::TypeScript, &text)],
+                &symbols,
+                &[],
+                false,
+                None,
+            );
+            assert_eq!(
+                targets(&report),
+                vec![call("util::helper", 1), call("util::helper", 2)],
+                "{text}"
+            );
+        }
+        // A JSX closing tag opens no regex: the names after it on the line are still code.
+        let jsx_symbols = vec![
+            symbol("color", "ui", "color", "ui::color", SymbolKind::Variable),
+            symbol(
+                "org",
+                "ui",
+                "organizationName",
+                "ui::organizationName",
+                SymbolKind::Variable,
+            ),
+        ];
+        let report = resolve_symbol_edges(
+            &[chunk_in(
+                Language::TypeScript,
+                r#"<Text bold>Org:</Text> <Text color="white">{organizationName}</Text>"#,
+            )],
+            &jsx_symbols,
+            &[],
+            false,
+            None,
+        );
+        let mut jsx_targets = targets(&report)
+            .into_iter()
+            .map(|(target, _, _)| target)
+            .collect::<Vec<_>>();
+        jsx_targets.sort();
+        assert_eq!(jsx_targets, vec!["ui::color", "ui::organizationName"]);
+        // A `/` after an operand divides, and a call between two of them is code.
+        let report = resolve_symbol_edges(
+            &[chunk_in(
+                Language::JavaScript,
+                "const r = total / helper() / 2;",
+            )],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(targets(&report), vec![call("util::helper", 1)]);
+    }
+
+    #[test]
+    fn languages_without_literal_rules_are_read_whole() {
+        for language in [Language::Json, Language::Markdown, Language::Text] {
+            let symbols = vec![with_language(
+                symbol(
+                    "target",
+                    "util",
+                    "helper",
+                    "util::helper",
+                    SymbolKind::Function,
+                ),
+                language.clone(),
+            )];
+            let report = resolve_symbol_edges(
+                &[chunk_in(language.clone(), r#"{"helper": "value"}"#)],
+                &symbols,
+                &[],
+                false,
+                None,
+            );
+            assert_eq!(
+                targets(&report),
+                vec![("util::helper".to_string(), GraphEdgeType::References, 1)],
+                "{language:?}"
+            );
+        }
+        // A double-quoted SQL name is an identifier; a single-quoted one is a literal.
+        let symbols = vec![with_language(
+            symbol(
+                "target",
+                "db",
+                "orders",
+                "db::orders",
+                SymbolKind::DatabaseTable,
+            ),
+            Language::Sql,
+        )];
+        let report = resolve_symbol_edges(
+            &[chunk_in(
+                Language::Sql,
+                "SELECT * FROM \"orders\";\nSELECT 'orders'; -- orders",
+            )],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(
+            targets(&report),
+            vec![("db::orders".to_string(), GraphEdgeType::References, 1)]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_single_line_literal_ends_with_its_line() {
+        let symbols = vec![
+            symbol("caller", "entry", "main", "app::main", SymbolKind::Function),
+            symbol(
+                "target",
+                "util",
+                "helper",
+                "util::helper",
+                SymbolKind::Function,
+            ),
+        ];
+        let report = resolve_symbol_edges(
+            &[chunk_in(
+                Language::TypeScript,
+                "const s = 'unclosed\nhelper();",
+            )],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(targets(&report), vec![call("util::helper", 2)]);
     }
 
     #[test]
