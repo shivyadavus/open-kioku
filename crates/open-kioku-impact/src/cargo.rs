@@ -279,7 +279,7 @@ impl CargoWorkspace {
             .map(|component| component.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         path.extension().and_then(|ext| ext.to_str()) == Some("rs")
-            && !segments.first().is_some_and(|first| first == "bin")
+            && segments.first().is_none_or(|first| first != "bin")
             && segments.as_slice() != ["main"]
     }
 }
@@ -311,6 +311,18 @@ impl CrateDependents {
             ..Self::default()
         }
     }
+}
+
+/// A file whose `use` rows the import resolver resolved to the changed file.
+struct Importer<'a> {
+    /// Those rows.
+    rows: Vec<&'a Import>,
+    /// The changed file's item names they import.
+    names: BTreeSet<String>,
+    /// The crate names they write for the changed file's crate.
+    heads: BTreeSet<String>,
+    /// The importing file's package.
+    package: usize,
 }
 
 /// Whether a stored `use` path is written through a crate name rather than `crate::`, `self::`
@@ -404,8 +416,7 @@ pub(crate) fn crate_dependent_impacts(
 
     // Importing file -> (import rows naming the changed file, the item names they import, the
     // crate names they write, the importer's package).
-    let mut importers =
-        BTreeMap::<&Path, (Vec<&Import>, BTreeSet<String>, BTreeSet<String>, usize)>::new();
+    let mut importers = BTreeMap::<&Path, Importer<'_>>::new();
     for fact in resolutions.iter().filter(|fact| {
         fact.edge_type == GraphEdgeType::Imports
             && fact.target_kind == GraphNodeType::File
@@ -449,26 +460,26 @@ pub(crate) fn crate_dependent_impacts(
         if rows.is_empty() {
             continue;
         }
-        let entry = importers.entry(file.path.as_path()).or_insert_with(|| {
-            (
-                Vec::new(),
-                BTreeSet::new(),
-                BTreeSet::new(),
-                *importer_package,
-            )
-        });
+        let entry = importers
+            .entry(file.path.as_path())
+            .or_insert_with(|| Importer {
+                rows: Vec::new(),
+                names: BTreeSet::new(),
+                heads: BTreeSet::new(),
+                package: *importer_package,
+            });
         for import in rows {
             let mut segments = import.imported.split("::").map(str::trim);
             if let Some(head) = segments.next() {
-                entry.2.insert(head.to_string());
+                entry.heads.insert(head.to_string());
             }
             if let Some(last) = import.imported.rsplit("::").next().map(str::trim) {
                 if items.contains(last) {
-                    entry.1.insert(last.to_string());
+                    entry.names.insert(last.to_string());
                 }
             }
-            if !entry.0.iter().any(|row| std::ptr::eq(*row, import)) {
-                entry.0.push(import);
+            if !entry.rows.iter().any(|row| std::ptr::eq(*row, import)) {
+                entry.rows.push(import);
             }
         }
     }
@@ -477,7 +488,16 @@ pub(crate) fn crate_dependent_impacts(
     // Per importing package: the imported names, and the crate names it writes for the changed
     // file's crate.
     let mut names_by_package = BTreeMap::<usize, (BTreeSet<String>, BTreeSet<String>)>::new();
-    for (path, (rows, names, heads, importer_package)) in &importers {
+    for (
+        path,
+        Importer {
+            rows,
+            names,
+            heads,
+            package: importer_package,
+        },
+    ) in &importers
+    {
         if *importer_package != package {
             let entry = names_by_package.entry(*importer_package).or_default();
             entry.0.extend(names.iter().cloned());
@@ -611,7 +631,7 @@ pub(crate) fn crate_dependent_impacts(
     }
     dependents.packages = importers
         .values()
-        .map(|(_, _, _, importer_package)| *importer_package)
+        .map(|importer| importer.package)
         .collect::<BTreeSet<_>>()
         .len();
     count_unresolved_imports(
@@ -638,12 +658,12 @@ fn count_unresolved_imports(
     package: usize,
     rust_files: &HashMap<&FileId, (&File, Membership)>,
     imports_by_file: &HashMap<&FileId, Vec<&Import>>,
-    importers: &BTreeMap<&Path, (Vec<&Import>, BTreeSet<String>, BTreeSet<String>, usize)>,
+    importers: &BTreeMap<&Path, Importer<'_>>,
     dependents: &mut CrateDependents,
 ) -> Result<()> {
     let mut crate_names = BTreeSet::from([workspace.packages[package].crate_name.clone()]);
-    for (_, _, heads, _) in importers.values() {
-        crate_names.extend(heads.iter().cloned());
+    for importer in importers.values() {
+        crate_names.extend(importer.heads.iter().cloned());
     }
     let mut files = imports_by_file
         .iter()
