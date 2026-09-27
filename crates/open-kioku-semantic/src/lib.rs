@@ -1243,6 +1243,191 @@ pub fn discard_vector_store(repo: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// What [`prune_vector_store`] removed from the semantic vector store.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct VectorStorePrune {
+    /// Chunk and symbol targets removed because their path left the semantic corpus.
+    pub removed_targets: usize,
+    /// Distinct paths those targets came from.
+    pub removed_paths: usize,
+    /// Generations removed whole because they could not be read, so what they held could not
+    /// be checked against the index.
+    pub discarded_generations: usize,
+    /// Interrupted semantic builds removed.
+    pub discarded_builds: usize,
+}
+
+impl VectorStorePrune {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Removes from the semantic vector store every target whose path is not among `indexed_files`,
+/// the files the published index holds, or is among them but no longer embedded (a deleted file, a path the policy now excludes
+/// or denies, vendored or generated code). Their text, embedding cache entries and vectors are
+/// rewritten out of each generation, not tombstoned, so no file under `.ok/vectors` keeps them
+/// (#564). The rest of the embedding cache is kept, so the next `ok semantic index` re-embeds
+/// nothing it already had.
+///
+/// Pruning does not make the store current: its manifest still names the authoritative index
+/// generation it was built from, so status reports it stale and search refuses it until
+/// rebuilt. A generation that cannot be read is removed whole, since what it holds cannot be
+/// checked. Callers hold the index write lock, which every semantic build also takes, so a
+/// build directory present here is an interrupted one and is removed with the rest.
+pub fn prune_vector_store(repo: &Path, indexed_files: &[File]) -> Result<VectorStorePrune> {
+    let root = open_kioku_storage::generations::resolve_index_location(repo).vectors_root();
+    let mut report = VectorStorePrune::default();
+    if !root.exists() {
+        return Ok(report);
+    }
+    let embedded_paths = indexed_files
+        .iter()
+        .filter(|file| !excluded_path(file))
+        .map(|file| file.path.clone())
+        .collect::<HashSet<_>>();
+    let builds = root.join("builds");
+    if builds.exists() {
+        report.discarded_builds = fs::read_dir(&builds)?.count();
+        remove_vector_dir(&builds)?;
+    }
+    for generation in [root.join("current"), root.join("previous")] {
+        if !generation.exists() {
+            continue;
+        }
+        match prune_generation(&generation, &builds, &embedded_paths) {
+            Ok(Some((targets, paths))) => {
+                report.removed_targets += targets;
+                report.removed_paths += paths;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                remove_vector_dir(&generation)?;
+                report.discarded_generations += 1;
+            }
+        }
+    }
+    // A failed rewrite leaves its scratch directory here.
+    if builds.exists() {
+        remove_vector_dir(&builds)?;
+    }
+    Ok(report)
+}
+
+/// Rewrites one generation without the targets outside `embedded_paths`, returning how many
+/// targets and paths it removed, or `None` when it held none. The rewrite is written beside
+/// the generation and swapped in, so an interruption leaves either the old generation or none.
+fn prune_generation(
+    generation: &Path,
+    scratch_root: &Path,
+    embedded_paths: &HashSet<PathBuf>,
+) -> Result<Option<(usize, usize)>> {
+    let targets =
+        serde_json::from_slice::<Vec<SemanticTarget>>(&fs::read(generation.join("ids.json"))?)?;
+    let (kept, removed): (Vec<_>, Vec<_>) = targets
+        .into_iter()
+        .partition(|target| embedded_paths.contains(&target.path));
+    if removed.is_empty() {
+        return Ok(None);
+    }
+    let removed_paths = removed
+        .iter()
+        .map(|target| &target.path)
+        .collect::<HashSet<_>>()
+        .len();
+    let mut manifest =
+        serde_json::from_slice::<SemanticManifest>(&fs::read(generation.join("manifest.json"))?)?;
+    let mut cache =
+        serde_json::from_slice::<EmbeddingCache>(&fs::read(generation.join("embeddings.cache"))?)?;
+    let mut stats =
+        serde_json::from_slice::<SemanticStats>(&fs::read(generation.join("stats.json"))?)?;
+    let kept_ids = kept
+        .iter()
+        .map(|target| target.stable_id.as_str())
+        .collect::<HashSet<_>>();
+    cache
+        .entries
+        .retain(|_, entry| kept_ids.contains(entry.target_id.as_str()));
+    let vectors = cache
+        .entries
+        .values()
+        .filter(|entry| entry.vector.len() == manifest.dimensions)
+        .map(|entry| (entry.target_id.as_str(), &entry.vector))
+        .collect::<HashMap<_, _>>();
+    // Rebuilt from the kept vectors rather than removed from the loaded index: an HNSW graph
+    // keeps a removed vector's slot, and its bytes, in the file it saves.
+    let records = kept
+        .iter()
+        .filter_map(|target| {
+            vectors
+                .get(target.stable_id.as_str())
+                .map(|vector| VectorRecord {
+                    id: target.vector_id,
+                    target_id: target.stable_id.clone(),
+                    target_kind: target.kind.clone(),
+                    vector: (*vector).clone(),
+                })
+        })
+        .collect::<Vec<_>>();
+    let vector_count = records.len();
+
+    let scratch = scratch_root.join(format!("prune-{}", Utc::now().timestamp_millis()));
+    fs::create_dir_all(&scratch)?;
+    match resolved_backend_from_name(&manifest.backend)? {
+        ResolvedSemanticBackend::ExactFlat => {
+            let mut index = ExactFlatVectorIndex::new(manifest.dimensions)?;
+            for record in records {
+                index.add(record)?;
+            }
+            index.save(&scratch.join("index.json"))?;
+        }
+        backend @ (ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16) => {
+            let scalar_kind = if backend == ResolvedSemanticBackend::HnswF32 {
+                AnnScalarKind::F32
+            } else {
+                AnnScalarKind::Bf16
+            };
+            let mut index = UsearchHnswVectorIndex::with_parameters(
+                manifest.dimensions,
+                scalar_kind,
+                vector_count,
+                PRODUCTION_HNSW_PARAMETERS,
+            )?;
+            for record in records {
+                index.add(record)?;
+            }
+            index.save(&scratch.join("index.usearch"))?;
+        }
+    }
+    let mut counts = BTreeMap::<String, usize>::new();
+    for target in &kept {
+        *counts.entry(target.kind.clone()).or_default() += 1;
+    }
+    manifest.vector_count = vector_count;
+    manifest.target_counts = counts;
+    stats.vector_count = vector_count;
+    stats.indexed_count = vector_count;
+    stats.failed_count = kept.len().saturating_sub(vector_count);
+    write_json(&scratch.join("manifest.json"), &manifest)?;
+    write_json(&scratch.join("ids.json"), &kept)?;
+    write_json(&scratch.join("embeddings.cache"), &cache)?;
+    stats.disk_usage_bytes = dir_size(&scratch);
+    write_json(&scratch.join("stats.json"), &stats)?;
+
+    remove_vector_dir(generation)?;
+    fs::rename(&scratch, generation)?;
+    Ok(Some((removed.len(), removed_paths)))
+}
+
+fn remove_vector_dir(path: &Path) -> Result<()> {
+    fs::remove_dir_all(path).map_err(|err| {
+        OkError::Storage(format!(
+            "removing {} from the semantic vector store failed: {err}",
+            path.display()
+        ))
+    })
+}
+
 pub fn ensure_enabled(config: &SemanticConfig) -> Result<()> {
     provider_from_config(config).and_then(|provider| {
         provider
