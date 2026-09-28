@@ -10010,3 +10010,62 @@ fn a_go_type_alias_is_listed_just_after_the_type_it_stands_for() {
         "{served}"
     );
 }
+
+/// `ok search` shows one result per file, so an alias's file must not keep the first rank
+/// through another line of it once the alias goes below its target (#621): a group of aliases
+/// whose file name spells the query, and an alias beside a helper that names the type.
+#[test]
+fn a_go_type_alias_file_does_not_outrank_the_type_through_a_neighbour() {
+    let store = "package store\n\n// Entry is a ledger line.\ntype Entry struct{ Amount int }\n\ntype Reader interface{ Read() Entry }\n";
+    let grouped = "package ledger\n\nimport (\n\t\"example.com/app/mid\"\n\t\"example.com/app/store\"\n)\n\ntype Entry = mid.Row\n\ntype Line = store.Entry\n\ntype Source = store.Reader\n\ntype Blob = []byte\n";
+    let helper = "package ledger\n\nimport \"example.com/app/store\"\n\ntype Entry = store.Entry\n\nfunc NewEntry(amount int) Entry { return Entry{Amount: amount} }\n";
+    for (ledger, alias_line) in [(grouped, 8), (helper, 5)] {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        for (path, content) in [
+            ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+            ("store/store.go", store),
+            (
+                "mid/mid.go",
+                "package mid\n\nimport \"example.com/app/store\"\n\ntype Row = store.Entry\n",
+            ),
+            ("ledger/entry.go", ledger),
+        ] {
+            fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            fs::write(repo.join(path), content).unwrap();
+        }
+        run({
+            let mut command = ok();
+            command.arg("index").arg(repo);
+            command
+        });
+        let search: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", "Entry"]);
+            command
+        }))
+        .unwrap();
+        let shown = search["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| {
+                (
+                    result["path"].as_str().unwrap().to_string(),
+                    result["line_range"]["start"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown[..2],
+            [
+                ("store/store.go".to_string(), 4),
+                ("ledger/entry.go".to_string(), alias_line)
+            ],
+            "{search}"
+        );
+    }
+}
