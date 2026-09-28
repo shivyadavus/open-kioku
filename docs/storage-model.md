@@ -17,6 +17,13 @@ SQLite stores metadata:
 
 `replace_index` writes a complete metadata index inside one transaction for crash-safe replacement. Graph writes use a separate transactional `replace_graph` call. Most tables store query columns plus the full JSON domain object; `graph_edges` and `call_sites` do not — see [Compact graph tables](#compact-graph-tables).
 
+`symbols.alias_order_key` holds the qualified name of the type a Go type alias stands for
+(`Symbol::alias_of`) and is `NULL` for every other symbol. Symbol listings order by it, so a
+placed alias follows its target, through a partial index over the few rows that set it. A
+store open adds the column to an index written before it; a row an older Open Kioku inserts
+gets `NULL` and lists under its own name, and a read surface that finds no such column lists
+in plain qualified-name order.
+
 ### Deleted content
 
 Every re-index deletes rows: `ok index` replaces all of them, `ok watch` replaces the changed

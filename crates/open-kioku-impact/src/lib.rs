@@ -2430,6 +2430,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunks = vec![
             CodeChunk {
@@ -2588,6 +2589,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunks = vec![
             CodeChunk {
@@ -3152,6 +3154,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let target_symbol = make_symbol(
             "symbol:auth::issue_token",
@@ -3754,6 +3757,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let occurrences = files[1..]
             .iter()
@@ -4087,6 +4091,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility,
+            alias_of: None,
         }
     }
 

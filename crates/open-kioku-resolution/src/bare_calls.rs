@@ -376,6 +376,7 @@ mod tests {
             scope_id: scope_id.map(ScopeId::new),
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         }
     }
 

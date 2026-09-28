@@ -1223,6 +1223,12 @@ impl Indexer {
                 analysis_facts.extend(non_call_facts);
             }
         }
+        // After every resolution pass, which read an alias by its syntax: from here on, and in
+        // the stored symbol, a placed alias has its target's kind and names its target.
+        symbol_registry::apply_type_alias_targets(
+            &mut symbols,
+            &registry_report.type_alias_targets,
+        );
         let relationship_facts = collect_relationship_analysis_facts(
             &files,
             &symbols,
@@ -3484,6 +3490,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         }
     }
 
@@ -5149,6 +5156,7 @@ class Util {
                 scope_id: None,
                 signature: None,
                 visibility: open_kioku_core::Visibility::Unknown,
+                alias_of: None,
             },
             Symbol {
                 id: SymbolId::new("left"),
@@ -5165,6 +5173,7 @@ class Util {
                 scope_id: None,
                 signature: None,
                 visibility: open_kioku_core::Visibility::Unknown,
+                alias_of: None,
             },
             Symbol {
                 id: SymbolId::new("right"),
@@ -5181,6 +5190,7 @@ class Util {
                 scope_id: None,
                 signature: None,
                 visibility: open_kioku_core::Visibility::Unknown,
+                alias_of: None,
             },
         ];
         let newer_at = Utc.with_ymd_and_hms(2026, 6, 2, 12, 0, 0).unwrap();

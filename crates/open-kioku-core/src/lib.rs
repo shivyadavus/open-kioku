@@ -2219,6 +2219,16 @@ pub struct TypeAliasSite {
     pub target_name: Option<String>,
 }
 
+/// The repository type a Go type alias stands for, as the symbol registry placed it through the
+/// alias file's imports (`TypeAliasSite`), following an alias of an alias to its end. Recorded on
+/// the alias's `Symbol` only when the registry placed one type declaration; an alias of a
+/// predeclared, composite or other module's type carries none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TypeAliasTarget {
+    pub symbol_id: SymbolId,
+    pub qualified_name: String,
+}
+
 /// The package a file declares: a Java `package org.example;` or a Go `package store` clause.
 /// Neither need match the file's directory: a Java file may sit anywhere its build puts it, and a
 /// Go `_test.go` file may declare the external test package `store_test` beside `store`.
@@ -2308,6 +2318,11 @@ pub struct Symbol {
     pub signature: Option<String>,
     #[serde(default)]
     pub visibility: Visibility,
+    /// Set on a Go type alias whose target the index placed: the symbol is that type under
+    /// another name, and its `kind` is the target's. Search ranks it just below the target
+    /// (`type_alias_below_target`), and symbol listings put it just after the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias_of: Option<TypeAliasTarget>,
 }
 
 /// A symbol together with as much of its definition as the index can actually

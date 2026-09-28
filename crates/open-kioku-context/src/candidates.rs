@@ -1004,6 +1004,7 @@ mod tests {
                 scope_id: None,
                 signature: None,
                 visibility: Visibility::Unknown,
+                alias_of: None,
             }),
             score,
             match_reason: "fixture".into(),

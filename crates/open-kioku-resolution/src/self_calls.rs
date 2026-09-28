@@ -128,6 +128,7 @@ mod tests {
             scope_id: Some(ScopeId::new("scope:file")),
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         }
     }
 

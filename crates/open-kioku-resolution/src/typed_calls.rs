@@ -1774,6 +1774,7 @@ mod tests {
             scope_id: Some(ScopeId::new("scope:file")),
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         }
     }
 
@@ -1793,6 +1794,7 @@ mod tests {
             scope_id: Some(ScopeId::new("scope:file")),
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         }
     }
 
@@ -2288,6 +2290,7 @@ mod tests {
             scope_id: Some(ScopeId::new(scope)),
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         };
         let function = SymbolKind::Function;
         let mut symbols = vec![
@@ -2515,6 +2518,7 @@ mod tests {
                     scope_id: None,
                     signature: None,
                     visibility: Visibility::Public,
+                    alias_of: None,
                 }
             })
             .collect();
@@ -3024,6 +3028,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         };
         let symbols = SymbolIndex::build(vec![
             symbol(
@@ -3343,6 +3348,7 @@ mod tests {
             scope_id: Some(ScopeId::new("scope:helpers:file")),
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         };
         with_inline_mod_context(vec![helper.clone()], true, |ctx| {
             let at = |scope: &str, receiver: &str, callee: &str| {

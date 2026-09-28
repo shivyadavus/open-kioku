@@ -1,5 +1,5 @@
 use open_kioku_config::{OkConfig, ResolutionMode};
-use open_kioku_core::{identity, Confidence, GraphEdgeType};
+use open_kioku_core::{identity, Confidence, GraphEdgeType, SymbolKind};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_ingest::Indexer;
 
@@ -529,6 +529,55 @@ fn go_members_reached_through_a_type_alias_link_to_the_aliased_type() {
         "{:?}",
         snapshot.manifest.quality.quality_notes
     );
+}
+
+#[test]
+fn a_placed_go_type_alias_takes_its_targets_kind_and_names_it() {
+    let mut config = OkConfig::default();
+    config.history.enabled = false;
+    config.scip.enabled = false;
+    let repo = copied_fixture("go-alias-fixture");
+    let (snapshot, _) = Indexer::default()
+        .index_repo_with_history(repo.path(), &config)
+        .expect("indexing pipeline failed");
+    let symbol = |qualified_name: &str| {
+        snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == qualified_name)
+            .unwrap_or_else(|| panic!("`{qualified_name}` is indexed"))
+    };
+    let alias = |name: &str| {
+        let alias = symbol(&format!("ledger::aliases::{name}"));
+        (
+            alias.kind.clone(),
+            alias
+                .alias_of
+                .as_ref()
+                .map(|target| (target.symbol_id.clone(), target.qualified_name.clone())),
+        )
+    };
+    let target = |qualified_name: &str| {
+        let target = symbol(qualified_name);
+        Some((target.id.clone(), target.qualified_name.clone()))
+    };
+
+    // `type Source = store.Source` is an interface, as the type it stands for is, although
+    // its syntax node reads as any other type declaration.
+    assert_eq!(
+        alias("Source"),
+        (SymbolKind::Interface, target("store::store::Source"))
+    );
+    assert_eq!(
+        alias("Entry"),
+        (SymbolKind::Class, target("store::store::Entry"))
+    );
+    // Neither `io.Reader` nor `[]byte` is a repository type: the alias keeps the kind its
+    // syntax gave it and names no target.
+    assert_eq!(alias("Reader"), (SymbolKind::Class, None));
+    assert_eq!(alias("Raw"), (SymbolKind::Class, None));
+    // A type that is not an alias names no target.
+    assert!(symbol("store::store::Source").alias_of.is_none());
 }
 
 /// Each symbol-registry fact from the file at `path`: its target, line and edge type, sorted.

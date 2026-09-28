@@ -1,10 +1,16 @@
 package ledger
 
-import "example.com/app/store"
+import (
+	"io"
+
+	"example.com/app/store"
+)
 
 type Entry = store.Entry
 
 type (
-	Batch = store.Batch
-	Raw   = []byte
+	Batch  = store.Batch
+	Source = store.Source
+	Reader = io.Reader
+	Raw    = []byte
 )
