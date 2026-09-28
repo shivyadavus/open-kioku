@@ -1599,6 +1599,101 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // `cfg_attr(all(), ..)` holds on every build, so `imp` is always `sys/x.rs` and the
+        // leftover `sys/imp.rs` is never compiled (#613).
+        "cfg_attr_all_path_leaves_no_default_location" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n\npub fn caller_fn() {\n    crate::sys::imp::target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(all(), path = \"x.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/x.rs", "pub fn other_fn() {}\n"),
+            ],
+            false,
+        ),
+        // `unix` beside `not(unix)` covers every build, so `imp` is `sys/u.rs` or `sys/o.rs` and
+        // never the leftover `sys/imp.rs`; the call reaches each alternative, and proves
+        // neither (#613).
+        "cfg_attr_complementary_paths_leave_no_default_location" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n\npub fn caller_fn() {\n    crate::sys::imp::target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(unix, path = \"u.rs\")]\n#[cfg_attr(not(unix), path = \"o.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/u.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/o.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // `imp` is `sys/imp.rs` unless the condition holds, and `sys/win.rs` when it does: a
+        // path into it proves neither file's `target_fn` (#613).
+        "cfg_attr_path_beside_default_location_alternatives" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n\npub fn caller_fn() {\n    crate::sys::imp::target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // The `#[cfg]` spelling of the same choice: two `mod imp;` items, one at the default
+        // location and one moved by `#[path]` (#613).
+        "cfg_gated_mod_items_alternatives" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n\npub fn caller_fn() {\n    crate::sys::imp::target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg(not(windows))]\npub mod imp;\n#[cfg(windows)]\n#[path = \"win.rs\"]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // A file compiled only with one alternative fixes the choice for paths that stay below
+        // it: `self::inner` in `sys/imp.rs` is `sys/imp/inner.rs`, though `sys/win.rs` has an
+        // `inner` of its own (#613).
+        "cfg_attr_alternative_own_subtree_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                (
+                    "src/sys/imp.rs",
+                    "mod inner;\n\npub fn caller_fn() {\n    self::inner::target_fn();\n}\n",
+                ),
+                ("src/sys/imp/inner.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "mod inner;\n"),
+                ("src/sys/inner.rs", "pub fn other_fn() {}\n"),
+            ],
+            true,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![

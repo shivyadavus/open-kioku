@@ -140,6 +140,9 @@ pub struct ScopeIndex {
     rust_crate_names: HashMap<FileId, Arc<RustCrateNames>>,
     /// The crates outside the repository each Rust file can name by crate name.
     rust_external_crates: HashMap<FileId, Arc<BTreeSet<String>>>,
+    /// The modules configuration selects a file for, by the qualified-name prefix of the crate
+    /// root whose tree holds them.
+    rust_configured_modules: HashMap<String, RustConfiguredModules>,
 }
 
 /// The library crates code of one crate names by crate name: the dependencies its package's
@@ -174,6 +177,40 @@ pub struct RustModulePlacement {
     /// read even when `in_other_crates` is set. Not so for a file another crate mounts with
     /// `#[path]` (other than a `mod.rs`), whose `mod` items that crate reads from its directory.
     pub own_subtree_in_every_crate: bool,
+}
+
+/// The modules of one crate whose file configuration selects (#613): a `mod` item whose `path`
+/// attributes are `cfg_attr`s beside its default location, or several `#[cfg]`-gated `mod` items
+/// of one name, naming more than one file between them. Rustc compiles one of those files on a
+/// given build, and the index does not model the build, so a path into such a module, or below
+/// it, reaches an item of each file but proves none. Modules are spelled below the crate root, as
+/// [`RustModulePlacement::module`] is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RustConfiguredModules {
+    /// The modules whose `mod` items choose between files.
+    pub choices: BTreeSet<Vec<String>>,
+    /// Each module at or below a choice, with the files that may hold it.
+    pub files: BTreeMap<Vec<String>, RustModuleFiles>,
+}
+
+/// The files a module at or below a configuration choice may be compiled from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RustModuleFiles {
+    /// Repository-relative paths without `.rs`, sorted.
+    pub files: Vec<String>,
+    /// A `path` attribute of the choice the index cannot read, or a file of it that was not
+    /// indexed, may name another file.
+    pub unread: bool,
+}
+
+/// What a module path names in a crate with modules configuration selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfiguredModule<'s> {
+    /// The module is at or below a choice, and may be held by each of these files.
+    Files(&'s RustModuleFiles),
+    /// The module is below a choice but is no file module the index followed, such as a type or
+    /// an inline `mod` block: the files of the choice it is below.
+    Below(&'s RustModuleFiles),
 }
 
 /// What the `mod` item a module symbol names turned out to be.
@@ -250,6 +287,42 @@ impl ScopeIndex {
     /// Where `file` sits in its crate's module tree, when it is recorded.
     pub(crate) fn rust_module_placement(&self, file: &FileId) -> Option<&RustModulePlacement> {
         self.rust_module_placements.get(file)
+    }
+
+    /// Records the modules configuration selects a file for, by crate root.
+    pub fn record_rust_configured_modules(
+        &mut self,
+        modules: HashMap<String, RustConfiguredModules>,
+    ) {
+        self.rust_configured_modules.extend(modules);
+    }
+
+    /// Whether `module` of a crate of `placement` is at or below a module whose file
+    /// configuration selects, and which files may hold it. `None` also when `caller`, the module
+    /// of the file the path is written in, is below the same choice: that file is compiled only
+    /// with the file of the choice that holds it, so a path that stays below the choice names
+    /// that file's modules alone.
+    pub(crate) fn rust_configured_module(
+        &self,
+        placement: &RustModulePlacement,
+        caller: Option<&[String]>,
+        module: &[String],
+    ) -> Option<ConfiguredModule<'_>> {
+        placement.crate_roots.iter().find_map(|root| {
+            let configured = self.rust_configured_modules.get(root)?;
+            // The innermost choice the module is at or below.
+            let choice = (1..=module.len())
+                .rev()
+                .map(|len| &module[..len])
+                .find(|prefix| configured.choices.contains(*prefix))?;
+            if caller.is_some_and(|caller| caller.starts_with(choice)) {
+                return None;
+            }
+            match configured.files.get(module) {
+                Some(files) => Some(ConfiguredModule::Files(files)),
+                None => configured.files.get(choice).map(ConfiguredModule::Below),
+            }
+        })
     }
 
     /// Records which library crates each Rust file names by crate name. A path through one of

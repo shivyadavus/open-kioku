@@ -97,7 +97,13 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// its own crate's module tree and below a `#[path]`-mounted file, parsed or read off a file
 /// skipped for size. Earlier indexes read no module path from that file, and hold `CALLS` edges
 /// from a `crate::` path in it into one crate's item when another crate mounts its parent.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v24";
+/// v26: a Rust path into a module whose file configuration selects (a `cfg_attr` path beside the
+/// default location, or `#[cfg]`-gated `mod` items of one name naming more than one file), or
+/// below one, keeps a `CALLS` edge to the item in each file that may hold it, none authoritative
+/// and each naming the files; `cfg_attr(all(), ..)` and `X` beside `not(X)` leave no default
+/// location. Earlier indexes hold one authoritative edge into the placed default file, including
+/// one rustc never compiles. v25 is taken by an open change.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v26";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -142,7 +148,9 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// closure.
 /// v11: a Rust `mod` declaration records whether its every `path` attribute is a `cfg_attr`
 /// (`path_is_conditional`); a v10 index records none, which reads as a `path` that always applies.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v11";
+/// v12: `path_is_conditional` is unset when the `cfg_attr` conditions hold on every build
+/// (`all()`, or `X` beside `not(X)`); a v11 index records such a module as conditional.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v12";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

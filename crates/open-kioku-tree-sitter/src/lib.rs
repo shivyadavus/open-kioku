@@ -1891,16 +1891,31 @@ fn extract_rust_module_declaration(
         has_body: node.child_by_field_name("body").is_some(),
         has_path_attribute: !path_attribute_texts.is_empty(),
         path_attributes: rust_item_path_attributes(node, source),
-        path_is_conditional: !path_attribute_texts.is_empty()
-            && path_attribute_texts
-                .iter()
-                .all(|text| text.starts_with("#[cfg_attr(")),
+        path_is_conditional: rust_path_attributes_are_conditional(&path_attribute_texts),
         range: node_source_range(node),
     });
 }
 
-/// The outer attributes before an item that set `path`, including through `cfg_attr`, each with
-/// its whitespace removed. Outer attributes precede an item as siblings in tree-sitter-rust. Any
+/// Whether the `path` attributes of an item, as [`rust_item_path_attribute_texts`] gives them,
+/// leave the module at its default location on some build: each is a `cfg_attr`, and their
+/// conditions are not ones that hold on every build (`all()`, or `X` beside `not(X)`, #613).
+fn rust_path_attributes_are_conditional(texts: &[String]) -> bool {
+    if texts.is_empty()
+        || !texts
+            .iter()
+            .all(|text| without_whitespace(text).starts_with("#[cfg_attr("))
+    {
+        return false;
+    }
+    let conditions = texts
+        .iter()
+        .filter_map(|text| open_kioku_languages::rust::cfg_attr_condition(text))
+        .collect::<Vec<_>>();
+    !open_kioku_languages::rust::cfg_conditions_hold_on_every_build(&conditions)
+}
+
+/// The outer attributes before an item that set `path`, including through `cfg_attr`, each as
+/// written. Outer attributes precede an item as siblings in tree-sitter-rust. Any
 /// of them moves the module file off its default location, always or when its `cfg_attr`
 /// condition holds; a false match only withholds a binding.
 fn rust_item_path_attribute_texts(node: Node<'_>, source: &[u8]) -> Vec<String> {
@@ -1909,13 +1924,9 @@ fn rust_item_path_attribute_texts(node: Node<'_>, source: &[u8]) -> Vec<String> 
     while let Some(previous) = sibling {
         match previous.kind() {
             "attribute_item" => {
-                let text = previous
-                    .utf8_text(source)
-                    .unwrap_or_default()
-                    .split_whitespace()
-                    .collect::<String>();
-                if text.contains("path=") {
-                    texts.push(text);
+                let text = previous.utf8_text(source).unwrap_or_default();
+                if without_whitespace(text).contains("path=") {
+                    texts.push(text.to_string());
                 }
             }
             "line_comment" | "block_comment" => {}
@@ -1924,6 +1935,10 @@ fn rust_item_path_attribute_texts(node: Node<'_>, source: &[u8]) -> Vec<String> 
         sibling = previous.prev_named_sibling();
     }
     texts
+}
+
+fn without_whitespace(text: &str) -> String {
+    text.split_whitespace().collect()
 }
 
 /// The string literals the `path` attributes before an item set, as written. A crate other than
@@ -3002,7 +3017,7 @@ mod ri3_rust_use_import_site_tests {
         };
         let facts = parse_file(
             &file,
-            "pub mod auth;\n#[cfg(test)]\nmod tests {\n    mod nested;\n}\n#[path = \"store_v2.rs\"]\nmod store;\n/// Platform glue.\n#[cfg_attr(unix, path = \"unix.rs\")]\nmod platform;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[cfg_attr( windows ,\n  path = \"b.rs\")]\nmod both;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[path = \"c.rs\"]\nmod mixed;\n#[cfg_attr(unix, path = r\"raw.rs\")]\nmod unread;\n",
+            "pub mod auth;\n#[cfg(test)]\nmod tests {\n    mod nested;\n}\n#[path = \"store_v2.rs\"]\nmod store;\n/// Platform glue.\n#[cfg_attr(unix, path = \"unix.rs\")]\nmod platform;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[cfg_attr( windows ,\n  path = \"b.rs\")]\nmod both;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[path = \"c.rs\"]\nmod mixed;\n#[cfg_attr(unix, path = r\"raw.rs\")]\nmod unread;\n#[cfg_attr( all( ), path = \"x.rs\")]\nmod always;\n#[cfg_attr(unix, path = \"u.rs\")]\n#[cfg_attr(not( unix ), path = \"o.rs\")]\nmod paired;\n#[cfg_attr(unix, path = \"u.rs\")]\n#[cfg_attr(not(windows), path = \"o.rs\")]\nmod unpaired;\n#[cfg_attr(feature = \"a b\", path = \"u.rs\")]\n#[cfg_attr(not(feature = \"ab\"), path = \"o.rs\")]\nmod spaced;\n#[cfg_attr(unix, cfg_attr(feature = \"x\", path = \"a.rs\"))]\n#[cfg_attr(not(unix), path = \"b.rs\")]\nmod layered;\n",
         )
         .expect("Rust module fixture should parse");
         let declaration = |name: &str| {
@@ -3032,19 +3047,24 @@ mod ri3_rust_use_import_site_tests {
         assert_eq!(declaration("platform").path_attributes, vec!["unix.rs"]);
         // A module whose every `path` is set through `cfg_attr` also compiles from its default
         // location; one `path` that always applies moves it off that location for good (#608).
-        for conditional in ["platform", "both", "unread"] {
+        for conditional in [
+            "platform", "both", "unread", "unpaired", "spaced", "layered",
+        ] {
             assert!(
                 declaration(conditional).path_is_conditional,
                 "{conditional}"
             );
         }
-        for unconditional in ["auth", "tests", "store", "mixed"] {
+        // `all()`, and a condition beside its own `not(..)`, hold on every build, so the default
+        // location is never compiled (#613).
+        for unconditional in ["auth", "tests", "store", "mixed", "always", "paired"] {
             assert!(
                 !declaration(unconditional).path_is_conditional,
                 "{unconditional}"
             );
         }
         assert!(declaration("unread").path_attributes.is_empty());
+        assert_eq!(declaration("paired").path_attributes, vec!["u.rs", "o.rs"]);
     }
 
     #[test]

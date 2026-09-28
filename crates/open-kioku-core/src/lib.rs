@@ -2199,7 +2199,8 @@ pub struct ModuleDeclarationSite {
     pub path_attributes: Vec<String>,
     /// Set when every `path` attribute of the item is inside a `cfg_attr`, so the module is
     /// compiled from its default location (`name.rs` or `name/mod.rs`) whenever no condition
-    /// holds. Unset for an item with no `path` attribute or with one that always applies.
+    /// holds. Unset for an item with no `path` attribute, with one that always applies, or whose
+    /// `cfg_attr` conditions hold on every build: `all()`, or a condition beside its own `not(..)`.
     #[serde(default)]
     pub path_is_conditional: bool,
     pub range: SourceRange,

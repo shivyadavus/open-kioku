@@ -692,6 +692,11 @@ pub(crate) fn scan_module_declarations(source: &str) -> Option<ScannedModules> {
                     attributes_from,
                     item,
                 )?);
+                // Conditions that hold on every build never leave the module at its default
+                // location (#613).
+                if cfg_attr_paths_hold_on_every_build(&stripped, attributes_from, item) {
+                    continue;
+                }
             }
             scanned.names.insert(name.to_string());
         }
@@ -741,6 +746,46 @@ fn conditional_path_values(
         values.push(literal.clone()?);
     }
     Some(values)
+}
+
+/// Whether the `cfg_attr` attributes in `stripped.code[from..to]` have conditions one of which
+/// holds on every build, each read with its string literals put back. A literal the stripping did
+/// not record leaves its condition unread.
+fn cfg_attr_paths_hold_on_every_build(stripped: &StrippedSource, from: usize, to: usize) -> bool {
+    let mut conditions = Vec::new();
+    let text = &stripped.code[from..to];
+    for (opened, _) in text.match_indices("#[") {
+        let mut attribute = String::new();
+        let mut depth = 0usize;
+        let mut readable = true;
+        for (offset, ch) in text[opened..].char_indices() {
+            match stripped.literals.get(&(from + opened + offset)) {
+                Some(Some(literal)) => {
+                    attribute.push('"');
+                    attribute.push_str(literal);
+                    attribute.push('"');
+                    continue;
+                }
+                Some(None) => readable = false,
+                None => {}
+            }
+            attribute.push(ch);
+            match ch {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if readable {
+            conditions.extend(open_kioku_languages::rust::cfg_attr_condition(&attribute));
+        }
+    }
+    open_kioku_languages::rust::cfg_conditions_hold_on_every_build(&conditions)
 }
 
 /// Rust source with its comments and literals removed, as [`strip_comments_and_literals`] gives it.
@@ -1367,8 +1412,47 @@ mod tests {
                 "#[cfg_attr(unix, path =\n    \"unix.rs\"\n)]\nmod sys;\nmod cli;\n",
                 &["unix.rs"],
             ),
+            (
+                "#[cfg_attr(feature = \"a\", path = \"a.rs\")]\n#[cfg_attr(not(feature = \"b\"), path = \"b.rs\")]\nmod sys;\nmod cli;\n",
+                &["a.rs", "b.rs"],
+            ),
+            (
+                "#[cfg_attr(feature = \"a\\\"\", path = \"a.rs\")]\n#[cfg_attr(not(feature = \"a\\\"\"), path = \"b.rs\")]\nmod sys;\nmod cli;\n",
+                &["a.rs", "b.rs"],
+            ),
+            (
+                "#[cfg_attr(unix, cfg_attr(feature = \"x\", path = \"a.rs\"))]\n#[cfg_attr(not(unix), path = \"b.rs\")]\nmod sys;\nmod cli;\n",
+                &["a.rs", "b.rs"],
+            ),
         ] {
             assert_eq!(scan(source), sys(paths), "{source}");
+        }
+        // Conditions that hold on every build never leave `sys` at its default location, which
+        // is then not read as declared; its paths still are (#613).
+        let cli_only = |paths: &[&str]| {
+            Some((
+                vec!["cli".to_string()],
+                paths
+                    .iter()
+                    .map(|path| path.to_string())
+                    .collect::<Vec<_>>(),
+            ))
+        };
+        for (source, paths) in [
+            (
+                "#[cfg_attr(all(), path = \"x.rs\")]\nmod sys;\nmod cli;\n",
+                &["x.rs"][..],
+            ),
+            (
+                "#[cfg_attr(unix, path = \"u.rs\")]\n#[cfg_attr(not( unix ),\n    path = \"o.rs\")]\nmod sys;\nmod cli;\n",
+                &["u.rs", "o.rs"],
+            ),
+            (
+                "#[cfg_attr(feature = \"a\", path = \"a.rs\")] #[cfg_attr(not(feature = \"a\"), path = \"b.rs\")] mod sys;\nmod cli;\n",
+                &["a.rs", "b.rs"],
+            ),
+        ] {
+            assert_eq!(scan(source), cli_only(paths), "{source}");
         }
     }
 }

@@ -1839,6 +1839,99 @@
       "notes": "Regression case (#608): `src/sys/mod.rs` declares `#[cfg_attr(windows, path = \"win.rs\")] mod imp;`, so unless the condition holds `imp` is compiled from `src/sys/imp.rs`, whose `super::target_fn()` names `sys`'s `target_fn`."
     },
     {
+      "id": "ci-rust-calls-89-cfg_attr_all_path_leaves_no_default_location",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_all_path_leaves_no_default_location",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_all_path_leaves_no_default_location:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "cfg_attr_all_path_leaves_no_default_location",
+      "notes": "Regression case (#613): `#[cfg_attr(all(), path = \"x.rs\")] pub mod imp;` holds on every build, so `crate::sys::imp::target_fn()` must not reach the leftover `src/sys/imp.rs`, which is never compiled."
+    },
+    {
+      "id": "ci-rust-calls-90-cfg_attr_complementary_paths_leave_no_default_location",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_complementary_paths_leave_no_default_location",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_complementary_paths_leave_no_default_location:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_complementary_paths_leave_no_default_location",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#613): `cfg_attr(unix, path = \"u.rs\")` beside `cfg_attr(not(unix), path = \"o.rs\")` covers every build, so `crate::sys::imp::target_fn()` reaches `u.rs` and `o.rs` (two candidates, neither authoritative) and never the leftover `src/sys/imp.rs`."
+    },
+    {
+      "id": "ci-rust-calls-91-cfg_attr_path_beside_default_location_alternatives",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_path_beside_default_location_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_path_beside_default_location_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_path_beside_default_location_alternatives",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#613): `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` beside `src/sys/imp.rs` gives `imp` two files, so `crate::sys::imp::target_fn()` keeps a candidate in each and no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-92-cfg_gated_mod_items_alternatives",
+      "fixture_id": "ci/ri3/rust/calls/cfg_gated_mod_items_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_gated_mod_items_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_gated_mod_items_alternatives",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#613): `#[cfg(not(windows))] pub mod imp;` beside `#[cfg(windows)] #[path = \"win.rs\"] pub mod imp;` gives `imp` two files, so `crate::sys::imp::target_fn()` keeps a candidate in each and no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-93-cfg_attr_alternative_own_subtree_path",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_alternative_own_subtree_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_alternative_own_subtree_path:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "cfg_attr_alternative_own_subtree_path",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:cfg_attr_alternative_own_subtree_path:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#613): `self::inner::target_fn()` in `src/sys/imp.rs`, the default location of a `cfg_attr` path module, names `src/sys/imp/inner.rs`: that file is compiled only when `imp` is, so the choice is already made."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
