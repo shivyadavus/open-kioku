@@ -233,6 +233,20 @@ fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+/// The candidates of a type relation that become relationships: the proven one, or each file's
+/// candidate when configuration selects the file the type is in, whose proofs leave it
+/// unproven and name the other files, so no user of any of them is hidden (#625).
+fn kept_candidates(
+    outcome: open_kioku_resolution::ResolutionOutcome,
+) -> impl Iterator<Item = open_kioku_resolution::ResolutionCandidate> {
+    match outcome {
+        open_kioku_resolution::ResolutionOutcome::Proven { candidate } => vec![candidate],
+        open_kioku_resolution::ResolutionOutcome::Alternatives { candidates, .. } => candidates,
+        _ => Vec::new(),
+    }
+    .into_iter()
+}
+
 /// Reports the Rust files whose module-path `CALLS` edges are left unresolved because the index
 /// cannot tell which crate they belong to. Paths are not named: a skipped root may be a
 /// secret-like one.
@@ -1138,17 +1152,17 @@ impl Indexer {
                     &outcome,
                     elapsed_micros(enrichment_started),
                 );
-                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
-                    resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
+                resolved_relationships.extend(kept_candidates(outcome).map(|candidate| {
+                    open_kioku_resolution::ResolvedRelationship {
                         from: site.child_symbol_id.clone(),
                         to: candidate.target_symbol_id,
-                        edge_type,
+                        edge_type: edge_type.clone(),
                         confidence: candidate.confidence,
                         call_site: None,
                         evidence: candidate.evidence,
                         proofs: candidate.proofs,
-                    });
-                }
+                    }
+                }));
             }
 
             for binding in &bindings {
@@ -1182,17 +1196,17 @@ impl Indexer {
                     &outcome,
                     elapsed_micros(enrichment_started),
                 );
-                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
-                    resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
-                        from: source,
+                resolved_relationships.extend(kept_candidates(outcome).map(|candidate| {
+                    open_kioku_resolution::ResolvedRelationship {
+                        from: source.clone(),
                         to: candidate.target_symbol_id,
                         edge_type: GraphEdgeType::UsesType,
                         confidence: candidate.confidence,
                         call_site: None,
                         evidence: candidate.evidence,
                         proofs: candidate.proofs,
-                    });
-                }
+                    }
+                }));
             }
         }
 
@@ -4207,6 +4221,286 @@ class Util {
             .collect::<Vec<_>>();
         edges.sort();
         edges
+    }
+
+    /// Each `edge_type` relationship in a package `fx` of `files`, as (file and name of its
+    /// source, file of its target, whether it is authoritative, the files its proofs name as
+    /// ambiguity), sorted.
+    fn rust_relations(
+        files: &[(&str, &str)],
+        edge_type: open_kioku_core::GraphEdgeType,
+    ) -> Vec<(String, String, bool, Vec<String>)> {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fx\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        for (path, source) in files {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, source).unwrap();
+        }
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.history.enabled = false;
+        let snapshot = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Full)
+            .unwrap();
+        let symbol = |id: &SymbolId| snapshot.symbols.iter().find(|symbol| symbol.id == *id);
+        let file_of = |id: &SymbolId| {
+            let symbol = symbol(id)?;
+            snapshot
+                .files
+                .iter()
+                .find(|file| file.id == symbol.file_id)
+                .map(|file| file.path.to_string_lossy().replace('\\', "/"))
+        };
+        let mut edges = snapshot
+            .resolved_relationships
+            .iter()
+            .filter(|edge| edge.edge_type == edge_type)
+            .map(|edge| {
+                let authoritative =
+                    open_kioku_core::relationship_authority(&edge.edge_type, &edge.proofs)
+                        == open_kioku_core::RelationshipAuthority::Authoritative;
+                let mut ambiguity = edge
+                    .proofs
+                    .iter()
+                    .flat_map(|proof| proof.ambiguity.iter().cloned())
+                    .collect::<Vec<_>>();
+                ambiguity.sort();
+                ambiguity.dedup();
+                (
+                    format!(
+                        "{}::{}",
+                        file_of(&edge.from).unwrap_or_default(),
+                        symbol(&edge.from)
+                            .map(|symbol| symbol.name.as_str())
+                            .unwrap_or("")
+                    ),
+                    file_of(&edge.to).unwrap_or_default(),
+                    authoritative,
+                    ambiguity,
+                )
+            })
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges.dedup();
+        edges
+    }
+
+    #[test]
+    fn a_path_or_import_written_inside_one_alternative_reaches_that_alternative_alone() {
+        // Each alternative of `imp` declares `util` and calls its `g` through a path (`h`) and
+        // through an import (`f`); `lib.rs` calls it from outside every alternative (#624).
+        let inside = "pub mod util;\nuse crate::sys::imp::util::g;\npub fn f() {\n    g();\n}\npub fn h() {\n    crate::sys::imp::util::g();\n}\n";
+        let top = "mod sys;\npub fn top() {\n    crate::sys::imp::util::g();\n}\n";
+        let g = "pub fn g() {}\n";
+        let calls = |files: &[(&str, &str)]| {
+            rust_relations(files, open_kioku_core::GraphEdgeType::Calls)
+                .into_iter()
+                .map(|(from, to, authoritative, ambiguity)| {
+                    (from, to, authoritative, ambiguity.len())
+                })
+                .collect::<Vec<_>>()
+        };
+        let edge = |from: &str, to: &str, authoritative: bool, files: usize| {
+            (from.to_string(), to.to_string(), authoritative, files)
+        };
+        // Both alternatives are files a `path` attribute mounts, which the tree does not place.
+        assert_eq!(
+            calls(&[
+                ("src/lib.rs", top),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(unix, path = \"unix/mod.rs\")]\n#[cfg_attr(not(unix), path = \"other/mod.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/unix/mod.rs", inside),
+                ("src/sys/unix/util.rs", g),
+                ("src/sys/other/mod.rs", inside),
+                ("src/sys/other/util.rs", g),
+            ]),
+            vec![
+                edge("src/lib.rs::top", "src/sys/other/util.rs", false, 2),
+                edge("src/lib.rs::top", "src/sys/unix/util.rs", false, 2),
+                edge("src/sys/other/mod.rs::f", "src/sys/other/util.rs", true, 0),
+                edge("src/sys/other/mod.rs::h", "src/sys/other/util.rs", true, 0),
+                edge("src/sys/unix/mod.rs::f", "src/sys/unix/util.rs", true, 0),
+                edge("src/sys/unix/mod.rs::h", "src/sys/unix/util.rs", true, 0),
+            ]
+        );
+        // The placed default location beside one mounted file: each reads its own `util`.
+        assert_eq!(
+            calls(&[
+                ("src/lib.rs", top),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"other/mod.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp/mod.rs", inside),
+                ("src/sys/imp/util.rs", g),
+                ("src/sys/other/mod.rs", inside),
+                ("src/sys/other/util.rs", g),
+            ]),
+            vec![
+                edge("src/lib.rs::top", "src/sys/imp/util.rs", false, 2),
+                edge("src/lib.rs::top", "src/sys/other/util.rs", false, 2),
+                edge("src/sys/imp/mod.rs::f", "src/sys/imp/util.rs", true, 0),
+                edge("src/sys/imp/mod.rs::h", "src/sys/imp/util.rs", true, 0),
+                edge("src/sys/other/mod.rs::f", "src/sys/other/util.rs", true, 0),
+                edge("src/sys/other/mod.rs::h", "src/sys/other/util.rs", true, 0),
+            ]
+        );
+        // A choice nested in one alternative leaves that alternative's two files, unproven.
+        assert_eq!(
+            calls(&[
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp/mod.rs", inside),
+                ("src/sys/imp/util.rs", g),
+                (
+                    "src/sys/win/mod.rs",
+                    &format!("#[cfg_attr(target_arch = \"x86\", path = \"util32.rs\")]\n{inside}"),
+                ),
+                ("src/sys/win/util.rs", g),
+                ("src/sys/win/util32.rs", g),
+            ]),
+            vec![
+                edge("src/sys/imp/mod.rs::f", "src/sys/imp/util.rs", true, 0),
+                edge("src/sys/imp/mod.rs::h", "src/sys/imp/util.rs", true, 0),
+                edge("src/sys/win/mod.rs::f", "src/sys/win/util.rs", false, 2),
+                edge("src/sys/win/mod.rs::f", "src/sys/win/util32.rs", false, 2),
+                edge("src/sys/win/mod.rs::h", "src/sys/win/util.rs", false, 2),
+                edge("src/sys/win/mod.rs::h", "src/sys/win/util32.rs", false, 2),
+            ]
+        );
+        // `#[cfg]`-gated definitions of `g` in the one file the choice leaves stay candidates,
+        // unproven, rather than losing the edge.
+        assert_eq!(
+            calls(&[
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(unix, path = \"unix/mod.rs\")]\n#[cfg_attr(not(unix), path = \"other/mod.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/unix/mod.rs", inside),
+                (
+                    "src/sys/unix/util.rs",
+                    "#[cfg(target_os = \"linux\")]\npub fn g() {}\n#[cfg(not(target_os = \"linux\"))]\npub fn g() {}\n",
+                ),
+                ("src/sys/other/mod.rs", "pub mod util;\n"),
+                ("src/sys/other/util.rs", g),
+            ]),
+            vec![
+                edge("src/sys/unix/mod.rs::f", "src/sys/unix/util.rs", false, 1),
+                edge("src/sys/unix/mod.rs::h", "src/sys/unix/util.rs", false, 1),
+            ]
+        );
+        // A file both alternatives mount is compiled with either, so it reaches both.
+        let common = "use crate::sys::imp::util::g;\npub fn f() {\n    g();\n}\npub fn h() {\n    crate::sys::imp::util::g();\n}\n";
+        let mounts = "#[path = \"../common.rs\"]\npub mod common;\npub mod util;\n";
+        assert_eq!(
+            calls(&[
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(unix, path = \"unix/mod.rs\")]\n#[cfg_attr(not(unix), path = \"other/mod.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/common.rs", common),
+                ("src/sys/unix/mod.rs", mounts),
+                ("src/sys/unix/util.rs", g),
+                ("src/sys/other/mod.rs", mounts),
+                ("src/sys/other/util.rs", g),
+            ]),
+            vec![
+                edge("src/sys/common.rs::f", "src/sys/other/util.rs", false, 2),
+                edge("src/sys/common.rs::f", "src/sys/unix/util.rs", false, 2),
+                edge("src/sys/common.rs::h", "src/sys/other/util.rs", false, 2),
+                edge("src/sys/common.rs::h", "src/sys/unix/util.rs", false, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_type_imported_through_a_module_whose_file_configuration_selects_is_every_files_type() {
+        // `use crate::sys::imp::{S, T};` where `imp` is `imp/mod.rs` or `win/mod.rs`, each
+        // declaring `S` with `new` and `m`, and a trait `T`. `win/user.rs` is below the mounted
+        // alternative, `imp/user.rs` below the placed one (#625).
+        let types = "pub mod user;\npub struct S;\nimpl S {\n    pub fn new() -> Self {\n        S\n    }\n    pub fn m(&self) {}\n}\npub trait T {\n    fn t(&self);\n}\n";
+        let user = |name: &str| {
+            format!("use crate::sys::imp::S;\npub fn {name}(s: &S) {{\n    s.m();\n}}\n")
+        };
+        let (imp_user, win_user) = (user("u"), user("w"));
+        let files = |declaring: &'static str| {
+            vec![
+                (
+                    "src/lib.rs",
+                    "mod sys;\nuse crate::sys::imp::{S, T};\npub struct Mine;\nimpl T for Mine {\n    fn t(&self) {}\n}\npub fn go(s: &S) {\n    s.m();\n}\npub fn mk() {\n    let s = S::new();\n    s.m();\n}\n",
+                ),
+                ("src/sys/mod.rs", declaring),
+                ("src/sys/imp/mod.rs", types),
+                ("src/sys/imp/user.rs", imp_user.as_str()),
+                ("src/sys/win/mod.rs", types),
+                ("src/sys/win/user.rs", win_user.as_str()),
+            ]
+        };
+        let relations = |declaring: &'static str, edge_type| {
+            rust_relations(&files(declaring), edge_type)
+                .into_iter()
+                .map(|(from, to, authoritative, ambiguity)| {
+                    (from, to, authoritative, ambiguity.len())
+                })
+                .collect::<Vec<_>>()
+        };
+        let edge = |from: &str, to: &str, authoritative: bool, files: usize| {
+            (from.to_string(), to.to_string(), authoritative, files)
+        };
+        let configured = "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n";
+        let (imp, win) = ("src/sys/imp/mod.rs", "src/sys/win/mod.rs");
+        let both = |from: &str| vec![edge(from, imp, false, 2), edge(from, win, false, 2)];
+        // Every method call through the imported type, and `S::new()`, reaches both files'
+        // method, unproven; one written below either alternative reaches its own.
+        let mut calls = both("src/lib.rs::go");
+        calls.extend(both("src/lib.rs::mk"));
+        calls.push(edge("src/sys/imp/user.rs::u", imp, true, 0));
+        calls.push(edge("src/sys/win/user.rs::w", win, true, 0));
+        calls.sort();
+        assert_eq!(
+            relations(configured, open_kioku_core::GraphEdgeType::Calls),
+            calls
+        );
+        // The declared type and the implemented trait are each file's too, never authoritative.
+        let uses = relations(configured, open_kioku_core::GraphEdgeType::UsesType);
+        assert_eq!(
+            uses.iter()
+                .filter(|(from, ..)| from == "src/lib.rs::go")
+                .cloned()
+                .collect::<Vec<_>>(),
+            both("src/lib.rs::go")
+        );
+        assert!(
+            uses.contains(&edge("src/sys/win/user.rs::w", win, true, 0)),
+            "{uses:?}"
+        );
+        assert_eq!(
+            relations(configured, open_kioku_core::GraphEdgeType::Implements),
+            both("src/lib.rs::Mine")
+        );
+        // Control: with no choice the placed file is proven throughout.
+        let placed = "pub mod imp;\n";
+        assert!(relations(placed, open_kioku_core::GraphEdgeType::Calls)
+            .iter()
+            .filter(|(from, ..)| from.starts_with("src/lib.rs::"))
+            .all(|(_, to, authoritative, files)| to == imp && *authoritative && *files == 0));
+        assert_eq!(
+            relations(placed, open_kioku_core::GraphEdgeType::Implements),
+            vec![edge("src/lib.rs::Mine", imp, true, 0)]
+        );
     }
 
     #[test]

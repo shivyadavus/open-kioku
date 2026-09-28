@@ -14,8 +14,8 @@ pub use calls::{resolve_call, resolve_call_outcome};
 pub use context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 pub use evidence::{ResolutionEvidence, ResolutionEvidenceKind, ResolvedRelationship};
 pub use index::{
-    BindingIndex, RustConfiguredModules, RustCrateNames, RustModuleFiles, RustModulePlacement,
-    ScopeIndex, SymbolIndex,
+    BindingIndex, RustConfiguredModules, RustConfiguredRead, RustCrateNames, RustModuleFiles,
+    RustModulePlacement, RustModuleRoute, ScopeIndex, SymbolIndex,
 };
 pub use inheritance::InheritanceIndex;
 pub use language_capabilities::{

@@ -8,7 +8,7 @@ use open_kioku_core::{
     SymbolKind,
 };
 use open_kioku_resolution::{
-    RustConfiguredModules, RustCrateNames, RustModuleFiles, RustModulePlacement,
+    RustConfiguredModules, RustConfiguredRead, RustCrateNames, RustModulePlacement, RustModuleRoute,
 };
 use open_kioku_semantic_model::{
     CargoImporter, ConfiguredImportTargets, ProjectModel, ProjectRoot,
@@ -19,7 +19,7 @@ pub use open_kioku_semantic_model::{
 };
 use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -129,6 +129,16 @@ struct RustPathTarget {
     /// What the path names in each file of a module whose file configuration selects, when it
     /// passes through one the file writing it is not below (#615).
     configured: Option<ConfiguredImportTargets>,
+}
+
+/// What a Rust `use` path names once modules whose file configuration selects are read.
+enum ConfiguredPath {
+    /// What the placed tree reached, with what the path names in each file that may hold such a
+    /// module on a build that compiles the writer, if it passes one.
+    Alternatives(Option<RustPathTarget>),
+    /// The writer fixes every choice on the path: what the path names in the one file each
+    /// choice is compiled from with it, in place of what the placed tree reached.
+    Proven(Option<RustPathTarget>),
 }
 
 /// The file a `#[path]` attribute on a `mod` item mounts, as far as the index can tell.
@@ -462,17 +472,8 @@ impl<'a> RustModuleTree<'a> {
         hops: usize,
     ) -> Option<RustPathTarget> {
         let placed = self.placed_path_target(path, follow_reexports, symbols, scopes, hops);
-        match self.configured_path_targets(path, writer, placed.as_ref(), symbols) {
-            Some(configured) => Some(RustPathTarget {
-                configured: Some(configured),
-                ..placed.unwrap_or(RustPathTarget {
-                    module_file: None,
-                    item: None,
-                    reexport: false,
-                    configured: None,
-                })
-            }),
-            None => placed,
+        match self.configured_path_targets(path, writer, placed, symbols) {
+            ConfiguredPath::Alternatives(target) | ConfiguredPath::Proven(target) => target,
         }
     }
 
@@ -514,56 +515,119 @@ impl<'a> RustModuleTree<'a> {
 
     /// What `path` names in each file of a module whose file configuration selects, when the
     /// path ends at or below one that `writer` is not below (#615): each file of a module the
-    /// path names, or the item of its name in each file of the module holding it. What the
-    /// placed tree reached, `placed`, is one of them, including through a `pub use` of one file,
-    /// and a choice a `pub use` it was followed through passes, is kept too. `None` for a path
-    /// no such choice is on, whose `placed` target stands proven.
+    /// path names, or the item of its name in each file of the module holding it, as
+    /// `configured` beside `placed`, what the placed tree reached. What `placed` reached is one
+    /// of them, including through a `pub use` of one file, and a choice a `pub use` it was
+    /// followed through passes, is kept too. A file inside one alternative, `path`-mounted or
+    /// not, is compiled only with that alternative's files, so the path names those alone
+    /// (#624), and when that leaves one file for every choice on the path, what the path names
+    /// there is its proven target, in place of `placed`. `placed` stands alone for a path no such
+    /// choice is on.
     fn configured_path_targets(
         &self,
         path: &RustUsePath,
         writer: Option<&Path>,
-        placed: Option<&RustPathTarget>,
+        placed: Option<RustPathTarget>,
         symbols: &open_kioku_resolution::SymbolIndex,
-    ) -> Option<ConfiguredImportTargets> {
-        let (item_name, parent) = path.segments.split_last()?;
+    ) -> ConfiguredPath {
+        let Some((item_name, parent)) = path.segments.split_last() else {
+            return ConfiguredPath::Alternatives(placed);
+        };
         if item_name == "*" {
-            return None;
+            return ConfiguredPath::Alternatives(placed);
         }
         let mut found = ConfiguredImportTargets::default();
-        if let Some((Some(files), _)) = self.configured_choice(path, writer, &path.segments) {
-            found.module_files = files
-                .files
-                .iter()
-                .filter_map(|stem| self.files_by_stem.get(stem).cloned())
-                .collect();
-            found.files.clone_from(&files.files);
-            found.unread = files.unread;
-        }
-        if found.module_files.is_empty() {
-            if let Some((own, choice)) = self.configured_choice(path, writer, parent) {
-                let files = own.unwrap_or(choice);
-                if let Some(own) = own {
-                    found.items = rust_module_items(&own.files, item_name, symbols);
-                }
+        let mut reading = None;
+        if let Some(read) = self.configured_choice(path, writer, &path.segments) {
+            if let Some(files) = &read.files {
+                found.module_files = self.file_ids(&files.files);
                 found.files.clone_from(&files.files);
                 found.unread = files.unread;
+                reading = Some(read);
             }
         }
-        let inner = placed.and_then(|placed| placed.configured.as_ref());
+        if found.module_files.is_empty() {
+            if let Some(read) = self.configured_choice(path, writer, parent) {
+                if let Some(own) = &read.files {
+                    found.items = rust_module_items(&own.files, item_name, symbols);
+                }
+                let files = read.files.as_ref().unwrap_or(&read.choice_files);
+                found.files.clone_from(&files.files);
+                found.unread = files.unread;
+                reading = Some(read);
+            }
+        }
+        // One file for every choice: the path names its module, or its one item of the name.
+        // Several items of the name in that file (`#[cfg]`-gated definitions) stay unproven
+        // alternatives below, as they are from outside.
+        let several_items = found.module_files.is_empty() && found.items.len() > 1;
+        if reading.as_ref().is_some_and(|read| read.proven) && !several_items {
+            let target = match (found.module_files.as_slice(), found.items.as_slice()) {
+                ([module_file], _) => Some(RustPathTarget {
+                    module_file: Some(module_file.clone()),
+                    item: None,
+                    reexport: false,
+                    configured: None,
+                }),
+                ([], [item]) => Some(RustPathTarget {
+                    module_file: None,
+                    item: Some(item.clone()),
+                    reexport: false,
+                    configured: None,
+                }),
+                // Not declared in that file, or through its `pub use`, which is not followed
+                // there: what the placed tree reached is in a file never compiled with this one.
+                _ => None,
+            };
+            return ConfiguredPath::Proven(target);
+        }
+        // A file a build that compiles the writer may compile: below no choice, or on a route
+        // that agrees with the writer's.
+        let may_compile = |file: &FileId| {
+            reading
+                .as_ref()
+                .is_none_or(|read: &RustConfiguredRead<'_>| read.may_compile(file))
+        };
+        let item_compiles = |item: &SymbolId| {
+            symbols
+                .get(item)
+                .is_some_and(|symbol| may_compile(&symbol.file_id))
+        };
+        let inner = placed
+            .as_ref()
+            .and_then(|placed| placed.configured.as_ref());
         if found.files.is_empty() && inner.is_none() {
-            return None;
+            return ConfiguredPath::Alternatives(placed);
         }
-        if let Some(placed) = placed {
-            found.items.extend(placed.item.iter().cloned());
-            found
-                .module_files
-                .extend(placed.module_file.iter().cloned());
-        }
+        let mut target = placed.clone().unwrap_or(RustPathTarget {
+            module_file: None,
+            item: None,
+            reexport: false,
+            configured: None,
+        });
+        // The placed tree's own target stays on the binding only where a build compiling the
+        // writer may compile it.
+        target.item = target.item.filter(|item| item_compiles(item));
+        target.module_file = target.module_file.filter(|file| may_compile(file));
+        found.items.extend(target.item.iter().cloned());
+        found
+            .module_files
+            .extend(target.module_file.iter().cloned());
         if let Some(inner) = inner {
-            found.items.extend(inner.items.iter().cloned());
-            found
-                .module_files
-                .extend(inner.module_files.iter().cloned());
+            found.items.extend(
+                inner
+                    .items
+                    .iter()
+                    .filter(|item| item_compiles(item))
+                    .cloned(),
+            );
+            found.module_files.extend(
+                inner
+                    .module_files
+                    .iter()
+                    .filter(|file| may_compile(file))
+                    .cloned(),
+            );
             found.files.extend(inner.files.iter().cloned());
             found.unread |= inner.unread;
         }
@@ -575,39 +639,55 @@ impl<'a> RustModuleTree<'a> {
         found.module_files.dedup();
         found.files.sort();
         found.files.dedup();
-        (!found.items.is_empty() || !found.module_files.is_empty()).then_some(found)
+        if found.items.is_empty() && found.module_files.is_empty() {
+            return ConfiguredPath::Alternatives(
+                (target.item.is_some() || target.module_file.is_some()).then_some(target),
+            );
+        }
+        target.configured = Some(found);
+        ConfiguredPath::Alternatives(Some(target))
     }
 
-    /// The files that may hold `module` of the crate `path` is read in, when it is at or below
-    /// a module whose file configuration selects (`None` for a module below the choice that no
-    /// followed file module is, such as an inline `mod` block), and the files of that choice.
-    /// `None` when `writer` is placed below the same choice: it is compiled only with the file
-    /// of the choice holding it, so a path that stays below the choice names that file's modules
-    /// alone.
+    /// The ids of the indexed files at `stems`.
+    fn file_ids(&self, stems: &[String]) -> Vec<FileId> {
+        stems
+            .iter()
+            .filter_map(|stem| self.files_by_stem.get(stem).cloned())
+            .collect()
+    }
+
+    /// What `module` of the crate `path` is read in names, when it is at or below a module whose
+    /// file configuration selects, read from `writer`, the file writing the path (`None` for a
+    /// path through a crate name, which is written in another crate). A writer the tree does not
+    /// place, such as a file a `path` attribute mounts, is read by its route through the choices
+    /// (#624). `None` when `writer` is placed below the same choice: it is compiled only with the
+    /// file of the choice holding it, so a path that stays below the choice names that file's
+    /// modules alone, as the tree places them.
     fn configured_choice(
         &self,
         path: &RustUsePath,
         writer: Option<&Path>,
         module: &[String],
-    ) -> Option<(Option<&RustModuleFiles>, &RustModuleFiles)> {
+    ) -> Option<RustConfiguredRead<'_>> {
         let configured = self.configured();
         if configured.is_empty() {
             return None;
         }
+        let placed = writer.and_then(|writer| self.placed_module(writer));
+        let stem = writer.and_then(rust_file_stem);
         self.crate_roots(path).iter().find_map(|root| {
             let modules = configured.get(&root.replace('/', "::"))?;
-            // The innermost choice the module is at or below.
-            let choice = (1..=module.len())
-                .rev()
-                .map(|len| &module[..len])
-                .find(|prefix| modules.choices.contains(*prefix))?;
-            if writer
-                .and_then(|writer| self.placed_module(writer))
-                .is_some_and(|writer| writer.starts_with(choice))
+            let from = stem
+                .as_deref()
+                .and_then(|stem| modules.route_of(stem, placed.as_deref()));
+            let read = modules.read(module, from)?;
+            if placed
+                .as_ref()
+                .is_some_and(|writer| writer.starts_with(&read.choice))
             {
                 return None;
             }
-            Some((modules.files.get(module), modules.files.get(choice)?))
+            Some(read)
         })
     }
 
@@ -1000,6 +1080,8 @@ impl<'a> RustModuleTree<'a> {
 
     fn find_configured_modules(&self) -> HashMap<String, RustConfiguredModules> {
         let mut configured = HashMap::<String, RustConfiguredModules>::new();
+        // The route to each file, by crate root; `None` for a file two routes reach.
+        let mut routes = HashMap::<String, HashMap<String, Option<RustModuleRoute>>>::new();
         let mut declaring = self
             .declared_modules
             .iter()
@@ -1037,23 +1119,52 @@ impl<'a> RustModuleTree<'a> {
                     continue;
                 }
                 let mut found = RustConfiguredModules::default();
-                self.configured_subtree(module, candidates, unread, &mut found);
+                let mut found_routes = HashMap::new();
+                self.configured_subtree(
+                    module,
+                    (stem, candidates, unread),
+                    &mut found,
+                    &mut found_routes,
+                );
                 for root in &roots {
-                    let into = configured.entry(root.replace('/', "::")).or_default();
+                    let root = root.replace('/', "::");
+                    let into = configured.entry(root.clone()).or_default();
                     into.choices.extend(found.choices.iter().cloned());
                     for (module, files) in &found.files {
                         let entry = into.files.entry(module.clone()).or_default();
                         entry.files.extend(files.files.iter().cloned());
                         entry.unread |= files.unread;
                     }
+                    into.stems.extend(
+                        found
+                            .stems
+                            .iter()
+                            .map(|(id, stem)| (id.clone(), stem.clone())),
+                    );
+                    for (module, declaring) in &found.unread_by {
+                        into.unread_by
+                            .entry(module.clone())
+                            .or_default()
+                            .extend(declaring.iter().cloned());
+                    }
+                    let into = routes.entry(root).or_default();
+                    for (stem, route) in &found_routes {
+                        merge_route(into, stem, route.clone());
+                    }
                 }
             }
         }
-        for modules in configured.values_mut() {
+        for (root, modules) in &mut configured {
             for files in modules.files.values_mut() {
                 files.files.sort();
                 files.files.dedup();
             }
+            modules.routes = routes
+                .remove(root)
+                .into_iter()
+                .flatten()
+                .filter_map(|(stem, route)| Some((stem, route?)))
+                .collect();
         }
         configured
     }
@@ -1110,29 +1221,50 @@ impl<'a> RustModuleTree<'a> {
         (candidates, unread)
     }
 
-    /// Records `module`, whose file configuration selects from `candidates`, and the modules its
-    /// candidates declare below it, each with the files that may hold it, in `out`. A file a
-    /// `path` mounts has its own `mod` items read from its directory, as a `mod.rs` file does.
+    /// Records `module`, which `declaring` gives a file configuration selects from `candidates`
+    /// (with whether one of them the index cannot read or did not index may name another), and
+    /// the modules its candidates declare below it, each with the files that may hold it, in
+    /// `out`. A file a `path` mounts has its own `mod` items read from its directory, as a
+    /// `mod.rs` file does. The route to each file the walk reaches by one route alone is recorded
+    /// in `routes`, and `None` for one it reaches by more (#624).
     fn configured_subtree(
         &self,
         module: Vec<String>,
-        candidates: Vec<(String, bool)>,
-        unread: bool,
+        (declaring, candidates, unread): (&str, Vec<(String, bool)>, bool),
         out: &mut RustConfiguredModules,
+        routes: &mut HashMap<String, Option<RustModuleRoute>>,
     ) {
         out.choices.insert(module.clone());
-        let mut seen = HashSet::new();
-        let mut pending = candidates
-            .into_iter()
-            .map(|(stem, mounted)| (module.clone(), stem, mounted, unread))
-            .collect::<Vec<_>>();
+        if unread {
+            out.unread_by
+                .entry(module.clone())
+                .or_default()
+                .insert(declaring.to_string());
+        }
+        // Each (module, file) the walk reached, with those it was reached from: a candidate of
+        // the choice itself is reached from none.
+        let mut parents = WalkParents::new();
+        let mut pending = Vec::new();
+        for (stem, mounted) in candidates {
+            if parents
+                .insert((module.clone(), stem.clone()), BTreeSet::new())
+                .is_none()
+            {
+                pending.push((module.clone(), stem, mounted, unread));
+            }
+        }
+        let tops = parents.keys().cloned().collect::<HashSet<_>>();
         while let Some((module, stem, mounted, unread)) = pending.pop() {
             let entry = out.files.entry(module.clone()).or_default();
             entry.files.push(stem.clone());
             entry.unread |= unread;
             // An unindexed file's `mod` items are not known: a path below it is read as below
             // the choice, against the files the tree places.
-            if module.len() >= MAX_CONFIGURED_DEPTH || !self.files_by_stem.contains_key(&stem) {
+            let Some(id) = self.files_by_stem.get(&stem) else {
+                continue;
+            };
+            out.stems.insert(id.clone(), stem.clone());
+            if module.len() >= MAX_CONFIGURED_DEPTH {
                 continue;
             }
             let dir = if mounted || is_mod_rs(&stem) {
@@ -1157,12 +1289,40 @@ impl<'a> RustModuleTree<'a> {
                 if candidates.len() + usize::from(unread) >= 2 {
                     out.choices.insert(child.clone());
                 }
+                if unread {
+                    out.unread_by
+                        .entry(child.clone())
+                        .or_default()
+                        .insert(stem.clone());
+                }
                 for (candidate, mounted) in candidates {
-                    if seen.insert((child.clone(), candidate.clone())) {
-                        pending.push((child.clone(), candidate, mounted, unread));
-                    }
+                    let from = parents
+                        .entry((child.clone(), candidate.clone()))
+                        .or_insert_with(|| {
+                            pending.push((child.clone(), candidate.clone(), mounted, unread));
+                            BTreeSet::new()
+                        });
+                    from.insert((module.clone(), stem.clone()));
                 }
             }
+        }
+        let mut memo = HashMap::new();
+        let mut by_stem = BTreeMap::<&str, Vec<&WalkNode>>::new();
+        for node in parents.keys() {
+            by_stem.entry(node.1.as_str()).or_default().push(node);
+        }
+        for (stem, nodes) in by_stem {
+            let route = match nodes.as_slice() {
+                [node] => {
+                    node_route(node, &parents, &tops, &mut memo, 0).map(|files| RustModuleRoute {
+                        module: node.0.clone(),
+                        files,
+                    })
+                }
+                // One file held as two modules is compiled with no one choice made.
+                _ => None,
+            };
+            merge_route(routes, stem, route);
         }
     }
 
@@ -1666,6 +1826,76 @@ fn may_choose(items: &[DeclaredModule]) -> bool {
     })
 }
 
+/// A route through the configured subtree, keyed by module: the file each module is compiled
+/// from.
+type RouteFiles = BTreeMap<Vec<String>, String>;
+
+/// A (module, file) the walk below a choice reached.
+type WalkNode = (Vec<String>, String);
+
+/// Each node the walk below a choice reached, with the nodes it was reached from.
+type WalkParents = HashMap<WalkNode, BTreeSet<WalkNode>>;
+
+/// The route to `node`, a (module, file) the walk below a choice reached: the files from the
+/// choice down to it. `None` when it is reached from more than one (module, file), or from one
+/// whose route is `None`, or a candidate of the choice is also reached from below it.
+fn node_route(
+    node: &WalkNode,
+    parents: &WalkParents,
+    tops: &HashSet<WalkNode>,
+    memo: &mut HashMap<WalkNode, Option<RouteFiles>>,
+    depth: usize,
+) -> Option<RouteFiles> {
+    if let Some(route) = memo.get(node) {
+        return route.clone();
+    }
+    // Deeper than the walk goes only through a cycle of `path` attributes.
+    if depth > MAX_CONFIGURED_DEPTH {
+        return None;
+    }
+    let from = parents.get(node)?;
+    let route = match (
+        tops.contains(node),
+        from.iter().collect::<Vec<_>>().as_slice(),
+    ) {
+        (true, []) => Some(BTreeMap::new()),
+        (false, [parent]) => node_route(parent, parents, tops, memo, depth + 1),
+        _ => None,
+    }
+    .map(|mut files| {
+        files.insert(node.0.clone(), node.1.clone());
+        files
+    });
+    memo.insert(node.clone(), route.clone());
+    route
+}
+
+/// Records `route` for the file at `stem` in `routes`. Two walks may reach one file, such as the
+/// walk below a choice and the walk below a choice nested in a placed file of it: the longer
+/// route stands when it holds the shorter one; routes that disagree leave the file none.
+fn merge_route(
+    routes: &mut HashMap<String, Option<RustModuleRoute>>,
+    stem: &str,
+    route: Option<RustModuleRoute>,
+) {
+    let Some(known) = routes.get_mut(stem) else {
+        routes.insert(stem.to_string(), route);
+        return;
+    };
+    let holds = |outer: &RustModuleRoute, inner: &RustModuleRoute| {
+        outer.module == inner.module
+            && inner
+                .files
+                .iter()
+                .all(|(module, file)| outer.files.get(module) == Some(file))
+    };
+    *known = match (known.take(), route) {
+        (Some(left), Some(right)) if holds(&left, &right) => Some(left),
+        (Some(left), Some(right)) if holds(&right, &left) => Some(right),
+        _ => None,
+    };
+}
+
 /// Where the library crate root of the package at `root` sits, for paths through its crate name.
 /// `None` when the layout does not follow the library's module tree.
 fn library_placement(root: &ProjectRoot) -> Option<RustModulePlacement> {
@@ -2034,7 +2264,10 @@ pub(crate) fn rust_import_edge_targets(
             modules
                 .rust_path(importer, site.scope_id.as_ref(), &site.source, scopes)
                 .and_then(|(path, crate_name)| {
-                    rust_import_edge(&path, crate_name, symbols, scopes, modules)
+                    // A path through a crate name is written in another crate, where no choice
+                    // of that crate's configuration-selected modules is made.
+                    let writer = (!crate_name).then_some(*importer);
+                    rust_import_edge(&path, crate_name, writer, symbols, scopes, modules)
                 })
         };
         if !in_crate && edge.is_none() {
@@ -2102,6 +2335,7 @@ fn rust_self_module_site(site: &ImportSite, scopes: &open_kioku_resolution::Scop
 fn rust_import_edge(
     path: &RustUsePath,
     follow_reexports: bool,
+    writer: Option<&Path>,
     symbols: &open_kioku_resolution::SymbolIndex,
     scopes: &open_kioku_resolution::ScopeIndex,
     modules: &RustModuleTree<'_>,
@@ -2115,8 +2349,13 @@ fn rust_import_edge(
         return modules.module_or_root_file(path, parent).map(module_edge);
     }
     // The file-level edge is read off the tree as placed; the alternatives a
-    // configuration-selected module adds bind the names, not this edge.
-    let target = modules.placed_path_target(path, follow_reexports, symbols, scopes, 0)?;
+    // configuration-selected module adds bind the names, not this edge. A writer inside one
+    // alternative imports from that alternative alone, and from its own file when that leaves one
+    // for every choice on the path (#624).
+    let placed = modules.placed_path_target(path, follow_reexports, symbols, scopes, 0);
+    let target = match modules.configured_path_targets(path, writer, placed, symbols) {
+        ConfiguredPath::Alternatives(target) | ConfiguredPath::Proven(target) => target,
+    }?;
     let strategy = if target.reexport {
         RUST_REEXPORT_STRATEGY
     } else if target.module_file.is_some() {

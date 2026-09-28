@@ -191,6 +191,40 @@ pub struct RustConfiguredModules {
     pub choices: BTreeSet<Vec<String>>,
     /// Each module at or below a choice, with the files that may hold it.
     pub files: BTreeMap<Vec<String>, RustModuleFiles>,
+    /// The route to each file at or below a choice that the module tree reaches by one route
+    /// alone, by its repository-relative path without `.rs` (#624). A file two routes reach, such
+    /// as one both alternatives mount, has none.
+    pub routes: BTreeMap<String, RustModuleRoute>,
+    /// The repository-relative path without `.rs` of each indexed file at or below a choice.
+    pub stems: BTreeMap<FileId, String>,
+    /// For each module whose files the index may not all know, the files whose `mod` items for
+    /// it hold a `path` the index cannot read or name a file it did not index. A choice's own
+    /// declaring file is placed, so it is below no choice.
+    pub unread_by: BTreeMap<Vec<String>, BTreeSet<String>>,
+}
+
+/// Where a file at or below a configuration choice sits: a build compiles it only with the file
+/// this route names for each module above it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RustModuleRoute {
+    /// The module the file holds, below the crate root.
+    pub module: Vec<String>,
+    /// The file each module from the outermost choice above the file down to `module` is
+    /// compiled from on a build that compiles the file, repository-relative without `.rs`.
+    pub files: BTreeMap<Vec<String>, String>,
+}
+
+impl RustModuleRoute {
+    /// Whether one build may compile the files of both routes: they name the same file for
+    /// every module both hold.
+    pub fn agrees_with(&self, other: &Self) -> bool {
+        self.files.iter().all(|(module, file)| {
+            other
+                .files
+                .get(module)
+                .is_none_or(|other_file| other_file == file)
+        })
+    }
 }
 
 /// The files a module at or below a configuration choice may be compiled from.
@@ -203,14 +237,128 @@ pub struct RustModuleFiles {
     pub unread: bool,
 }
 
-/// What a module path names in a crate with modules configuration selects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConfiguredModule<'s> {
-    /// The module is at or below a choice, and may be held by each of these files.
-    Files(&'s RustModuleFiles),
-    /// The module is below a choice but is no file module the index followed, such as a type or
-    /// an inline `mod` block: the files of the choice it is below.
-    Below(&'s RustModuleFiles),
+impl RustModuleFiles {
+    /// One file, which the index read.
+    fn is_single(&self) -> bool {
+        self.files.len() == 1 && !self.unread
+    }
+}
+
+/// What a module path at or below a module whose file configuration selects names, read from
+/// one file (#613, #624).
+#[derive(Debug, Clone)]
+pub struct RustConfiguredRead<'s> {
+    modules: &'s RustConfiguredModules,
+    from: Option<&'s RustModuleRoute>,
+    /// The innermost choice the module is at or below.
+    pub choice: Vec<String>,
+    /// The files that may hold the module on a build that compiles the reading file; `None` for a
+    /// module below the choice that no followed file module is, such as a type or an inline `mod`
+    /// block.
+    pub files: Option<RustModuleFiles>,
+    /// The files that may hold the choice on such a build.
+    pub choice_files: RustModuleFiles,
+    /// The reading file is compiled only with one readable file for every choice on the path, so
+    /// the path names that file's module and the path proves what it reaches there.
+    pub proven: bool,
+}
+
+impl RustConfiguredRead<'_> {
+    /// Whether a build that compiles the reading file may compile `file`: it is below no choice,
+    /// or its route agrees with the reading file's.
+    pub fn may_compile(&self, file: &FileId) -> bool {
+        self.modules
+            .stems
+            .get(file)
+            .is_none_or(|stem| self.modules.route_agrees(stem, self.from))
+    }
+}
+
+impl RustConfiguredModules {
+    /// What `module` names, read from a file whose route is `from` (`None` for a file below no
+    /// choice, or one another crate compiles): every file of the module that agrees with the
+    /// route, so a file inside one alternative reaches that alternative's files alone. `None`
+    /// when the module is below no choice.
+    pub fn read<'s>(
+        &'s self,
+        module: &[String],
+        from: Option<&'s RustModuleRoute>,
+    ) -> Option<RustConfiguredRead<'s>> {
+        let choice = (1..=module.len())
+            .rev()
+            .map(|len| &module[..len])
+            .find(|prefix| self.choices.contains(*prefix))?;
+        let choice_files = self.files_from(choice, from)?;
+        let files = self.files_from(module, from);
+        let proven = from.is_some()
+            && files.as_ref().unwrap_or(&choice_files).is_single()
+            && (1..=module.len())
+                .map(|len| &module[..len])
+                .filter(|prefix| self.choices.contains(*prefix))
+                .all(|prefix| {
+                    self.files_from(prefix, from)
+                        .is_some_and(|files| files.is_single())
+                });
+        Some(RustConfiguredRead {
+            modules: self,
+            from,
+            choice: choice.to_vec(),
+            files,
+            choice_files,
+            proven,
+        })
+    }
+
+    /// The route of the file at `stem`, when the tree reaches it by one route alone and it holds
+    /// `placed`, the module the tree places it at, if any: a file also declared as another module
+    /// is compiled with no choice made.
+    pub fn route_of(&self, stem: &str, placed: Option<&[String]>) -> Option<&RustModuleRoute> {
+        self.routes
+            .get(stem)
+            .filter(|route| placed.is_none_or(|placed| placed == route.module.as_slice()))
+    }
+
+    /// The files of `module` a build that compiles a file of route `from` may compile it from.
+    fn files_from(
+        &self,
+        module: &[String],
+        from: Option<&RustModuleRoute>,
+    ) -> Option<RustModuleFiles> {
+        let files = self.files.get(module)?;
+        let Some(from) = from else {
+            return Some(files.clone());
+        };
+        // The reading file is compiled only with the file its own route names for the module.
+        if let Some(own) = from.files.get(module) {
+            return Some(RustModuleFiles {
+                files: vec![own.clone()],
+                unread: false,
+            });
+        }
+        Some(RustModuleFiles {
+            files: files
+                .files
+                .iter()
+                .filter(|stem| self.route_agrees(stem, Some(from)))
+                .cloned()
+                .collect(),
+            unread: files.unread
+                && self.unread_by.get(module).is_none_or(|declaring| {
+                    declaring
+                        .iter()
+                        .any(|stem| self.route_agrees(stem, Some(from)))
+                }),
+        })
+    }
+
+    /// Whether the file at `stem` may be compiled with a file of route `from`. A file without a
+    /// route of its own may be.
+    fn route_agrees(&self, stem: &str, from: Option<&RustModuleRoute>) -> bool {
+        match (self.routes.get(stem), from) {
+            (Some(route), Some(from)) => route.agrees_with(from),
+            _ => true,
+        }
+    }
 }
 
 /// What the `mod` item a module symbol names turned out to be.
@@ -298,30 +446,29 @@ impl ScopeIndex {
     }
 
     /// Whether `module` of a crate of `placement` is at or below a module whose file
-    /// configuration selects, and which files may hold it. `None` also when `caller`, the module
-    /// of the file the path is written in, is below the same choice: that file is compiled only
-    /// with the file of the choice that holds it, so a path that stays below the choice names
-    /// that file's modules alone.
+    /// configuration selects, and which files may hold it, read from `caller`, the file the path
+    /// is written in (`None` for one in another crate). `None` also when the tree places the
+    /// caller below the same choice: that file is compiled only with the file of the choice that
+    /// holds it, so a path that stays below the choice names that file's modules alone, as the
+    /// tree places them. A caller the tree does not place, such as a file a `path` attribute
+    /// mounts, is read by its route instead (#624).
     pub(crate) fn rust_configured_module(
         &self,
         placement: &RustModulePlacement,
-        caller: Option<&[String]>,
+        caller: Option<&FileId>,
         module: &[String],
-    ) -> Option<ConfiguredModule<'_>> {
+    ) -> Option<RustConfiguredRead<'_>> {
         placement.crate_roots.iter().find_map(|root| {
             let configured = self.rust_configured_modules.get(root)?;
-            // The innermost choice the module is at or below.
-            let choice = (1..=module.len())
-                .rev()
-                .map(|len| &module[..len])
-                .find(|prefix| configured.choices.contains(*prefix))?;
-            if caller.is_some_and(|caller| caller.starts_with(choice)) {
+            let caller_module = caller.and(placement.module.as_deref());
+            let from = caller
+                .and_then(|caller| configured.stems.get(caller))
+                .and_then(|stem| configured.route_of(stem, caller_module));
+            let read = configured.read(module, from)?;
+            if caller_module.is_some_and(|caller| caller.starts_with(&read.choice)) {
                 return None;
             }
-            match configured.files.get(module) {
-                Some(files) => Some(ConfiguredModule::Files(files)),
-                None => configured.files.get(choice).map(ConfiguredModule::Below),
-            }
+            Some(read)
         })
     }
 
