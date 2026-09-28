@@ -64,6 +64,7 @@ fn function(id: &str, name: &str, file: &File, range: LineRange) -> Symbol {
         scope_id: None,
         signature: None,
         visibility: Visibility::Unknown,
+        alias_of: None,
     }
 }
 

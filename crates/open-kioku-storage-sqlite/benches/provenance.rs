@@ -37,6 +37,7 @@ fn provenance_lookup(c: &mut Criterion) {
         scope_id: None,
         signature: None,
         visibility: open_kioku_core::Visibility::Public,
+        alias_of: None,
     };
     let manifest = IndexManifest {
         analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),

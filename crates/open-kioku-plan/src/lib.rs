@@ -3171,6 +3171,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let login_test = TestTarget {
             selection_tier: open_kioku_core::TestSelectionTier::default(),
@@ -4924,6 +4925,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let symbols = [
             symbol("convert-currency", "convertCurrency", "rates"),
@@ -5183,6 +5185,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunks = vec![CodeChunk {
             id: "source-chunk".into(),
@@ -5290,6 +5293,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunks = vec![
             CodeChunk {

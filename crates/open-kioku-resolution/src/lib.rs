@@ -56,6 +56,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         };
 
         let repo_save = Symbol {
@@ -73,6 +74,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         };
 
         let sym_index = SymbolIndex::build(vec![repo_class, repo_save]);

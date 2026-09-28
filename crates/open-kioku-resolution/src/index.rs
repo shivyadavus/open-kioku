@@ -496,6 +496,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         }
     }
 

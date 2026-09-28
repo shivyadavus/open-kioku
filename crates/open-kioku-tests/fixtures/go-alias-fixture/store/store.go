@@ -7,3 +7,7 @@ type Entry struct {
 type Batch struct {
 	Entries []Entry
 }
+
+type Source interface {
+	Next() (Entry, bool)
+}

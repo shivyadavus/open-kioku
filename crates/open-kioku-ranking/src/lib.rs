@@ -280,7 +280,77 @@ pub fn rerank_with_options(
         }
     }
     results.sort_by(|a, b| compare_reranked(a, b, options.query.as_deref()));
+    if options.mode != RankingMode::Baseline
+        && rank_type_aliases_below_targets(&mut results, options.query.as_deref())
+    {
+        results.sort_by(|a, b| compare_reranked(a, b, options.query.as_deref()));
+    }
     results
+}
+
+/// The score component that ranks a Go type alias just below the type it stands for.
+pub const TYPE_ALIAS_BELOW_TARGET_SIGNAL: &str = "type_alias_below_target";
+
+/// Ranks each Go type alias the index placed (`Symbol::alias_of`) just below the type it stands
+/// for, when both are in the pool and the alias ranks above it: `type Entry = store.Entry` is one
+/// short line that repeats the type's name, so BM25 scores it above the declaration it names.
+/// The alias takes the largest score below its target's, recorded as a
+/// [`TYPE_ALIAS_BELOW_TARGET_SIGNAL`] component carrying both results' evidence ids. An alias
+/// whose target is not in the pool is left where it is, and so is one the query names exactly
+/// when it does not name the target (`ledger::aliases::Entry`). No other result moves relative
+/// to another. `results` must be in `compare_reranked` order; returns whether a score changed.
+fn rank_type_aliases_below_targets(results: &mut [SearchResult], query: Option<&str>) -> bool {
+    if !results
+        .iter()
+        .any(|result| result.symbol.as_ref().is_some_and(|s| s.alias_of.is_some()))
+    {
+        return false;
+    }
+    let exact =
+        |result: &SearchResult| query.is_some_and(|query| exact_identity_match(result, query));
+    // The best-ranked result of each symbol, which is its first in `compare_reranked` order.
+    let mut first_of_symbol = std::collections::HashMap::new();
+    for (index, result) in results.iter().enumerate() {
+        if let Some(symbol) = &result.symbol {
+            first_of_symbol.entry(symbol.id.clone()).or_insert(index);
+        }
+    }
+    let mut demotions = Vec::new();
+    for (index, alias) in results.iter().enumerate() {
+        let Some(target) = alias.symbol.as_ref().and_then(|s| s.alias_of.as_ref()) else {
+            continue;
+        };
+        let Some(&target_index) = first_of_symbol.get(&target.symbol_id) else {
+            continue;
+        };
+        let target_result = &results[target_index];
+        if target_index < index
+            || (exact(alias) && !exact(target_result))
+            || !target_result.score.is_finite()
+        {
+            continue;
+        }
+        let score = target_result.score.next_down();
+        let mut evidence_ids = alias.derived_evidence_ids();
+        evidence_ids.extend(target_result.derived_evidence_ids());
+        let component = ScoreComponent::adjustment(
+            TYPE_ALIAS_BELOW_TARGET_SIGNAL,
+            score - alias.score,
+            evidence_ids,
+            format!(
+                "Go type alias of `{}`: ranked just below the type it stands for",
+                target.qualified_name
+            ),
+        );
+        demotions.push((index, score, component));
+    }
+    let changed = !demotions.is_empty();
+    for (index, score, component) in demotions {
+        let alias = &mut results[index];
+        alias.score = score;
+        alias.add_score_component(component);
+    }
+    changed
 }
 
 /// Exact identity matches first, then descending score, then repository position (path, line
@@ -1081,10 +1151,11 @@ mod tests {
     use super::{
         rerank, rerank_baseline, rerank_with_options, rerank_without_signal, top_score_signals,
         RankingMode, RankingOptions, RankingSignal, RankingWeights, TextRelevanceScale,
+        TYPE_ALIAS_BELOW_TARGET_SIGNAL,
     };
     use open_kioku_core::{
         Confidence, EvidenceSourceType, FileId, Language, LineRange, ScoreComponent, SearchResult,
-        Symbol, SymbolId, SymbolKind,
+        Symbol, SymbolId, SymbolKind, TypeAliasTarget,
     };
     use std::path::{Path, PathBuf};
 
@@ -1276,6 +1347,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         });
         let test = make_result("src/test/TildePrefixValidatorTests.java", 48.1);
 
@@ -1318,6 +1390,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         });
         let mut prefix = make_result("src/Router.java", 42.0);
         prefix.symbol = Some(Symbol {
@@ -1335,6 +1408,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         });
 
         let results = rerank_with_options(
@@ -1989,5 +2063,150 @@ mod tests {
         typed.exact_reference_provenance = Some(EvidenceSourceType::TreeSitter);
         let results = rerank(vec![typed]);
         assert!(has_exact_reference(&results[0]));
+    }
+
+    /// A Go type result: the type `store::store::Entry`, or, given `alias_of`, an alias of it.
+    fn go_type(
+        path: &str,
+        score: f32,
+        qualified_name: &str,
+        alias_of: Option<&str>,
+    ) -> SearchResult {
+        let mut result = make_result(path, score);
+        result.evidence_refs = vec![format!("{path}:1")];
+        result.symbol = Some(Symbol {
+            id: SymbolId::new(qualified_name),
+            name: qualified_name.rsplit("::").next().unwrap().into(),
+            qualified_name: qualified_name.into(),
+            kind: SymbolKind::Class,
+            file_id: FileId::new(path),
+            range: Some(LineRange::single(1)),
+            language: Language::Go,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Public,
+            alias_of: alias_of.map(|target| TypeAliasTarget {
+                symbol_id: SymbolId::new(target),
+                qualified_name: target.into(),
+            }),
+        });
+        result
+    }
+
+    /// `type Entry = store.Entry` scored above `type Entry struct`, as BM25 scores the one-line
+    /// alias, with an unrelated result between them and one below.
+    fn alias_pool(alias_of: Option<&str>) -> Vec<SearchResult> {
+        vec![
+            go_type(
+                "ledger/aliases.go",
+                11.35,
+                "ledger::aliases::Entry",
+                alias_of,
+            ),
+            make_result("ledger/journal.go", 11.0),
+            go_type("store/store.go", 10.62, "store::store::Entry", None),
+            make_result("main.go", 2.16),
+        ]
+    }
+
+    fn paths(results: &[SearchResult]) -> Vec<&str> {
+        results
+            .iter()
+            .map(|result| result.path.to_str().unwrap())
+            .collect()
+    }
+
+    fn alias_component(result: &SearchResult) -> Option<&ScoreComponent> {
+        result
+            .score_breakdown
+            .iter()
+            .find(|component| component.signal == TYPE_ALIAS_BELOW_TARGET_SIGNAL)
+    }
+
+    #[test]
+    fn a_go_type_alias_ranks_just_below_the_type_it_stands_for() {
+        for query in [None, Some("Entry")] {
+            let options = RankingOptions {
+                query: query.map(str::to_string),
+                ..RankingOptions::default()
+            };
+            let unmarked = rerank_with_options(alias_pool(None), &options);
+            let ranked = rerank_with_options(alias_pool(Some("store::store::Entry")), &options);
+            assert_eq!(
+                paths(&unmarked)[0],
+                "ledger/aliases.go",
+                "{query:?}: the fixture must rank the alias first when it is not marked"
+            );
+
+            let alias = paths(&ranked)
+                .iter()
+                .position(|path| *path == "ledger/aliases.go")
+                .unwrap();
+            assert!(
+                alias > 0,
+                "{query:?}: the alias still ranks first: {:?}",
+                paths(&ranked)
+            );
+            assert_eq!(
+                paths(&ranked)[alias - 1],
+                "store/store.go",
+                "{query:?}: {:?}",
+                paths(&ranked)
+            );
+            assert!(ranked[alias].score < ranked[alias - 1].score);
+            // No other result moves relative to another.
+            let others = |results: &[SearchResult]| {
+                paths(results)
+                    .into_iter()
+                    .filter(|path| *path != "ledger/aliases.go")
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(others(&ranked), others(&unmarked), "{query:?}");
+
+            let component = alias_component(&ranked[alias]).expect("the demotion is recorded");
+            assert!(component.contribution < 0.0, "{component:?}");
+            assert!(component.rationale.contains("`store::store::Entry`"));
+            assert!(component
+                .evidence_ids
+                .contains(&"store/store.go:1".to_string()));
+            assert!(component
+                .evidence_ids
+                .contains(&"ledger/aliases.go:1".to_string()));
+            let total = open_kioku_core::score_component_total(&ranked[alias].score_breakdown);
+            assert!((total - ranked[alias].score).abs() <= 0.001, "{total}");
+        }
+    }
+
+    #[test]
+    fn a_go_type_alias_keeps_its_rank_without_its_target_or_when_the_query_names_it() {
+        // The target is not in the pool: nothing to rank below.
+        let options = RankingOptions::default();
+        let mut pool = alias_pool(Some("store::store::Entry"));
+        pool.remove(2);
+        let ranked = rerank_with_options(pool, &options);
+        assert_eq!(paths(&ranked)[0], "ledger/aliases.go");
+        assert!(ranked
+            .iter()
+            .all(|result| alias_component(result).is_none()));
+
+        // The query spells the alias, not the type it stands for.
+        let options = RankingOptions {
+            query: Some("ledger::aliases::Entry".into()),
+            ..RankingOptions::default()
+        };
+        let ranked = rerank_with_options(alias_pool(Some("store::store::Entry")), &options);
+        assert_eq!(paths(&ranked)[0], "ledger/aliases.go");
+        assert!(ranked
+            .iter()
+            .all(|result| alias_component(result).is_none()));
+
+        // Lexical baseline ranking reads the lexical score alone.
+        let ranked = rerank_baseline(alias_pool(Some("store::store::Entry")));
+        assert_eq!(paths(&ranked)[0], "ledger/aliases.go");
     }
 }

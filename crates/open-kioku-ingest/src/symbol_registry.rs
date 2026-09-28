@@ -2,7 +2,7 @@ use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType,
     GraphNodeType, ImportResolution, Language, PackageDeclarationSite, QualityNote,
     QualityNoteKind, ResolutionStatus, Scope, ScopeId, ScopeKind, StringInterner, Symbol, SymbolId,
-    SymbolKind, TypeAliasSite,
+    SymbolKind, TypeAliasSite, TypeAliasTarget,
 };
 use open_kioku_resolution::{
     context::rust_rules_out_same_file_item, BindingIndex, InheritanceIndex, ResolutionContext,
@@ -12,7 +12,7 @@ use open_kioku_semantic_model::{ImportBinding, SemanticRepository, GLOB_IMPORT_L
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cell::{OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
 
@@ -115,6 +115,38 @@ pub struct RegistryReport {
     pub analysis_facts: Vec<AnalysisFact>,
     pub quality_notes: Vec<QualityNote>,
     pub heuristic_hints: Vec<HeuristicRelationshipHint>,
+    /// Each Go type alias the pass placed at one repository type, by the alias's symbol: the
+    /// type it stands for, through every alias on the way. An alias it could not place is absent.
+    pub type_alias_targets: BTreeMap<SymbolId, SymbolId>,
+}
+
+/// Records on each Go type alias of `targets` the repository type it stands for, and gives it
+/// that type's kind: `type R = api.Reader` is an interface, whatever its syntax node says. The
+/// registry placed the target through the alias file's own imports at the one type declaration
+/// of that name in the package, so the kind is read off the declaration, not guessed. An alias
+/// it could not place keeps the kind its syntax gave it and records no target.
+pub fn apply_type_alias_targets(symbols: &mut [Symbol], targets: &BTreeMap<SymbolId, SymbolId>) {
+    if targets.is_empty() {
+        return;
+    }
+    let wanted = targets.values().collect::<HashSet<_>>();
+    let placed = symbols
+        .iter()
+        .filter(|symbol| wanted.contains(&symbol.id))
+        .map(|symbol| {
+            let target = TypeAliasTarget {
+                symbol_id: symbol.id.clone(),
+                qualified_name: symbol.qualified_name.clone(),
+            };
+            (symbol.id.clone(), (symbol.kind.clone(), target))
+        })
+        .collect::<HashMap<_, _>>();
+    for symbol in symbols {
+        if let Some((kind, target)) = targets.get(&symbol.id).and_then(|id| placed.get(id)) {
+            symbol.kind = kind.clone();
+            symbol.alias_of = Some(target.clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1636,6 +1668,14 @@ pub fn resolve_symbol_edges(
         ));
     }
 
+    report.type_alias_targets = registry
+        .alias_targets
+        .iter()
+        .filter_map(|(alias, target)| match target {
+            AliasTarget::Type(target) => Some((alias.clone(), target.clone())),
+            AliasTarget::Unplaced(_) => None,
+        })
+        .collect();
     report.quality_notes.sort();
     report.quality_notes.dedup();
     report.analysis_facts.sort_by(|a, b| a.id.cmp(&b.id));
@@ -3299,6 +3339,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         }
     }
 

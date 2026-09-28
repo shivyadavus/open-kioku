@@ -1139,6 +1139,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunk = CodeChunk {
             id: "chunk-1".into(),
@@ -1240,6 +1241,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunk = CodeChunk {
             id: "chunk-1".into(),
@@ -1325,6 +1327,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunk = CodeChunk {
             id: "chunk-1".into(),
@@ -1598,6 +1601,7 @@ mod symbol_text_tests {
             scope_id: Some(ScopeId::new("src/keys.rs:scope:file:0")),
             signature: Some("fn(material: &Seed) Epoch".into()),
             visibility,
+            alias_of: None,
         }
     }
 

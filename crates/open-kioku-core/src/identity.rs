@@ -324,6 +324,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: crate::Visibility::Unknown,
+            alias_of: None,
         }
     }
 
