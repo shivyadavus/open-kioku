@@ -97,7 +97,13 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// its own crate's module tree and below a `#[path]`-mounted file, parsed or read off a file
 /// skipped for size. Earlier indexes read no module path from that file, and hold `CALLS` edges
 /// from a `crate::` path in it into one crate's item when another crate mounts its parent.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v24";
+/// v26: a Rust path into a module whose file configuration selects (a `cfg_attr` path beside the
+/// default location, or `#[cfg]`-gated `mod` items of one name naming more than one file), or
+/// below one, keeps a `CALLS` edge to the item in each file that may hold it, none authoritative
+/// and each naming the files; `cfg_attr(all(), ..)` and `X` beside `not(X)` leave no default
+/// location. Earlier indexes hold one authoritative edge into the placed default file, including
+/// one rustc never compiles. v25 is taken by an open change.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v26";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

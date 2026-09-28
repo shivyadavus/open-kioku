@@ -87,6 +87,15 @@ pub enum ResolutionOutcome {
         identity: String,
         evidence: Vec<ResolutionEvidence>,
     },
+    /// Candidates in files of which configuration compiles one, such as the items a Rust path
+    /// reaches in each file a `cfg_attr(.., path = ..)` or `#[cfg]`-gated `mod` item may select
+    /// (#613). Each is the target on the builds that compile its file, so none is proven, and
+    /// every one is kept: emitted as a relationship its proofs leave short of authoritative, and
+    /// naming the other files, rather than dropped, so a caller of any of them stays visible.
+    Alternatives {
+        candidates: Vec<ResolutionCandidate>,
+        reason: String,
+    },
 }
 
 /// Canonicalize candidate order and merge duplicate target identities without using discovery order
@@ -199,6 +208,7 @@ impl ResolutionOutcome {
                 candidates_considered,
                 ..
             } => *candidates_considered,
+            Self::Alternatives { candidates, .. } => candidates.len(),
             Self::External { .. } => 0,
         }
     }
@@ -224,7 +234,8 @@ impl ResolutionOutcome {
             },
             Self::Ambiguous {
                 candidates, reason, ..
-            } => ResolutionResult::Ambiguous {
+            }
+            | Self::Alternatives { candidates, reason } => ResolutionResult::Ambiguous {
                 candidates: candidates
                     .iter()
                     .map(|candidate| candidate.target_symbol_id.clone())

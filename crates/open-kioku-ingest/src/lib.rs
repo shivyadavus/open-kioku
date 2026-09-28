@@ -127,7 +127,9 @@ impl ResolutionQualityReportExt for ResolutionQualityReport {
             open_kioku_resolution::ResolutionOutcome::Proven { .. } => {
                 language_metrics.proven += 1;
             }
-            open_kioku_resolution::ResolutionOutcome::Ambiguous { .. } => {
+            // Candidates configuration chooses between are kept but none is proven.
+            open_kioku_resolution::ResolutionOutcome::Ambiguous { .. }
+            | open_kioku_resolution::ResolutionOutcome::Alternatives { .. } => {
                 language_metrics.ambiguous += 1;
             }
             open_kioku_resolution::ResolutionOutcome::Unresolved { .. } => {
@@ -161,6 +163,14 @@ impl ResolutionQualityReportExt for ResolutionQualityReport {
                             != open_kioku_core::RelationshipAuthority::Authoritative
                     })
                     .count();
+                for candidate in candidates {
+                    record_candidate_evidence(metrics, candidate);
+                }
+            }
+            open_kioku_resolution::ResolutionOutcome::Alternatives { candidates, .. } => {
+                metrics.candidates_considered += candidates.len();
+                metrics.ambiguous += 1;
+                metrics.heuristic_candidates_retained += candidates.len();
                 for candidate in candidates {
                     record_candidate_evidence(metrics, candidate);
                 }
@@ -804,6 +814,7 @@ impl Indexer {
             }
         };
         scope_index.record_rust_module_placements(rust_modules.module_placements());
+        scope_index.record_rust_configured_modules(rust_modules.configured_modules());
         scope_index.record_rust_crate_names(rust_modules.crate_names());
         scope_index.record_rust_external_crates(crate::project_model::rust_external_crate_names(
             &project_model,
@@ -993,6 +1004,29 @@ impl Indexer {
                             }
                             open_kioku_resolution::ResolutionOutcome::Ambiguous { .. } => {
                                 quality_report.ambiguous += 1;
+                                None
+                            }
+                            // Each file configuration may compile holds a candidate: every one
+                            // is kept as a relationship its proofs leave unproven, which names
+                            // the other files, so no caller of any of them is hidden (#613).
+                            open_kioku_resolution::ResolutionOutcome::Alternatives {
+                                candidates,
+                                ..
+                            } => {
+                                quality_report.ambiguous += 1;
+                                if let Some(caller) = &call.caller_symbol_id {
+                                    resolved_relationships.extend(candidates.iter().map(
+                                        |candidate| open_kioku_resolution::ResolvedRelationship {
+                                            from: caller.clone(),
+                                            to: candidate.target_symbol_id.clone(),
+                                            edge_type: GraphEdgeType::Calls,
+                                            confidence: candidate.confidence,
+                                            call_site: Some(call.range.clone()),
+                                            evidence: candidate.evidence.clone(),
+                                            proofs: candidate.proofs.clone(),
+                                        },
+                                    ));
+                                }
                                 None
                             }
                             open_kioku_resolution::ResolutionOutcome::External { .. } => {
@@ -3998,6 +4032,112 @@ class Util {
         // Unchanged: the scan does not read such a `path`, so the skipped file may mount any
         // file of the package.
         assert_eq!(exact_calls(unconditional, true), [0, 0, 0]);
+        // Conditions that cover every build never compile `imp` from its default location, parsed
+        // or read off the skipped file's lines: `sys/imp.rs` is a leftover file of the library
+        // alone, and only the two paths are compiled into the test crate (#613).
+        let complementary =
+            "#[cfg_attr(unix, path = \"../common.rs\")]\n#[cfg_attr(not( unix ), path = \"../other.rs\")]";
+        assert_eq!(exact_calls(complementary, false), [1, 0, 0]);
+        assert_eq!(exact_calls(complementary, true), [1, 0, 0]);
+        let always = "#[cfg_attr(all(), path = \"../common.rs\")]";
+        assert_eq!(exact_calls(always, false), [1, 0, 1]);
+        assert_eq!(exact_calls(always, true), [1, 0, 1]);
+    }
+
+    #[test]
+    fn a_path_into_a_module_whose_file_configuration_selects_reaches_every_file_unproven() {
+        // `go` calls `crate::sys::imp::f()`, and `sys/mod.rs` gives `imp` its file with
+        // `declaring`. Each `CALLS` edge from `go`, by the file of its target and whether it is
+        // authoritative (#613).
+        let calls_from_go = |declaring: &str| {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            std::fs::create_dir_all(root.join("src/sys")).unwrap();
+            std::fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fx\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("src/lib.rs"),
+                "mod sys;\npub fn go() {\n    crate::sys::imp::f();\n}\n",
+            )
+            .unwrap();
+            for file in ["imp", "win", "u", "o", "x"] {
+                std::fs::write(root.join(format!("src/sys/{file}.rs")), "pub fn f() {}\n").unwrap();
+            }
+            std::fs::write(root.join("src/sys/mod.rs"), declaring).unwrap();
+            let mut config = OkConfig::default();
+            config.scip.enabled = false;
+            config.history.enabled = false;
+            let snapshot = Indexer::default()
+                .index_repo_with_mode(root, &config, IndexMode::Full)
+                .unwrap();
+            let go = snapshot
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == "go")
+                .map(|symbol| symbol.id.clone())
+                .expect("`go` is indexed");
+            let file_of = |id: &SymbolId| {
+                let symbol = snapshot.symbols.iter().find(|symbol| symbol.id == *id)?;
+                snapshot
+                    .files
+                    .iter()
+                    .find(|file| file.id == symbol.file_id)
+                    .map(|file| file.path.to_string_lossy().replace('\\', "/"))
+            };
+            let mut edges = snapshot
+                .resolved_relationships
+                .iter()
+                .filter(|edge| {
+                    edge.from == go && edge.edge_type == open_kioku_core::GraphEdgeType::Calls
+                })
+                .map(|edge| {
+                    let authoritative =
+                        open_kioku_core::relationship_authority(&edge.edge_type, &edge.proofs)
+                            == open_kioku_core::RelationshipAuthority::Authoritative;
+                    (file_of(&edge.to).unwrap_or_default(), authoritative)
+                })
+                .collect::<Vec<_>>();
+            edges.sort();
+            edges
+        };
+        let unproven = |files: &[&str]| {
+            files
+                .iter()
+                .map(|file| (file.to_string(), false))
+                .collect::<Vec<_>>()
+        };
+        // `imp` is `sys/imp.rs` unless the condition holds, and `sys/win.rs` when it does.
+        assert_eq!(
+            calls_from_go("#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n"),
+            unproven(&["src/sys/imp.rs", "src/sys/win.rs"])
+        );
+        assert_eq!(
+            calls_from_go(
+                "#[cfg(not(windows))]\npub mod imp;\n#[cfg(windows)]\n#[path = \"win.rs\"]\npub mod imp;\n"
+            ),
+            unproven(&["src/sys/imp.rs", "src/sys/win.rs"])
+        );
+        // `unix` beside `not(unix)` never leaves `imp` at `sys/imp.rs`.
+        assert_eq!(
+            calls_from_go(
+                "#[cfg_attr(unix, path = \"u.rs\")]\n#[cfg_attr(not(unix), path = \"o.rs\")]\npub mod imp;\n"
+            ),
+            unproven(&["src/sys/o.rs", "src/sys/u.rs"])
+        );
+        // `all()` always moves `imp` to `sys/x.rs`, which, like any `#[path]` file, a path
+        // does not end in; `sys/imp.rs` is never compiled.
+        assert_eq!(
+            calls_from_go("#[cfg_attr(all(), path = \"x.rs\")]\npub mod imp;\n"),
+            Vec::new()
+        );
+        // Control: with no choice the placed file is proven.
+        assert_eq!(
+            calls_from_go("pub mod imp;\n"),
+            vec![("src/sys/imp.rs".to_string(), true)]
+        );
     }
 
     #[test]

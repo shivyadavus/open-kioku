@@ -7,7 +7,7 @@ use open_kioku_core::{
     File, FileId, ImportSite, Language, ModuleDeclarationSite, ScopeId, ScopeKind, SymbolId,
     SymbolKind,
 };
-use open_kioku_resolution::{RustCrateNames, RustModulePlacement};
+use open_kioku_resolution::{RustConfiguredModules, RustCrateNames, RustModulePlacement};
 use open_kioku_semantic_model::{CargoImporter, ProjectModel, ProjectRoot};
 pub use open_kioku_semantic_model::{
     ExportBinding, ExportIndex, ImportBinding, ImportBindingRule, ImportIndex, ImportOrigin,
@@ -83,11 +83,30 @@ pub(crate) struct RustModuleTree<'a> {
     scanned_files: HashMap<String, Option<ScannedModules>>,
     /// What each `#[path]` attribute mounts, by the extension-less path of the declaring file.
     path_mounts: Vec<(String, PathMount)>,
+    /// The file-backed `mod name;` items of each file, by its extension-less path, as
+    /// [`RustModuleTree::configured_modules`] reads the files each may be compiled from.
+    declared_modules: HashMap<String, Vec<DeclaredModule>>,
     /// [`RustModuleTree::find_shared_files`], computed on first use.
     shared_files: OnceCell<SharedFiles>,
     /// The `pub use` sites of each Rust file, which other crates reach items through.
     reexports: HashMap<FileId, Vec<ImportSite>>,
 }
+
+/// A `mod name;` item with no body outside any inline module, and the files it may compile the
+/// module from.
+#[derive(Debug, Clone)]
+struct DeclaredModule {
+    /// The module name, `r#` removed.
+    name: String,
+    /// It has no `path` attribute, or only `cfg_attr` ones whose conditions may all fail, so its
+    /// default location is compiled on some build.
+    at_default: bool,
+    /// The extension-less file each `path` attribute names, `None` for one the index cannot read.
+    paths: Vec<Option<String>>,
+}
+
+/// How deep below a module whose file configuration selects the module tree is followed.
+const MAX_CONFIGURED_DEPTH: usize = 64;
 
 /// How many `pub use` re-exports one path is followed through before it is left unresolved.
 const MAX_REEXPORT_HOPS: usize = 8;
@@ -248,6 +267,42 @@ impl<'a> RustModuleTree<'a> {
                 ))
             })
             .collect();
+        let mut declared_modules = HashMap::<String, Vec<DeclaredModule>>::new();
+        for declaration in declarations.iter().filter(|declaration| {
+            !declaration.has_body
+                && !declaration
+                    .scope_id
+                    .as_ref()
+                    .is_some_and(|scope| is_inside_inline_module(scope, scopes))
+        }) {
+            let Some(declaring) = files
+                .get(&declaration.file_id)
+                .and_then(|path| rust_file_stem(path))
+            else {
+                continue;
+            };
+            let paths = if declaration.has_path_attribute && declaration.path_attributes.is_empty()
+            {
+                vec![None]
+            } else {
+                declaration
+                    .path_attributes
+                    .iter()
+                    .map(|value| match PathMount::of(&declaring, value, false) {
+                        Some(PathMount::File(file)) => Some(file),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            declared_modules
+                .entry(declaring)
+                .or_default()
+                .push(DeclaredModule {
+                    name: module_name(&declaration.name).to_string(),
+                    at_default: !declaration.has_path_attribute || declaration.path_is_conditional,
+                    paths,
+                });
+        }
         let mut path_mounts = Vec::new();
         for declaration in declarations
             .iter()
@@ -283,6 +338,7 @@ impl<'a> RustModuleTree<'a> {
             unindexed_stems: HashSet::new(),
             scanned_files: HashMap::new(),
             path_mounts,
+            declared_modules,
             shared_files: OnceCell::new(),
             reexports: HashMap::new(),
         }
@@ -768,6 +824,183 @@ impl<'a> RustModuleTree<'a> {
                 ))
             })
             .collect()
+    }
+
+    /// The modules whose file configuration selects, by the qualified-name prefix of each crate
+    /// root whose tree holds them (#613). A choice is made where the `mod name;` items of one
+    /// placed file name more than one file for `name` between them: the default location of an
+    /// item with no `path` attribute or only `cfg_attr` ones that may all fail, and each file a
+    /// `path` names, so `#[cfg_attr(windows, path = "win.rs")] mod imp;` beside `imp.rs` and
+    /// `#[cfg(unix)] mod imp;` beside `#[cfg(windows)] #[path = "win.rs"] mod imp;` both choose.
+    /// A `path` the index cannot read, or a default location found both as `name.rs` and
+    /// `name/mod.rs`, may name another file. Below a choice, the modules each of its files declares
+    /// are followed as file modules, so a path below it can be read against every file.
+    pub(crate) fn configured_modules(&self) -> HashMap<String, RustConfiguredModules> {
+        let mut configured = HashMap::<String, RustConfiguredModules>::new();
+        let mut declaring = self
+            .declared_modules
+            .iter()
+            .filter(|(_, items)| may_choose(items))
+            .map(|(stem, _)| stem)
+            .collect::<Vec<_>>();
+        declaring.sort();
+        for stem in declaring {
+            let Some(file) = self
+                .files_by_stem
+                .get(stem)
+                .and_then(|id| self.files.get(id))
+                .and_then(|path| self.module_file_of(path))
+            else {
+                continue;
+            };
+            // A file the tree does not place is reached only below a choice of its own crate,
+            // whose walk reads it.
+            let (placed, roots) = self.declared_placement(&file);
+            if !placed || roots.is_empty() {
+                continue;
+            }
+            let mut names = self.declared_modules[stem]
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>();
+            names.sort();
+            names.dedup();
+            for name in names {
+                let mut module = file.importer_module.clone();
+                module.push(name.to_string());
+                let default = file.module_file_stems(&module);
+                let (candidates, unread) = self.module_candidates(stem, name, &default);
+                if candidates.len() + usize::from(unread) < 2 {
+                    continue;
+                }
+                let mut found = RustConfiguredModules::default();
+                self.configured_subtree(module, candidates, unread, &mut found);
+                for root in &roots {
+                    let into = configured.entry(root.replace('/', "::")).or_default();
+                    into.choices.extend(found.choices.iter().cloned());
+                    for (module, files) in &found.files {
+                        let entry = into.files.entry(module.clone()).or_default();
+                        entry.files.extend(files.files.iter().cloned());
+                        entry.unread |= files.unread;
+                    }
+                }
+            }
+        }
+        for modules in configured.values_mut() {
+            for files in modules.files.values_mut() {
+                files.files.sort();
+                files.files.dedup();
+            }
+        }
+        configured
+    }
+
+    /// The files the `mod name;` items of `declaring` may compile module `name` from, each with
+    /// whether a `path` attribute mounts it, given `default`, the files of its default location;
+    /// and whether one of them the index cannot read or did not index may name another.
+    fn module_candidates(
+        &self,
+        declaring: &str,
+        name: &str,
+        default: &[String],
+    ) -> (Vec<(String, bool)>, bool) {
+        let mut candidates = Vec::<(String, bool)>::new();
+        let mut unread = false;
+        let mut add = |stem: &str, mounted: bool, unread: &mut bool| {
+            if self.files_by_stem.contains_key(stem) {
+                if !candidates.iter().any(|(known, _)| known == stem) {
+                    candidates.push((stem.to_string(), mounted));
+                }
+            } else if self.unindexed_stems.contains(stem) {
+                *unread = true;
+            }
+        };
+        for item in self
+            .declared_modules
+            .get(declaring)
+            .into_iter()
+            .flatten()
+            .filter(|item| item.name == name)
+        {
+            if item.at_default {
+                let found = default
+                    .iter()
+                    .filter(|stem| {
+                        self.files_by_stem.contains_key(*stem)
+                            || self.unindexed_stems.contains(*stem)
+                    })
+                    .collect::<Vec<_>>();
+                match found.as_slice() {
+                    [stem] => add(stem, false, &mut unread),
+                    // `name.rs` beside `name/mod.rs`, which rustc rejects.
+                    [_, _, ..] => unread = true,
+                    [] => {}
+                }
+            }
+            for path in &item.paths {
+                match path {
+                    Some(stem) => add(stem, true, &mut unread),
+                    None => unread = true,
+                }
+            }
+        }
+        (candidates, unread)
+    }
+
+    /// Records `module`, whose file configuration selects from `candidates`, and the modules its
+    /// candidates declare below it, each with the files that may hold it, in `out`. A file a
+    /// `path` mounts has its own `mod` items read from its directory, as a `mod.rs` file does.
+    fn configured_subtree(
+        &self,
+        module: Vec<String>,
+        candidates: Vec<(String, bool)>,
+        unread: bool,
+        out: &mut RustConfiguredModules,
+    ) {
+        out.choices.insert(module.clone());
+        let mut seen = HashSet::new();
+        let mut pending = candidates
+            .into_iter()
+            .map(|(stem, mounted)| (module.clone(), stem, mounted, unread))
+            .collect::<Vec<_>>();
+        while let Some((module, stem, mounted, unread)) = pending.pop() {
+            let entry = out.files.entry(module.clone()).or_default();
+            entry.files.push(stem.clone());
+            entry.unread |= unread;
+            // An unindexed file's `mod` items are not known: a path below it is read as below
+            // the choice, against the files the tree places.
+            if module.len() >= MAX_CONFIGURED_DEPTH || !self.files_by_stem.contains_key(&stem) {
+                continue;
+            }
+            let dir = if mounted || is_mod_rs(&stem) {
+                parent_dir(&stem)
+            } else {
+                stem.as_str()
+            };
+            let mut names = self
+                .declared_modules
+                .get(&stem)
+                .into_iter()
+                .flatten()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>();
+            names.sort();
+            names.dedup();
+            for name in names {
+                let default = [join_dir(dir, name), join_dir(dir, &format!("{name}/mod"))];
+                let (candidates, unread) = self.module_candidates(&stem, name, &default);
+                let mut child = module.clone();
+                child.push(name.to_string());
+                if candidates.len() + usize::from(unread) >= 2 {
+                    out.choices.insert(child.clone());
+                }
+                for (candidate, mounted) in candidates {
+                    if seen.insert((child.clone(), candidate.clone())) {
+                        pending.push((child.clone(), candidate, mounted, unread));
+                    }
+                }
+            }
+        }
     }
 
     /// The library crates each Rust file names by crate name: the dependencies its package
@@ -1257,6 +1490,17 @@ impl<'a> RustModuleTree<'a> {
             _ => None,
         }
     }
+}
+
+/// Whether the `mod` items of one file may choose between files for a module: two items of one
+/// name, or one naming a file beside its default location, more than one file, or a file the
+/// index cannot read. Only such a file is placed to find out.
+fn may_choose(items: &[DeclaredModule]) -> bool {
+    items.iter().enumerate().any(|(at, item)| {
+        items[..at].iter().any(|other| other.name == item.name)
+            || item.paths.len() + usize::from(item.at_default) >= 2
+            || item.paths.iter().any(Option::is_none)
+    })
 }
 
 /// Where the library crate root of the package at `root` sits, for paths through its crate name.
@@ -3490,6 +3734,139 @@ mod tests {
         let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
         assert_eq!(modules.placement_gaps().unread_mounts, 1);
         assert!(modules.module_placements()[&FileId::new("file:src/other.rs")].in_other_crates);
+    }
+
+    #[test]
+    fn a_module_whose_file_configuration_selects_is_read_with_every_file() {
+        let path_decl =
+            |file: &str, name: &str, paths: &[&str], conditional: bool| ModuleDeclarationSite {
+                has_path_attribute: true,
+                path_attributes: paths.iter().map(|path| path.to_string()).collect(),
+                path_is_conditional: conditional,
+                ..mod_decl(file, name)
+            };
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let project = rust_project(&[("", None)]);
+        let files = [
+            "src/lib.rs",
+            "src/sys/mod.rs",
+            "src/sys/imp.rs",
+            "src/sys/imp/inner.rs",
+            "src/sys/win.rs",
+            "src/sys/inner.rs",
+            "src/sys/u.rs",
+            "src/sys/o.rs",
+            "src/sys/x.rs",
+            "src/sys/plain.rs",
+        ]
+        .map(source_file);
+        let configured = |imp: Vec<ModuleDeclarationSite>| {
+            let mut declarations = vec![
+                mod_decl("src/lib.rs", "sys"),
+                mod_decl("src/sys/mod.rs", "plain"),
+                mod_decl("src/sys/imp.rs", "inner"),
+                mod_decl("src/sys/win.rs", "inner"),
+            ];
+            declarations.extend(imp);
+            let mut modules = RustModuleTree::new(&files, &project, &declarations, &scopes)
+                .configured_modules()
+                .into_iter()
+                .collect::<Vec<_>>();
+            modules.sort_by(|left, right| left.0.cmp(&right.0));
+            modules
+                .into_iter()
+                .map(|(root, modules)| {
+                    let files = modules
+                        .files
+                        .into_iter()
+                        .map(|(module, files)| (module.join("::"), files.files, files.unread))
+                        .collect::<Vec<_>>();
+                    let choices = modules
+                        .choices
+                        .into_iter()
+                        .map(|module| module.join("::"))
+                        .collect::<Vec<_>>();
+                    (root, choices, files)
+                })
+                .collect::<Vec<_>>()
+        };
+        let strings = |values: &[&str]| values.iter().map(|value| value.to_string()).collect();
+        // `imp` is `sys/imp.rs` or `sys/win.rs`, and its `inner` is below whichever it is.
+        let windows = vec![(
+            "src::lib".to_string(),
+            strings(&["sys::imp"]),
+            vec![
+                (
+                    "sys::imp".to_string(),
+                    strings(&["src/sys/imp", "src/sys/win"]),
+                    false,
+                ),
+                (
+                    "sys::imp::inner".to_string(),
+                    strings(&["src/sys/imp/inner", "src/sys/inner"]),
+                    false,
+                ),
+            ],
+        )];
+        // `#[cfg_attr(windows, path = "win.rs")] mod imp;`
+        assert_eq!(
+            configured(vec![path_decl("src/sys/mod.rs", "imp", &["win.rs"], true)]),
+            windows
+        );
+        // `#[cfg(not(windows))] mod imp;` and `#[cfg(windows)] #[path = "win.rs"] mod imp;`
+        assert_eq!(
+            configured(vec![
+                mod_decl("src/sys/mod.rs", "imp"),
+                path_decl("src/sys/mod.rs", "imp", &["win.rs"], false),
+            ]),
+            windows
+        );
+        // `unix` beside `not(unix)`: never the default location.
+        assert_eq!(
+            configured(vec![path_decl(
+                "src/sys/mod.rs",
+                "imp",
+                &["u.rs", "o.rs"],
+                false
+            )]),
+            vec![(
+                "src::lib".to_string(),
+                strings(&["sys::imp"]),
+                vec![(
+                    "sys::imp".to_string(),
+                    strings(&["src/sys/o", "src/sys/u"]),
+                    false
+                )],
+            )]
+        );
+        // A `path` the index cannot read may name another file than the default location.
+        assert_eq!(
+            configured(vec![path_decl("src/sys/mod.rs", "imp", &[], true)]),
+            vec![(
+                "src::lib".to_string(),
+                strings(&["sys::imp"]),
+                vec![
+                    ("sys::imp".to_string(), strings(&["src/sys/imp"]), true),
+                    (
+                        "sys::imp::inner".to_string(),
+                        strings(&["src/sys/imp/inner"]),
+                        false
+                    ),
+                ],
+            )]
+        );
+        // One file, however the module is spelled, chooses nothing: `all()` read as always, a
+        // `#[cfg]` on a single item, and two items at the default location.
+        for one_file in [
+            vec![path_decl("src/sys/mod.rs", "imp", &["x.rs"], false)],
+            vec![mod_decl("src/sys/mod.rs", "imp")],
+            vec![
+                mod_decl("src/sys/mod.rs", "imp"),
+                mod_decl("src/sys/mod.rs", "imp"),
+            ],
+        ] {
+            assert_eq!(configured(one_file.clone()), Vec::new(), "{one_file:?}");
+        }
     }
 
     #[test]

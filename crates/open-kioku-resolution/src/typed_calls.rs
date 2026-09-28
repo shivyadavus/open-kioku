@@ -1,7 +1,9 @@
 use crate::context::{ResolutionContext, RustRelativeModule, ScopedImport};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
-use crate::index::RustModulePlacement;
-use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
+use crate::index::{ConfiguredModule, RustModuleFiles, RustModulePlacement};
+use crate::pipeline::{
+    evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
+};
 use open_kioku_core::{
     Binding, CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, Language,
     LineRange, RelationshipProof, RelationshipProofKind, ScopeId, Symbol, SymbolId, SymbolKind,
@@ -292,25 +294,23 @@ fn rust_module_path_items(
     name: &str,
     accept: impl Fn(&Symbol) -> bool,
 ) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
-    if let Some(targets) = rust_crate_name_items(call, ctx, path, name, &accept) {
-        return Some((targets, RustModulePathStrategy::CrateName));
+    if let Some(found) = rust_crate_name_items(call, ctx, path, name, &accept) {
+        return Some(found);
     }
     let own = ctx.scopes.rust_module_placement(ctx.file_id);
     // A file another crate may compile too is read against no one crate.
     let mut placement = own.filter(|placement| !placement.in_other_crates);
-    let (mut targets, strategy) = if path == "crate" || path.starts_with("crate::") {
-        let names = rust_crate_path_member_names(placement?, path, name)?;
-        (
-            rust_qualified_targets(ctx, &names, &accept),
-            RustModulePathStrategy::CrateQualified,
-        )
+    let module = if path == "crate" || path.starts_with("crate::") {
+        rust_crate_path_module(path)?
     } else {
         let (depth, segments) = rust_relative_path(path)?;
         match crate::context::rust_relative_module(ctx, &call.scope_id, depth, &segments)? {
-            RustRelativeModule::InFile(module) => (
-                crate::context::rust_module_items(ctx, module, name, &accept),
-                RustModulePathStrategy::ModuleScope,
-            ),
+            RustRelativeModule::InFile(module) => {
+                let mut targets = crate::context::rust_module_items(ctx, module, name, &accept);
+                normalize_symbol_ids(&mut targets);
+                return (!targets.is_empty())
+                    .then_some((targets, RustModulePathStrategy::ModuleScope));
+            }
             RustRelativeModule::Outside { climbs, path } => {
                 // A path that climbs no higher than this file's own module ends below it, in the
                 // same file in every crate that compiles this one at the same place.
@@ -320,27 +320,55 @@ fn rust_module_path_items(
                     });
                 }
                 // The path is read off this file's module, which only a placed file has.
-                let names = rust_outside_member_names(placement?, climbs, &path, name)?;
-                (
-                    rust_qualified_targets(ctx, &names, &accept),
-                    RustModulePathStrategy::CrateQualified,
-                )
+                rust_outside_module(placement?, climbs, &path)?
             }
         }
     };
-    if matches!(strategy, RustModulePathStrategy::CrateQualified) {
-        // A file the module tree does not place where its path says, such as the default
-        // location of a `#[path]` module, or one of another crate, is not the module the path
-        // spells.
-        let placement = placement?;
-        targets.retain(|target| {
-            ctx.symbols
-                .get(target)
-                .is_some_and(|symbol| ctx.scopes.is_placed_in_crate_of(&symbol.file_id, placement))
-        });
+    let placement = placement?;
+    let names = rust_module_member_names(placement, &module, name);
+    let mut targets = rust_qualified_targets(ctx, &names, &accept);
+    // A file the module tree does not place where its path says, such as the default location
+    // of a `#[path]` module, or one of another crate, is not the module the path spells.
+    targets.retain(|target| {
+        ctx.symbols
+            .get(target)
+            .is_some_and(|symbol| ctx.scopes.is_placed_in_crate_of(&symbol.file_id, placement))
+    });
+    if let Some(configured) =
+        ctx.scopes
+            .rust_configured_module(placement, placement.module.as_deref(), &module)
+    {
+        return rust_configured_items(ctx, configured, targets, name, &accept);
     }
     normalize_symbol_ids(&mut targets);
-    (!targets.is_empty()).then_some((targets, strategy))
+    (!targets.is_empty()).then_some((targets, RustModulePathStrategy::CrateQualified))
+}
+
+/// The items named `name` that `accept` admits in a module whose file configuration selects:
+/// those of each file that may hold it, or, for a path below such a module that no file module
+/// holds, `placed`, the items the placed files hold. None of them is proven.
+fn rust_configured_items(
+    ctx: &ResolutionContext<'_>,
+    configured: ConfiguredModule<'_>,
+    placed: Vec<SymbolId>,
+    name: &str,
+    accept: impl Fn(&Symbol) -> bool,
+) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
+    let (mut targets, files) = match configured {
+        ConfiguredModule::Files(files) => {
+            // Tree-sitter spells an item's qualified name from its file's path, wherever the
+            // module tree places the file.
+            let names = files
+                .files
+                .iter()
+                .map(|file| format!("{}::{name}", file.replace('/', "::")))
+                .collect::<Vec<_>>();
+            (rust_qualified_targets(ctx, &names, accept), files)
+        }
+        ConfiguredModule::Below(files) => (placed, files),
+    };
+    normalize_symbol_ids(&mut targets);
+    (!targets.is_empty()).then(|| (targets, RustModulePathStrategy::Configured(files.clone())))
 }
 
 /// The associated functions a Rust path through a type reached, each proven by the call site,
@@ -351,25 +379,37 @@ fn rust_type_path_outcome(
     targets: Vec<SymbolId>,
     strategy: RustModulePathStrategy,
 ) -> ResolutionOutcome {
-    let (module_strategy, type_strategy) = match strategy {
+    let (module_strategy, type_strategy) = match &strategy {
         RustModulePathStrategy::CrateQualified => {
             ("rust_crate_qualified_module", "rust_crate_qualified_type")
         }
         RustModulePathStrategy::ModuleScope => ("rust_module_scope_path", "rust_module_scope_type"),
         RustModulePathStrategy::CrateName => ("rust_crate_name_module", "rust_crate_name_type"),
+        RustModulePathStrategy::Configured(_) => ("rust_configured_module", "rust_configured_type"),
     };
     let candidate_count = targets.len();
-    let ambiguity = ambiguity_strings(&targets);
+    let (confidence, ambiguity, message) = match &strategy {
+        RustModulePathStrategy::Configured(files) => (
+            Confidence::High,
+            configured_file_names(files),
+            configured_message("associated function of the type a Rust path names", files),
+        ),
+        _ => (
+            Confidence::Exact,
+            ambiguity_strings(&targets),
+            "associated function of the type an exact Rust path names".to_string(),
+        ),
+    };
     let candidates = targets
         .into_iter()
         .map(|target| {
-            let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact);
+            let mut candidate = ResolutionCandidate::new(target.clone(), confidence);
             candidate.evidence.push(ResolutionEvidence {
                 kind: ResolutionEvidenceKind::LexicalScope,
                 source_type: EvidenceSourceType::TreeSitter,
                 file_range: call_file_range(call, ctx),
                 symbol_id: Some(target.clone()),
-                message: "associated function of the type an exact Rust path names".into(),
+                message: message.clone(),
             });
             candidate.proofs.push(call_site_proof(call, ctx, &target));
             for (kind, strategy) in [
@@ -396,7 +436,44 @@ fn rust_type_path_outcome(
             candidate
         })
         .collect();
-    evaluate_candidates(&GraphEdgeType::Calls, candidates)
+    rust_path_outcome(&strategy, candidates)
+}
+
+/// The outcome of the candidates a Rust path reached: proven when exactly one is, or, through a
+/// module whose file configuration selects, every one kept as an alternative.
+fn rust_path_outcome(
+    strategy: &RustModulePathStrategy,
+    candidates: Vec<ResolutionCandidate>,
+) -> ResolutionOutcome {
+    match strategy {
+        RustModulePathStrategy::Configured(files) => ResolutionOutcome::Alternatives {
+            candidates: normalize_candidates(candidates),
+            reason: configured_message("the Rust path", files),
+        },
+        _ => evaluate_candidates(&GraphEdgeType::Calls, candidates),
+    }
+}
+
+/// The files a module configuration selects may be compiled from, as a proof's ambiguity names
+/// them: each such proof is short of unique, so the relationship is not authoritative.
+fn configured_file_names(files: &RustModuleFiles) -> Vec<String> {
+    let mut names = files
+        .files
+        .iter()
+        .map(|file| format!("{file}.rs"))
+        .collect::<Vec<_>>();
+    if files.unread {
+        names.push("a `path` attribute the index cannot read".into());
+    }
+    names
+}
+
+/// The caveat of a candidate reached through a module whose file configuration selects.
+fn configured_message(what: &str, files: &RustModuleFiles) -> String {
+    format!(
+        "{what} reaches a module whose file configuration selects, one of {}; the call reaches this candidate only on builds that compile its file",
+        configured_file_names(files).join(", ")
+    )
 }
 
 /// The candidates a Rust module path reached, each proven by the call site, the module path and
@@ -407,7 +484,7 @@ fn rust_module_path_outcome(
     targets: Vec<SymbolId>,
     strategy: RustModulePathStrategy,
 ) -> ResolutionOutcome {
-    let (message, module_strategy, member_strategy) = match strategy {
+    let (message, module_strategy, member_strategy) = match &strategy {
         RustModulePathStrategy::CrateQualified => (
             "candidate from exact Rust crate-qualified module path",
             "rust_crate_qualified_module",
@@ -423,19 +500,35 @@ fn rust_module_path_outcome(
             "rust_crate_name_module",
             "rust_crate_name_member",
         ),
+        RustModulePathStrategy::Configured(_) => (
+            "candidate from a Rust path",
+            "rust_configured_module",
+            "rust_configured_member",
+        ),
     };
     let candidate_count = targets.len();
-    let ambiguity = ambiguity_strings(&targets);
+    let (confidence, ambiguity, message) = match &strategy {
+        RustModulePathStrategy::Configured(files) => (
+            Confidence::High,
+            configured_file_names(files),
+            configured_message(message, files),
+        ),
+        _ => (
+            Confidence::Exact,
+            ambiguity_strings(&targets),
+            message.to_string(),
+        ),
+    };
     let candidates = targets
         .into_iter()
         .map(|target| {
-            let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact);
+            let mut candidate = ResolutionCandidate::new(target.clone(), confidence);
             candidate.evidence.push(ResolutionEvidence {
                 kind: ResolutionEvidenceKind::LexicalScope,
                 source_type: EvidenceSourceType::TreeSitter,
                 file_range: call_file_range(call, ctx),
                 symbol_id: Some(target.clone()),
-                message: message.into(),
+                message: message.clone(),
             });
             candidate.proofs.push(call_site_proof(call, ctx, &target));
             candidate.proofs.push(proof(
@@ -459,7 +552,7 @@ fn rust_module_path_outcome(
             candidate
         })
         .collect();
-    evaluate_candidates(&GraphEdgeType::Calls, candidates)
+    rust_path_outcome(&strategy, candidates)
 }
 
 /// The items named `name` that `accept` admits in the module a Rust path through a crate name the
@@ -473,21 +566,32 @@ fn rust_crate_name_items(
     path: &str,
     name: &str,
     accept: impl Fn(&Symbol) -> bool,
-) -> Option<Vec<SymbolId>> {
-    let (names, crate_placement) = rust_crate_name_member_names(call, ctx, path.trim(), name)?;
-    let mut targets = rust_qualified_targets(ctx, &names, accept);
+) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
+    let (module, crate_placement) = rust_crate_name_module(call, ctx, path.trim())?;
+    let names = rust_module_member_names(crate_placement, &module, name);
+    let mut targets = rust_qualified_targets(ctx, &names, &accept);
     targets.retain(|target| {
         ctx.symbols.get(target).is_some_and(|symbol| {
             ctx.scopes
                 .is_placed_in_crate_of(&symbol.file_id, crate_placement)
         })
     });
+    // The caller is in another crate, so no choice of the library's is made by compiling it.
+    if let Some(configured) = ctx
+        .scopes
+        .rust_configured_module(crate_placement, None, &module)
+    {
+        return rust_configured_items(ctx, configured, targets, name, &accept);
+    }
     normalize_symbol_ids(&mut targets);
-    (!targets.is_empty()).then_some(targets)
+    (!targets.is_empty()).then_some((targets, RustModulePathStrategy::CrateName))
 }
 
 /// How a Rust module path reached its candidates.
 enum RustModulePathStrategy {
+    /// Items of each file that may hold a module whose file configuration selects, or below one
+    /// (#613): the path proves none of them.
+    Configured(RustModuleFiles),
     /// Qualified names the path spells from the file path.
     CrateQualified,
     /// Items a module scope of this file declares.
@@ -497,16 +601,15 @@ enum RustModulePathStrategy {
     CrateName,
 }
 
-/// Qualified names of `callee` in the module a path through a crate name reaches, and the
-/// library crate it starts in: `engine::plan::f()` where the caller's package declares `engine`.
+/// The module a path through a crate name reaches, below the root of the library crate it starts
+/// in, and that crate: `engine::plan::f()` where the caller's package declares `engine`.
 /// The first segment names that crate only when nothing of this file does: an explicit import of
 /// the name, or an item of it in lexical scope, such as a module, shadows the crate. A glob
 /// importing a module of that name from another file is not seen.
-fn rust_crate_name_member_names<'c>(
+fn rust_crate_name_module<'c>(
     call: &CallSite,
     ctx: &ResolutionContext<'c>,
     receiver: &str,
-    member: &str,
 ) -> Option<(Vec<String>, &'c RustModulePlacement)> {
     let mut segments = receiver.split("::").map(str::trim);
     let first = segments.next()?;
@@ -529,10 +632,7 @@ fn rust_crate_name_member_names<'c>(
         }
         module.push(rust_module_name(segment).to_string());
     }
-    Some((
-        rust_module_member_names(placement, &module, member),
-        placement,
-    ))
+    Some((module, placement))
 }
 
 /// The symbols of the qualified names a Rust path spells that `accept` admits. A call path never
@@ -572,12 +672,8 @@ fn rust_relative_path(receiver: &str) -> Option<(usize, Vec<&str>)> {
     Some((depth, rest))
 }
 
-/// Qualified names of `callee` in the module a `crate::` path names in the caller's crate.
-fn rust_crate_path_member_names(
-    placement: &RustModulePlacement,
-    receiver: &str,
-    callee: &str,
-) -> Option<Vec<String>> {
+/// The module a `crate::` path names, below the caller's crate root.
+fn rust_crate_path_module(receiver: &str) -> Option<Vec<String>> {
     let module = match receiver.strip_prefix("crate::") {
         None if receiver == "crate" => Vec::new(),
         None => return None,
@@ -592,17 +688,16 @@ fn rust_crate_path_member_names(
             module
         }
     };
-    Some(rust_module_member_names(placement, &module, callee))
+    Some(module)
 }
 
-/// Qualified names of `callee` in the module `climbs` modules above the caller's own module and
-/// then down `path`, in the caller's crate. `None` when the caller is not placed at its path or
-/// the climb leaves the crate.
-fn rust_outside_member_names(
+/// The module `climbs` modules above the caller's own module and then down `path`, below the
+/// caller's crate root. `None` when the caller is not placed at its path or the climb leaves the
+/// crate.
+fn rust_outside_module(
     placement: &RustModulePlacement,
     climbs: usize,
     path: &[String],
-    callee: &str,
 ) -> Option<Vec<String>> {
     let own = placement.module.as_ref()?;
     let kept = own.len().checked_sub(climbs)?;
@@ -612,7 +707,7 @@ fn rust_outside_member_names(
         .chain(path.iter().map(|segment| rust_module_name(segment)))
         .map(str::to_string)
         .collect::<Vec<_>>();
-    Some(rust_module_member_names(placement, &module, callee))
+    Some(module)
 }
 
 /// Qualified names of `callee` in `module` of the crate, as tree-sitter spells them from module
@@ -1112,6 +1207,7 @@ mod tests {
         Binding, BindingId, CallSiteId, FileId, Language, ModuleDeclarationSite, ReceiverKind,
         Scope, ScopeKind, SourceRange, Symbol, Visibility,
     };
+    use std::collections::HashMap;
 
     fn placement(crate_dir: &str, roots: &[&str], module: Option<&[&str]>) -> RustModulePlacement {
         RustModulePlacement {
@@ -1121,6 +1217,28 @@ mod tests {
             in_other_crates: false,
             own_subtree_in_every_crate: true,
         }
+    }
+
+    /// Qualified names of `callee` in the module a `crate::` path names in the caller's crate.
+    fn rust_crate_path_member_names(
+        placement: &RustModulePlacement,
+        receiver: &str,
+        callee: &str,
+    ) -> Option<Vec<String>> {
+        let module = rust_crate_path_module(receiver)?;
+        Some(rust_module_member_names(placement, &module, callee))
+    }
+
+    /// Qualified names of `callee` in the module `climbs` modules above the caller's own module
+    /// and then down `path`.
+    fn rust_outside_member_names(
+        placement: &RustModulePlacement,
+        climbs: usize,
+        path: &[String],
+        callee: &str,
+    ) -> Option<Vec<String>> {
+        let module = rust_outside_module(placement, climbs, path)?;
+        Some(rust_module_member_names(placement, &module, callee))
     }
 
     #[test]
@@ -1880,6 +1998,18 @@ mod tests {
         crates: Vec<(&str, RustModulePlacement)>,
         test: impl FnOnce(&ResolutionContext<'_>) -> T,
     ) -> T {
+        with_rust_modules(caller, items, placements, crates, HashMap::new(), test)
+    }
+
+    /// [`with_rust_crates`] with the modules configuration selects a file for, by crate root.
+    fn with_rust_modules<T>(
+        caller: &str,
+        items: &[(&str, &str)],
+        placements: Vec<(&str, RustModulePlacement)>,
+        crates: Vec<(&str, RustModulePlacement)>,
+        configured: HashMap<String, crate::index::RustConfiguredModules>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
         let caller_id = FileId::new(format!("file:{caller}"));
         let mut scopes = ScopeIndex::build(vec![Scope {
             id: ScopeId::new("scope:worker"),
@@ -1900,6 +2030,7 @@ mod tests {
                 .map(|(path, placement)| (FileId::new(format!("file:{path}")), placement))
                 .collect(),
         );
+        scopes.record_rust_configured_modules(configured);
         scopes.record_rust_crate_names(
             [(
                 caller_id.clone(),
@@ -1968,6 +2099,135 @@ mod tests {
             semantics,
         );
         test(&context)
+    }
+
+    #[test]
+    fn a_rust_path_into_a_module_whose_file_configuration_selects_keeps_every_file_unproven() {
+        // `src/sys/mod.rs` declares `#[cfg_attr(windows, path = "win.rs")] mod imp;`: `imp` is
+        // `sys/imp.rs`, placed at its path, or `sys/win.rs`, which is not. Each declares `inner`.
+        let at = |module: &[&str]| placement("src", &["src::lib"], Some(module));
+        let items = [
+            ("src::sys::imp::f", "src/sys/imp.rs"),
+            ("src::sys::win::f", "src/sys/win.rs"),
+            ("src::sys::imp::inner::g", "src/sys/imp/inner.rs"),
+            ("src::sys::inner::g", "src/sys/inner.rs"),
+            ("src::sys::imp::Engine (type)", "src/sys/imp.rs"),
+            (
+                "src::sys::imp::new @src::sys::imp::Engine",
+                "src/sys/imp.rs",
+            ),
+            ("src::sys::f", "src/sys/mod.rs"),
+        ];
+        let placements = vec![
+            ("src/lib.rs", at(&[])),
+            ("src/sys/mod.rs", at(&["sys"])),
+            ("src/sys/imp.rs", at(&["sys", "imp"])),
+            ("src/sys/imp/inner.rs", at(&["sys", "imp", "inner"])),
+            ("src/sys/win.rs", placement("src", &["src::lib"], None)),
+            ("src/sys/inner.rs", placement("src", &["src::lib"], None)),
+        ];
+        let module = |path: &str| path.split("::").map(str::to_string).collect::<Vec<_>>();
+        let files = |files: &[&str]| crate::index::RustModuleFiles {
+            files: files.iter().map(|file| file.to_string()).collect(),
+            unread: false,
+        };
+        let configured = HashMap::from([(
+            "src::lib".to_string(),
+            crate::index::RustConfiguredModules {
+                choices: [module("sys::imp")].into(),
+                files: [
+                    (module("sys::imp"), files(&["src/sys/imp", "src/sys/win"])),
+                    (
+                        module("sys::imp::inner"),
+                        files(&["src/sys/imp/inner", "src/sys/inner"]),
+                    ),
+                ]
+                .into(),
+            },
+        )]);
+        let alternatives = |outcome: ResolutionOutcome| match outcome {
+            ResolutionOutcome::Alternatives { candidates, .. } => candidates
+                .into_iter()
+                .map(|candidate| {
+                    assert_eq!(candidate.confidence, Confidence::High);
+                    assert_ne!(
+                        candidate.authority(&GraphEdgeType::Calls),
+                        open_kioku_core::RelationshipAuthority::Authoritative
+                    );
+                    assert!(candidate.proofs.iter().any(|proof| proof.ambiguity
+                        == vec!["src/sys/imp.rs".to_string(), "src/sys/win.rs".to_string()]
+                        || proof.ambiguity
+                            == vec![
+                                "src/sys/imp/inner.rs".to_string(),
+                                "src/sys/inner.rs".to_string()
+                            ]));
+                    candidate.target_symbol_id.0
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected alternatives, got {other:?}"),
+        };
+        with_rust_modules(
+            "src/lib.rs",
+            &items,
+            placements.clone(),
+            Vec::new(),
+            configured.clone(),
+            |ctx| {
+                let outcome = |receiver: &str, callee: &str| {
+                    resolve_module_member_outcome(
+                        &module_path_call("scope:worker", receiver, callee),
+                        ctx,
+                    )
+                };
+                // Into the module, and below it, each file's item is kept, and none proven.
+                assert_eq!(
+                    alternatives(outcome("crate::sys::imp", "f")),
+                    vec!["src::sys::imp::f", "src::sys::win::f"]
+                );
+                assert_eq!(
+                    alternatives(outcome("crate::sys::imp::inner", "g")),
+                    vec!["src::sys::imp::inner::g", "src::sys::inner::g"]
+                );
+                // A path through a type below the choice is not proven either.
+                assert_eq!(
+                    alternatives(outcome("crate::sys::imp::Engine", "new")),
+                    vec!["src::sys::imp::Engine.new"]
+                );
+                // Beside the choice nothing changes.
+                assert_eq!(
+                    proven_target(ctx, &module_path_call("scope:worker", "crate::sys", "f"))
+                        .as_deref(),
+                    Some("src::sys::f")
+                );
+            },
+        );
+        // `sys/imp.rs` is compiled only when `imp` is that file, so `self::inner` there is
+        // `sys/imp/inner.rs` alone.
+        with_rust_modules(
+            "src/sys/imp.rs",
+            &items,
+            placements.clone(),
+            Vec::new(),
+            configured.clone(),
+            |ctx| {
+                assert_eq!(
+                    proven_target(ctx, &module_path_call("scope:worker", "self::inner", "g"))
+                        .as_deref(),
+                    Some("src::sys::imp::inner::g")
+                );
+            },
+        );
+        // Without the choice recorded, the placed file alone is the proven target.
+        with_rust_files("src/lib.rs", &items, placements, |ctx| {
+            assert_eq!(
+                proven_target(
+                    ctx,
+                    &module_path_call("scope:worker", "crate::sys::imp", "f")
+                )
+                .as_deref(),
+                Some("src::sys::imp::f")
+            );
+        });
     }
 
     #[test]
