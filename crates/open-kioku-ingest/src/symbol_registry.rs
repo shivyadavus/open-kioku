@@ -1892,7 +1892,7 @@ fn python_assignment_end(line: &str) -> Option<usize> {
 /// before; YAML and TOML lose only their `#` comments. A Python f-string's replacement fields are
 /// code up to their conversion or format spec (#582); a Rust format string's names read as
 /// literal.
-struct CodeLexer {
+pub(crate) struct CodeLexer {
     syntax: LexicalSyntax,
     /// Innermost last. Empty is code outside any template interpolation.
     stack: Vec<LexState>,
@@ -1965,7 +1965,7 @@ enum LexStep {
 }
 
 impl CodeLexer {
-    fn new(language: &Language) -> Self {
+    pub(crate) fn new(language: &Language) -> Self {
         let c_like = LexicalSyntax {
             line_comment: Some("//"),
             block_comments: true,
@@ -2036,7 +2036,7 @@ impl CodeLexer {
 
     /// The byte ranges of `line` that are code, continuing from the previous line's state. Every
     /// range starts and ends beside an ASCII delimiter, so it is a valid slice of `line`.
-    fn code_spans(&mut self, line: &str) -> Vec<Range<usize>> {
+    pub(crate) fn code_spans(&mut self, line: &str) -> Vec<Range<usize>> {
         let mut spans = Vec::new();
         let mut code_start = self.in_code().then_some(0);
         let mut idx = 0;
@@ -2269,7 +2269,7 @@ impl CodeLexer {
         }
     }
 
-    fn in_code(&self) -> bool {
+    pub(crate) fn in_code(&self) -> bool {
         matches!(
             self.stack.last(),
             None | Some(LexState::Interpolation(_) | LexState::FormatField(_))

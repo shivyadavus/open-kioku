@@ -255,10 +255,18 @@ fn rust_placement_notes(gaps: imports::RustPlacementGaps) -> Vec<QualityNote> {
         } else {
             String::new()
         };
+        let unread_files = if gaps.unread_mounted_files > 0 {
+            format!(
+                "; {} Rust file(s) a `#[path]` attribute mounts, or that sit below one, were not indexed and their `mod` items could not be read, so each may mount any file of its package",
+                gaps.unread_mounted_files
+            )
+        } else {
+            String::new()
+        };
         notes.push(QualityNote::new(
             QualityNoteKind::RelationshipResolution,
             format!(
-                "{} Rust source file(s) an indexed crate root declares may also be compiled into another crate (a crate root beside them was not indexed, or another crate mounts them or a module above them with `#[path]`); `crate::`, `self::` and `super::` call paths in those files are left unresolved, except a `self::`/`super::` path ending below the file's own module where every crate compiles the file at the same place{unread_mounts}",
+                "{} Rust source file(s) an indexed crate root declares may also be compiled into another crate (a crate root beside them was not indexed, or another crate mounts them or a module above them with `#[path]`); `crate::`, `self::` and `super::` call paths in those files are left unresolved, except a `self::`/`super::` path ending below the file's own module where every crate compiles the file at the same place{unread_mounts}{unread_files}",
                 gaps.shared_files
             ),
         ));
@@ -766,24 +774,34 @@ impl Indexer {
         )
         .with_reexports(&import_sites);
         let rust_modules = {
-            let unread = rust_modules.unread_crate_roots();
-            // Only a root skipped for its size has its `mod` lines read; a path policy's
-            // exclusion is never read around.
-            let scanned = skipped_paths
-                .iter()
-                .filter(|skipped| {
-                    skipped.reason == SkipReason::TooLarge
-                        && skipped.source == SkipSource::SizeLimit
-                        && skipped.safe_to_show
-                        && !open_kioku_core::is_secret_like_path(&skipped.path)
-                        && unread.contains(&skipped.path)
-                })
-                .map(|skipped| {
-                    let names = rust_use_path::read_module_declarations(&root.join(&skipped.path));
-                    (skipped.path.as_path(), names)
-                })
-                .collect::<Vec<_>>();
-            rust_modules.with_scanned_roots(scanned)
+            // Only a file skipped for its size has its `mod` lines read; a path policy's
+            // exclusion is never read around. A mounted file read this way can mount another
+            // skipped file, so reading repeats until no readable file is left unread.
+            let mut rust_modules = rust_modules;
+            let mut read = HashSet::new();
+            loop {
+                let wanted = rust_modules.unscanned_module_files();
+                let scanned = skipped_paths
+                    .iter()
+                    .filter(|skipped| {
+                        skipped.reason == SkipReason::TooLarge
+                            && skipped.source == SkipSource::SizeLimit
+                            && skipped.safe_to_show
+                            && !open_kioku_core::is_secret_like_path(&skipped.path)
+                            && wanted.contains(&skipped.path)
+                            && read.insert(skipped.path.as_path())
+                    })
+                    .map(|skipped| {
+                        let names =
+                            rust_use_path::read_module_declarations(&root.join(&skipped.path));
+                        (skipped.path.as_path(), names)
+                    })
+                    .collect::<Vec<_>>();
+                if scanned.is_empty() {
+                    break rust_modules;
+                }
+                rust_modules = rust_modules.with_scanned_files(scanned);
+            }
         };
         scope_index.record_rust_module_placements(rust_modules.module_placements());
         scope_index.record_rust_crate_names(rust_modules.crate_names());
@@ -3807,6 +3825,85 @@ class Util {
         assert!(sized.starts_with("1 Rust source file(s)"), "{sized}");
         let ignored = shared_note(true).expect("both modules are shared");
         assert!(ignored.starts_with("2 Rust source file(s)"), "{ignored}");
+    }
+
+    #[test]
+    fn a_mounted_file_skipped_for_size_shares_the_module_files_its_mod_lines_declare() {
+        // `tests/it.rs` mounts `src/m.rs` with `#[path]`, and `m.rs` is over `max_file_size`.
+        // Read from `src/`, its `mod b;` is the library's `src/b.rs`, which the test crate then
+        // compiles with its own `helper`: `crate::helper()` there must prove no edge into the
+        // library's (#610). A comment or a `//` in a string beside the item hides nothing.
+        let exact_calls_from_b = |declaring: &str| {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::create_dir_all(root.join("tests")).unwrap();
+            std::fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fx\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+            std::fs::write(root.join("src/lib.rs"), "mod b;\npub fn helper() {}\n").unwrap();
+            std::fs::write(
+                root.join("src/b.rs"),
+                "pub fn u() {\n    crate::helper();\n}\n",
+            )
+            .unwrap();
+            let padding = "// padding\n".repeat(64);
+            std::fs::write(root.join("src/m.rs"), format!("{declaring}\n{padding}")).unwrap();
+            std::fs::write(
+                root.join("tests/it.rs"),
+                "#[path = \"../src/m.rs\"]\nmod m;\nfn helper() {}\n#[test]\nfn t() {}\n",
+            )
+            .unwrap();
+            let mut config = OkConfig::default();
+            config.scip.enabled = false;
+            config.history.enabled = false;
+            config.index.max_file_size = "256b".into();
+            let snapshot = Indexer::default()
+                .index_repo_with_mode(root, &config, IndexMode::Full)
+                .unwrap();
+            assert!(snapshot
+                .skipped_paths
+                .iter()
+                .any(|skipped| skipped.path == std::path::Path::new("src/m.rs")
+                    && skipped.reason == SkipReason::TooLarge));
+            let symbol = |path: &str, name: &str| {
+                let file = snapshot
+                    .files
+                    .iter()
+                    .find(|file| file.path == std::path::Path::new(path))
+                    .map(|file| file.id.clone())
+                    .expect("the file is indexed");
+                snapshot
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.file_id == file && symbol.name == name)
+                    .map(|symbol| symbol.id.clone())
+                    .expect("the symbol is indexed")
+            };
+            let (caller, helper) = (symbol("src/b.rs", "u"), symbol("src/lib.rs", "helper"));
+            snapshot
+                .resolved_relationships
+                .iter()
+                .filter(|edge| {
+                    edge.from == caller
+                        && edge.to == helper
+                        && edge.edge_type == open_kioku_core::GraphEdgeType::Calls
+                        && edge.confidence == Confidence::Exact
+                })
+                .count()
+        };
+        // Declaring no `b`, the mounted file leaves `b.rs` to the library alone.
+        assert_eq!(exact_calls_from_b("mod z;"), 1);
+        for declaring in [
+            "mod b;",
+            "mod b /* c */;",
+            "const U: &str = \"http://example\"; mod b;",
+            "const R: &[u8] = br#\"//\"#; mod b;",
+        ] {
+            assert_eq!(exact_calls_from_b(declaring), 0, "{declaring}");
+        }
     }
 
     #[test]

@@ -10,6 +10,8 @@
 //! path alone, so `self::` and `super::` are wrong for a `use` nested in an inline `mod` block, and
 //! a mapped path is only a candidate until the caller checks the `mod` declarations.
 
+use crate::symbol_registry::CodeLexer;
+use open_kioku_core::Language;
 use open_kioku_semantic_model::{CargoTargetKind, CargoTargets, ProjectRoot};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -670,108 +672,25 @@ pub(crate) fn scan_module_declarations(source: &str) -> Option<HashSet<String>> 
     Some(names)
 }
 
-/// `source` with its comments removed and the contents of its string and character literals
-/// emptied (`"http://x"` is `""`), so a `//` or `mod` inside a literal is not read as code. A
-/// block comment becomes one space, however many lines it spans, so one between `mod name` and
-/// `;` is not in the way. `None` for a literal or block comment left open.
+/// `source` with its comments and its string, byte-string, raw-string and character literals
+/// removed, as the symbol registry's [`CodeLexer`] reads Rust, so a `//` or `mod` inside a
+/// literal is not read as code. Each removed piece leaves one space, and a line break inside a
+/// block comment or a literal is removed with it, so a block comment between `mod name` and `;`
+/// is not in the way. A lifetime or label (`'a`) is code. `None` for a literal or block comment
+/// left open.
 fn strip_comments_and_literals(source: &str) -> Option<String> {
-    let chars = source.chars().collect::<Vec<_>>();
-    let is_ident = |ch: char| ch == '_' || ch.is_alphanumeric();
+    let mut lexer = CodeLexer::new(&Language::Rust);
     let mut code = String::with_capacity(source.len());
-    let mut at = 0;
-    while at < chars.len() {
-        let ch = chars[at];
-        let next = chars.get(at + 1).copied();
-        let prev = at.checked_sub(1).map(|index| chars[index]);
-        if ch == '/' && next == Some('/') {
-            let end = chars[at..]
-                .iter()
-                .position(|ch| *ch == '\n')
-                .map_or(chars.len(), |offset| at + offset);
-            at = end;
-        } else if ch == '/' && next == Some('*') {
-            let mut depth = 0usize;
-            let mut index = at;
-            loop {
-                match (chars.get(index), chars.get(index + 1)) {
-                    (Some('/'), Some('*')) => {
-                        depth += 1;
-                        index += 2;
-                    }
-                    (Some('*'), Some('/')) => {
-                        depth -= 1;
-                        index += 2;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    (Some(_), _) => index += 1,
-                    (None, _) => return None,
-                }
+    for line in source.lines() {
+        for (at, span) in lexer.code_spans(line).into_iter().enumerate() {
+            if at > 0 {
+                code.push(' ');
             }
-            code.push(' ');
-            at = index;
-        } else if ch == 'r'
-            && !prev.is_some_and(|prev| {
-                is_ident(prev) && !(prev == 'b' && !(at >= 2 && is_ident(chars[at - 2])))
-            })
-            && matches!(next, Some('"' | '#'))
-        {
-            // A raw string `r"..."` or `r#"..."#` (`br` too); `r#name` is a raw identifier.
-            let hashes = chars[at + 1..].iter().take_while(|ch| **ch == '#').count();
-            if chars.get(at + 1 + hashes) != Some(&'"') {
-                code.push(ch);
-                at += 1;
-                continue;
-            }
-            let body = at + 2 + hashes;
-            let close = (body..chars.len()).find(|index| {
-                chars[*index] == '"'
-                    && chars[index + 1..]
-                        .iter()
-                        .take(hashes)
-                        .filter(|ch| **ch == '#')
-                        .count()
-                        == hashes
-            })?;
-            code.push_str("\"\"");
-            at = close + 1 + hashes;
-        } else if ch == '"' {
-            let mut index = at + 1;
-            loop {
-                match chars.get(index) {
-                    Some('\\') => index += 2,
-                    Some('"') => break,
-                    Some(_) => index += 1,
-                    None => return None,
-                }
-            }
-            code.push_str("\"\"");
-            at = index + 1;
-        } else if ch == '\'' {
-            // A character literal (`'"'`, `'\''`), or else a lifetime or label (`'a`).
-            let end = match (next, chars.get(at + 2)) {
-                (Some('\\'), _) => (at + 2..chars.len().min(at + 12))
-                    .find(|index| chars[*index] == '\'' && *index > at + 2),
-                (Some(_), Some('\'')) => Some(at + 2),
-                _ => None,
-            };
-            match end {
-                Some(end) => {
-                    code.push_str("' '");
-                    at = end + 1;
-                }
-                None => {
-                    code.push(ch);
-                    at += 1;
-                }
-            }
-        } else {
-            code.push(ch);
-            at += 1;
+            code.push_str(&line[span]);
         }
+        code.push(if lexer.in_code() { '\n' } else { ' ' });
     }
-    Some(code)
+    lexer.in_code().then_some(code)
 }
 
 /// Whether `text` holds the word `path` followed by `=`, as a `path` attribute does, directly or
@@ -1263,6 +1182,20 @@ mod tests {
             ),
             Some(vec!["a".to_string()])
         );
+        // Byte, raw byte and C strings, character literals holding a quote or a `/`, doc and
+        // nested block comments, and a string spanning lines are skipped the same way, while
+        // a lifetime or label is code (#610).
+        for source in [
+            "const B: &[u8] = b\"http://x\"; mod b;\nmod a;\n",
+            "const R: &[u8] = br#\"// \"mod x;\" \"#; mod b;\nmod a;\n",
+            "const C: &core::ffi::CStr = c\"//\"; mod b;\nmod a;\n",
+            "const Q: u8 = b'\"'; const S: char = '/'; mod b;\nmod a;\n",
+            "/** mod x; */ mod b /*! /* mod y; */ */;\nmod a;\n",
+            "fn f<'a>(x: &'a str) -> &'a str { 'outer: loop { break 'outer x; } } mod b;\nmod a;\n",
+            "const M: &str = \"line one\nmod x;\n// still text\"; mod b;\nmod a;\n",
+        ] {
+            assert_eq!(scanned(source), both, "{source}");
+        }
     }
 
     #[test]
@@ -1271,6 +1204,9 @@ mod tests {
             "#[path = \"other.rs\"]\nmod cli;\n",
             "#[cfg_attr(unix,\n    path = \"unix.rs\")]\nmod sys;\n",
             "#[path = \"x.rs\"] mod cli;\n",
+            // A `path` in a raw string is still an attribute, whatever its literal holds.
+            "#[path = r\"x.rs\"]\nmod cli;\n",
+            "#[cfg_attr(unix, path = r#\"unix.rs\"#)] mod sys;\n",
             "pub mod\n    cli;\n",
             "mod cli\n{\n}\n",
             "macro_rules! m { ($name:ident) => { mod $name; } }\n",
