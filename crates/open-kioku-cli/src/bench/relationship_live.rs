@@ -1556,6 +1556,49 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // The mounted `sys/mod.rs` sets its `imp`'s path only on Windows, so elsewhere the test
+        // crate compiles `imp` from its default location, `sys/imp.rs` (#608).
+        "cfg_attr_default_location_below_mounted_mod_rs_shared_with_test_crate" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\nmod common;\n\npub fn target_fn() {}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"../common.rs\")]\nmod imp;\n",
+                ),
+                (
+                    "src/sys/imp.rs",
+                    "pub fn caller_fn() {\n    crate::target_fn();\n}\n",
+                ),
+                ("src/common.rs", "pub fn other_fn() {}\n"),
+                (
+                    "tests/it.rs",
+                    "#[path = \"../src/sys/mod.rs\"]\nmod sys;\n\nfn target_fn() {}\n\n#[test]\nfn t() {}\n",
+                ),
+            ],
+            false,
+        ),
+        // Unless its `cfg_attr` condition holds, `imp` is `sys/imp.rs`, whose `super` is `sys`
+        // (#608).
+        "cfg_attr_default_location_super_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\nmod imp;\n\npub fn target_fn() {}\n",
+                ),
+                (
+                    "src/sys/imp.rs",
+                    "pub fn caller_fn() {\n    super::target_fn();\n}\n",
+                ),
+                ("src/sys/win.rs", "pub fn other_fn() {}\n"),
+            ],
+            true,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![
