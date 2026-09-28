@@ -115,7 +115,17 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// target the pass cannot place resolves to nothing, with a caveat naming the alias. v27 indexes
 /// hold no edge for a member reached through an alias declared in another package. v28 is taken
 /// by an open change.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v29";
+/// v31: the symbol-registry pass reads a Java static import's class by the package the candidate's
+/// file declares and the classes enclosing the member, not by the file's directories, and counts a
+/// Java import inside a declared package (by whole segments) as the repository's. A Go file of an
+/// external test package (`package store_test` in a `_test.go` file) is not of the package its
+/// directory holds, and a Go `_test.go` declaration is ruled out for a use in another directory, or
+/// outside its external test package. v29 indexes hold no edge for a static import of a class whose
+/// directory does not mirror its package, one for a class whose directory spells the import's
+/// package while its declaration names another, unique-name edges into `_test.go` declarations from
+/// other directories, and no edge for a member made ambiguous by an alias its package's external
+/// test package declares. v30 is taken by an open change.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v31";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -165,7 +175,9 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// v13: a Go type alias (`type Entry = store.Entry`, alone or in a `type ( .. )` group) is a type
 /// symbol whose signature spells the alias, and records the package qualifier and name of the type
 /// it stands for; a v12 index holds no symbol for it.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v13";
+/// v15: a Java file records the package its `package` declaration names and a Go file its
+/// `package` clause; a v13 index records neither. v14 is taken by an open change.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v15";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

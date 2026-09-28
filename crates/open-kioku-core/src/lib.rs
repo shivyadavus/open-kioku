@@ -2219,6 +2219,16 @@ pub struct TypeAliasSite {
     pub target_name: Option<String>,
 }
 
+/// The package a file declares: a Java `package org.example;` or a Go `package store` clause.
+/// Neither need match the file's directory: a Java file may sit anywhere its build puts it, and a
+/// Go `_test.go` file may declare the external test package `store_test` beside `store`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PackageDeclarationSite {
+    pub file_id: FileId,
+    /// The name as declared: `org.example` or `store_test`.
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SyntaxFacts {
     pub symbols: Vec<Symbol>,
@@ -2232,6 +2242,8 @@ pub struct SyntaxFacts {
     pub module_declarations: Vec<ModuleDeclarationSite>,
     #[serde(default)]
     pub type_aliases: Vec<TypeAliasSite>,
+    #[serde(default)]
+    pub package_declaration: Option<PackageDeclarationSite>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

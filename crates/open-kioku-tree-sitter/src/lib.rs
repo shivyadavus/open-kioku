@@ -1,8 +1,8 @@
 use open_kioku_core::{
     Binding, BindingId, CallSite, CallSiteId, Confidence, EvidenceSourceType, ExportSite, File,
     ImportSite, ImportedName, InheritanceKind, InheritanceSite, Language, LineRange,
-    ModuleDeclarationSite, ReceiverKind, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId,
-    SymbolKind, SyntaxFacts, TypeAliasSite, Visibility,
+    ModuleDeclarationSite, PackageDeclarationSite, ReceiverKind, Scope, ScopeId, ScopeKind,
+    SourceRange, Symbol, SymbolId, SymbolKind, SyntaxFacts, TypeAliasSite, Visibility,
 };
 use open_kioku_errors::{OkError, Result};
 use sha2::{Digest, Sha256};
@@ -95,6 +95,7 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
     ctx.scope_stack.push(file_scope_id);
 
     walk(file, content, tree.root_node(), &mut ctx, &mut out);
+    out.package_declaration = package_declaration(file, content, tree.root_node());
 
     // Reconcile Rust impl method parent_symbol_id and inheritance sites to the actual struct/trait symbol
     if file.language == Language::Rust {
@@ -576,6 +577,37 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
     if pushed_symbol.is_some() {
         ctx.symbol_stack.pop();
     }
+}
+
+/// The package a Java or Go file declares, read from its top-level `package` declaration or
+/// clause. Java package annotations (`package-info.java`) are skipped.
+fn package_declaration(
+    file: &File,
+    content: &str,
+    root: Node<'_>,
+) -> Option<PackageDeclarationSite> {
+    let (declaration, names) = match file.language {
+        Language::Java => ("package_declaration", ["scoped_identifier", "identifier"]),
+        Language::Go => ("package_clause", ["package_identifier", "identifier"]),
+        _ => return None,
+    };
+    let mut cursor = root.walk();
+    let node = named_children(&mut cursor)
+        .into_iter()
+        .find(|node| node.kind() == declaration)?;
+    let mut cursor = node.walk();
+    let name = named_children(&mut cursor)
+        .into_iter()
+        .find(|child| names.contains(&child.kind()))?;
+    let name = name.utf8_text(content.as_bytes()).ok()?;
+    // A Java name may be spaced or span lines: `org . example`.
+    let name = name
+        .split(|ch: char| ch.is_whitespace())
+        .collect::<String>();
+    (!name.is_empty()).then(|| PackageDeclarationSite {
+        file_id: file.id.clone(),
+        name,
+    })
 }
 
 /// What a Go `type_alias` node names: `store.Entry`, `Entry` and `Page[int]` name a declared
@@ -3343,5 +3375,63 @@ mod ri3_go_type_classification_tests {
         assert_eq!((package, name), target(None, None));
         // A defined type is not an alias.
         assert_eq!(facts.type_aliases.len(), 6, "{:?}", facts.type_aliases);
+    }
+
+    #[test]
+    fn java_and_go_files_record_the_package_they_declare() {
+        let declared = |path: &str, language: Language, content: &str| {
+            let file = File {
+                id: FileId::new(path),
+                repository_id: RepositoryId::new("repo"),
+                path: path.into(),
+                language,
+                size_bytes: 0,
+                content_hash: "hash".into(),
+                is_generated: false,
+                is_vendor: false,
+            };
+            let facts = parse_file(&file, content).expect("package fixture should parse");
+            facts.package_declaration.map(|site| {
+                assert_eq!(site.file_id, file.id);
+                site.name
+            })
+        };
+        // The declaration, not the directory, names a Java file's package.
+        assert_eq!(
+            declared(
+                "src/Constants.java",
+                Language::Java,
+                "package org.example;\npublic class Constants {}\n",
+            )
+            .as_deref(),
+            Some("org.example")
+        );
+        assert_eq!(
+            declared(
+                "src/org/example/package-info.java",
+                Language::Java,
+                "@Deprecated\npackage org . example\n    .app;\n",
+            )
+            .as_deref(),
+            Some("org.example.app")
+        );
+        assert_eq!(
+            declared("Main.java", Language::Java, "public class Main {}\n"),
+            None
+        );
+        // A Go test file may declare the external test package beside the package it tests.
+        assert_eq!(
+            declared(
+                "store/store_test.go",
+                Language::Go,
+                "package store_test\n\nimport \"testing\"\n\nfunc TestEntry(t *testing.T) {}\n",
+            )
+            .as_deref(),
+            Some("store_test")
+        );
+        assert_eq!(
+            declared("src/lib.rs", Language::Rust, "pub fn run() {}\n"),
+            None
+        );
     }
 }
