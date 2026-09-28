@@ -5,9 +5,10 @@ use crate::pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
 };
 use open_kioku_core::{
-    Binding, CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, Language,
+    Binding, CallSite, Confidence, EvidenceSourceType, FileId, FileRange, GraphEdgeType, Language,
     LineRange, RelationshipProof, RelationshipProofKind, ScopeId, Symbol, SymbolId, SymbolKind,
 };
+use open_kioku_semantic_model::{ConfiguredImportTargets, ImportBinding};
 use std::collections::BTreeMap;
 
 pub(crate) fn resolve_typed_receiver_outcome(
@@ -456,7 +457,7 @@ fn rust_path_outcome(
 
 /// The files a module configuration selects may be compiled from, as a proof's ambiguity names
 /// them: each such proof is short of unique, so the relationship is not authoritative.
-fn configured_file_names(files: &RustModuleFiles) -> Vec<String> {
+pub(crate) fn configured_file_names(files: &RustModuleFiles) -> Vec<String> {
     let mut names = files
         .files
         .iter()
@@ -469,11 +470,71 @@ fn configured_file_names(files: &RustModuleFiles) -> Vec<String> {
 }
 
 /// The caveat of a candidate reached through a module whose file configuration selects.
-fn configured_message(what: &str, files: &RustModuleFiles) -> String {
+pub(crate) fn configured_message(what: &str, files: &RustModuleFiles) -> String {
     format!(
         "{what} reaches a module whose file configuration selects, one of {}; the call reaches this candidate only on builds that compile its file",
         configured_file_names(files).join(", ")
     )
+}
+
+/// The files a Rust import names through a module whose file configuration selects (#615).
+pub(crate) fn configured_import_files(targets: &ConfiguredImportTargets) -> RustModuleFiles {
+    RustModuleFiles {
+        files: targets.files.clone(),
+        unread: targets.unread,
+    }
+}
+
+/// The candidates a call through a Rust import reached, when the import names a module whose
+/// file configuration selects or an item of one (#615): as for a path spelling that module, each
+/// file's candidate is kept, at `High` confidence, with import and qualified-name proofs that
+/// list `files` as ambiguity, so none is proven.
+pub(crate) fn rust_configured_import_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    mut targets: Vec<SymbolId>,
+    files: &RustModuleFiles,
+    evidence_kind: ResolutionEvidenceKind,
+    import_strategy: &str,
+    member_strategy: &str,
+) -> ResolutionOutcome {
+    normalize_symbol_ids(&mut targets);
+    let candidate_count = targets.len();
+    let ambiguity = configured_file_names(files);
+    let message = configured_message("a Rust import", files);
+    let candidates = targets
+        .into_iter()
+        .map(|target| {
+            let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::High);
+            candidate.evidence.push(ResolutionEvidence {
+                kind: evidence_kind.clone(),
+                source_type: EvidenceSourceType::TreeSitter,
+                file_range: call_file_range(call, ctx),
+                symbol_id: Some(target.clone()),
+                message: message.clone(),
+            });
+            candidate.proofs.push(call_site_proof(call, ctx, &target));
+            for (kind, strategy) in [
+                (RelationshipProofKind::ImportBinding, import_strategy),
+                (RelationshipProofKind::QualifiedName, member_strategy),
+            ] {
+                candidate.proofs.push(proof(
+                    kind,
+                    strategy,
+                    call,
+                    ctx,
+                    &target,
+                    candidate_count,
+                    &ambiguity,
+                ));
+            }
+            candidate
+        })
+        .collect();
+    ResolutionOutcome::Alternatives {
+        candidates: normalize_candidates(candidates),
+        reason: configured_message("the Rust import", files),
+    }
 }
 
 /// The candidates a Rust module path reached, each proven by the call site, the module path and
@@ -812,11 +873,71 @@ pub(crate) fn imported_receiver_outcome(
 ) -> ResolutionOutcome {
     let mut targets = Vec::new();
     let import_bindings = match ctx.scoped_import(&call.scope_id, receiver, |binding| {
-        binding.target_file.is_some() || binding.resolved_module.is_some()
+        binding.target_file.is_some()
+            || binding.resolved_module.is_some()
+            || configured_module_files(binding).is_some()
     }) {
         ScopedImport::Resolved(bindings) => bindings,
         ScopedImport::NotImported | ScopedImport::Unresolved => Vec::new(),
     };
+    let members_in_file = |file: &FileId, targets: &mut Vec<SymbolId>| {
+        for id in ctx.symbols.by_file.get(file).into_iter().flatten() {
+            if ctx
+                .symbols
+                .get(id)
+                .map(|symbol| {
+                    // `mod yield_now;` beside `pub use yield_now::yield_now;` is a module of the
+                    // same name, never what a call reaches.
+                    symbol.name == call.callee_name
+                        && symbol.parent_symbol_id.is_none()
+                        && !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
+                })
+                .unwrap_or(false)
+            {
+                targets.push(id.clone());
+            }
+        }
+    };
+
+    // A Rust import of a module whose file configuration selects names each of its files, and
+    // a call through it proves none of their items (#615).
+    if import_bindings
+        .iter()
+        .any(|binding| configured_module_files(binding).is_some())
+    {
+        let mut files = RustModuleFiles::default();
+        for binding in &import_bindings {
+            match configured_module_files(binding) {
+                Some(configured) => {
+                    for file in &configured.module_files {
+                        members_in_file(file, &mut targets);
+                    }
+                    let found = configured_import_files(configured);
+                    files.files.extend(found.files);
+                    files.unread |= found.unread;
+                }
+                None => {
+                    if let Some(file) = &binding.target_file {
+                        members_in_file(file, &mut targets);
+                    }
+                }
+            }
+        }
+        files.files.sort();
+        files.files.dedup();
+        if targets.is_empty() {
+            return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
+        }
+        return rust_configured_import_outcome(
+            call,
+            ctx,
+            targets,
+            &files,
+            ResolutionEvidenceKind::ExplicitImport,
+            "rust_configured_receiver_import",
+            "rust_configured_receiver_member",
+        );
+    }
 
     for binding in import_bindings {
         if let Some(module_id) = &binding.resolved_module {
@@ -839,24 +960,7 @@ pub(crate) fn imported_receiver_outcome(
                     }
                 }
             }
-            if let Some(file_symbols) = ctx.symbols.by_file.get(target_file) {
-                for id in file_symbols {
-                    if ctx
-                        .symbols
-                        .get(id)
-                        .map(|symbol| {
-                            // `mod yield_now;` beside `pub use yield_now::yield_now;` is a
-                            // module of the same name, never what a call reaches.
-                            symbol.name == call.callee_name
-                                && symbol.parent_symbol_id.is_none()
-                                && !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
-                        })
-                        .unwrap_or(false)
-                    {
-                        targets.push(id.clone());
-                    }
-                }
-            }
+            members_in_file(target_file, &mut targets);
         }
     }
     normalize_symbol_ids(&mut targets);
@@ -900,6 +1004,14 @@ pub(crate) fn imported_receiver_outcome(
         })
         .collect();
     evaluate_candidates(&GraphEdgeType::Calls, candidates)
+}
+
+/// The files a Rust module import names when configuration selects the module's file.
+fn configured_module_files(binding: &ImportBinding) -> Option<&ConfiguredImportTargets> {
+    binding
+        .configured_targets
+        .as_ref()
+        .filter(|configured| !configured.module_files.is_empty())
 }
 
 pub(crate) fn evaluate_direct_member_targets(
@@ -2553,6 +2665,7 @@ mod tests {
                 is_glob: false,
                 evidence: Vec::new(),
                 rule: open_kioku_semantic_model::ImportBindingRule::RustModulePath,
+                configured_targets: None,
             });
         let scopes = ScopeIndex::build(Vec::new());
         let bindings = BindingIndex::build(Vec::new());

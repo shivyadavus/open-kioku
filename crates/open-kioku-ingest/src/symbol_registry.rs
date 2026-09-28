@@ -529,11 +529,14 @@ impl<'a> RegistryScopeModel<'a> {
         true
     }
 
-    /// Whether the resolver places `binding` exactly: a resolved target, a `self::`/`super::`
-    /// path to one item, a `crate::` path (which it never rules out without a target), or an
-    /// external crate.
+    /// Whether the resolver places `binding` exactly: a resolved target, the files of a
+    /// configuration-selected module it names (#615), a `self::`/`super::` path to one item, a
+    /// `crate::` path (which it never rules out without a target), or an external crate.
     fn import_is_modeled(&self, binding: &ImportBinding) -> bool {
-        if binding.target_symbol.is_some() || binding.target_file.is_some() {
+        if binding.target_symbol.is_some()
+            || binding.target_file.is_some()
+            || binding.configured_targets.is_some()
+        {
             return true;
         }
         let source = binding.source_module.as_str();
@@ -1068,6 +1071,7 @@ impl SymbolRegistry {
         !binding.is_glob
             && binding.target_symbol.is_none()
             && binding.target_file.is_none()
+            && binding.configured_targets.is_none()
             && !source.starts_with('.')
             && !matches!(root, "crate" | "self" | "super" | "Self")
             && !self.is_module(root)
@@ -4425,6 +4429,7 @@ mod tests {
                     is_glob: false,
                     evidence: Vec::new(),
                     rule: Default::default(),
+                    configured_targets: None,
                 });
         }
         let (symbol_index, scopes, bindings, inheritance) = (

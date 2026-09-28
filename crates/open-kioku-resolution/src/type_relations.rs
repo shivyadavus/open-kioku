@@ -826,6 +826,7 @@ mod ri3_relationship_outcome_tests {
                     is_glob: *is_glob,
                     evidence: Vec::new(),
                     rule: open_kioku_semantic_model::ImportBindingRule::ModuleKey,
+                    configured_targets: None,
                 });
         }
         fixture.scopes.record_rust_external_crates(

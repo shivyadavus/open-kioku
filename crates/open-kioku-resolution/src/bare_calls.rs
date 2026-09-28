@@ -1,6 +1,8 @@
 use crate::context::{ResolutionContext, ScopedImport};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
+use crate::index::RustModuleFiles;
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
+use crate::typed_calls::{configured_import_files, rust_configured_import_outcome};
 use open_kioku_core::{
     CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, Language, LineRange,
     RelationshipProof, RelationshipProofKind, SymbolId, SymbolKind,
@@ -87,13 +89,27 @@ pub(crate) fn resolve_bare_call_outcome(
     // target, and a resolved import further out is shadowed.
     if let ScopedImport::Resolved(bindings) =
         ctx.scoped_import(&call.scope_id, &call.callee_name, |binding| {
-            binding.target_symbol.is_some()
+            binding.target_symbol.is_some() || binding.configured_targets.is_some()
         })
     {
-        let mut imported_targets = bindings
+        // An import through a module whose file configuration selects names the item of each
+        // file that may hold it (#615).
+        let through_configured = bindings
             .iter()
-            .filter_map(|binding| binding.target_symbol.clone())
-            .collect::<Vec<_>>();
+            .any(|binding| binding.configured_targets.is_some());
+        let mut files = RustModuleFiles::default();
+        let mut imported_targets = Vec::new();
+        for binding in &bindings {
+            match &binding.configured_targets {
+                Some(configured) => {
+                    imported_targets.extend(configured.items.iter().cloned());
+                    let found = configured_import_files(configured);
+                    files.files.extend(found.files);
+                    files.unread |= found.unread;
+                }
+                None => imported_targets.extend(binding.target_symbol.iter().cloned()),
+            }
+        }
         if ctx.language == Language::Rust {
             // A Rust `use` also binds tuple structs and constants by name; as for same-scope and
             // same-file calls, only a function is a call target.
@@ -102,6 +118,22 @@ pub(crate) fn resolve_bare_call_outcome(
                     .get(target)
                     .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
             });
+        }
+        if through_configured {
+            files.files.sort();
+            files.files.dedup();
+            if imported_targets.is_empty() {
+                return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
+            }
+            return rust_configured_import_outcome(
+                call,
+                ctx,
+                imported_targets,
+                &files,
+                ResolutionEvidenceKind::ExplicitImport,
+                "rust_configured_item_import",
+                "rust_configured_member",
+            );
         }
         let (strategy, message) = if bindings
             .iter()
@@ -528,6 +560,7 @@ mod tests {
             } else {
                 ImportBindingRule::ModuleKey
             },
+            configured_targets: None,
         }
     }
 

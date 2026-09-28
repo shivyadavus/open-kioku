@@ -322,6 +322,27 @@ pub struct ImportBinding {
     pub evidence: Vec<EvidenceId>,
     #[serde(default)]
     pub rule: ImportBindingRule,
+    /// Set on a Rust import whose path, or a `pub use` it is followed through, passes through a
+    /// module whose file configuration selects (#615): what the path names in each file that may
+    /// hold that module. `target_file` and `target_symbol` keep what the module tree as placed
+    /// reaches, which is one of them or none; a relationship through the binding proves none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_targets: Option<ConfiguredImportTargets>,
+}
+
+/// What a Rust import path names in each file of a module whose file configuration selects, of
+/// which a build compiles one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfiguredImportTargets {
+    /// The module-level item of the imported name in each file, for a path naming an item.
+    pub items: Vec<SymbolId>,
+    /// Each file that may hold the module, for a path naming a module.
+    pub module_files: Vec<FileId>,
+    /// The files of the configuration choice, repository-relative without `.rs`, sorted.
+    pub files: Vec<String>,
+    /// A `path` attribute of the choice the index cannot read, or a file of it that was not
+    /// indexed, may name another file.
+    pub unread: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
