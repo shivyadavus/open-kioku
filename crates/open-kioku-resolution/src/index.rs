@@ -450,8 +450,9 @@ impl ScopeIndex {
     /// is written in (`None` for one in another crate). `None` also when the tree places the
     /// caller below the same choice: that file is compiled only with the file of the choice that
     /// holds it, so a path that stays below the choice names that file's modules alone, as the
-    /// tree places them. A caller the tree does not place, such as a file a `path` attribute
-    /// mounts, is read by its route instead (#624).
+    /// tree places them, unless a `mod` item outside the choice also reaches it. A caller the
+    /// tree does not place, such as a file a `path` attribute mounts, is read by its route
+    /// instead (#624).
     pub(crate) fn rust_configured_module(
         &self,
         placement: &RustModulePlacement,
@@ -461,11 +462,14 @@ impl ScopeIndex {
         placement.crate_roots.iter().find_map(|root| {
             let configured = self.rust_configured_modules.get(root)?;
             let caller_module = caller.and(placement.module.as_deref());
-            let from = caller
-                .and_then(|caller| configured.stems.get(caller))
-                .and_then(|stem| configured.route_of(stem, caller_module));
+            let stem = caller.and_then(|caller| configured.stems.get(caller));
+            let from = stem.and_then(|stem| configured.route_of(stem, caller_module));
             let read = configured.read(module, from)?;
-            if caller_module.is_some_and(|caller| caller.starts_with(&read.choice)) {
+            // A placed file the walk found no one route to, such as one a `path` attribute
+            // outside the choice also mounts, is compiled whichever file the choice takes.
+            if caller_module.is_some_and(|caller| caller.starts_with(&read.choice))
+                && (stem.is_none() || from.is_some())
+            {
                 return None;
             }
             Some(read)

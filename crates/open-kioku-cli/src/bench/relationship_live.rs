@@ -692,6 +692,9 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
     const GENERIC_PLAN_ENGINE_CALLER: &str = "pub struct PlanEngine<'a> {\n    store: &'a str,\n}\n\nimpl<'a> PlanEngine<'a> {\n    pub fn target_fn(store: &'a str) -> Self {\n        PlanEngine { store }\n    }\n}\n\npub fn caller_fn() {\n    PlanEngine::target_fn(\"index\");\n}\n";
     const LIB_AND_BIN_BESIDE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n\n[[bin]]\nname = \"app\"\npath = \"main.rs\"\n";
     const CFG_ATTR_MOUNTED_PAIR: &str = "#[cfg_attr(unix, path = \"unix/mod.rs\")]\n#[cfg_attr(not(unix), path = \"other/mod.rs\")]\npub mod imp;\n";
+    const CFG_ATTR_BACKEND: &str = "pub mod util;\n\npub fn target_fn() {}\n";
+    const CFG_ATTR_UTIL_CALLER: &str =
+        "pub fn caller_fn() {\n    crate::sys::imp::target_fn();\n}\n";
     const CFG_ATTR_ENGINE: &str =
         "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
@@ -1912,6 +1915,44 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                 ),
                 ("src/sys/win/util.rs", "pub fn target_fn() {}\n"),
                 ("src/sys/win/util32.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // The crate root mounts the mounted alternative's `util.rs` a second time, so it is
+        // compiled whichever file `imp` is, and its `crate::sys::imp::target_fn()` keeps a
+        // candidate in each alternative (#624).
+        "cfg_attr_mounted_alternative_file_mounted_again" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n#[path = \"sys/unix/util.rs\"]\nmod uu;\n",
+                ),
+                ("src/sys/mod.rs", CFG_ATTR_MOUNTED_PAIR),
+                ("src/sys/unix/mod.rs", CFG_ATTR_BACKEND),
+                ("src/sys/unix/util.rs", CFG_ATTR_UTIL_CALLER),
+                ("src/sys/other/mod.rs", CFG_ATTR_BACKEND),
+                ("src/sys/other/util.rs", "pub fn other_fn() {}\n"),
+            ],
+            false,
+        ),
+        // The same for a file below the placed default alternative, which the placed tree alone
+        // would prove (#624).
+        "cfg_attr_default_alternative_file_mounted_again" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n#[path = \"sys/imp/util.rs\"]\nmod uu;\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp/mod.rs", CFG_ATTR_BACKEND),
+                ("src/sys/imp/util.rs", CFG_ATTR_UTIL_CALLER),
+                ("src/sys/win/mod.rs", CFG_ATTR_BACKEND),
+                ("src/sys/win/util.rs", "pub fn other_fn() {}\n"),
             ],
             false,
         ),

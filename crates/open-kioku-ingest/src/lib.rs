@@ -4427,6 +4427,96 @@ class Util {
     }
 
     #[test]
+    fn a_file_below_a_choice_that_a_path_outside_it_also_mounts_reaches_every_alternative() {
+        // The crate root also mounts `util.rs` of one alternative with `#[path]`, so that file is
+        // compiled on every build, whichever file `imp` is: its `crate::sys::imp::h` is each
+        // alternative's `h`, unproven, though the choice would place it in one alternative.
+        let util = "use crate::sys::imp::h;\npub fn g() {\n    h();\n}\npub fn k() {\n    crate::sys::imp::h();\n}\n";
+        let backend = "pub mod util;\npub fn h() {}\n";
+        let calls = |files: &[(&str, &str)]| {
+            rust_relations(files, open_kioku_core::GraphEdgeType::Calls)
+                .into_iter()
+                .filter(|(from, ..)| from.contains("util.rs::"))
+                .map(|(from, to, authoritative, ambiguity)| {
+                    (from, to, authoritative, ambiguity.len())
+                })
+                .collect::<Vec<_>>()
+        };
+        let edge = |from: &str, to: &str, authoritative: bool, files: usize| {
+            (from.to_string(), to.to_string(), authoritative, files)
+        };
+        let both = |from: &str, left: &str, right: &str| {
+            vec![
+                edge(&format!("{from}::g"), left, false, 2),
+                edge(&format!("{from}::g"), right, false, 2),
+                edge(&format!("{from}::k"), left, false, 2),
+                edge(&format!("{from}::k"), right, false, 2),
+            ]
+        };
+        // Both alternatives are mounted; the root mounts `unix/util.rs` a second time.
+        let (unix, other) = ("src/sys/unix/mod.rs", "src/sys/other/mod.rs");
+        let mounted = |root: &'static str| {
+            calls(&[
+                ("src/lib.rs", root),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(unix, path = \"unix/mod.rs\")]\n#[cfg_attr(not(unix), path = \"other/mod.rs\")]\npub mod imp;\n",
+                ),
+                (unix, backend),
+                ("src/sys/unix/util.rs", util),
+                (other, backend),
+                ("src/sys/other/util.rs", util),
+            ])
+        };
+        let mut expected = both("src/sys/unix/util.rs", other, unix);
+        expected.extend([
+            edge("src/sys/other/util.rs::g", other, true, 0),
+            edge("src/sys/other/util.rs::k", other, true, 0),
+        ]);
+        expected.sort();
+        assert_eq!(
+            mounted("mod sys;\n#[path = \"sys/unix/util.rs\"]\nmod uu;\n"),
+            expected
+        );
+        // Control: without the second mount each file reads its own alternative, proven.
+        assert_eq!(
+            mounted("mod sys;\n"),
+            vec![
+                edge("src/sys/other/util.rs::g", other, true, 0),
+                edge("src/sys/other/util.rs::k", other, true, 0),
+                edge("src/sys/unix/util.rs::g", unix, true, 0),
+                edge("src/sys/unix/util.rs::k", unix, true, 0),
+            ]
+        );
+        // The placed default alternative's `util.rs`, mounted again by the root, is not proven
+        // through the placed tree either.
+        let (imp, win) = ("src/sys/imp/mod.rs", "src/sys/win/mod.rs");
+        let mut expected = both("src/sys/imp/util.rs", imp, win);
+        expected.extend([
+            edge("src/sys/win/util.rs::g", win, true, 0),
+            edge("src/sys/win/util.rs::k", win, true, 0),
+        ]);
+        expected.sort();
+        assert_eq!(
+            calls(&[
+                (
+                    "src/lib.rs",
+                    "mod sys;\n#[path = \"sys/imp/util.rs\"]\nmod uu;\n"
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n",
+                ),
+                (imp, backend),
+                ("src/sys/imp/util.rs", util),
+                (win, backend),
+                ("src/sys/win/util.rs", util),
+            ]),
+            expected
+        );
+    }
+
+    #[test]
     fn a_type_imported_through_a_module_whose_file_configuration_selects_is_every_files_type() {
         // `use crate::sys::imp::{S, T};` where `imp` is `imp/mod.rs` or `win/mod.rs`, each
         // declaring `S` with `new` and `m`, and a trait `T`. `win/user.rs` is below the mounted

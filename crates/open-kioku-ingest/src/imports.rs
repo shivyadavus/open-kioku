@@ -662,7 +662,8 @@ impl<'a> RustModuleTree<'a> {
     /// place, such as a file a `path` attribute mounts, is read by its route through the choices
     /// (#624). `None` when `writer` is placed below the same choice: it is compiled only with the
     /// file of the choice holding it, so a path that stays below the choice names that file's
-    /// modules alone, as the tree places them.
+    /// modules alone, as the tree places them, unless a `mod` item outside the choice also
+    /// reaches it.
     fn configured_choice(
         &self,
         path: &RustUsePath,
@@ -681,9 +682,16 @@ impl<'a> RustModuleTree<'a> {
                 .as_deref()
                 .and_then(|stem| modules.route_of(stem, placed.as_deref()));
             let read = modules.read(module, from)?;
+            // A placed file the walk found no one route to, such as one a `path` attribute
+            // outside the choice also mounts, is compiled whichever file the choice takes.
+            let walked = stem
+                .as_deref()
+                .and_then(|stem| self.files_by_stem.get(stem))
+                .is_some_and(|id| modules.stems.contains_key(id));
             if placed
                 .as_ref()
                 .is_some_and(|writer| writer.starts_with(&read.choice))
+                && (!walked || from.is_some())
             {
                 return None;
             }
@@ -1082,6 +1090,9 @@ impl<'a> RustModuleTree<'a> {
         let mut configured = HashMap::<String, RustConfiguredModules>::new();
         // The route to each file, by crate root; `None` for a file two routes reach.
         let mut routes = HashMap::<String, HashMap<String, Option<RustModuleRoute>>>::new();
+        // The files some walk below a choice reached, and each `mod` item that makes a choice.
+        let mut walked = HashSet::<String>::new();
+        let mut choice_items = HashSet::<(String, String)>::new();
         let mut declaring = self
             .declared_modules
             .iter()
@@ -1118,6 +1129,7 @@ impl<'a> RustModuleTree<'a> {
                 if candidates.len() + usize::from(unread) < 2 {
                     continue;
                 }
+                choice_items.insert((stem.clone(), name.to_string()));
                 let mut found = RustConfiguredModules::default();
                 let mut found_routes = HashMap::new();
                 self.configured_subtree(
@@ -1152,6 +1164,24 @@ impl<'a> RustModuleTree<'a> {
                         merge_route(into, stem, route.clone());
                     }
                 }
+                walked.extend(found_routes.into_keys());
+            }
+        }
+        // A file below a choice that a `mod` item outside every walk also reaches, such as
+        // `#[path = "sys/unix/util.rs"] mod uu;` in the crate root, is compiled on every build
+        // that compiles that item, whichever file the choice takes: it, and every file whose
+        // route runs through it, has no route.
+        let mounted_outside = self.reached_outside(&walked, &choice_items);
+        for known in routes.values_mut() {
+            for route in known.values_mut() {
+                if route.as_ref().is_some_and(|route| {
+                    route
+                        .files
+                        .values()
+                        .any(|file| mounted_outside.contains(file))
+                }) {
+                    *route = None;
+                }
             }
         }
         for (root, modules) in &mut configured {
@@ -1167,6 +1197,69 @@ impl<'a> RustModuleTree<'a> {
                 .collect();
         }
         configured
+    }
+
+    /// The files the `mod` items of files no walk below a choice reached (`walked`) may compile
+    /// their modules from, other than the items that make a choice (`choice_items`), whose
+    /// files are the choice's own. A default location is read both from the file's place in the
+    /// tree and from its own directory, since a file a `path` attribute mounts reads its children
+    /// from there: a file found in more places than rustc compiles only loses a proof.
+    fn reached_outside(
+        &self,
+        walked: &HashSet<String>,
+        choice_items: &HashSet<(String, String)>,
+    ) -> HashSet<String> {
+        let mut reached = HashSet::new();
+        for (declaring, items) in &self.declared_modules {
+            if walked.contains(declaring) {
+                continue;
+            }
+            let file = self
+                .files_by_stem
+                .get(declaring)
+                .and_then(|id| self.files.get(id))
+                .and_then(|path| self.module_file_of(path));
+            let mut names = items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>();
+            names.sort();
+            names.dedup();
+            for name in names {
+                if choice_items.contains(&(declaring.clone(), name.to_string())) {
+                    continue;
+                }
+                let mut default = file
+                    .as_ref()
+                    .map(|file| {
+                        let mut module = file.importer_module.clone();
+                        module.push(name.to_string());
+                        file.module_file_stems(&module)
+                    })
+                    .unwrap_or_default();
+                for dir in [parent_dir(declaring), declaring.as_str()] {
+                    default.push(join_dir(dir, name));
+                    default.push(join_dir(dir, &format!("{name}/mod")));
+                }
+                default.sort();
+                default.dedup();
+                // `name.rs` beside `name/mod.rs` reads as unread there; either may be compiled.
+                reached.extend(
+                    default
+                        .iter()
+                        .filter(|stem| {
+                            items
+                                .iter()
+                                .any(|item| item.name == name && item.at_default)
+                                && self.files_by_stem.contains_key(*stem)
+                        })
+                        .cloned(),
+                );
+                let (candidates, _) = self.module_candidates(declaring, name, &[]);
+                reached.extend(candidates.into_iter().map(|(stem, _)| stem));
+            }
+        }
+        reached
     }
 
     /// The files the `mod name;` items of `declaring` may compile module `name` from, each with

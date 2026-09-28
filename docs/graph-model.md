@@ -93,9 +93,12 @@ the caller's is not kept. When that leaves one readable file for every choice on
 path is proven into it, whether or not the module tree places the file: `self::inner::g()` or
 `crate::sys::imp::inner::g()` in `imp.rs`, and `crate::sys::imp::inner::g()` in `win.rs`, which
 a `path` attribute mounts. A choice nested inside one alternative still leaves that alternative's
-files unproven. A file two routes reach, such as one both alternatives mount with `#[path]`, or
-one the tree also places as another module, has no route and reaches every file of the choice, as
-a file outside every alternative does. `cfg_attr(all(), path = ..)`, and a condition written beside
+files unproven. A file two routes reach, such as one both alternatives mount with `#[path]`, one
+the tree also places as another module, or one a `mod` item outside every choice also reaches
+(`#[path = "sys/unix/util.rs"] mod uu;` in the crate root), has no route, and neither has a file
+below it: it is compiled whichever file the choice takes, so it reaches every file of the choice,
+as a file outside every alternative does, even when the tree places it in the default
+alternative. `cfg_attr(all(), path = ..)`, and a condition written beside
 its own `not(..)` (compared as written, whitespace outside literals aside), hold on every build and
 leave no default location; any other set of conditions, or a `path` set inside a nested `cfg_attr`, is read as one that may fail.
 
