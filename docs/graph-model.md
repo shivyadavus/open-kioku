@@ -89,8 +89,23 @@ any of the files stays visible to callers and impact. A path written in one of t
 stays below the module (`self::inner::g()` in `imp.rs`) is proven as before, since that file is
 compiled only with its own subtree; a file a `path` attribute mounts is not placed, so a path written there reaches every file of the choice. `cfg_attr(all(), path = ..)`, and a condition written beside
 its own `not(..)` (compared as written, whitespace outside literals aside), hold on every build and
-leave no default location; any other set of conditions, or a `path` set inside a nested `cfg_attr`, is read as one that may fail. A `use`
-import of an item in such a module still binds the placed default file.
+leave no default location; any other set of conditions, or a `path` set inside a nested `cfg_attr`, is read as one that may fail.
+
+A call through a `use` import reads the same way (#615). An import whose path ends at or below
+such a module, from a file not below it, names what the path reaches in every file of the module,
+and so does one that reaches its item through a `pub use` that makes no choice (`pub use imp::f;`
+in the module declaring `imp`, followed from another crate's `use engine::sys::f;`). Calls through
+it keep one `CALLS` edge per file: `f()` after `use crate::sys::imp::f;` with strategies
+`rust_configured_item_import` and `rust_configured_member`, and `imp::f()` after
+`use crate::sys::imp;` with `rust_configured_receiver_import` and
+`rust_configured_receiver_member`, whose `import_binding` and `qualified_name` proofs list the
+files in `ambiguity`. A file that is one of the choice's files and also another module (`mod
+other;` beside `cfg_attr(unix, path = "../other.rs")`) stays a candidate, and a path naming that
+other module (`crate::other::f`) is proven as before (#616). A `use` written in one of the choice's
+files that stays below the module is proven, as a path is. The file-level `IMPORTS` edge of such a
+`use` still names the file the module tree places, and a glob import into such a module binds no
+call, as a glob never does. A method call on a value of a type imported through such a module
+(`use crate::sys::imp::S;` then `s.m()`) still resolves to the placed default file's method (#625).
 
 Nodes and edges also support additive metadata fields. `properties` stores
 structured queryable facts that are specific to the node or edge family, such as
