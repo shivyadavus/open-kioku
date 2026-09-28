@@ -2059,6 +2059,135 @@
       "notes": "Regression case (#615): `use self::inner::target_fn;` in `src/sys/imp.rs`, the default location of a `cfg_attr` path module, names `src/sys/imp/inner.rs`: that file is compiled only when `imp` is, so the choice is already made."
     },
     {
+      "id": "ci-rust-calls-101-cfg_attr_mounted_alternative_own_path",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_mounted_alternative_own_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_mounted_alternative_own_path:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "cfg_attr_mounted_alternative_own_path",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::unix::util::target_fn",
+        "identity": "symbol:rust:calls:cfg_attr_mounted_alternative_own_path:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#624): `crate::sys::imp::util::target_fn()` in `src/sys/unix/mod.rs`, which `cfg_attr(unix, path = \"unix/mod.rs\")` mounts beside `cfg_attr(not(unix), path = \"other/mod.rs\")`, names `src/sys/unix/util.rs` alone: that file is compiled only when `imp` is `unix/mod.rs`, so the choice is already made."
+    },
+    {
+      "id": "ci-rust-calls-102-cfg_attr_mounted_alternative_own_import",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_mounted_alternative_own_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_mounted_alternative_own_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "cfg_attr_mounted_alternative_own_import",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::unix::util::target_fn",
+        "identity": "symbol:rust:calls:cfg_attr_mounted_alternative_own_import:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#624): the same call through `use crate::sys::imp::util::target_fn;` written in the mounted `src/sys/unix/mod.rs` is proven into `src/sys/unix/util.rs`."
+    },
+    {
+      "id": "ci-rust-calls-103-cfg_attr_file_both_alternatives_mount",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_file_both_alternatives_mount",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_file_both_alternatives_mount:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_file_both_alternatives_mount",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#624): `src/sys/common.rs` is mounted by both alternatives, so it is compiled with either, and its `crate::sys::imp::util::target_fn()` keeps a candidate in each alternative's `util`."
+    },
+    {
+      "id": "ci-rust-calls-104-cfg_attr_nested_choice_in_mounted_alternative",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_nested_choice_in_mounted_alternative",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_nested_choice_in_mounted_alternative:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_nested_choice_in_mounted_alternative",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#624): the mounted `src/sys/win/mod.rs` chooses `util` from `util.rs` or `util32.rs`; its `crate::sys::imp::util::target_fn()` keeps those two candidates and none in the placed default `src/sys/imp/util.rs`."
+    },
+    {
+      "id": "ci-rust-calls-105-cfg_attr_imported_type_method_alternatives",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_imported_type_method_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_imported_type_method_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_imported_type_method_alternatives",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#625): `use crate::sys::imp::Engine;` through `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` names `Engine` of either file, so `engine.target_fn()` keeps the method of each and no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-106-cfg_attr_mounted_alternative_imported_type_method",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_mounted_alternative_imported_type_method",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_mounted_alternative_imported_type_method:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "cfg_attr_mounted_alternative_imported_type_method",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::win::mod::target_fn",
+        "identity": "symbol:rust:calls:cfg_attr_mounted_alternative_imported_type_method:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#624, #625): `use crate::sys::imp::Engine;` written in `src/sys/win/user.rs`, below the mounted alternative `src/sys/win/mod.rs`, names that file's `Engine`, so `engine.target_fn()` is proven into it."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
@@ -2110,6 +2239,23 @@
       "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
     },
     {
+      "id": "ci-rust-uses_type-02-cfg_attr_imported_type_alternatives",
+      "fixture_id": "ci/ri3/rust/uses_type/cfg_attr_imported_type_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:cfg_attr_imported_type_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_imported_type_alternatives",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#625): `caller_fn(value: TargetType)` after `use crate::sys::imp::TargetType;` through `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` uses the `TargetType` of either file, so it keeps a `USES_TYPE` candidate in each and no authoritative edge."
+    },
+    {
       "id": "ci-rust-implements-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/implements/metamorphic_a",
       "split": "development",
@@ -2129,6 +2275,23 @@
         "identity": "symbol:rust:implements:target"
       },
       "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+    },
+    {
+      "id": "ci-rust-implements-02-cfg_attr_imported_trait_alternatives",
+      "fixture_id": "ci/ri3/rust/implements/cfg_attr_imported_trait_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPLEMENTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "SourceType",
+        "identity": "symbol:rust:implements:cfg_attr_imported_trait_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_imported_trait_alternatives",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#625): `impl TargetTrait for SourceType {}` after `use crate::sys::imp::TargetTrait;` through `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` implements the `TargetTrait` of either file, so it keeps an `IMPLEMENTS` candidate in each and no authoritative edge."
     },
     {
       "id": "ci-rust-extends-01-metamorphic_a",

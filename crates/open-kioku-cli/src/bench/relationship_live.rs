@@ -549,6 +549,18 @@ fn live_fixture_files(case: &RelationshipBenchCase) -> anyhow::Result<Vec<(PathB
     let files = match &case.relationship {
         GraphEdgeType::Calls => live_call_fixture(case.language, adversarial, &case.scenario)?,
         GraphEdgeType::References => live_reference_fixture(case.language),
+        GraphEdgeType::UsesType | GraphEdgeType::Implements
+            if rust_type_relation_fixture(&case.scenario).is_some() =>
+        {
+            if case.language != RelationshipBenchLanguage::Rust {
+                anyhow::bail!(
+                    "{} is defined only for a Rust case, got {:?}",
+                    case.scenario,
+                    case.language
+                );
+            }
+            rust_type_relation_fixture(&case.scenario).unwrap_or_default()
+        }
         GraphEdgeType::UsesType => live_type_fixture(case.language, positive_syntax),
         GraphEdgeType::Implements => live_implements_fixture(case.language, positive_syntax),
         GraphEdgeType::Extends => live_extends_fixture(case.language, positive_syntax),
@@ -679,6 +691,9 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
         "use engine::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
     const GENERIC_PLAN_ENGINE_CALLER: &str = "pub struct PlanEngine<'a> {\n    store: &'a str,\n}\n\nimpl<'a> PlanEngine<'a> {\n    pub fn target_fn(store: &'a str) -> Self {\n        PlanEngine { store }\n    }\n}\n\npub fn caller_fn() {\n    PlanEngine::target_fn(\"index\");\n}\n";
     const LIB_AND_BIN_BESIDE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n\n[[bin]]\nname = \"app\"\npath = \"main.rs\"\n";
+    const CFG_ATTR_MOUNTED_PAIR: &str = "#[cfg_attr(unix, path = \"unix/mod.rs\")]\n#[cfg_attr(not(unix), path = \"other/mod.rs\")]\npub mod imp;\n";
+    const CFG_ATTR_ENGINE: &str =
+        "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
         "cross_module_item_import" => (
             vec![
@@ -1822,6 +1837,124 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // `sys/unix/mod.rs`, which a `path` attribute mounts, is compiled only when `imp` is that
+        // file, so its path into `imp` names its own `util`, proven (#624).
+        "cfg_attr_mounted_alternative_own_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                ("src/sys/mod.rs", CFG_ATTR_MOUNTED_PAIR),
+                (
+                    "src/sys/unix/mod.rs",
+                    "pub mod util;\n\npub fn caller_fn() {\n    crate::sys::imp::util::target_fn();\n}\n",
+                ),
+                ("src/sys/unix/util.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/other/mod.rs", "pub mod util;\n"),
+                ("src/sys/other/util.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // The same call through an import written in the mounted file (#624).
+        "cfg_attr_mounted_alternative_own_import" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                ("src/sys/mod.rs", CFG_ATTR_MOUNTED_PAIR),
+                (
+                    "src/sys/unix/mod.rs",
+                    "pub mod util;\nuse crate::sys::imp::util::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+                ("src/sys/unix/util.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/other/mod.rs", "pub mod util;\n"),
+                ("src/sys/other/util.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // `sys/common.rs` is mounted by both alternatives, so it is compiled with either and its
+        // call keeps a candidate in each (#624).
+        "cfg_attr_file_both_alternatives_mount" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                ("src/sys/mod.rs", CFG_ATTR_MOUNTED_PAIR),
+                (
+                    "src/sys/common.rs",
+                    "pub fn caller_fn() {\n    crate::sys::imp::util::target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/unix/mod.rs",
+                    "#[path = \"../common.rs\"]\npub mod common;\npub mod util;\n",
+                ),
+                ("src/sys/unix/util.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/sys/other/mod.rs",
+                    "#[path = \"../common.rs\"]\npub mod common;\npub mod util;\n",
+                ),
+                ("src/sys/other/util.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // A choice nested in the mounted alternative leaves that alternative's two files, and
+        // none of the placed default's (#624).
+        "cfg_attr_nested_choice_in_mounted_alternative" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp/mod.rs", "pub mod util;\n"),
+                ("src/sys/imp/util.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/sys/win/mod.rs",
+                    "#[cfg_attr(target_arch = \"x86\", path = \"util32.rs\")]\npub mod util;\n\npub fn caller_fn() {\n    crate::sys::imp::util::target_fn();\n}\n",
+                ),
+                ("src/sys/win/util.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win/util32.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // A method call on a type imported through a configuration-selected module reaches the
+        // method in each file (#625).
+        "cfg_attr_imported_type_method_alternatives" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\nuse crate::sys::imp::Engine;\n\npub fn caller_fn(engine: &Engine) {\n    engine.target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", CFG_ATTR_ENGINE),
+                ("src/sys/win.rs", CFG_ATTR_ENGINE),
+            ],
+            false,
+        ),
+        // The same method call written below the mounted alternative reaches that file's method,
+        // proven (#624, #625).
+        "cfg_attr_mounted_alternative_imported_type_method" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp/mod.rs", CFG_ATTR_ENGINE),
+                (
+                    "src/sys/win/mod.rs",
+                    "pub mod user;\npub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n",
+                ),
+                (
+                    "src/sys/win/user.rs",
+                    "use crate::sys::imp::Engine;\n\npub fn caller_fn(engine: &Engine) {\n    engine.target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![
@@ -2367,6 +2500,44 @@ fn live_import_fixture(
 
 /// Multi-file Rust packages for the file-level `IMPORTS` edge of a `use` path inside the importing
 /// crate. The crate's declared module tree, not the path text, decides which file the edge names.
+/// Multi-file Rust fixtures for a `USES_TYPE` or `IMPLEMENTS` relation through an import.
+fn rust_type_relation_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
+    const PACKAGE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    const DECLARING: &str = "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n";
+    const TYPES: &str = "pub struct TargetType;\n\npub trait TargetTrait {}\n";
+    let files: Vec<(&str, &str)> = match scenario {
+        // The declared type names the type of each file configuration may select (#625).
+        "cfg_attr_imported_type_alternatives" => vec![
+            ("Cargo.toml", PACKAGE),
+            (
+                "src/lib.rs",
+                "mod sys;\nuse crate::sys::imp::TargetType;\n\npub fn caller_fn(value: TargetType) {\n    let _ = value;\n}\n",
+            ),
+            ("src/sys/mod.rs", DECLARING),
+            ("src/sys/imp.rs", TYPES),
+            ("src/sys/win.rs", TYPES),
+        ],
+        // So does the trait an `impl` names (#625).
+        "cfg_attr_imported_trait_alternatives" => vec![
+            ("Cargo.toml", PACKAGE),
+            (
+                "src/lib.rs",
+                "mod sys;\nuse crate::sys::imp::TargetTrait;\n\npub struct SourceType;\n\nimpl TargetTrait for SourceType {}\n",
+            ),
+            ("src/sys/mod.rs", DECLARING),
+            ("src/sys/imp.rs", TYPES),
+            ("src/sys/win.rs", TYPES),
+        ],
+        _ => return None,
+    };
+    Some(
+        files
+            .into_iter()
+            .map(|(path, content)| (PathBuf::from(path), content.to_string()))
+            .collect(),
+    )
+}
+
 fn rust_import_edge_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
     const PACKAGE: &str = "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
     const AUTH: &str = "pub struct Token;\n\npub fn issue_token() -> Token {\n    Token\n}\n";
