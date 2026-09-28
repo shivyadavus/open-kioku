@@ -592,9 +592,21 @@ pub(crate) fn map_rust_crate_name_path(
 /// The largest crate root [`read_module_declarations`] reads; a larger one is left unread.
 const MAX_SCANNED_ROOT_BYTES: u64 = 16 * 1024 * 1024;
 
+/// What [`scan_module_declarations`] reads off a Rust file's `mod` lines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ScannedModules {
+    /// The module names the file declares, each also compiled from its default location: a
+    /// `mod` whose every `path` attribute is a `cfg_attr` uses it whenever no condition holds.
+    pub(crate) names: HashSet<String>,
+    /// The paths those `cfg_attr(.., path = "..")` attributes set, as written, relative to the
+    /// declaring file's directory. Each is compiled when its condition holds, which the index
+    /// cannot tell.
+    pub(crate) conditional_paths: Vec<String>,
+}
+
 /// [`scan_module_declarations`] of the file at `path`. `None` when it is not a regular file,
 /// cannot be read, or is over [`MAX_SCANNED_ROOT_BYTES`].
-pub(crate) fn read_module_declarations(path: &Path) -> Option<HashSet<String>> {
+pub(crate) fn read_module_declarations(path: &Path) -> Option<ScannedModules> {
     // Discovery follows no symlink, and neither does this.
     if !std::fs::symlink_metadata(path).ok()?.is_file() {
         return None;
@@ -620,33 +632,42 @@ pub(crate) fn read_module_declarations(path: &Path) -> Option<HashSet<String>> {
 /// module file the name does not spell, an `include!` that may bring in declarations of its own,
 /// or a literal or block comment left open. A module a macro declares without writing `mod` in
 /// this file is not seen.
-pub(crate) fn scan_module_declarations(source: &str) -> Option<HashSet<String>> {
-    let code = strip_comments_and_literals(source)?;
+///
+/// The one `path` attribute read is a `cfg_attr(.., path = "..")` on a `mod name;` outside every
+/// block, when each `path` before the item is one: the module is then compiled from its default
+/// location or from each path, depending on configuration (#608). Any other `path`, or one whose
+/// value is not a plain string literal, still gives `None`.
+pub(crate) fn scan_module_declarations(source: &str) -> Option<ScannedModules> {
+    let stripped = strip_comments_and_literals(source)?;
+    let code = stripped.code.as_str();
     if code.contains("include!") {
         return None;
     }
-    let mut names = HashSet::new();
-    // The text since the last line that ended an item or opened a block, where the attributes of
-    // the next item are written.
-    let mut attributes = String::new();
-    for code in code.lines() {
+    let mut scanned = ScannedModules::default();
+    // Where the text since the last line that ended an item or opened a block starts; the
+    // attributes of the next item are written there.
+    let mut attributes_from = 0;
+    // How many blocks are open at the start of the line.
+    let mut depth = 0usize;
+    let mut line_start = 0;
+    for line in code.split_inclusive('\n') {
         let mut from = 0;
-        while let Some(found) = code[from..].find("mod") {
+        while let Some(found) = line[from..].find("mod") {
             let at = from + found;
             from = at + "mod".len();
-            let before = code[..at].chars().next_back();
+            let before = line[..at].chars().next_back();
             if before.is_some_and(|ch| ch == '_' || ch == '#' || ch.is_alphanumeric()) {
                 continue;
             }
-            match code[from..].chars().next() {
+            match line[from..].chars().next() {
                 // `pub mod` with its name on the next line.
-                None => return None,
+                None | Some('\n') => return None,
                 Some(ch) if ch.is_whitespace() => {}
                 // `mod_x`, `modern`: another word.
                 Some(ch) if ch == '_' || ch.is_alphanumeric() => continue,
                 Some(_) => return None,
             }
-            let rest = code[from..].trim_start();
+            let rest = line[from..].trim_start();
             let ident = rest.strip_prefix("r#").unwrap_or(rest);
             let end = ident
                 .find(|ch: char| ch != '_' && !ch.is_alphanumeric())
@@ -654,22 +675,80 @@ pub(crate) fn scan_module_declarations(source: &str) -> Option<HashSet<String>> 
             let (name, tail) = ident.split_at(end);
             // `mod $name;`, a name on the next line, or anything else after the name: the
             // declaration cannot be read, and may name a module.
-            if name.is_empty() || !tail.trim_start().starts_with([';', '{']) {
+            let tail = tail.trim_start();
+            if name.is_empty() || !tail.starts_with([';', '{']) {
                 return None;
             }
-            if has_path_attribute(&attributes) || has_path_attribute(&code[..at]) {
-                return None;
+            let item = line_start + at;
+            let attributes = &code[attributes_from..item];
+            if has_path_attribute(attributes) {
+                let in_block =
+                    depth + line[..at].matches('{').count() > line[..at].matches('}').count();
+                if in_block || tail.starts_with('{') {
+                    return None;
+                }
+                scanned.conditional_paths.extend(conditional_path_values(
+                    &stripped,
+                    attributes_from,
+                    item,
+                )?);
             }
-            names.insert(name.to_string());
+            scanned.names.insert(name.to_string());
         }
-        if code.trim_end().ends_with([';', '{', '}']) {
-            attributes.clear();
-        } else {
-            attributes.push_str(code);
-            attributes.push('\n');
+        let line_code = line.trim_end();
+        depth =
+            (depth + line_code.matches('{').count()).saturating_sub(line_code.matches('}').count());
+        line_start += line.len();
+        if line_code.ends_with([';', '{', '}']) {
+            attributes_from = line_start;
         }
     }
-    Some(names)
+    Some(scanned)
+}
+
+/// The values of the `path` attributes in `stripped.code[from..to]`, when each is inside a
+/// `#[cfg_attr(..)]` and set by a plain string literal; `None` otherwise.
+fn conditional_path_values(
+    stripped: &StrippedSource,
+    from: usize,
+    to: usize,
+) -> Option<Vec<String>> {
+    let text = &stripped.code[from..to];
+    let mut values = Vec::new();
+    for (at, _) in text.match_indices("path") {
+        let before = text[..at].chars().next_back();
+        let after = &text[at + "path".len()..];
+        let value = after.trim_start();
+        if before.is_some_and(|ch| ch == '_' || ch.is_alphanumeric())
+            || !value.starts_with('=')
+            || value.starts_with("==")
+        {
+            continue;
+        }
+        let attribute = &text[..at];
+        let opened = attribute.rfind("#[")?;
+        let head = attribute[opened..].split_whitespace().collect::<String>();
+        if !head.starts_with("#[cfg_attr(") {
+            return None;
+        }
+        // The literal's contents were removed, leaving one space (or the line break) in its
+        // place right after the `=` and any whitespace.
+        let equals = from + at + "path".len() + (after.len() - value.len());
+        let literal = stripped.code[equals + 1..]
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_whitespace())
+            .find_map(|(offset, _)| stripped.literals.get(&(equals + 1 + offset)))?;
+        values.push(literal.clone()?);
+    }
+    Some(values)
+}
+
+/// Rust source with its comments and literals removed, as [`strip_comments_and_literals`] gives it.
+struct StrippedSource {
+    code: String,
+    /// Each removed piece that was a whole string literal on one line, by the offset in `code`
+    /// of the space left in its place: its contents when they hold no escape, `None` otherwise.
+    literals: HashMap<usize, Option<String>>,
 }
 
 /// `source` with its comments and its string, byte-string, raw-string and character literals
@@ -678,19 +757,37 @@ pub(crate) fn scan_module_declarations(source: &str) -> Option<HashSet<String>> 
 /// block comment or a literal is removed with it, so a block comment between `mod name` and `;`
 /// is not in the way. A lifetime or label (`'a`) is code. `None` for a literal or block comment
 /// left open.
-fn strip_comments_and_literals(source: &str) -> Option<String> {
+fn strip_comments_and_literals(source: &str) -> Option<StrippedSource> {
     let mut lexer = CodeLexer::new(&Language::Rust);
     let mut code = String::with_capacity(source.len());
+    let mut literals = HashMap::new();
     for line in source.lines() {
-        for (at, span) in lexer.code_spans(line).into_iter().enumerate() {
-            if at > 0 {
-                code.push(' ');
+        let mut removed_from = 0;
+        let mut remove = |code: &mut String, piece: &str| {
+            if piece.is_empty() {
+                return;
             }
-            code.push_str(&line[span]);
+            if let Some(contents) = piece
+                .strip_prefix('"')
+                .and_then(|piece| piece.strip_suffix('"'))
+                .filter(|contents| !contents.contains('"'))
+            {
+                literals.insert(
+                    code.len(),
+                    (!contents.contains('\\')).then(|| contents.to_string()),
+                );
+            }
+            code.push(' ');
+        };
+        for span in lexer.code_spans(line) {
+            remove(&mut code, &line[removed_from..span.start]);
+            code.push_str(&line[span.clone()]);
+            removed_from = span.end;
         }
+        remove(&mut code, &line[removed_from..]);
         code.push(if lexer.in_code() { '\n' } else { ' ' });
     }
-    lexer.in_code().then_some(code)
+    lexer.in_code().then_some(StrippedSource { code, literals })
 }
 
 /// Whether `text` holds the word `path` followed by `=`, as a `path` attribute does, directly or
@@ -1141,8 +1238,9 @@ mod tests {
     }
 
     fn scanned(source: &str) -> Option<Vec<String>> {
-        scan_module_declarations(source).map(|names| {
-            let mut names = names.into_iter().collect::<Vec<_>>();
+        scan_module_declarations(source).map(|scan| {
+            assert!(scan.conditional_paths.is_empty(), "{source}");
+            let mut names = scan.names.into_iter().collect::<Vec<_>>();
             names.sort();
             names
         })
@@ -1202,8 +1300,15 @@ mod tests {
     fn mod_lines_that_cannot_tell_what_a_root_declares_read_as_unknown() {
         for source in [
             "#[path = \"other.rs\"]\nmod cli;\n",
-            "#[cfg_attr(unix,\n    path = \"unix.rs\")]\nmod sys;\n",
             "#[path = \"x.rs\"] mod cli;\n",
+            // A `cfg_attr` path beside one that always applies, one inside a block, on a
+            // module with a body, or set by anything but a plain string.
+            "#[cfg_attr(unix, path = \"unix.rs\")]\n#[path = \"x.rs\"]\nmod sys;\n",
+            "mod outer {\n    #[cfg_attr(unix, path = \"unix.rs\")]\n    mod sys;\n}\n",
+            "fn f() { #[cfg_attr(unix, path = \"unix.rs\")] mod sys; }\n",
+            "#[cfg_attr(unix, path = \"unix\")]\nmod sys {\n}\n",
+            "#[cfg_attr(unix, path = \"a\\\\b.rs\")]\nmod sys;\n",
+            "#[cfg_attr(unix, path = concat!(\"a\", \".rs\"))]\nmod sys;\n",
             // A `path` in a raw string is still an attribute, whatever its literal holds.
             "#[path = r\"x.rs\"]\nmod cli;\n",
             "#[cfg_attr(unix, path = r#\"unix.rs\"#)] mod sys;\n",
@@ -1218,6 +1323,52 @@ mod tests {
             "let s = \"open\nmod b;\n",
         ] {
             assert_eq!(scanned(source), None, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_mod_whose_every_path_is_a_cfg_attr_is_read_with_those_paths() {
+        // Compiled from `sys.rs` or `sys/mod.rs` unless a condition holds, and from the path
+        // whose condition does (#608).
+        let scan = |source: &str| {
+            scan_module_declarations(source).map(|scan| {
+                let mut names = scan.names.into_iter().collect::<Vec<_>>();
+                names.sort();
+                (names, scan.conditional_paths)
+            })
+        };
+        let sys = |paths: &[&str]| {
+            Some((
+                vec!["cli".to_string(), "sys".to_string()],
+                paths
+                    .iter()
+                    .map(|path| path.to_string())
+                    .collect::<Vec<_>>(),
+            ))
+        };
+        for (source, paths) in [
+            (
+                "#[cfg_attr(unix, path = \"unix.rs\")]\nmod sys;\nmod cli;\n",
+                &["unix.rs"][..],
+            ),
+            (
+                "#[cfg_attr(unix,\n    path = \"unix.rs\")]\npub(crate) mod sys;\nmod cli;\n",
+                &["unix.rs"],
+            ),
+            (
+                "#[cfg_attr(unix, path = \"unix.rs\")] #[cfg_attr(windows, path=\"../w.rs\")] mod sys;\nmod cli;\n",
+                &["unix.rs", "../w.rs"],
+            ),
+            (
+                "#[cfg_attr(all(unix, feature = \"x\"), path = \"unix.rs\")]\n/// Glue.\n#[allow(dead_code)]\nmod sys;\nmod cli;\n",
+                &["unix.rs"],
+            ),
+            (
+                "#[cfg_attr(unix, path =\n    \"unix.rs\"\n)]\nmod sys;\nmod cli;\n",
+                &["unix.rs"],
+            ),
+        ] {
+            assert_eq!(scan(source), sys(paths), "{source}");
         }
     }
 }

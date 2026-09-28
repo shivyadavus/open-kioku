@@ -1,6 +1,7 @@
 use crate::rust_use_path::{
     join_dir, map_rust_crate_name_path, map_rust_module_file, map_rust_use_path, module_name,
     normalize_path, parent_dir, strip_dir, RustCrateTree, RustPackageLayout, RustUsePath,
+    ScannedModules,
 };
 use open_kioku_core::{
     File, FileId, ImportSite, Language, ModuleDeclarationSite, ScopeId, ScopeKind, SymbolId,
@@ -62,21 +63,24 @@ pub(crate) struct RustModuleTree<'a> {
     stems_in_dir: HashMap<String, Vec<String>>,
     project: &'a ProjectModel,
     /// `(declaring file without `.rs`, module name)` for each file-backed declaration: `mod name;`
-    /// with no body and no `path` attribute, outside any inline module. `mod r#type;` is `type`.
+    /// with no body, outside any inline module, and with no `path` attribute or only ones set
+    /// through `cfg_attr`, which leave the module at its default location whenever their
+    /// conditions do not hold (#608). `mod r#type;` is `type`.
     file_modules: HashSet<(String, String)>,
     /// Rust files discovery saw but did not index (over `max_file_size`, excluded, ignored,
     /// unreadable), by repository-relative path without `.rs`. A crate root among them owns
     /// modules the index cannot place.
     unindexed_stems: HashSet<String>,
-    /// The module names Rust files discovery skipped for size declare, by extension-less path,
-    /// as [`scan_module_declarations`] read them: `None` where the lines could not tell. Only
+    /// The module names Rust files discovery skipped for size declare, and the `cfg_attr` paths
+    /// on those `mod` items, by extension-less path, as [`scan_module_declarations`] read them:
+    /// `None` where the lines could not tell. Only
     /// the files whose `mod` items decide a placement are read: crate roots, and files a
     /// `#[path]` attribute mounts or that sit below one. A root not scanned (one a path policy
     /// excluded is never read) may declare any module, and a mounted file not scanned may mount
     /// any file of its package.
     ///
     /// [`scan_module_declarations`]: crate::rust_use_path::scan_module_declarations
-    scanned_files: HashMap<String, Option<HashSet<String>>>,
+    scanned_files: HashMap<String, Option<ScannedModules>>,
     /// What each `#[path]` attribute mounts, by the extension-less path of the declaring file.
     path_mounts: Vec<(String, PathMount)>,
     /// [`RustModuleTree::find_shared_files`], computed on first use.
@@ -230,7 +234,7 @@ impl<'a> RustModuleTree<'a> {
             .iter()
             .filter(|declaration| {
                 !declaration.has_body
-                    && !declaration.has_path_attribute
+                    && (!declaration.has_path_attribute || declaration.path_is_conditional)
                     && !declaration
                         .scope_id
                         .as_ref()
@@ -577,13 +581,13 @@ impl<'a> RustModuleTree<'a> {
         files
     }
 
-    /// Records the module names Rust files skipped for size declare, as
+    /// Records the module names, and `cfg_attr` paths, Rust files skipped for size declare, as
     /// [`scan_module_declarations`] read them (`None` where it could not tell).
     ///
     /// [`scan_module_declarations`]: crate::rust_use_path::scan_module_declarations
     pub(crate) fn with_scanned_files<'p>(
         mut self,
-        files: impl IntoIterator<Item = (&'p Path, Option<HashSet<String>>)>,
+        files: impl IntoIterator<Item = (&'p Path, Option<ScannedModules>)>,
     ) -> Self {
         self.scanned_files.extend(
             files
@@ -949,14 +953,15 @@ impl<'a> RustModuleTree<'a> {
                     continue;
                 };
                 match self.scanned_files.get(root) {
-                    Some(Some(names)) => {
+                    Some(Some(scan)) if scan.conditional_paths.is_empty() => {
                         let top = below.split('/').next().unwrap_or(below);
-                        if names.contains(module_name(top)) {
+                        if scan.names.contains(module_name(top)) {
                             reasons.push(true);
                         }
                     }
-                    // Its lines may hold a `path` attribute, which mounts a file anywhere.
-                    Some(None) => reasons.push(false),
+                    // Its lines may hold a `path` attribute, which mounts a file anywhere; a
+                    // root's `cfg_attr` paths are not followed.
+                    Some(_) => reasons.push(false),
                     None => reasons.push(true),
                 }
             }
@@ -1039,11 +1044,14 @@ impl<'a> RustModuleTree<'a> {
     ///
     /// A `#[path]` inside the subtree, including each alternative of a `cfg_attr(.., path = ..)`
     /// since the configuration is unknown, mounts its file into the mounting crate as well, read
-    /// relative to the declaring file just as in its own crate.
+    /// relative to the declaring file just as in its own crate. A module whose every `path` is a
+    /// `cfg_attr` is also followed to its default location, which it compiles from whenever no
+    /// condition holds (#608).
     ///
-    /// A file of the subtree discovery saw but did not index has its `mod` items read from
-    /// [`RustModuleTree::scanned_files`]; where they were not read, or could not tell, the file
-    /// is recorded as unread, since it may mount any file of its package (#610).
+    /// A file of the subtree discovery saw but did not index has its `mod` items, and their
+    /// `cfg_attr` paths, read from [`RustModuleTree::scanned_files`]; where they were not read,
+    /// or could not tell, the file is recorded as unread, since it may mount any file of its
+    /// package (#610).
     fn mounted_subtree(
         &self,
         mounted: &str,
@@ -1061,6 +1069,9 @@ impl<'a> RustModuleTree<'a> {
         let mut seen = HashSet::from([mounted.to_string()]);
         let mut pending = vec![(mounted.to_string(), parent_dir(mounted).to_string())];
         while let Some((file, dir)) = pending.pop() {
+            // The `cfg_attr` paths a scanned file's `mod` items set, which an indexed file's
+            // `mounts_by_file` hold instead.
+            let mut scanned_mounts = Vec::new();
             let names = if self.files_by_stem.contains_key(&file) {
                 modules_by_file
                     .get(file.as_str())
@@ -1071,8 +1082,13 @@ impl<'a> RustModuleTree<'a> {
             } else if !self.unindexed_stems.contains(&file) {
                 // A path naming no file discovery saw mounts nothing the index holds.
                 Vec::new()
-            } else if let Some(Some(names)) = self.scanned_files.get(&file) {
-                names.iter().map(String::as_str).collect()
+            } else if let Some(Some(scan)) = self.scanned_files.get(&file) {
+                scanned_mounts = scan
+                    .conditional_paths
+                    .iter()
+                    .filter_map(|value| PathMount::of(&file, value, false))
+                    .collect();
+                scan.names.iter().map(String::as_str).collect()
             } else {
                 subtree.unread_files.push(file.clone());
                 Vec::new()
@@ -1091,19 +1107,27 @@ impl<'a> RustModuleTree<'a> {
                     pending.push((child, child_dir));
                 }
             }
+            let mut mounted_children = Vec::new();
             for (at, mount) in mounts_by_file.get(file.as_str()).into_iter().flatten() {
-                let Some(children) = self.mounted_files(&file, mount) else {
-                    subtree.unread_mounts.push((*at, file.clone()));
-                    continue;
-                };
-                for child in children {
-                    if !known(&child) || !seen.insert(child.clone()) {
-                        continue;
-                    }
-                    let child_dir = parent_dir(&child).to_string();
-                    subtree.files.push((child.clone(), is_mod_rs(&child)));
-                    pending.push((child, child_dir));
+                match self.mounted_files(&file, mount) {
+                    Some(children) => mounted_children.extend(children),
+                    None => subtree.unread_mounts.push((*at, file.clone())),
                 }
+            }
+            for mount in &scanned_mounts {
+                match self.mounted_files(&file, mount) {
+                    Some(children) => mounted_children.extend(children),
+                    // A scanned path the index cannot follow leaves the file's mounts unread.
+                    None => subtree.unread_files.push(file.clone()),
+                }
+            }
+            for child in mounted_children {
+                if !known(&child) || !seen.insert(child.clone()) {
+                    continue;
+                }
+                let child_dir = parent_dir(&child).to_string();
+                subtree.files.push((child.clone(), is_mod_rs(&child)));
+                pending.push((child, child_dir));
             }
         }
         subtree
@@ -1959,6 +1983,7 @@ mod tests {
             has_body: false,
             has_path_attribute: false,
             path_attributes: Vec::new(),
+            path_is_conditional: false,
             range: SourceRange {
                 start_line: 1,
                 start_column: 1,
@@ -2465,6 +2490,7 @@ mod tests {
             ModuleDeclarationSite {
                 has_path_attribute: true,
                 path_attributes: Vec::new(),
+                path_is_conditional: false,
                 ..mod_decl("src/w.rs", "pathed")
             },
             ModuleDeclarationSite {
@@ -2647,6 +2673,7 @@ mod tests {
         let declarations = vec![ModuleDeclarationSite {
             has_path_attribute: true,
             path_attributes: Vec::new(),
+            path_is_conditional: false,
             ..mod_decl("tests/a.rs", "util")
         }];
         let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
@@ -3075,6 +3102,7 @@ mod tests {
         let path_decl = |file: &str, name: &str, paths: &[&str]| ModuleDeclarationSite {
             has_path_attribute: true,
             path_attributes: paths.iter().map(|path| path.to_string()).collect(),
+            path_is_conditional: false,
             ..mod_decl(file, name)
         };
         let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
@@ -3266,7 +3294,13 @@ mod tests {
             marked
         };
         let declared = HashSet::from(["util".to_string()]);
-        let scanned = modules().with_scanned_files([(Path::new("src/main.rs"), Some(declared))]);
+        let scanned = modules().with_scanned_files([(
+            Path::new("src/main.rs"),
+            Some(ScannedModules {
+                names: declared,
+                ..ScannedModules::default()
+            }),
+        )]);
         assert_eq!(
             marked(&scanned),
             vec![("file:src/util.rs".to_string(), true)]
@@ -3299,6 +3333,7 @@ mod tests {
         let path_decl = |file: &str, name: &str, paths: &[&str]| ModuleDeclarationSite {
             has_path_attribute: true,
             path_attributes: paths.iter().map(|path| path.to_string()).collect(),
+            path_is_conditional: false,
             ..mod_decl(file, name)
         };
         let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
@@ -3374,6 +3409,7 @@ mod tests {
         let path_decl = |file: &str, name: &str, paths: &[&str]| ModuleDeclarationSite {
             has_path_attribute: true,
             path_attributes: paths.iter().map(|path| path.to_string()).collect(),
+            path_is_conditional: false,
             ..mod_decl(file, name)
         };
         let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
@@ -3457,6 +3493,182 @@ mod tests {
     }
 
     #[test]
+    fn a_module_whose_only_path_is_a_cfg_attr_is_also_at_its_default_location() {
+        // `sys/mod.rs` declares `#[cfg_attr(windows, path = "../common.rs")] mod imp;`: the
+        // module is `common.rs` on Windows and `sys/imp.rs` everywhere else (#608).
+        let path_decl =
+            |file: &str, name: &str, paths: &[&str], conditional: bool| ModuleDeclarationSite {
+                has_path_attribute: true,
+                path_attributes: paths.iter().map(|path| path.to_string()).collect(),
+                path_is_conditional: conditional,
+                ..mod_decl(file, name)
+            };
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let project = rust_project(&[("", None)]);
+        let files = [
+            "src/lib.rs",
+            "src/sys/mod.rs",
+            "src/sys/imp.rs",
+            "src/common.rs",
+            "src/other.rs",
+            "tests/it.rs",
+        ]
+        .map(source_file);
+        let own = |conditional: bool| {
+            vec![
+                mod_decl("src/lib.rs", "sys"),
+                mod_decl("src/lib.rs", "common"),
+                mod_decl("src/lib.rs", "other"),
+                path_decl("src/sys/mod.rs", "imp", &["../common.rs"], conditional),
+            ]
+        };
+        let mounted = |conditional: bool| {
+            let mut declarations = own(conditional);
+            declarations.push(path_decl(
+                "tests/it.rs",
+                "sys",
+                &["../src/sys/mod.rs"],
+                false,
+            ));
+            declarations
+        };
+        let placed = |declarations: &[ModuleDeclarationSite]| {
+            RustModuleTree::new(&files, &project, declarations, &scopes).module_placements()
+                [&FileId::new("file:src/sys/imp.rs")]
+                .module
+                .clone()
+        };
+        let marked = |modules: &RustModuleTree<'_>| {
+            let mut marked = modules
+                .module_placements()
+                .into_iter()
+                .filter(|(_, placement)| placement.in_other_crates)
+                .map(|(id, placement)| (id.0, placement.own_subtree_in_every_crate))
+                .collect::<Vec<_>>();
+            marked.sort();
+            marked
+        };
+
+        // The library places `sys/imp.rs` at `crate::sys::imp`; a `path` that always applies
+        // leaves it a stale file no module path names.
+        assert_eq!(
+            placed(&own(true)),
+            Some(vec!["sys".to_string(), "imp".to_string()])
+        );
+        assert_eq!(placed(&own(false)), None);
+
+        // `tests/it.rs` mounts `sys/mod.rs`, so the test crate compiles `sys/imp.rs` as well as
+        // `common.rs`, and `crate::helper` in either is no one crate's item.
+        let modules = RustModuleTree::new(&files, &project, &mounted(true), &scopes);
+        assert_eq!(
+            marked(&modules),
+            vec![
+                ("file:src/common.rs".to_string(), false),
+                ("file:src/sys/imp.rs".to_string(), true),
+                ("file:src/sys/mod.rs".to_string(), true),
+            ]
+        );
+        let registry = bind_crate_paths(
+            &modules,
+            &["src/sys/imp.rs", "src/common.rs", "src/other.rs"],
+            &["src/lib.rs"],
+        );
+        assert_eq!(bound_target(&registry, "src/sys/imp.rs", "helper"), None);
+        assert_eq!(bound_target(&registry, "src/common.rs", "helper"), None);
+        assert_eq!(
+            bound_target(&registry, "src/other.rs", "helper").as_deref(),
+            Some("symbol:src/lib.rs:helper")
+        );
+
+        // Control: under an unconditional `#[path]` the default file is not compiled into the
+        // test crate, and keeps its binding.
+        let modules = RustModuleTree::new(&files, &project, &mounted(false), &scopes);
+        assert_eq!(
+            marked(&modules),
+            vec![
+                ("file:src/common.rs".to_string(), false),
+                ("file:src/sys/mod.rs".to_string(), true),
+            ]
+        );
+        let registry = bind_crate_paths(&modules, &["src/sys/imp.rs"], &["src/lib.rs"]);
+        assert_eq!(
+            bound_target(&registry, "src/sys/imp.rs", "helper").as_deref(),
+            Some("symbol:src/lib.rs:helper")
+        );
+    }
+
+    #[test]
+    fn a_mounted_file_skipped_for_size_follows_its_cfg_attr_paths_and_default_locations() {
+        // As above, with `sys/mod.rs` over `max_file_size`: its lines declare `imp` with only a
+        // `cfg_attr` path, so the scan names `imp` and that path (#608).
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let project = rust_project(&[("", None)]);
+        let files = [
+            "src/lib.rs",
+            "src/sys/imp.rs",
+            "src/common.rs",
+            "src/other.rs",
+            "tests/it.rs",
+        ]
+        .map(source_file);
+        let declarations = vec![
+            mod_decl("src/lib.rs", "sys"),
+            mod_decl("src/lib.rs", "common"),
+            mod_decl("src/lib.rs", "other"),
+            ModuleDeclarationSite {
+                has_path_attribute: true,
+                path_attributes: vec!["../src/sys/mod.rs".to_string()],
+                path_is_conditional: false,
+                ..mod_decl("tests/it.rs", "sys")
+            },
+        ];
+        let modules = |scan: Option<ScannedModules>| {
+            RustModuleTree::new(&files, &project, &declarations, &scopes)
+                .with_unindexed_files([Path::new("src/sys/mod.rs")])
+                .with_scanned_files([(Path::new("src/sys/mod.rs"), scan)])
+        };
+        let marked = |modules: &RustModuleTree<'_>| {
+            let mut marked = modules
+                .module_placements()
+                .into_iter()
+                .filter(|(_, placement)| placement.in_other_crates)
+                .map(|(id, _)| id.0)
+                .collect::<Vec<_>>();
+            marked.sort();
+            marked
+        };
+
+        let scanned = modules(Some(ScannedModules {
+            names: HashSet::from(["imp".to_string()]),
+            conditional_paths: vec!["../common.rs".to_string()],
+        }));
+        assert_eq!(
+            marked(&scanned),
+            vec![
+                "file:src/common.rs".to_string(),
+                "file:src/sys/imp.rs".to_string(),
+            ]
+        );
+        assert_eq!(scanned.placement_gaps().unread_mounted_files, 0);
+
+        // A scanned path the index cannot follow leaves the file unread, which may mount any
+        // file of the package.
+        let absolute = modules(Some(ScannedModules {
+            names: HashSet::from(["imp".to_string()]),
+            conditional_paths: vec!["/abs/common.rs".to_string()],
+        }));
+        assert_eq!(
+            marked(&absolute),
+            vec![
+                "file:src/common.rs".to_string(),
+                "file:src/other.rs".to_string(),
+                "file:src/sys/imp.rs".to_string(),
+            ]
+        );
+        assert_eq!(absolute.placement_gaps().unread_mounted_files, 1);
+    }
+
+    #[test]
     fn path_attributes_the_index_cannot_read_are_counted() {
         // `#[path = r"support.rs"]` in `tests/it.rs` may mount any file of the package, so each
         // library file is marked, and the attribute is counted for the quality note (#576).
@@ -3467,6 +3679,7 @@ mod tests {
             ModuleDeclarationSite {
                 has_path_attribute: true,
                 path_attributes: Vec::new(),
+                path_is_conditional: false,
                 ..mod_decl("tests/it.rs", "support")
             },
         ];
@@ -3492,6 +3705,7 @@ mod tests {
             ModuleDeclarationSite {
                 has_path_attribute: true,
                 path_attributes: vec!["../src/m.rs".to_string()],
+                path_is_conditional: false,
                 ..mod_decl("tests/it.rs", "m")
             },
         ];
@@ -3517,7 +3731,13 @@ mod tests {
         );
 
         let declared = HashSet::from(["b".to_string()]);
-        let scanned = modules().with_scanned_files([(Path::new("src/m.rs"), Some(declared))]);
+        let scanned = modules().with_scanned_files([(
+            Path::new("src/m.rs"),
+            Some(ScannedModules {
+                names: declared,
+                ..ScannedModules::default()
+            }),
+        )]);
         assert!(scanned.unscanned_module_files().is_empty());
         assert_eq!(marked(&scanned), vec!["file:src/b.rs".to_string()]);
         let gaps = scanned.placement_gaps();
@@ -3665,6 +3885,7 @@ mod tests {
                 ModuleDeclarationSite {
                     has_path_attribute: true,
                     path_attributes: Vec::new(),
+                    path_is_conditional: false,
                     ..mod_decl("src/lib.rs", "session")
                 },
             ],
@@ -3844,6 +4065,7 @@ mod tests {
                 vec![ModuleDeclarationSite {
                     has_path_attribute: true,
                     path_attributes: Vec::new(),
+                    path_is_conditional: false,
                     ..mod_decl("src/lib.rs", "auth")
                 }],
                 Vec::new(),
@@ -4270,6 +4492,7 @@ mod tests {
                 ModuleDeclarationSite {
                     has_path_attribute: true,
                     path_attributes: Vec::new(),
+                    path_is_conditional: false,
                     ..mod_decl("src/lib.rs", "auth")
                 },
                 mod_decl("src/lib.rs", "session"),

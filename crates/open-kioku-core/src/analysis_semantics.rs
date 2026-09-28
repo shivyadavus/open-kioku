@@ -92,7 +92,12 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// its `mod` items read, so the module files it declares are shared with the mounting crate too;
 /// one skipped and not read may mount any file of its package. Earlier indexes hold `CALLS`
 /// edges from a `crate::` path in such a module file into one crate's item.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v22";
+/// v24: a Rust module whose every `path` attribute is a `cfg_attr` is also placed at its default
+/// location (`name.rs` or `name/mod.rs`), which it compiles from whenever no condition holds, in
+/// its own crate's module tree and below a `#[path]`-mounted file, parsed or read off a file
+/// skipped for size. Earlier indexes read no module path from that file, and hold `CALLS` edges
+/// from a `crate::` path in it into one crate's item when another crate mounts its parent.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v24";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -135,7 +140,9 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// v10: a Rust closure is a scope, so its typed parameters bind in the closure alone; a v9 index
 /// records `|ctx: &mut Ring|` in the enclosing block, where it types a `ctx` used after the
 /// closure.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v10";
+/// v11: a Rust `mod` declaration records whether its every `path` attribute is a `cfg_attr`
+/// (`path_is_conditional`); a v10 index records none, which reads as a `path` that always applies.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v11";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

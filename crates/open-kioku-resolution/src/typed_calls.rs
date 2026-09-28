@@ -1706,6 +1706,7 @@ mod tests {
                 has_body,
                 has_path_attribute: false,
                 path_attributes: Vec::new(),
+                path_is_conditional: false,
                 range: range(line),
             };
             scopes.record_module_declarations(&[
