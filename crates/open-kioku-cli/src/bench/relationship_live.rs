@@ -1694,6 +1694,134 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // An import through a module whose file configuration selects reads as its path does:
+        // `use crate::sys::imp::target_fn;` names `target_fn` of `sys/imp.rs` or `sys/win.rs`
+        // and proves neither (#615).
+        "cfg_attr_item_import_alternatives" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\nuse crate::sys::imp::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // `use crate::sys::imp;` names either file, so `imp::target_fn()` proves neither (#615).
+        "cfg_attr_module_import_alternatives" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\nuse crate::sys::imp;\n\npub fn caller_fn() {\n    imp::target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // The `#[cfg]` spelling of the same choice, through an item import (#615).
+        "cfg_gated_item_import_alternatives" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\nuse crate::sys::imp::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg(not(windows))]\npub mod imp;\n#[cfg(windows)]\n#[path = \"win.rs\"]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // A glob into such a module binds no call: nothing reaches the default file alone
+        // (#615).
+        "cfg_attr_glob_import_no_default_location" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\nuse crate::sys::imp::*;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // A binary's crate-name import reaches `target_fn` through `sys`'s `pub use
+        // imp::target_fn;`, which makes no choice of `imp`'s file (#615).
+        "cfg_attr_crate_name_reexport_import_alternatives" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\npub use imp::target_fn;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/bin/tool.rs",
+                    "use bench::sys::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n\nfn main() {\n    caller_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `imp` is `src/other.rs`, which `mod other;` also declares, or `src/sys/imp.rs`: the
+        // import keeps both candidates (#616).
+        "cfg_attr_import_alternative_declared_elsewhere" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod other;\nmod sys;\nuse crate::sys::imp::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(unix, path = \"../other.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/other.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // An import written in `sys/imp.rs` that stays below `imp` is proven: that file is
+        // compiled only when `imp` is (#615).
+        "cfg_attr_alternative_own_subtree_import" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                (
+                    "src/sys/imp.rs",
+                    "mod inner;\nuse self::inner::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+                ("src/sys/imp/inner.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "mod inner;\n"),
+                ("src/sys/inner.rs", "pub fn other_fn() {}\n"),
+            ],
+            true,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![

@@ -1932,6 +1932,133 @@
       "notes": "Regression case (#613): `self::inner::target_fn()` in `src/sys/imp.rs`, the default location of a `cfg_attr` path module, names `src/sys/imp/inner.rs`: that file is compiled only when `imp` is, so the choice is already made."
     },
     {
+      "id": "ci-rust-calls-94-cfg_attr_item_import_alternatives",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_item_import_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_item_import_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_item_import_alternatives",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#615): `use crate::sys::imp::target_fn;` through `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` beside `src/sys/imp.rs` names `target_fn` of either file, so the call keeps a candidate in each and no authoritative edge, as the path spelling does."
+    },
+    {
+      "id": "ci-rust-calls-95-cfg_attr_module_import_alternatives",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_module_import_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_module_import_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_module_import_alternatives",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#615): `use crate::sys::imp;` names either file of a `cfg_attr` path module, so `imp::target_fn()` keeps a candidate in each and no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-96-cfg_gated_item_import_alternatives",
+      "fixture_id": "ci/ri3/rust/calls/cfg_gated_item_import_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_gated_item_import_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_gated_item_import_alternatives",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#615): the `#[cfg]` spelling of the choice, `#[cfg(not(windows))] pub mod imp;` beside `#[cfg(windows)] #[path = \"win.rs\"] pub mod imp;`, read through `use crate::sys::imp::target_fn;`."
+    },
+    {
+      "id": "ci-rust-calls-97-cfg_attr_glob_import_no_default_location",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_glob_import_no_default_location",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_glob_import_no_default_location:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "cfg_attr_glob_import_no_default_location",
+      "notes": "Regression case (#615): `use crate::sys::imp::*;` into a `cfg_attr` path module must not prove the call to the default file's `target_fn`."
+    },
+    {
+      "id": "ci-rust-calls-98-cfg_attr_crate_name_reexport_import_alternatives",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_crate_name_reexport_import_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_crate_name_reexport_import_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_crate_name_reexport_import_alternatives",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#615): a binary's `use bench::sys::target_fn;` reaches `target_fn` through `sys`'s `pub use imp::target_fn;`, which makes no choice of `imp`'s file, so the call keeps a candidate in each and no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-99-cfg_attr_import_alternative_declared_elsewhere",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_import_alternative_declared_elsewhere",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_import_alternative_declared_elsewhere:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_import_alternative_declared_elsewhere",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#616): `imp` is `src/other.rs`, which `mod other;` also declares, or `src/sys/imp.rs`; `use crate::sys::imp::target_fn;` keeps a candidate in both."
+    },
+    {
+      "id": "ci-rust-calls-100-cfg_attr_alternative_own_subtree_import",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_alternative_own_subtree_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_alternative_own_subtree_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "cfg_attr_alternative_own_subtree_import",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:cfg_attr_alternative_own_subtree_import:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#615): `use self::inner::target_fn;` in `src/sys/imp.rs`, the default location of a `cfg_attr` path module, names `src/sys/imp/inner.rs`: that file is compiled only when `imp` is, so the choice is already made."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
