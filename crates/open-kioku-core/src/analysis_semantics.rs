@@ -142,7 +142,9 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// closure.
 /// v11: a Rust `mod` declaration records whether its every `path` attribute is a `cfg_attr`
 /// (`path_is_conditional`); a v10 index records none, which reads as a `path` that always applies.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v11";
+/// v12: `path_is_conditional` is unset when the `cfg_attr` conditions hold on every build
+/// (`all()`, or `X` beside `not(X)`); a v11 index records such a module as conditional.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v12";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 
