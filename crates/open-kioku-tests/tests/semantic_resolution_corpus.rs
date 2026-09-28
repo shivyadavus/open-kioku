@@ -530,3 +530,89 @@ fn go_members_reached_through_a_type_alias_link_to_the_aliased_type() {
         snapshot.manifest.quality.quality_notes
     );
 }
+
+/// Each symbol-registry fact from the file at `path`: its target, line and edge type, sorted.
+fn registry_facts_from(
+    snapshot: &open_kioku_ingest::IndexSnapshot,
+    path: &str,
+) -> Vec<(String, u32, open_kioku_core::GraphEdgeType)> {
+    let file = snapshot
+        .files
+        .iter()
+        .find(|file| file.path == std::path::Path::new(path))
+        .unwrap_or_else(|| panic!("`{path}` is indexed"));
+    let mut facts = snapshot
+        .analysis_facts
+        .iter()
+        .filter(|fact| {
+            fact.file_id == file.id && fact.source.starts_with("open-kioku-symbol-registry/")
+        })
+        .map(|fact| {
+            (
+                fact.target.clone(),
+                fact.range.as_ref().map_or(0, |range| range.start),
+                fact.edge_type.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    facts.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    facts
+}
+
+#[test]
+fn a_java_static_import_reaches_a_class_whose_directory_does_not_mirror_its_package() {
+    let mut config = OkConfig::default();
+    config.history.enabled = false;
+    config.scip.enabled = false;
+    let repo = copied_fixture("java-flat-package-fixture");
+    let (snapshot, _) = Indexer::default()
+        .index_repo_with_history(repo.path(), &config)
+        .expect("indexing pipeline failed");
+
+    // `src/Constants.java` declares `package org.example;`, which no directory spells.
+    let facts = registry_facts_from(&snapshot, "src/app/Reader.java");
+    let targets = facts
+        .iter()
+        .map(|(target, _, _)| target.as_str())
+        .collect::<Vec<_>>();
+    assert!(targets.contains(&"src::Constants::FLAT_KEY"), "{facts:?}");
+    assert!(targets.contains(&"src::Constants::keyOf"), "{facts:?}");
+    let false_caveat = "no registry candidate belongs to the class its static import names";
+    let outside = "the name's path or import leads outside the repository";
+    assert!(
+        !snapshot
+            .manifest
+            .quality
+            .quality_notes
+            .iter()
+            .any(|note| note.message.contains(false_caveat) || note.message.contains(outside)),
+        "{:?}",
+        snapshot.manifest.quality.quality_notes
+    );
+}
+
+#[test]
+fn a_go_external_test_packages_alias_does_not_compete_with_the_package_it_tests() {
+    let mut config = OkConfig::default();
+    config.history.enabled = false;
+    config.scip.enabled = false;
+    let repo = copied_fixture("go-external-test-fixture");
+    let (snapshot, _) = Indexer::default()
+        .index_repo_with_history(repo.path(), &config)
+        .expect("indexing pipeline failed");
+
+    // `store/store_test.go` is `package store_test`: its `Entry` is not `store.Entry`.
+    let facts = registry_facts_from(&snapshot, "cmd/main.go");
+    assert!(
+        facts
+            .iter()
+            .any(|(target, line, _)| target == "store::store::Entry" && *line == 6),
+        "{facts:?}"
+    );
+    assert!(
+        !facts
+            .iter()
+            .any(|(target, _, _)| target.starts_with("audit::") || target.contains("store_test")),
+        "{facts:?}"
+    );
+}

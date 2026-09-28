@@ -689,6 +689,7 @@ impl Indexer {
         let mut import_sites = Vec::new();
         let mut module_declarations = Vec::new();
         let mut type_aliases = Vec::new();
+        let mut package_declarations = Vec::new();
         let mut export_sites = Vec::new();
         let mut inheritance_sites = Vec::new();
         let mut chunks = Vec::new();
@@ -702,6 +703,7 @@ impl Indexer {
             import_sites.extend(file.syntax.imports);
             module_declarations.extend(file.syntax.module_declarations);
             type_aliases.extend(file.syntax.type_aliases);
+            package_declarations.extend(file.syntax.package_declaration);
             export_sites.extend(file.syntax.exports);
             inheritance_sites.extend(file.syntax.inheritance);
             chunks.extend(file.chunks);
@@ -888,6 +890,7 @@ impl Indexer {
             &binding_index,
             &inheritance_index,
             &type_aliases,
+            &package_declarations,
         );
         let registry_report = symbol_registry::resolve_symbol_edges(
             &chunks,

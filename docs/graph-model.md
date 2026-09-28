@@ -177,6 +177,17 @@ token's place, and where it cannot tell, the token is matched as before:
   receiver that no import binds under its name (a package whose name differs from
   its path's last segment, such as a `go-uuid` path imported as `uuid` without an alias, or a
   variable) is still matched by the directories and types its name spells.
+- A Go package is its directory and its `package` clause. A `_test.go` file whose clause names
+  the external test package (`package store_test` in `store/`) is not of the package an import
+  of `store/` names, so no receiver places a member there. Go compiles a `_test.go` file only
+  into the tests of its own directory's package, so a use in another directory cannot name its
+  declarations, nor can a use outside the external test package name one of that package's. Such
+  a declaration is ruled out as any other is: it is never the target, and beside another
+  candidate of the name the match stays ambiguous, since the name is still declared twice. A
+  ruled-out type alias declares no type of its own and leaves no ambiguity, so `store.Entry{}`
+  in `cmd/` links to `store.Entry` beside the test package's `type Entry = audit.Record`. A
+  `_test.go` file of the package itself (`package store`) is of the package, so the external test
+  package names its declarations through its import of `store`.
 - A Go type alias (`type Entry = store.Entry`, alone or in a `type ( .. )` group) is a type symbol
   whose signature spells the alias, and every registry strategy reads it as the type it stands
   for. The target is placed through the alias file's own imports, as a receiver is: an
@@ -219,9 +230,12 @@ token's place, and where it cannot tell, the token is matched as before:
   package included (a nested class's member is qualified by its file's class and belongs to the
   nested class): `import static org.example.vendor.Constants.ACCESS_KEY;` under the
   repository's `org.example` does not match the repository's `org.example.Constants.ACCESS_KEY`.
-  The package is read from the file's directories, so a member of a Java file whose directory
-  does not mirror its `package` declaration is not matched through a static import. The
-  resolver's import model
+  The package is the one the candidate's file declares, not its directories, so a class in
+  `src/Constants.java` declaring `package org.example;` is `org.example.Constants`, and one whose
+  directory spells `org/example` while it declares `package org.other;` is not. A file declaring
+  no package is in the unnamed package, which no import names. The first segment of every
+  declared package is the repository's, so a static import from under it is not taken for one
+  from outside. The resolver's import model
   supplies the name each import binds, so `use std::fs::File as FsFile;` leaves `File` alone, and
   an unresolved import through the repository's own modules (`use crate::evidence::X;`, often a
   re-export) constrains nothing.
