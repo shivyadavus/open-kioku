@@ -177,6 +177,26 @@ token's place, and where it cannot tell, the token is matched as before:
   receiver that no import binds under its name (a package whose name differs from
   its path's last segment, such as a `go-uuid` path imported as `uuid` without an alias, or a
   variable) is still matched by the directories and types its name spells.
+- A Go type alias (`type Entry = store.Entry`, alone or in a `type ( .. )` group) is a type symbol
+  whose signature spells the alias, and every registry strategy reads it as the type it stands
+  for. The target is placed through the alias file's own imports, as a receiver is: an
+  unqualified name is the alias's own package's type, a qualified one the package its import
+  names, and an alias of an alias is followed on. So `ledger.Entry`, with `ledger` declaring the
+  alias, reaches `store.Entry`, and an alias and its target matched by one name are one
+  candidate, not two. An alias declares no type of its own, so one that a receiver's package or
+  the use site's scope rules out does not stay a candidate as another ruled-out declaration
+  does: another package's `type Entry = Record` does not make `store.Entry` ambiguous. The
+  target must be the one type declaration of that name in the package; an alias of a predeclared, composite, pointer or other module's type, one whose qualifier no
+  import of its file binds, or one whose target is declared more than once (once per build
+  constraint) is not placed. Such an alias matched alone resolves to nothing, and its caveat
+  names the alias and the type it spells (`` `ledger::aliases::Raw` is a Go type alias of
+  `[]byte` ``). No registry edge ends at an alias, and an alias's own declaration, like any
+  chunk, does not match the name it declares, so `type Entry = store.Entry` holds no edge to
+  `store.Entry` (a renamed alias, `type Row = store.Entry`, does). The resolver's own type
+  edges are not read through aliases: a `USES_TYPE` edge proven from an annotation that names an
+  alias ends at the alias. Go has no same-package strategy in this pass, so a bare name used in
+  its own package (`Entry` inside `store`) is ambiguous beside a same-named alias elsewhere, as
+  it is beside any same-named type.
 - A field or parameter name (a Rust `name: value` or `Foo { name, .. }`, a JavaScript or
   TypeScript object key or annotated name, a Go composite literal's `Key: value`, a Python keyword
   argument) matches only a symbol of kind field.
