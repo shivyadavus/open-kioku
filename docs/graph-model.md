@@ -85,9 +85,20 @@ item in every file that may hold the module, at High confidence and never author
 `rust_configured_member`, `rust_configured_type`) list those files in `ambiguity`, so neither is
 unique and the edge ranks with corroborated relationships; its evidence message names the files,
 and a `path` attribute the index cannot read is named too. No candidate is dropped, so a caller of
-any of the files stays visible to callers and impact. A path written in one of those files that
-stays below the module (`self::inner::g()` in `imp.rs`) is proven as before, since that file is
-compiled only with its own subtree; a file a `path` attribute mounts is not placed, so a path written there reaches every file of the choice. `cfg_attr(all(), path = ..)`, and a condition written beside
+any of the files stays visible to callers and impact. A file of the choice, or a file below one,
+is compiled only with that file's own subtree, so a path it writes into the module reaches that
+alternative's files alone (#624). Each file below a choice records its route, the file every
+module from the choice down to it is compiled from, and a candidate whose route disagrees with
+the caller's is not kept. When that leaves one readable file for every choice on the path, the
+path is proven into it, whether or not the module tree places the file: `self::inner::g()` or
+`crate::sys::imp::inner::g()` in `imp.rs`, and `crate::sys::imp::inner::g()` in `win.rs`, which
+a `path` attribute mounts. A choice nested inside one alternative still leaves that alternative's
+files unproven. A file two routes reach, such as one both alternatives mount with `#[path]`, one
+the tree also places as another module, or one a `mod` item outside every choice also reaches
+(`#[path = "sys/unix/util.rs"] mod uu;` in the crate root), has no route, and neither has a file
+below it: it is compiled whichever file the choice takes, so it reaches every file of the choice,
+as a file outside every alternative does, even when the tree places it in the default
+alternative. `cfg_attr(all(), path = ..)`, and a condition written beside
 its own `not(..)` (compared as written, whitespace outside literals aside), hold on every build and
 leave no default location; any other set of conditions, or a `path` set inside a nested `cfg_attr`, is read as one that may fail.
 
@@ -102,10 +113,25 @@ it keep one `CALLS` edge per file: `f()` after `use crate::sys::imp::f;` with st
 files in `ambiguity`. A file that is one of the choice's files and also another module (`mod
 other;` beside `cfg_attr(unix, path = "../other.rs")`) stays a candidate, and a path naming that
 other module (`crate::other::f`) is proven as before (#616). A `use` written in one of the choice's
-files that stays below the module is proven, as a path is. The file-level `IMPORTS` edge of such a
-`use` still names the file the module tree places, and a glob import into such a module binds no
-call, as a glob never does. A method call on a value of a type imported through such a module
-(`use crate::sys::imp::S;` then `s.m()`) still resolves to the placed default file's method (#625).
+files, or below one, reads its own alternative as a path does, and binds the item or module it
+names there when that leaves one file for every choice (#624); its file-level `IMPORTS` edge then
+names that file too. The `IMPORTS` edge of a `use` written outside every alternative still names
+the file the module tree places, and a glob import into such a module binds no call, as a glob
+never does.
+
+A type or trait imported through such a module is the type of each file that may hold it (#625).
+A method call on a value of that type (`use crate::sys::imp::S;` then `s.m()`, `S::new()`, or
+`self.s.m()` on a field `s: S`) keeps a `CALLS` edge to the method in each file, at High
+confidence, whose `receiver_type` and `containing_type` proofs (strategies
+`rust_configured_receiver_type` and `rust_configured_type_member`) list the files in `ambiguity`,
+so it ranks with corroborated relationships, as the path and import spellings do. The declared
+type of a binding (`USES_TYPE`) and the trait an `impl` names (`IMPLEMENTS`) keep one edge per
+file too, at High confidence, with the import strategy `rust_configured_type_import`. Every proof
+those carry names the target, so each lists the files and none is unique: they rank as heuristic,
+kept and visible to callers and impact but never authoritative. One `Exact` edge into the placed
+default file would claim a certainty the index does not have and leave the other file's type
+with no user. A `use` of the type written inside one alternative binds that alternative's type,
+and is proven, as above.
 
 Nodes and edges also support additive metadata fields. `properties` stores
 structured queryable facts that are specific to the node or edge family, such as

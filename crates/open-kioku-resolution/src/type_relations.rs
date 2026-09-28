@@ -1,7 +1,9 @@
 use crate::context::ResolutionContext;
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
-use crate::index::{ScopeIndex, SymbolIndex};
-use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
+use crate::index::{RustModuleFiles, ScopeIndex, SymbolIndex};
+use crate::pipeline::{
+    evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
+};
 use open_kioku_core::{
     Binding, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, InheritanceKind,
     InheritanceSite, Language, LineRange, RelationshipProof, RelationshipProofKind, ScopeId,
@@ -32,6 +34,19 @@ pub(crate) fn collect_parent_type_candidates(
     repository: &SemanticRepository,
     scopes: Option<&ScopeIndex>,
 ) -> Vec<ParentTypeCandidate> {
+    collect_parent_type_candidate_set(child, parent_name, symbols, repository, scopes).0
+}
+
+/// [`collect_parent_type_candidates`], with the files of a module whose file configuration
+/// selects when an import through it reached a candidate (#625).
+fn collect_parent_type_candidate_set(
+    child: &Symbol,
+    parent_name: &str,
+    symbols: &SymbolIndex,
+    repository: &SemanticRepository,
+    scopes: Option<&ScopeIndex>,
+) -> (Vec<ParentTypeCandidate>, Option<RustModuleFiles>) {
+    let mut configured = None::<RustModuleFiles>;
     let mut candidates = BTreeMap::<String, ParentTypeCandidate>::new();
     let mut add = |target: SymbolId, binding: ParentBindingKind| {
         let entry = candidates
@@ -63,9 +78,52 @@ pub(crate) fn collect_parent_type_candidates(
         &child.file_id,
         child.scope_id.as_ref(),
         parent_name,
-        |binding| binding.target_symbol.is_some() || binding.target_file.is_some(),
+        |binding| {
+            binding.target_symbol.is_some()
+                || binding.target_file.is_some()
+                || binding.configured_targets.is_some()
+        },
     ) {
         for binding in bindings {
+            // An import through a module whose file configuration selects names the type of each
+            // file that may hold it; the placed tree's target is one of them (#625).
+            if let Some(targets) = &binding.configured_targets {
+                let mut found = targets
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        symbols
+                            .get(item)
+                            .is_some_and(|symbol| is_type_symbol(&symbol.kind))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for file in &targets.module_files {
+                    found.extend(
+                        symbols
+                            .by_file
+                            .get(file)
+                            .into_iter()
+                            .flatten()
+                            .filter(|id| {
+                                symbols.get(id).is_some_and(|symbol| {
+                                    is_type_symbol(&symbol.kind) && symbol.name == parent_name
+                                })
+                            })
+                            .cloned(),
+                    );
+                }
+                if !found.is_empty() {
+                    for target in found {
+                        add(target, ParentBindingKind::Import);
+                    }
+                    let files = crate::typed_calls::configured_import_files(targets);
+                    let into = configured.get_or_insert_with(RustModuleFiles::default);
+                    into.files.extend(files.files);
+                    into.unread |= files.unread;
+                }
+                continue;
+            }
             if let Some(target) = &binding.target_symbol {
                 if symbols
                     .get(target)
@@ -105,7 +163,11 @@ pub(crate) fn collect_parent_type_candidates(
         }
     }
 
-    candidates.into_values().collect()
+    if let Some(files) = &mut configured {
+        files.files.sort();
+        files.files.dedup();
+    }
+    (candidates.into_values().collect(), configured)
 }
 
 pub fn resolve_inheritance_relationship_outcome(
@@ -119,7 +181,7 @@ pub fn resolve_inheritance_relationship_outcome(
             evaluate_candidates(&edge_type, Vec::new()),
         );
     };
-    let parent_candidates = collect_parent_type_candidates(
+    let (parent_candidates, configured) = collect_parent_type_candidate_set(
         child,
         &site.parent_name,
         ctx.symbols,
@@ -159,22 +221,41 @@ pub fn resolve_inheritance_relationship_outcome(
         .map(|candidate| candidate.target.clone())
         .collect::<Vec<_>>();
     let candidate_count = target_ids.len();
-    let ambiguity = ambiguity_strings(&target_ids);
+    // Through a module whose file configuration selects, every proof lists its files, so none is
+    // unique: each candidate is kept, below authoritative (#625).
+    let (confidence, ambiguity, message) = match &configured {
+        Some(files) => (
+            Confidence::High,
+            crate::typed_calls::configured_file_names(files),
+            crate::typed_calls::configured_type_message(
+                &format!(
+                    "explicit {:?} declaration of {} through a Rust import",
+                    site.kind, site.parent_name
+                ),
+                files,
+            ),
+        ),
+        None => (
+            Confidence::Exact,
+            ambiguity_strings(&target_ids),
+            format!(
+                "explicit {:?} declaration candidate for {}",
+                site.kind, site.parent_name
+            ),
+        ),
+    };
     let source_range = syntax_file_range(ctx, &site.range);
 
     let candidates = parent_candidates
         .into_iter()
         .map(|parent| {
-            let mut candidate = ResolutionCandidate::new(parent.target.clone(), Confidence::Exact);
+            let mut candidate = ResolutionCandidate::new(parent.target.clone(), confidence);
             candidate.evidence.push(ResolutionEvidence {
                 kind: ResolutionEvidenceKind::InheritanceGraph,
                 source_type: EvidenceSourceType::TreeSitter,
                 file_range: source_range.clone(),
                 symbol_id: Some(parent.target.clone()),
-                message: format!(
-                    "explicit {:?} declaration candidate for {}",
-                    site.kind, site.parent_name
-                ),
+                message: message.clone(),
             });
             candidate.proofs.push(proof(
                 RelationshipProofKind::InheritanceBinding,
@@ -190,6 +271,10 @@ pub fn resolve_inheritance_relationship_outcome(
                     ParentBindingKind::SameFile => (
                         RelationshipProofKind::SameScopeDefinition,
                         "same_file_parent_type",
+                    ),
+                    ParentBindingKind::Import if configured.is_some() => (
+                        RelationshipProofKind::ImportBinding,
+                        "rust_configured_type_import",
                     ),
                     ParentBindingKind::Import => (
                         RelationshipProofKind::ImportBinding,
@@ -233,10 +318,17 @@ pub fn resolve_inheritance_relationship_outcome(
         })
         .collect();
 
-    (
-        edge_type.clone(),
-        evaluate_candidates(&edge_type, candidates),
-    )
+    let outcome = match &configured {
+        Some(files) => ResolutionOutcome::Alternatives {
+            candidates: normalize_candidates(candidates),
+            reason: crate::typed_calls::configured_type_message(
+                &format!("the Rust import of {}", site.parent_name),
+                files,
+            ),
+        },
+        None => evaluate_candidates(&edge_type, candidates),
+    };
+    (edge_type, outcome)
 }
 
 /// Traits of the Rust standard prelude, in any edition, that code names without importing them.
@@ -387,25 +479,44 @@ pub fn resolve_declared_type_use_outcome(
         return None;
     }
     let source = scope_owner_symbol(&binding.scope_id, ctx.scopes)?;
-    let origins =
-        crate::typed_calls::collect_type_candidate_origins(ctx, &binding.scope_id, type_name);
+    let found = crate::typed_calls::collect_type_candidate_set(ctx, &binding.scope_id, type_name);
+    let origins = found.targets;
     let targets = origins
         .iter()
         .map(|(target, _)| target.clone())
         .collect::<Vec<_>>();
     let candidate_count = targets.len();
-    let ambiguity = ambiguity_strings(&targets);
+    // Through a module whose file configuration selects, the declared type names the type of each
+    // file that may hold it: every proof lists those files, so none is unique and each candidate
+    // is kept below authoritative (#625).
+    let (confidence, ambiguity, message, import_strategy) = match &found.configured {
+        Some(files) => (
+            Confidence::High,
+            crate::typed_calls::configured_file_names(files),
+            crate::typed_calls::configured_type_message(
+                &format!("the declared type `{type_name}` through a Rust import"),
+                files,
+            ),
+            "rust_configured_type_import",
+        ),
+        None => (
+            Confidence::Exact,
+            ambiguity_strings(&targets),
+            format!("explicit declared type `{type_name}` candidate"),
+            "import_bound_declared_type",
+        ),
+    };
     let source_range = syntax_file_range(ctx, &binding.range);
     let candidates = origins
         .into_iter()
         .map(|(target, via_import)| {
-            let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact);
+            let mut candidate = ResolutionCandidate::new(target.clone(), confidence);
             candidate.evidence.push(ResolutionEvidence {
                 kind: ResolutionEvidenceKind::TypedBinding,
                 source_type: EvidenceSourceType::TreeSitter,
                 file_range: source_range.clone(),
                 symbol_id: Some(target.clone()),
-                message: format!("explicit declared type `{type_name}` candidate"),
+                message: message.clone(),
             });
             candidate.proofs.push(proof(
                 RelationshipProofKind::ExactReference,
@@ -421,7 +532,7 @@ pub fn resolve_declared_type_use_outcome(
             if via_import {
                 candidate.proofs.push(proof(
                     RelationshipProofKind::ImportBinding,
-                    "import_bound_declared_type",
+                    import_strategy,
                     source_range.clone(),
                     &source,
                     &target,
@@ -432,10 +543,17 @@ pub fn resolve_declared_type_use_outcome(
             candidate
         })
         .collect();
-    Some((
-        source,
-        evaluate_candidates(&GraphEdgeType::UsesType, candidates),
-    ))
+    let outcome = match &found.configured {
+        Some(files) => ResolutionOutcome::Alternatives {
+            candidates: normalize_candidates(candidates),
+            reason: crate::typed_calls::configured_type_message(
+                &format!("the Rust import of `{type_name}`"),
+                files,
+            ),
+        },
+        None => evaluate_candidates(&GraphEdgeType::UsesType, candidates),
+    };
+    Some((source, outcome))
 }
 
 pub(crate) fn scope_owner_symbol(scope_id: &ScopeId, scopes: &ScopeIndex) -> Option<SymbolId> {

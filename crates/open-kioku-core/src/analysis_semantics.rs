@@ -130,7 +130,15 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// each file that may hold that module, none authoritative and each naming the files, as the
 /// path spelling does since v26. v31 indexes hold one authoritative edge into the placed default
 /// file.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v32";
+/// v34: a Rust path or `use` import written in a file inside one alternative of such a module,
+/// a file a `path` attribute mounts included, reaches that alternative's files alone, and is
+/// proven when that leaves one file for every choice on the path; a method call on a value of a
+/// type imported through such a module, and a `USES_TYPE` or `IMPLEMENTS` relation through such
+/// an import, keep one unproven edge per file that may hold the type. v32 indexes hold edges
+/// from such a file into every alternative, and one authoritative edge into the placed default
+/// file for the type's method, declared type and implemented trait. v33 is taken by an open
+/// change.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v34";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

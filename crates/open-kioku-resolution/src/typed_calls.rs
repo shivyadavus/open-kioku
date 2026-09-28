@@ -1,6 +1,6 @@
 use crate::context::{ResolutionContext, RustRelativeModule, ScopedImport};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
-use crate::index::{ConfiguredModule, RustModuleFiles, RustModulePlacement};
+use crate::index::{RustConfiguredRead, RustModuleFiles, RustModulePlacement};
 use crate::pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
 };
@@ -337,7 +337,7 @@ fn rust_module_path_items(
     });
     if let Some(configured) =
         ctx.scopes
-            .rust_configured_module(placement, placement.module.as_deref(), &module)
+            .rust_configured_module(placement, Some(ctx.file_id), &module)
     {
         return rust_configured_items(ctx, configured, targets, name, &accept);
     }
@@ -346,17 +346,21 @@ fn rust_module_path_items(
 }
 
 /// The items named `name` that `accept` admits in a module whose file configuration selects:
-/// those of each file that may hold it, or, for a path below such a module that no file module
-/// holds, `placed`, the items the placed files hold. None of them is proven.
+/// those of each file that may hold it on a build that compiles the caller, or, for a path below
+/// such a module that no file module holds, those of `placed`, the items the placed files hold,
+/// that such a build may compile. None of them is proven, unless the caller's own file fixes
+/// every choice on the path (#624): a file inside one alternative, `path`-mounted or not, is
+/// compiled only with that alternative, and a path it writes into the choice names that file's
+/// module as exactly as a path through placed files does.
 fn rust_configured_items(
     ctx: &ResolutionContext<'_>,
-    configured: ConfiguredModule<'_>,
-    placed: Vec<SymbolId>,
+    configured: RustConfiguredRead<'_>,
+    mut placed: Vec<SymbolId>,
     name: &str,
     accept: impl Fn(&Symbol) -> bool,
 ) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
-    let (mut targets, files) = match configured {
-        ConfiguredModule::Files(files) => {
+    let mut targets = match &configured.files {
+        Some(files) => {
             // Tree-sitter spells an item's qualified name from its file's path, wherever the
             // module tree places the file.
             let names = files
@@ -364,12 +368,28 @@ fn rust_configured_items(
                 .iter()
                 .map(|file| format!("{}::{name}", file.replace('/', "::")))
                 .collect::<Vec<_>>();
-            (rust_qualified_targets(ctx, &names, accept), files)
+            rust_qualified_targets(ctx, &names, accept)
         }
-        ConfiguredModule::Below(files) => (placed, files),
+        None => {
+            placed.retain(|target| {
+                ctx.symbols
+                    .get(target)
+                    .is_some_and(|symbol| configured.may_compile(&symbol.file_id))
+            });
+            placed
+        }
     };
     normalize_symbol_ids(&mut targets);
-    (!targets.is_empty()).then(|| (targets, RustModulePathStrategy::Configured(files.clone())))
+    if targets.is_empty() {
+        return None;
+    }
+    // Several items of the name in the one file (`#[cfg]`-gated definitions) stay unproven.
+    let strategy = if configured.proven && targets.len() == 1 {
+        RustModulePathStrategy::CrateQualified
+    } else {
+        RustModulePathStrategy::Configured(configured.files.unwrap_or(configured.choice_files))
+    };
+    Some((targets, strategy))
 }
 
 /// The associated functions a Rust path through a type reached, each proven by the call site,
@@ -477,6 +497,15 @@ pub(crate) fn configured_message(what: &str, files: &RustModuleFiles) -> String 
     )
 }
 
+/// The caveat of a type relation reached through a module whose file configuration selects
+/// (#625).
+pub(crate) fn configured_type_message(what: &str, files: &RustModuleFiles) -> String {
+    format!(
+        "{what} reaches a module whose file configuration selects, one of {}; it names this candidate only on builds that compile its file",
+        configured_file_names(files).join(", ")
+    )
+}
+
 /// The files a Rust import names through a module whose file configuration selects (#615).
 pub(crate) fn configured_import_files(targets: &ConfiguredImportTargets) -> RustModuleFiles {
     RustModuleFiles {
@@ -492,16 +521,41 @@ pub(crate) fn configured_import_files(targets: &ConfiguredImportTargets) -> Rust
 pub(crate) fn rust_configured_import_outcome(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
-    mut targets: Vec<SymbolId>,
+    targets: Vec<SymbolId>,
     files: &RustModuleFiles,
     evidence_kind: ResolutionEvidenceKind,
     import_strategy: &str,
     member_strategy: &str,
 ) -> ResolutionOutcome {
+    rust_configured_call_outcome(
+        call,
+        ctx,
+        targets,
+        files,
+        (evidence_kind, "a Rust import", "the Rust import"),
+        &[
+            (RelationshipProofKind::ImportBinding, import_strategy),
+            (RelationshipProofKind::QualifiedName, member_strategy),
+        ],
+    )
+}
+
+/// The candidates a call reached through a module whose file configuration selects, one per
+/// file it may be compiled from: each at `High` confidence with the call-site proof and a proof
+/// of each of `proofs`, whose ambiguity lists `files`, so none is proven. `what` is the evidence
+/// kind and how the evidence message and the outcome's reason name the route.
+fn rust_configured_call_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    mut targets: Vec<SymbolId>,
+    files: &RustModuleFiles,
+    (evidence_kind, evidence, reason): (ResolutionEvidenceKind, &str, &str),
+    proofs: &[(RelationshipProofKind, &str)],
+) -> ResolutionOutcome {
     normalize_symbol_ids(&mut targets);
     let candidate_count = targets.len();
     let ambiguity = configured_file_names(files);
-    let message = configured_message("a Rust import", files);
+    let message = configured_message(evidence, files);
     let candidates = targets
         .into_iter()
         .map(|target| {
@@ -514,12 +568,9 @@ pub(crate) fn rust_configured_import_outcome(
                 message: message.clone(),
             });
             candidate.proofs.push(call_site_proof(call, ctx, &target));
-            for (kind, strategy) in [
-                (RelationshipProofKind::ImportBinding, import_strategy),
-                (RelationshipProofKind::QualifiedName, member_strategy),
-            ] {
+            for (kind, strategy) in proofs {
                 candidate.proofs.push(proof(
-                    kind,
+                    *kind,
                     strategy,
                     call,
                     ctx,
@@ -533,7 +584,7 @@ pub(crate) fn rust_configured_import_outcome(
         .collect();
     ResolutionOutcome::Alternatives {
         candidates: normalize_candidates(candidates),
-        reason: configured_message("the Rust import", files),
+        reason: configured_message(reason, files),
     }
 }
 
@@ -833,8 +884,15 @@ pub(crate) fn resolve_type_names_member_outcome_with(
     receiver_type_proven: bool,
 ) -> ResolutionOutcome {
     let mut type_candidates = Vec::new();
+    let mut configured = None::<RustModuleFiles>;
     for type_name in type_names {
-        type_candidates.extend(collect_type_candidates(ctx, &call.scope_id, type_name));
+        let found = collect_type_candidate_set(ctx, &call.scope_id, type_name);
+        type_candidates.extend(found.targets.into_iter().map(|(target, _)| target));
+        if let Some(files) = found.configured {
+            let into = configured.get_or_insert_with(RustModuleFiles::default);
+            into.files.extend(files.files);
+            into.unread |= files.unread;
+        }
     }
     normalize_symbol_ids(&mut type_candidates);
     if type_candidates.is_empty() {
@@ -846,6 +904,37 @@ pub(crate) fn resolve_type_names_member_outcome_with(
         direct_targets.extend(find_members_by_name(ctx, type_id, &call.callee_name));
     }
     normalize_symbol_ids(&mut direct_targets);
+    // A type imported through a module whose file configuration selects is the type of each file
+    // that may hold it, and a method call on it proves none of their methods (#625).
+    if let (false, Some(mut files)) = (direct_targets.is_empty(), configured) {
+        files.files.sort();
+        files.files.dedup();
+        let receiver = (
+            RelationshipProofKind::ReceiverType,
+            "rust_configured_receiver_type",
+        );
+        let member = (
+            RelationshipProofKind::ContainingType,
+            "rust_configured_type_member",
+        );
+        let proofs = if receiver_type_proven {
+            vec![receiver, member]
+        } else {
+            vec![member]
+        };
+        return rust_configured_call_outcome(
+            call,
+            ctx,
+            direct_targets,
+            &files,
+            (
+                ResolutionEvidenceKind::TypedBinding,
+                "a method call on a type a Rust import names",
+                "the Rust import of the receiver's type",
+            ),
+            &proofs,
+        );
+    }
     if !direct_targets.is_empty() {
         return if receiver_type_proven {
             evaluate_direct_member_targets(call, ctx, direct_targets)
@@ -1145,6 +1234,25 @@ pub(crate) fn collect_type_candidate_origins(
     scope_id: &ScopeId,
     type_name: &str,
 ) -> Vec<(SymbolId, bool)> {
+    collect_type_candidate_set(ctx, scope_id, type_name).targets
+}
+
+/// The type candidates a name reaches in scope.
+pub(crate) struct TypeCandidates {
+    /// Each candidate, with whether an import binding reached it.
+    pub(crate) targets: Vec<(SymbolId, bool)>,
+    /// The files of a module whose file configuration selects, when an import through it reached
+    /// a candidate (#625): the import names the type in each of them, so it proves none.
+    pub(crate) configured: Option<RustModuleFiles>,
+}
+
+/// [`collect_type_candidate_origins`], with the files of a module whose file configuration
+/// selects that an import reached candidates through.
+pub(crate) fn collect_type_candidate_set(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    type_name: &str,
+) -> TypeCandidates {
     let mut candidates = BTreeMap::<String, (SymbolId, bool)>::new();
     let mut add = |target: &SymbolId, via_import: bool| {
         candidates
@@ -1152,6 +1260,7 @@ pub(crate) fn collect_type_candidate_origins(
             .or_insert_with(|| (target.clone(), false))
             .1 |= via_import;
     };
+    let mut configured = None::<RustModuleFiles>;
 
     if ctx.language == Language::Rust {
         // A Rust type of this file is nameable only from its own module, or through an import
@@ -1162,7 +1271,10 @@ pub(crate) fn collect_type_candidate_origins(
                 is_type_symbol(&symbol.kind)
             })
         {
-            return types.into_iter().map(|target| (target, false)).collect();
+            return TypeCandidates {
+                targets: types.into_iter().map(|target| (target, false)).collect(),
+                configured: None,
+            };
         }
     } else if let Some(file_symbols) = ctx.symbols.by_file.get(ctx.file_id) {
         for id in file_symbols {
@@ -1177,33 +1289,63 @@ pub(crate) fn collect_type_candidate_origins(
         }
     }
 
+    let is_type = |id: &SymbolId| {
+        ctx.symbols
+            .get(id)
+            .is_some_and(|symbol| is_type_symbol(&symbol.kind))
+    };
+    let types_in_file = |file: &FileId| {
+        ctx.symbols
+            .by_file
+            .get(file)
+            .into_iter()
+            .flatten()
+            .filter(|id| {
+                ctx.symbols
+                    .get(id)
+                    .is_some_and(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     // As for bare calls, the nearest import of the name in scope decides.
     if let ScopedImport::Resolved(bindings) = ctx.scoped_import(scope_id, type_name, |binding| {
-        binding.target_symbol.is_some() || binding.target_file.is_some()
+        binding.target_symbol.is_some()
+            || binding.target_file.is_some()
+            || binding.configured_targets.is_some()
     }) {
         for binding in bindings {
+            // An import through a module whose file configuration selects names the type of each
+            // file that may hold it; the placed tree's target is one of them (#625).
+            if let Some(targets) = &binding.configured_targets {
+                let mut found = targets
+                    .items
+                    .iter()
+                    .filter(|item| is_type(item))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for file in &targets.module_files {
+                    found.extend(types_in_file(file));
+                }
+                if !found.is_empty() {
+                    for target in &found {
+                        add(target, true);
+                    }
+                    let files = configured_import_files(targets);
+                    let into = configured.get_or_insert_with(RustModuleFiles::default);
+                    into.files.extend(files.files);
+                    into.unread |= files.unread;
+                }
+                continue;
+            }
             if let Some(target) = &binding.target_symbol {
-                if ctx
-                    .symbols
-                    .get(target)
-                    .map(|symbol| is_type_symbol(&symbol.kind))
-                    .unwrap_or(false)
-                {
+                if is_type(target) {
                     add(target, true);
                 }
             }
             if let Some(target_file) = &binding.target_file {
-                if let Some(file_symbols) = ctx.symbols.by_file.get(target_file) {
-                    for id in file_symbols {
-                        if ctx
-                            .symbols
-                            .get(id)
-                            .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
-                            .unwrap_or(false)
-                        {
-                            add(id, true);
-                        }
-                    }
+                for id in types_in_file(target_file) {
+                    add(&id, true);
                 }
             }
         }
@@ -1211,18 +1353,20 @@ pub(crate) fn collect_type_candidate_origins(
 
     if let Some(qualified) = ctx.symbols.by_qualified.get(type_name) {
         for id in qualified {
-            if ctx
-                .symbols
-                .get(id)
-                .map(|symbol| is_type_symbol(&symbol.kind))
-                .unwrap_or(false)
-            {
+            if is_type(id) {
                 add(id, false);
             }
         }
     }
 
-    candidates.into_values().collect()
+    if let Some(files) = &mut configured {
+        files.files.sort();
+        files.files.dedup();
+    }
+    TypeCandidates {
+        targets: candidates.into_values().collect(),
+        configured,
+    }
 }
 
 fn is_type_symbol(kind: &SymbolKind) -> bool {
@@ -2255,6 +2399,48 @@ mod tests {
                     ),
                 ]
                 .into(),
+                // The file each module from `imp` down is compiled from with each file.
+                routes: [
+                    ("src/sys/imp", &[("sys::imp", "src/sys/imp")][..]),
+                    ("src/sys/win", &[("sys::imp", "src/sys/win")]),
+                    (
+                        "src/sys/imp/inner",
+                        &[
+                            ("sys::imp", "src/sys/imp"),
+                            ("sys::imp::inner", "src/sys/imp/inner"),
+                        ],
+                    ),
+                    (
+                        "src/sys/inner",
+                        &[
+                            ("sys::imp", "src/sys/win"),
+                            ("sys::imp::inner", "src/sys/inner"),
+                        ],
+                    ),
+                ]
+                .into_iter()
+                .map(|(stem, route)| {
+                    let files = route
+                        .iter()
+                        .map(|(at, file)| (module(at), file.to_string()))
+                        .collect::<BTreeMap<_, _>>();
+                    let own = files.keys().next_back().cloned().unwrap_or_default();
+                    (
+                        stem.to_string(),
+                        crate::index::RustModuleRoute { module: own, files },
+                    )
+                })
+                .collect(),
+                stems: [
+                    "src/sys/imp",
+                    "src/sys/win",
+                    "src/sys/imp/inner",
+                    "src/sys/inner",
+                ]
+                .into_iter()
+                .map(|stem| (FileId::new(format!("file:{stem}.rs")), stem.to_string()))
+                .collect(),
+                ..Default::default()
             },
         )]);
         let alternatives = |outcome: ResolutionOutcome| match outcome {
@@ -2327,6 +2513,31 @@ mod tests {
                         .as_deref(),
                     Some("src::sys::imp::inner::g")
                 );
+            },
+        );
+        // `sys/win.rs` is mounted by a `path` attribute, so the tree does not place it, but it is
+        // compiled only when `imp` is that file: a path it writes into `imp`, or below it, names
+        // its own subtree alone, as proven as a placed file's (#624).
+        with_rust_modules(
+            "src/sys/win.rs",
+            &items,
+            placements.clone(),
+            Vec::new(),
+            configured.clone(),
+            |ctx| {
+                let proven = |receiver: &str, callee: &str| {
+                    proven_target(ctx, &module_path_call("scope:worker", receiver, callee))
+                };
+                assert_eq!(
+                    proven("crate::sys::imp", "f").as_deref(),
+                    Some("src::sys::win::f")
+                );
+                assert_eq!(
+                    proven("crate::sys::imp::inner", "g").as_deref(),
+                    Some("src::sys::inner::g")
+                );
+                // Beside the choice nothing changes.
+                assert_eq!(proven("crate::sys", "f").as_deref(), Some("src::sys::f"));
             },
         );
         // Without the choice recorded, the placed file alone is the proven target.
