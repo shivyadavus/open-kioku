@@ -2206,6 +2206,19 @@ pub struct ModuleDeclarationSite {
     pub range: SourceRange,
 }
 
+/// A Go type alias, `type Entry = store.Entry`, declared by the symbol `symbol_id`. The alias is
+/// the type it names, so a use of the alias is a use of that type. `target_name` is unset when the
+/// alias names no declared type by name (`= []byte`, `= *Entry`, `= func()`); a generic
+/// instantiation (`= Page[int]`) names its generic type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TypeAliasSite {
+    pub symbol_id: SymbolId,
+    /// The package qualifier the target is written with (`store` of `store.Entry`), as the
+    /// alias's file imports it; unset for a type of the alias's own package or a predeclared one.
+    pub target_package: Option<String>,
+    pub target_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SyntaxFacts {
     pub symbols: Vec<Symbol>,
@@ -2217,6 +2230,8 @@ pub struct SyntaxFacts {
     pub inheritance: Vec<InheritanceSite>,
     #[serde(default)]
     pub module_declarations: Vec<ModuleDeclarationSite>,
+    #[serde(default)]
+    pub type_aliases: Vec<TypeAliasSite>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

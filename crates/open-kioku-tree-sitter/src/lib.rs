@@ -2,7 +2,7 @@ use open_kioku_core::{
     Binding, BindingId, CallSite, CallSiteId, Confidence, EvidenceSourceType, ExportSite, File,
     ImportSite, ImportedName, InheritanceKind, InheritanceSite, Language, LineRange,
     ModuleDeclarationSite, ReceiverKind, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId,
-    SymbolKind, SyntaxFacts, Visibility,
+    SymbolKind, SyntaxFacts, TypeAliasSite, Visibility,
 };
 use open_kioku_errors::{OkError, Result};
 use sha2::{Digest, Sha256};
@@ -473,6 +473,10 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
                 };
 
                 out.symbols.push(symbol);
+                if file.language == Language::Go && node.kind() == "type_alias" {
+                    out.type_aliases
+                        .push(go_type_alias_site(content, node, symbol_id.clone()));
+                }
                 ctx.symbol_stack.push(symbol_id.clone());
                 pushed_symbol = Some(symbol_id.clone());
 
@@ -574,6 +578,34 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
     }
 }
 
+/// What a Go `type_alias` node names: `store.Entry`, `Entry` and `Page[int]` name a declared
+/// type; a pointer, slice, map, function or literal type names none.
+fn go_type_alias_site(content: &str, node: Node<'_>, symbol_id: SymbolId) -> TypeAliasSite {
+    let source_bytes = content.as_bytes();
+    let text = |node: Node<'_>| node.utf8_text(source_bytes).ok().map(str::to_string);
+    let mut target = node.child_by_field_name("type");
+    if let Some(generic) = target.filter(|node| node.kind() == "generic_type") {
+        target = generic.child_by_field_name("type");
+    }
+    let (target_package, target_name) = match target {
+        Some(node) if node.kind() == "type_identifier" => (None, text(node)),
+        Some(node) if node.kind() == "qualified_type" => {
+            let package = node.child_by_field_name("package").and_then(text);
+            let name = node.child_by_field_name("name").and_then(text);
+            match (package, name) {
+                (Some(package), Some(name)) => (Some(package), Some(name)),
+                _ => (None, None),
+            }
+        }
+        _ => (None, None),
+    };
+    TypeAliasSite {
+        symbol_id,
+        target_package,
+        target_name,
+    }
+}
+
 fn extract_symbol_signature(file: &File, content: &str, node: Node<'_>) -> Option<String> {
     let source_bytes = content.as_bytes();
     match file.language {
@@ -626,6 +658,20 @@ fn extract_symbol_signature(file: &File, content: &str, node: Node<'_>) -> Optio
             }
         }
         Language::Go => {
+            if node.kind() == "type_alias" {
+                // Says what the alias stands for wherever the symbol is listed, so it does not
+                // read as a second declaration of the type it names.
+                let name = node
+                    .child_by_field_name("name")?
+                    .utf8_text(source_bytes)
+                    .ok()?;
+                let target = node
+                    .child_by_field_name("type")?
+                    .utf8_text(source_bytes)
+                    .ok()?;
+                let target = target.split_whitespace().collect::<Vec<_>>().join(" ");
+                return Some(format!("type {name} = {target}"));
+            }
             if let Some(params) = node.child_by_field_name("parameters") {
                 let text = params.utf8_text(source_bytes).ok()?;
                 let name = node
@@ -1108,7 +1154,8 @@ fn symbol_name_node<'tree>(
         Language::Go => match kind {
             "function_declaration" => name.map(|node| (node, SymbolKind::Function)),
             "method_declaration" => name.map(|node| (node, SymbolKind::Method)),
-            "type_spec" => {
+            // An alias is a type declaration too: the registry reads through it to its target.
+            "type_spec" | "type_alias" => {
                 let symbol_kind = match node.child_by_field_name("type").map(|node| node.kind()) {
                     Some("interface_type") => SymbolKind::Interface,
                     _ => SymbolKind::Class,
@@ -3240,5 +3287,61 @@ mod ri3_go_type_classification_tests {
         assert_eq!(interface.kind, SymbolKind::Interface);
         assert!(facts.bindings.iter().any(|binding| binding.name == "value"
             && binding.declared_type.as_deref() == Some("TargetType")));
+    }
+
+    #[test]
+    fn go_type_aliases_are_type_symbols_that_record_their_target() {
+        let file = File {
+            id: FileId::new("file_go_aliases"),
+            repository_id: RepositoryId::new("repo"),
+            path: "ledger/aliases.go".into(),
+            language: Language::Go,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "package ledger\n\nimport \"example.com/app/store\"\n\ntype Entry = store.Entry\n\ntype (\n\tBatch = store.Batch\n\tLocal = Record\n\tRows  = store.Page[Record]\n\tRaw   = []byte\n\tRef   = *store.Entry\n)\n\ntype Record struct{}\n",
+        )
+        .expect("Go alias fixture should parse");
+        let alias = |name: &str| {
+            let symbol = facts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .unwrap_or_else(|| panic!("alias `{name}` is a symbol: {:?}", facts.symbols));
+            let site = facts
+                .type_aliases
+                .iter()
+                .find(|site| site.symbol_id == symbol.id)
+                .unwrap_or_else(|| panic!("alias `{name}` records its target"));
+            (
+                symbol.kind.clone(),
+                symbol.signature.clone(),
+                site.target_package.clone(),
+                site.target_name.clone(),
+            )
+        };
+        let target = |package: Option<&str>, name: Option<&str>| {
+            (package.map(str::to_string), name.map(str::to_string))
+        };
+        let (kind, signature, package, name) = alias("Entry");
+        assert_eq!(kind, SymbolKind::Class);
+        assert_eq!(signature.as_deref(), Some("type Entry = store.Entry"));
+        assert_eq!((package, name), target(Some("store"), Some("Entry")));
+        let (_, _, package, name) = alias("Batch");
+        assert_eq!((package, name), target(Some("store"), Some("Batch")));
+        let (_, _, package, name) = alias("Local");
+        assert_eq!((package, name), target(None, Some("Record")));
+        let (_, _, package, name) = alias("Rows");
+        assert_eq!((package, name), target(Some("store"), Some("Page")));
+        let (_, _, package, name) = alias("Raw");
+        assert_eq!((package, name), target(None, None));
+        let (_, _, package, name) = alias("Ref");
+        assert_eq!((package, name), target(None, None));
+        // A defined type is not an alias.
+        assert_eq!(facts.type_aliases.len(), 6, "{:?}", facts.type_aliases);
     }
 }

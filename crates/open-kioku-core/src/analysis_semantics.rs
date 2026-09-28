@@ -109,7 +109,13 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// of the path), and a Java static import matches only a member of the class its path names.
 /// v26 indexes hold unique-name edges from receivers imported from another module or package and
 /// from static imports of library classes.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v27";
+/// v29: the symbol-registry pass reads a Go type alias as the type it stands for, placed through
+/// the alias file's imports: a member whose receiver's package declares the alias reaches the
+/// aliased type, and an alias and its target matched by one name are one candidate. An alias whose
+/// target the pass cannot place resolves to nothing, with a caveat naming the alias. v27 indexes
+/// hold no edge for a member reached through an alias declared in another package. v28 is taken
+/// by an open change.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v29";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -156,7 +162,10 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// (`path_is_conditional`); a v10 index records none, which reads as a `path` that always applies.
 /// v12: `path_is_conditional` is unset when the `cfg_attr` conditions hold on every build
 /// (`all()`, or `X` beside `not(X)`); a v11 index records such a module as conditional.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v12";
+/// v13: a Go type alias (`type Entry = store.Entry`, alone or in a `type ( .. )` group) is a type
+/// symbol whose signature spells the alias, and records the package qualifier and name of the type
+/// it stands for; a v12 index holds no symbol for it.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v13";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

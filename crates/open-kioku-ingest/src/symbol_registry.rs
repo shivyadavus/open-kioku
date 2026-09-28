@@ -1,7 +1,7 @@
 use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType,
     GraphNodeType, ImportResolution, Language, QualityNote, QualityNoteKind, ResolutionStatus,
-    Scope, ScopeId, ScopeKind, StringInterner, Symbol, SymbolId, SymbolKind,
+    Scope, ScopeId, ScopeKind, StringInterner, Symbol, SymbolId, SymbolKind, TypeAliasSite,
 };
 use open_kioku_resolution::{
     context::rust_rules_out_same_file_item, BindingIndex, InheritanceIndex, ResolutionContext,
@@ -19,6 +19,9 @@ const COMMON_NAME_CAP: usize = 32;
 const MAX_TOKENS_PER_CHUNK: usize = 80;
 const MAX_UNRESOLVED_NOTES: usize = 64;
 const MAX_SIMPLE_NAMES_FOR_FUZZY: usize = 5000;
+/// Aliases one alias may lead through before its target is left unplaced; Go code rarely chains
+/// more than two.
+const MAX_ALIAS_HOPS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct SymbolRegistry {
@@ -40,6 +43,19 @@ pub struct SymbolRegistry {
     /// Every segment of a qualified name before its last (directories, files, modules), with a
     /// crate's `-` spelled `_` as a path spells it.
     places: HashSet<String>,
+    /// What each Go type alias stands for, read through its file's imports. A match of the alias
+    /// is a match of its target.
+    alias_targets: HashMap<SymbolId, AliasTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AliasTarget {
+    /// The repository type the alias stands for, through every alias on the way.
+    Type(SymbolId),
+    /// No single repository type could be placed: a predeclared, composite or other module's
+    /// type, an import the file does not bind, or a name declared twice in the target package.
+    /// Holds the alias's type as written.
+    Unplaced(String),
 }
 
 /// Where a token's path or import puts its target, for a match by name alone.
@@ -172,6 +188,8 @@ pub struct RegistryScopeModel<'a> {
     go_package_dirs: HashSet<&'a str>,
     /// Each module a `go.mod` declares, with the manifest's directory (`` at the root).
     go_modules: Vec<(String, &'a str)>,
+    /// Each Go type alias by the symbol that declares it.
+    go_aliases: HashMap<&'a SymbolId, &'a TypeAliasSite>,
 }
 
 struct RustFileScopes<'a> {
@@ -187,6 +205,7 @@ impl<'a> RegistryScopeModel<'a> {
         scopes: &'a ScopeIndex,
         bindings: &'a BindingIndex,
         inheritance: &'a InheritanceIndex,
+        type_aliases: &'a [TypeAliasSite],
     ) -> Self {
         let mut rust_files = files
             .iter()
@@ -260,6 +279,10 @@ impl<'a> RegistryScopeModel<'a> {
             go_packages,
             go_package_dirs,
             go_modules,
+            go_aliases: type_aliases
+                .iter()
+                .map(|site| (&site.symbol_id, site))
+                .collect(),
         }
     }
 
@@ -650,6 +673,7 @@ impl SymbolRegistry {
             by_name_suffix: HashMap::new(),
             qualified_name_normalized: HashMap::new(),
             places: HashSet::new(),
+            alias_targets: HashMap::new(),
         };
         for (idx, import) in import_resolutions.iter().enumerate() {
             registry
@@ -962,19 +986,30 @@ impl SymbolRegistry {
         let Some(model) = model else {
             return ReceiverPlace::Named;
         };
-        let bindings = model.file_imports(&chunk.file_id, receiver);
-        if chunk.language != Language::Go {
-            let outside = !bindings.is_empty()
-                && bindings
-                    .iter()
-                    .all(|binding| self.import_leads_outside(binding));
-            return if outside {
-                ReceiverPlace::Outside
-            } else {
-                ReceiverPlace::Named
-            };
+        if chunk.language == Language::Go {
+            return self.go_receiver_place(&chunk.file_id, receiver, model);
         }
-        let [binding] = bindings else {
+        let bindings = model.file_imports(&chunk.file_id, receiver);
+        let outside = !bindings.is_empty()
+            && bindings
+                .iter()
+                .all(|binding| self.import_leads_outside(binding));
+        if outside {
+            ReceiverPlace::Outside
+        } else {
+            ReceiverPlace::Named
+        }
+    }
+
+    /// Where a Go receiver `file_id` names puts its package: by the whole path of the import
+    /// binding it, or, with no single import binding it, by its name alone.
+    fn go_receiver_place<'t>(
+        &self,
+        file_id: &FileId,
+        receiver: &str,
+        model: &RegistryScopeModel<'t>,
+    ) -> ReceiverPlace<'t> {
+        let [binding] = model.file_imports(file_id, receiver) else {
             return ReceiverPlace::Named;
         };
         let path = binding.source_module.as_str();
@@ -984,19 +1019,165 @@ impl SymbolRegistry {
         // `myapp/internal/store` of `module myapp` included.
         let standard_library = model.go_modules.is_empty()
             && matches!(
-                self.import_status(&chunk.file_id, path),
+                self.import_status(file_id, path),
                 Some(ResolutionStatus::Builtin)
             );
         if standard_library {
             ReceiverPlace::Outside
         } else {
-            let importer_dir = model
-                .go_packages
-                .get(&chunk.file_id)
-                .copied()
-                .unwrap_or_default();
+            let importer_dir = model.go_packages.get(file_id).copied().unwrap_or_default();
             model.go_import_place(path, importer_dir)
         }
+    }
+
+    /// Reads every Go type alias of `model` to the repository type it stands for.
+    fn place_go_aliases(&mut self, model: &RegistryScopeModel<'_>) {
+        let mut targets = HashMap::with_capacity(model.go_aliases.len());
+        for (&alias_id, &site) in &model.go_aliases {
+            let written = self
+                .by_id
+                .get(alias_id)
+                .and_then(|alias| alias.signature.as_deref())
+                .and_then(|signature| signature.split_once(" = "))
+                .map_or_else(String::new, |(_, written)| written.to_string());
+            let mut site = site;
+            let mut visited = vec![alias_id];
+            let target = loop {
+                let Some(next) = self.go_alias_step(site, model) else {
+                    break AliasTarget::Unplaced(written);
+                };
+                match model.go_aliases.get(&next) {
+                    None => break AliasTarget::Type(next.clone()),
+                    // An alias of an alias: its own file's imports place the next step.
+                    Some(&next_site)
+                        if !visited.contains(&&next) && visited.len() < MAX_ALIAS_HOPS =>
+                    {
+                        visited.push(&next_site.symbol_id);
+                        site = next_site;
+                    }
+                    Some(_) => break AliasTarget::Unplaced(written),
+                }
+            };
+            targets.insert(alias_id.clone(), target);
+        }
+        self.alias_targets = targets;
+    }
+
+    /// The one type declaration of the package `site`'s target names, under the target's name:
+    /// the alias's own package for an unqualified name, else the package its qualifier's import
+    /// leads to.
+    fn go_alias_step(
+        &self,
+        site: &TypeAliasSite,
+        model: &RegistryScopeModel<'_>,
+    ) -> Option<SymbolId> {
+        let name = site.target_name.as_deref()?;
+        let alias = self.by_id.get(&site.symbol_id)?;
+        let alias_package = model.go_packages.get(&alias.file_id).copied()?;
+        let place = match site.target_package.as_deref() {
+            None => ReceiverPlace::GoPackage {
+                dir: alias_package,
+                rest: "",
+            },
+            Some(qualifier) => self.go_receiver_place(&alias.file_id, qualifier, model),
+        };
+        let in_place = |package: &str| match place {
+            ReceiverPlace::GoPackage { dir, rest } => joined_path_is(package, dir, rest),
+            ReceiverPlace::GoRoot => package.is_empty(),
+            // A qualifier no single import binds places nothing.
+            ReceiverPlace::Named | ReceiverPlace::Outside => false,
+        };
+        let mut candidates = self
+            .by_simple_name
+            .get(name)?
+            .iter()
+            .filter(|id| **id != site.symbol_id)
+            .filter_map(|id| self.by_id.get(id))
+            .filter(|symbol| {
+                symbol.language == Language::Go
+                    && matches!(symbol.kind, SymbolKind::Class | SymbolKind::Interface)
+                    // A type declared inside a function is not the package's.
+                    && symbol.parent_symbol_id.is_none()
+                    && model
+                        .go_packages
+                        .get(&symbol.file_id)
+                        .is_some_and(|package| in_place(package))
+            });
+        let target = candidates.next()?;
+        // Two declarations of the name (one per build constraint) leave the target open.
+        candidates.next().is_none().then(|| target.id.clone())
+    }
+
+    /// `symbol`, or the repository type it stands for when it is a Go type alias whose target
+    /// the registry placed.
+    fn through_alias(&self, symbol: Symbol) -> Symbol {
+        match self.alias_targets.get(&symbol.id) {
+            Some(AliasTarget::Type(target)) => self.by_id.get(target).cloned().unwrap_or(symbol),
+            _ => symbol,
+        }
+    }
+
+    /// `resolution_from_candidates` over the candidates `admits` keeps, when it keeps all or none.
+    ///
+    /// Ruling some candidates out does not show that the name means the rest: a `mod tests`
+    /// helper out of reach of a `let path = dir.path()` says nothing about the `path` method that
+    /// remains. A strategy that matched a ruled-out item beside others stays ambiguous, as it was.
+    /// With no survivor the strategy matched nothing and the next one runs.
+    ///
+    /// `admits` judges a Go type alias where it is declared, and an alias it rules out is not
+    /// kept as a candidate: an alias declares no type of its own, so a use whose receiver names
+    /// another package cannot mean it, and it must not make ambiguous a match that was unique
+    /// before aliases were indexed (`store.Entry` beside another package's
+    /// `type Entry = Record`). The candidates are then read through their aliases:
+    /// an alias and the type it stands for are one candidate, and a match of an alias is a match
+    /// of its target. An alias matched alone whose target could not be placed resolves to
+    /// nothing, with a caveat naming the alias.
+    fn scoped_resolution(
+        &self,
+        strategy: &'static str,
+        candidates: Vec<Symbol>,
+        admits: &dyn Fn(&Symbol) -> bool,
+        confidence: Confidence,
+        speculative: bool,
+    ) -> Option<Resolution> {
+        let (kept, mut dropped): (Vec<_>, Vec<_>) =
+            candidates.into_iter().partition(|symbol| admits(symbol));
+        dropped.retain(|symbol| !self.alias_targets.contains_key(&symbol.id));
+        let candidates = if kept.is_empty() || dropped.is_empty() {
+            kept
+        } else {
+            kept.into_iter().chain(dropped).collect()
+        };
+        let candidates = candidates
+            .into_iter()
+            .map(|symbol| self.through_alias(symbol))
+            .collect();
+        let resolution = resolution_from_candidates(strategy, candidates, confidence, speculative)?;
+        let unplaced = resolution.symbol.as_ref().and_then(|symbol| {
+            match self.alias_targets.get(&symbol.id) {
+                Some(AliasTarget::Unplaced(written)) => Some((symbol, written)),
+                _ => None,
+            }
+        });
+        let Some((alias, written)) = unplaced else {
+            return Some(resolution);
+        };
+        let written = if written.is_empty() {
+            String::new()
+        } else {
+            format!(" `{written}`")
+        };
+        Some(Resolution {
+            ambiguity_reason: Some(format!(
+                "`{}` is a Go type alias of{written}, which the registry could not place at one repository type",
+                alias.qualified_name
+            )),
+            symbol: None,
+            candidates: 1,
+            confidence: Confidence::Low,
+            speculative: true,
+            strategy,
+        })
     }
 
     /// How the resolver placed the import of `path` in `file_id`, when it saw one.
@@ -1057,7 +1238,7 @@ impl SymbolRegistry {
                 );
             }
         }
-        scoped_resolution("direct-import", candidates, admits, Confidence::High, false)
+        self.scoped_resolution("direct-import", candidates, admits, Confidence::High, false)
     }
 
     fn resolve_same_file(
@@ -1075,7 +1256,7 @@ impl SymbolRegistry {
             .filter(|symbol| symbol_matches_token(symbol, token))
             .cloned()
             .collect::<Vec<_>>();
-        scoped_resolution("same-file", candidates, admits, Confidence::High, false)
+        self.scoped_resolution("same-file", candidates, admits, Confidence::High, false)
     }
 
     fn resolve_same_module(
@@ -1098,7 +1279,7 @@ impl SymbolRegistry {
             .filter(|symbol| symbol_matches_token(symbol, token))
             .cloned()
             .collect::<Vec<_>>();
-        scoped_resolution(
+        self.scoped_resolution(
             "same-module",
             in_language_family(chunk, candidates),
             admits,
@@ -1132,7 +1313,7 @@ impl SymbolRegistry {
             .filter_map(|id| self.by_id.get(id))
             .cloned()
             .collect::<Vec<_>>();
-        scoped_resolution(
+        self.scoped_resolution(
             "unique-project-name",
             in_language_family(chunk, symbols),
             admits,
@@ -1170,7 +1351,7 @@ impl SymbolRegistry {
                 }
             })
             .collect::<Vec<_>>();
-        scoped_resolution(
+        self.scoped_resolution(
             "suffix-import-reachability",
             in_language_family(chunk, candidates),
             admits,
@@ -1199,7 +1380,7 @@ impl SymbolRegistry {
             .take(COMMON_NAME_CAP + 1)
             .cloned()
             .collect::<Vec<_>>();
-        scoped_resolution(
+        self.scoped_resolution(
             "fuzzy-fallback",
             in_language_family(chunk, candidates),
             admits,
@@ -1216,7 +1397,10 @@ pub fn resolve_symbol_edges(
     scip_available: bool,
     scope_model: Option<&RegistryScopeModel<'_>>,
 ) -> RegistryReport {
-    let registry = SymbolRegistry::new(symbols, import_resolutions);
+    let mut registry = SymbolRegistry::new(symbols, import_resolutions);
+    if let Some(model) = scope_model {
+        registry.place_go_aliases(model);
+    }
     // Scoped to this run: dropped with the report, so nothing accumulates in a
     // long-lived process. Shared across the rayon workers below.
     let interner = StringInterner::new();
@@ -1380,32 +1564,6 @@ fn resolve_chunk(
         notes,
         unresolved,
     }
-}
-
-/// `resolution_from_candidates` over the candidates `admits` keeps, when it keeps all or none.
-///
-/// Ruling some candidates out does not show that the name means the rest: a `mod tests` helper
-/// out of reach of a `let path = dir.path()` says nothing about the `path` method that remains.
-/// A strategy that matched a ruled-out item beside others stays ambiguous, as it was. With no
-/// survivor the strategy matched nothing and the next one runs.
-fn scoped_resolution(
-    strategy: &'static str,
-    candidates: Vec<Symbol>,
-    admits: &dyn Fn(&Symbol) -> bool,
-    confidence: Confidence,
-    speculative: bool,
-) -> Option<Resolution> {
-    let (kept, dropped): (Vec<_>, Vec<_>) =
-        candidates.into_iter().partition(|symbol| admits(symbol));
-    if kept.is_empty() || dropped.is_empty() {
-        return resolution_from_candidates(strategy, kept, confidence, speculative);
-    }
-    resolution_from_candidates(
-        strategy,
-        kept.into_iter().chain(dropped).collect(),
-        confidence,
-        speculative,
-    )
 }
 
 fn resolution_from_candidates(
@@ -3995,6 +4153,35 @@ mod tests {
         go_modules: &[(&str, &str)],
         resolutions: &[(&str, ResolutionStatus)],
     ) -> RegistryReport {
+        let imports = imports
+            .iter()
+            .map(|(local, source)| ("entry", *local, *source))
+            .collect::<Vec<_>>();
+        resolve_in_model(
+            language,
+            text,
+            symbols,
+            &imports,
+            files,
+            go_modules,
+            resolutions,
+            &[],
+        )
+    }
+
+    /// `resolve_in_repository` with `imports` of any file (`(file id, local name, source)`) and
+    /// the Go type aliases `type_aliases`.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_in_model(
+        language: Language,
+        text: &str,
+        symbols: &[Symbol],
+        imports: &[(&str, &str, &str)],
+        files: &[(&str, &str)],
+        go_modules: &[(&str, &str)],
+        resolutions: &[(&str, ResolutionStatus)],
+        type_aliases: &[TypeAliasSite],
+    ) -> RegistryReport {
         let files = files
             .iter()
             .map(|(id, path)| File {
@@ -4031,14 +4218,14 @@ mod tests {
                     cargo_manifest: None,
                 });
         }
-        for (local, source) in imports {
+        for (file, local, source) in imports {
             repository
                 .imports
                 .by_file_local_name
-                .entry((FileId::new("entry"), local.to_string()))
+                .entry((FileId::new(*file), local.to_string()))
                 .or_default()
                 .push(ImportBinding {
-                    file_id: FileId::new("entry"),
+                    file_id: FileId::new(*file),
                     scope_id: ScopeId::new("entry:scope"),
                     local_name: local.to_string(),
                     imported_name: source
@@ -4070,6 +4257,7 @@ mod tests {
             &scopes,
             &bindings,
             &inheritance,
+            type_aliases,
         );
         resolve_symbol_edges(
             &[chunk_in(language, text)],
@@ -4594,6 +4782,247 @@ mod tests {
                 call("tools::gen::gen::GenerateCode", 2),
             ]
         );
+    }
+
+    /// The Go files of the alias tests, `(id, path)`: the caller's and the `billing/ledger`,
+    /// `billing/mid`, `billing/store` and `audit` packages.
+    const ALIAS_FILES: [(&str, &str); 6] = [
+        ("entry", "cmd/main/main.go"),
+        ("ledger-aliases", "billing/ledger/aliases.go"),
+        ("ledger-record", "billing/ledger/record.go"),
+        ("mid", "billing/mid/mid.go"),
+        ("store", "billing/store/store.go"),
+        ("audit", "audit/entry.go"),
+    ];
+
+    /// `(id, file id, name, alias target)` of a top-level Go type; one with an alias target is a
+    /// type alias of `(package qualifier, name)`, `(None, None)` for a type named by no name.
+    type GoTypeEntry<'e> = (
+        &'e str,
+        &'e str,
+        &'e str,
+        Option<(Option<&'e str>, Option<&'e str>)>,
+    );
+
+    /// A Go caller in `entry` and, for each entry, a Go type of its file, qualified as the parser
+    /// qualifies it.
+    fn go_types(entries: &[GoTypeEntry<'_>]) -> (Vec<Symbol>, Vec<TypeAliasSite>) {
+        let mut caller = symbol_in(
+            Language::Go,
+            "caller",
+            "main",
+            "cmd::main::main::main",
+            SymbolKind::Function,
+        );
+        caller.file_id = FileId::new("entry");
+        let mut symbols = vec![caller];
+        let mut aliases = Vec::new();
+        for (id, file, name, alias) in entries {
+            let (_, path) = ALIAS_FILES
+                .iter()
+                .find(|(file_id, _)| file_id == file)
+                .expect("alias test files list every file");
+            let stem = path.strip_suffix(".go").unwrap_or(path).replace('/', "::");
+            let mut symbol = symbol_in(
+                Language::Go,
+                id,
+                name,
+                &format!("{stem}::{name}"),
+                SymbolKind::Class,
+            );
+            symbol.file_id = FileId::new(*file);
+            if let Some((package, target)) = alias {
+                let written = match (package, target) {
+                    (Some(package), Some(target)) => format!("{package}.{target}"),
+                    (None, Some(target)) => target.to_string(),
+                    _ => "[]byte".to_string(),
+                };
+                symbol.signature = Some(format!("type {name} = {written}"));
+                aliases.push(TypeAliasSite {
+                    symbol_id: symbol.id.clone(),
+                    target_package: package.map(str::to_string),
+                    target_name: target.map(str::to_string),
+                });
+            }
+            symbols.push(symbol);
+        }
+        (symbols, aliases)
+    }
+
+    fn resolve_go_aliases(
+        text: &str,
+        entries: &[GoTypeEntry<'_>],
+        imports: &[(&str, &str, &str)],
+    ) -> RegistryReport {
+        let (symbols, aliases) = go_types(entries);
+        resolve_in_model(
+            Language::Go,
+            text,
+            &symbols,
+            imports,
+            &ALIAS_FILES,
+            &[("", "example.com/app")],
+            &[],
+            &aliases,
+        )
+    }
+
+    #[test]
+    fn a_go_member_reached_through_an_alias_is_the_type_the_alias_stands_for() {
+        let entries = [
+            (
+                "alias-entry",
+                "ledger-aliases",
+                "Entry",
+                Some((Some("store"), Some("Entry"))),
+            ),
+            (
+                "alias-batch",
+                "ledger-aliases",
+                "Batch",
+                Some((Some("mid"), Some("Batch"))),
+            ),
+            (
+                "alias-local",
+                "ledger-aliases",
+                "Local",
+                Some((None, Some("Record"))),
+            ),
+            ("record", "ledger-record", "Record", None),
+            // An alias of an alias, placed through its own file's import.
+            (
+                "mid-batch",
+                "mid",
+                "Batch",
+                Some((Some("store"), Some("Batch"))),
+            ),
+            ("store-entry", "store", "Entry", None),
+            ("store-batch", "store", "Batch", None),
+        ];
+        let imports = [
+            ("entry", "ledger", "example.com/app/billing/ledger"),
+            ("ledger-aliases", "store", "example.com/app/billing/store"),
+            ("ledger-aliases", "mid", "example.com/app/billing/mid"),
+            ("mid", "store", "example.com/app/billing/store"),
+        ];
+        let report = resolve_go_aliases(
+            "e := ledger.Entry{}\nb := ledger.Batch{}\nl := ledger.Local{}",
+            &entries,
+            &imports,
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                reference("billing::store::store::Entry", 1),
+                reference("billing::store::store::Batch", 2),
+                reference("billing::ledger::record::Record", 3),
+            ]
+        );
+
+        // An alias and the type it stands for are one candidate for a name.
+        let report = resolve_go_aliases("func f(e Entry) {}", &entries[..1], &imports);
+        assert_eq!(line_targets(&report), vec![]);
+        let entries = [entries[0], entries[5]];
+        let report = resolve_go_aliases("func f(e Entry) {}", &entries, &imports);
+        assert_eq!(
+            line_targets(&report),
+            vec![reference("billing::store::store::Entry", 1)]
+        );
+
+        // An alias in another package is no candidate for a member its receiver places: the
+        // alias `ledger.Entry` does not make `store.Entry` ambiguous.
+        let report = resolve_go_aliases(
+            "e := store.Entry{}",
+            &entries,
+            &[("entry", "store", "example.com/app/billing/store")],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![reference("billing::store::store::Entry", 1)]
+        );
+        let renamed = [
+            (
+                "alias-entry",
+                "ledger-aliases",
+                "Entry",
+                Some((None, Some("Record"))),
+            ),
+            ("record", "ledger-record", "Record", None),
+            ("store-entry", "store", "Entry", None),
+        ];
+        let report = resolve_go_aliases(
+            "e := store.Entry{}",
+            &renamed,
+            &[("entry", "store", "example.com/app/billing/store")],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![reference("billing::store::store::Entry", 1)]
+        );
+
+        // A same-named type outside the alias's target package is still another candidate.
+        let entries = [
+            entries[0],
+            entries[1],
+            ("audit-entry", "audit", "Entry", None),
+        ];
+        let report = resolve_go_aliases("e := ledger.Entry{}", &entries, &imports);
+        assert_eq!(line_targets(&report), vec![]);
+        assert!(has_note(
+            &report,
+            "caveat for `Entry` via unique-project-name: 2 candidates matched via unique-project-name"
+        ));
+    }
+
+    #[test]
+    fn a_go_alias_whose_target_is_not_placed_resolves_to_nothing_and_its_caveat_names_it() {
+        let entries = [
+            ("alias-raw", "ledger-aliases", "Raw", Some((None, None))),
+            (
+                "alias-ui",
+                "ledger-aliases",
+                "Ui",
+                Some((Some("cli"), Some("Ui"))),
+            ),
+            (
+                "alias-pair",
+                "ledger-aliases",
+                "Pair",
+                Some((Some("store"), Some("Twice"))),
+            ),
+            // Declared once per build constraint.
+            ("store-twice-a", "store", "Twice", None),
+            ("store-twice-b", "store", "Twice", None),
+            // Not the other module's `Ui` its alias names.
+            ("audit-ui", "audit", "Ui", None),
+        ];
+        let imports = [
+            ("entry", "ledger", "example.com/app/billing/ledger"),
+            ("ledger-aliases", "store", "example.com/app/billing/store"),
+            ("ledger-aliases", "cli", "example.com/vendor/cli"),
+        ];
+        let report = resolve_go_aliases(
+            "var r ledger.Raw\nvar u ledger.Ui\nvar p ledger.Pair",
+            &entries,
+            &imports,
+        );
+        assert_eq!(line_targets(&report), vec![]);
+        for (alias, written) in [("Raw", "[]byte"), ("Pair", "store.Twice")] {
+            let caveat = format!(
+                "caveat for `{alias}` via unique-project-name: `billing::ledger::aliases::{alias}` is a Go type alias of `{written}`, which the registry could not place at one repository type"
+            );
+            assert!(has_note(&report, &caveat), "{caveat}: {report:?}");
+        }
+        // `audit.Ui` is another candidate, as a name match reads it.
+        assert!(has_note(
+            &report,
+            "caveat for `Ui` via unique-project-name: 2 candidates matched via unique-project-name"
+        ));
+        let report = resolve_go_aliases("var u ledger.Ui", &entries[..2], &imports);
+        assert!(has_note(
+            &report,
+            "caveat for `Ui` via unique-project-name: `billing::ledger::aliases::Ui` is a Go type alias of `cli.Ui`, which the registry could not place at one repository type"
+        ));
     }
 
     #[test]
