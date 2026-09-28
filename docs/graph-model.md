@@ -233,9 +233,17 @@ token's place, and where it cannot tell, the token is matched as before:
   The package is the one the candidate's file declares, not its directories, so a class in
   `src/Constants.java` declaring `package org.example;` is `org.example.Constants`, and one whose
   directory spells `org/example` while it declares `package org.other;` is not. A file declaring
-  no package is in the unnamed package, which no import names. The first segment of every
-  declared package is the repository's, so a static import from under it is not taken for one
-  from outside. The resolver's import model
+  no package is in the unnamed package, which no import names. A Java import (static or not)
+  whose path lies inside a package some file declares, compared by whole segments, is not taken
+  for one from outside, wherever that file sits: beside `package org.example;`,
+  `org.example.Constants` is the repository's while `org.apache.commons.Widget` and
+  `org.examples.Widget` are not. Another language's import is never read against a Java
+  package, so Python's `from io import StringIO` stays outside beside `package io.acme;`. A
+  static import still does not pick one of two classes of the same simple name in different
+  declared packages: with `org.example.Constants` and `org.other.Constants` each declaring
+  `SHARED_KEY`, `import static org.example.Constants.SHARED_KEY;` rules the second out, but a
+  ruled-out candidate keeps the match ambiguous, as it does everywhere, so the use gets no edge.
+  The resolver's import model
   supplies the name each import binds, so `use std::fs::File as FsFile;` leaves `File` alone, and
   an unresolved import through the repository's own modules (`use crate::evidence::X;`, often a
   re-export) constrains nothing.

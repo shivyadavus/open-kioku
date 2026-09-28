@@ -54,9 +54,11 @@ pub struct SymbolRegistry {
     go_test_files: HashMap<FileId, GoTestFile>,
     /// The directory of each Go file, when the repository holds a `_test.go` file.
     go_dirs: HashMap<FileId, String>,
-    /// The first segment of each package a Java file declares: a static import from under one
-    /// may name a repository class wherever its file sits.
-    java_package_roots: HashSet<String>,
+    /// Every package a Java file declares (`org.example`): a Java import from inside one may name
+    /// a repository class wherever its file sits.
+    java_packages: HashSet<String>,
+    /// Every Java file, whose imports alone are read against `java_packages`.
+    java_files: HashSet<FileId>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +220,8 @@ pub struct RegistryScopeModel<'a> {
     go_aliases: HashMap<&'a SymbolId, &'a TypeAliasSite>,
     /// The package each Java file declares (`org.example`), which its directory need not mirror.
     java_packages: HashMap<&'a FileId, &'a str>,
+    /// Every Java file, a package declared or not.
+    java_files: HashSet<&'a FileId>,
 }
 
 struct RustFileScopes<'a> {
@@ -299,10 +303,14 @@ impl<'a> RegistryScopeModel<'a> {
             .filter(|(file_id, _)| !go_external_tests.contains(*file_id))
             .map(|(_, dir)| *dir)
             .collect();
-        let java_packages = files
+        let java_files = files
             .iter()
             .filter(|file| file.language == Language::Java)
-            .filter_map(|file| Some((&file.id, *declared.get(&file.id)?)))
+            .map(|file| &file.id)
+            .collect::<HashSet<_>>();
+        let java_packages = java_files
+            .iter()
+            .filter_map(|&file_id| Some((file_id, *declared.get(file_id)?)))
             .collect();
         let go_modules = repository
             .project
@@ -350,6 +358,7 @@ impl<'a> RegistryScopeModel<'a> {
                 .map(|site| (&site.symbol_id, site))
                 .collect(),
             java_packages,
+            java_files,
         }
     }
 
@@ -752,7 +761,8 @@ impl SymbolRegistry {
             alias_targets: HashMap::new(),
             go_test_files: HashMap::new(),
             go_dirs: HashMap::new(),
-            java_package_roots: HashSet::new(),
+            java_packages: HashSet::new(),
+            java_files: HashSet::new(),
         };
         for (idx, import) in import_resolutions.iter().enumerate() {
             registry
@@ -1062,7 +1072,7 @@ impl SymbolRegistry {
             && !matches!(root, "crate" | "self" | "super" | "Self")
             && !self.is_module(root)
             && !self.by_simple_name.contains_key(root)
-            && !self.java_package_roots.contains(root)
+            && !self.java_import_is_declared_inside(binding, source)
     }
 
     /// Where a member's receiver says the member is. A receiver the file imports is where its
@@ -1142,13 +1152,32 @@ impl SymbolRegistry {
                 .map(|(&file_id, dir)| (file_id.clone(), dir.to_string()))
                 .collect();
         }
-        self.java_package_roots = model
+        self.java_packages = model
             .java_packages
             .values()
-            .filter_map(|package| package.split('.').next())
-            .filter(|root| !root.is_empty())
-            .map(str::to_string)
+            .filter(|package| !package.is_empty())
+            .map(|package| package.to_string())
             .collect();
+        self.java_files = model
+            .java_files
+            .iter()
+            .map(|&file_id| file_id.clone())
+            .collect();
+    }
+
+    /// Whether `binding`, an import of a Java file, names something inside a package the
+    /// repository declares: `org.example.Constants` or `static org.example.Constants.KEY` when a
+    /// file declares `package org.example;`, whatever directory holds it. Only whole leading
+    /// segments count, so `org.apache.commons.Widget` is not inside `org.example`, and another
+    /// language's import (Python's `from io import StringIO` beside a Java `package io.acme;`)
+    /// is never read against a Java package.
+    fn java_import_is_declared_inside(&self, binding: &ImportBinding, source: &str) -> bool {
+        if self.java_packages.is_empty() || !self.java_files.contains(&binding.file_id) {
+            return false;
+        }
+        source
+            .match_indices('.')
+            .any(|(end, _)| self.java_packages.contains(&source[..end]))
     }
 
     /// Whether a use in `chunk` can name `symbol` as far as Go test files say: a declaration of a
@@ -4336,7 +4365,13 @@ mod tests {
                 id: FileId::new(*id),
                 repository_id: open_kioku_core::RepositoryId::new("repo"),
                 path: path.into(),
-                language: language.clone(),
+                // A repository of several languages: each file's own, by its extension.
+                language: match path.rsplit('.').next() {
+                    Some("java") => Language::Java,
+                    Some("py") => Language::Python,
+                    Some("go") => Language::Go,
+                    _ => language.clone(),
+                },
                 size_bytes: 0,
                 content_hash: String::new(),
                 is_generated: false,
@@ -4525,11 +4560,24 @@ mod tests {
         imports: &[(&str, &str)],
         files: &[(&str, &str, Option<&str>)],
     ) -> RegistryReport {
-        let entry = [(
-            "entry",
+        resolve_java_from(
             "src/main/java/org/example/app/App.java",
-            Some("org.example.app"),
-        )];
+            text,
+            symbols,
+            imports,
+            files,
+        )
+    }
+
+    /// `resolve_java` with `entry` at `entry_path`, in `package org.example.app;`.
+    fn resolve_java_from(
+        entry_path: &str,
+        text: &str,
+        symbols: &[Symbol],
+        imports: &[(&str, &str)],
+        files: &[(&str, &str, Option<&str>)],
+    ) -> RegistryReport {
+        let entry = [("entry", entry_path, Some("org.example.app"))];
         let files = entry.iter().chain(files).collect::<Vec<_>>();
         let paths = files
             .iter()
@@ -4803,6 +4851,156 @@ mod tests {
             )],
         );
         assert_eq!(line_targets(&report), vec![]);
+    }
+
+    #[test]
+    fn a_java_import_from_outside_every_declared_package_leads_outside_the_repository() {
+        // A flat layout: `src/Widget.java` declares `package org.example;`, and no path of the
+        // repository spells `org`.
+        let symbols = vec![
+            java_symbol(
+                "caller",
+                "entry",
+                None,
+                "f",
+                "src::app::UsesLibrary::f",
+                SymbolKind::Method,
+            ),
+            java_symbol(
+                "widget",
+                "widget",
+                None,
+                "Widget",
+                "src::Widget::Widget",
+                SymbolKind::Class,
+            ),
+            java_symbol(
+                "build",
+                "widget",
+                Some("widget"),
+                "build",
+                "src::Widget::build",
+                SymbolKind::Method,
+            ),
+            java_symbol(
+                "mocks",
+                "mocks",
+                None,
+                "Mocks",
+                "src::Mocks::Mocks",
+                SymbolKind::Class,
+            ),
+            java_symbol(
+                "mock-thing",
+                "mocks",
+                Some("mocks"),
+                "mockThing",
+                "src::Mocks::mockThing",
+                SymbolKind::Method,
+            ),
+        ];
+        let files = [
+            ("widget", "src/Widget.java", Some("org.example")),
+            ("mocks", "src/Mocks.java", Some("org.example")),
+        ];
+        let resolve = |text: &str, imports: &[(&str, &str)]| {
+            resolve_java_from("src/app/UsesLibrary.java", text, &symbols, imports, &files)
+        };
+        let text = "Widget w = Widget.build();";
+
+        // A library's `Widget` shares only the `org` segment with the declared package.
+        let report = resolve(text, &[("Widget", "org.apache.commons.Widget")]);
+        assert_eq!(line_targets(&report), vec![]);
+        assert!(has_note(
+            &report,
+            "caveat for `build` via unresolved: the member's receiver is imported from outside the repository"
+        ));
+        let report = resolve(
+            "Object o = mockThing();",
+            &[("mockThing", "static org.mockito.Mockito.mockThing")],
+        );
+        assert_eq!(line_targets(&report), vec![]);
+        assert!(has_note(
+            &report,
+            "caveat for `mockThing` via unresolved: the name's path or import leads outside the repository"
+        ));
+        // A package is matched by whole segments: `org.examples` is not inside `org.example`.
+        let report = resolve(text, &[("Widget", "org.examples.Widget")]);
+        assert_eq!(line_targets(&report), vec![]);
+
+        // An import from inside the declared package names the repository's class.
+        let report = resolve(text, &[("Widget", "org.example.Widget")]);
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                reference("src::Widget::Widget", 1),
+                call("src::Widget::build", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn another_languages_import_is_not_read_against_a_declared_java_package() {
+        // `java/Acme.java` declares `package io.acme;`; Python's `io` is the standard library's.
+        let python = |id: &str, file: &str, name: &str, qualified: &str, kind: SymbolKind| {
+            let mut symbol = symbol_in(Language::Python, id, name, qualified, kind);
+            symbol.file_id = FileId::new(file);
+            symbol
+        };
+        let mut acme = java_symbol(
+            "acme",
+            "acme",
+            None,
+            "Acme",
+            "java::Acme::Acme",
+            SymbolKind::Class,
+        );
+        acme.language = Language::Java;
+        let symbols = vec![
+            python(
+                "caller",
+                "entry",
+                "render",
+                "py::app::render",
+                SymbolKind::Function,
+            ),
+            python(
+                "string-io",
+                "buffers",
+                "StringIO",
+                "py::buffers::StringIO",
+                SymbolKind::Class,
+            ),
+            acme,
+        ];
+        let files = [
+            ("entry", "py/app.py"),
+            ("buffers", "py/buffers.py"),
+            ("acme", "java/Acme.java"),
+        ];
+        // Even a path inside the Java package is Python's own: only a Java import is read
+        // against a Java package.
+        for source in ["io", "io.StringIO", "io.acme.StringIO"] {
+            let report = resolve_in_model(
+                Language::Python,
+                "return StringIO().getvalue()",
+                &symbols,
+                &[("entry", "StringIO", source)],
+                &files,
+                &[],
+                &[],
+                &[],
+                &[("acme", "io.acme")],
+            );
+            assert_eq!(line_targets(&report), vec![], "{source}");
+            assert!(
+                has_note(
+                    &report,
+                    "caveat for `StringIO` via unresolved: the name's path or import leads outside the repository"
+                ),
+                "{source}: {report:?}"
+            );
+        }
     }
 
     /// A Go caller in `entry` and, for each `(id, file path, name)`, a function in that file,

@@ -577,17 +577,39 @@ fn a_java_static_import_reaches_a_class_whose_directory_does_not_mirror_its_pack
         .collect::<Vec<_>>();
     assert!(targets.contains(&"src::Constants::FLAT_KEY"), "{facts:?}");
     assert!(targets.contains(&"src::Constants::keyOf"), "{facts:?}");
-    let false_caveat = "no registry candidate belongs to the class its static import names";
-    let outside = "the name's path or import leads outside the repository";
+    let notes = &snapshot.manifest.quality.quality_notes;
     assert!(
-        !snapshot
-            .manifest
-            .quality
-            .quality_notes
+        !notes.iter().any(|note| {
+            (note.message.contains("`FLAT_KEY`") || note.message.contains("`keyOf`"))
+                && note.message.contains("caveat")
+        }),
+        "{notes:?}"
+    );
+
+    // A library's class shares only `org` with the declared `org.example`: its `Widget` and a
+    // mocking library's static import are not the repository's.
+    let facts = registry_facts_from(&snapshot, "src/app/UsesLibrary.java");
+    assert!(
+        !facts
             .iter()
-            .any(|note| note.message.contains(false_caveat) || note.message.contains(outside)),
-        "{:?}",
-        snapshot.manifest.quality.quality_notes
+            .any(|(target, _, _)| target.starts_with("src::Widget::")
+                || target.starts_with("src::Mocks::")),
+        "{facts:?}"
+    );
+    assert!(
+        notes.iter().any(|note| note.message.contains(
+            "caveat for `mockThing` via unresolved: the name's path or import leads outside the repository"
+        )),
+        "{notes:?}"
+    );
+
+    // Python's `io` is not the Java package `io.acme` declared beside it.
+    let facts = registry_facts_from(&snapshot, "py/app.py");
+    assert!(
+        !facts
+            .iter()
+            .any(|(target, _, _)| target == "py::buffers::StringIO"),
+        "{facts:?}"
     );
 }
 
