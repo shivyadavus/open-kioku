@@ -1883,21 +1883,28 @@ fn extract_rust_module_declaration(
     else {
         return;
     };
+    let path_attribute_texts = rust_item_path_attribute_texts(node, source);
     out.module_declarations.push(ModuleDeclarationSite {
         file_id: file.id.clone(),
         scope_id: ctx.current_scope(),
         name: name.to_string(),
         has_body: node.child_by_field_name("body").is_some(),
-        has_path_attribute: rust_item_has_path_attribute(node, source),
+        has_path_attribute: !path_attribute_texts.is_empty(),
         path_attributes: rust_item_path_attributes(node, source),
+        path_is_conditional: !path_attribute_texts.is_empty()
+            && path_attribute_texts
+                .iter()
+                .all(|text| text.starts_with("#[cfg_attr(")),
         range: node_source_range(node),
     });
 }
 
-/// Outer attributes precede an item as siblings in tree-sitter-rust. Any of them that sets `path`,
-/// including through `cfg_attr`, moves the module file off its default location; a false match
-/// only withholds a binding.
-fn rust_item_has_path_attribute(node: Node<'_>, source: &[u8]) -> bool {
+/// The outer attributes before an item that set `path`, including through `cfg_attr`, each with
+/// its whitespace removed. Outer attributes precede an item as siblings in tree-sitter-rust. Any
+/// of them moves the module file off its default location, always or when its `cfg_attr`
+/// condition holds; a false match only withholds a binding.
+fn rust_item_path_attribute_texts(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut texts = Vec::new();
     let mut sibling = node.prev_named_sibling();
     while let Some(previous) = sibling {
         match previous.kind() {
@@ -1908,15 +1915,15 @@ fn rust_item_has_path_attribute(node: Node<'_>, source: &[u8]) -> bool {
                     .split_whitespace()
                     .collect::<String>();
                 if text.contains("path=") {
-                    return true;
+                    texts.push(text);
                 }
             }
             "line_comment" | "block_comment" => {}
-            _ => return false,
+            _ => break,
         }
         sibling = previous.prev_named_sibling();
     }
-    false
+    texts
 }
 
 /// The string literals the `path` attributes before an item set, as written. A crate other than
@@ -2995,7 +3002,7 @@ mod ri3_rust_use_import_site_tests {
         };
         let facts = parse_file(
             &file,
-            "pub mod auth;\n#[cfg(test)]\nmod tests {\n    mod nested;\n}\n#[path = \"store_v2.rs\"]\nmod store;\n/// Platform glue.\n#[cfg_attr(unix, path = \"unix.rs\")]\nmod platform;\n",
+            "pub mod auth;\n#[cfg(test)]\nmod tests {\n    mod nested;\n}\n#[path = \"store_v2.rs\"]\nmod store;\n/// Platform glue.\n#[cfg_attr(unix, path = \"unix.rs\")]\nmod platform;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[cfg_attr( windows ,\n  path = \"b.rs\")]\nmod both;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[path = \"c.rs\"]\nmod mixed;\n#[cfg_attr(unix, path = r\"raw.rs\")]\nmod unread;\n",
         )
         .expect("Rust module fixture should parse");
         let declaration = |name: &str| {
@@ -3023,6 +3030,21 @@ mod ri3_rust_use_import_site_tests {
         assert!(auth.path_attributes.is_empty());
         assert_eq!(declaration("store").path_attributes, vec!["store_v2.rs"]);
         assert_eq!(declaration("platform").path_attributes, vec!["unix.rs"]);
+        // A module whose every `path` is set through `cfg_attr` also compiles from its default
+        // location; one `path` that always applies moves it off that location for good (#608).
+        for conditional in ["platform", "both", "unread"] {
+            assert!(
+                declaration(conditional).path_is_conditional,
+                "{conditional}"
+            );
+        }
+        for unconditional in ["auth", "tests", "store", "mixed"] {
+            assert!(
+                !declaration(unconditional).path_is_conditional,
+                "{unconditional}"
+            );
+        }
+        assert!(declaration("unread").path_attributes.is_empty());
     }
 
     #[test]

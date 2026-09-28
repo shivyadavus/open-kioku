@@ -2183,7 +2183,8 @@ pub struct InheritanceSite {
 }
 
 /// A Rust `mod name;` or `mod name { ... }` declaration. A module path leads to a file only through
-/// a declaration with no body and no `path` attribute, made outside any inline module.
+/// a declaration with no body, made outside any inline module, that has no `path` attribute or
+/// sets its path only through `cfg_attr`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModuleDeclarationSite {
     pub file_id: FileId,
@@ -2196,6 +2197,11 @@ pub struct ModuleDeclarationSite {
     /// `cfg_attr`. Empty when `has_path_attribute` is set but no string literal could be read.
     #[serde(default)]
     pub path_attributes: Vec<String>,
+    /// Set when every `path` attribute of the item is inside a `cfg_attr`, so the module is
+    /// compiled from its default location (`name.rs` or `name/mod.rs`) whenever no condition
+    /// holds. Unset for an item with no `path` attribute or with one that always applies.
+    #[serde(default)]
+    pub path_is_conditional: bool,
     pub range: SourceRange,
 }
 

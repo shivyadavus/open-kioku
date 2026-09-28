@@ -3907,6 +3907,100 @@ class Util {
     }
 
     #[test]
+    fn a_cfg_attr_path_module_below_a_mounted_file_is_shared_at_its_default_location_too() {
+        // `tests/it.rs` mounts `src/sys/mod.rs`, which declares `mod imp;` with a `path` that
+        // is only set on Windows: elsewhere the test crate compiles `src/sys/imp.rs` with its
+        // own `helper`, so `crate::helper()` there proves no edge into the library's (#608).
+        // Exact `CALLS` into the library's `helper` from `u` in `sys/imp.rs`, `common.rs` and
+        // `other.rs`, with `sys/mod.rs` parsed or skipped for size.
+        let exact_calls = |declaring: &str, skipped: bool| {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            std::fs::create_dir_all(root.join("src/sys")).unwrap();
+            std::fs::create_dir_all(root.join("tests")).unwrap();
+            std::fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fx\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("src/lib.rs"),
+                "mod sys;\nmod common;\nmod other;\npub fn helper() {}\n",
+            )
+            .unwrap();
+            for file in ["src/sys/imp.rs", "src/common.rs", "src/other.rs"] {
+                std::fs::write(root.join(file), "pub fn u() {\n    crate::helper();\n}\n").unwrap();
+            }
+            let padding = if skipped {
+                "// padding\n".repeat(64)
+            } else {
+                String::new()
+            };
+            std::fs::write(
+                root.join("src/sys/mod.rs"),
+                format!("{declaring}\nmod imp;\n{padding}"),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("tests/it.rs"),
+                "#[path = \"../src/sys/mod.rs\"]\nmod sys;\nfn helper() {}\n#[test]\nfn t() {}\n",
+            )
+            .unwrap();
+            let mut config = OkConfig::default();
+            config.scip.enabled = false;
+            config.history.enabled = false;
+            config.index.max_file_size = "256b".into();
+            let snapshot = Indexer::default()
+                .index_repo_with_mode(root, &config, IndexMode::Full)
+                .unwrap();
+            assert_eq!(
+                snapshot.skipped_paths.iter().any(|skipped| skipped.path
+                    == std::path::Path::new("src/sys/mod.rs")
+                    && skipped.reason == SkipReason::TooLarge),
+                skipped
+            );
+            let symbol = |path: &str, name: &str| {
+                let file = snapshot
+                    .files
+                    .iter()
+                    .find(|file| file.path == std::path::Path::new(path))
+                    .map(|file| file.id.clone())
+                    .expect("the file is indexed");
+                snapshot
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.file_id == file && symbol.name == name)
+                    .map(|symbol| symbol.id.clone())
+                    .expect("the symbol is indexed")
+            };
+            let helper = symbol("src/lib.rs", "helper");
+            ["src/sys/imp.rs", "src/common.rs", "src/other.rs"].map(|file| {
+                let caller = symbol(file, "u");
+                snapshot
+                    .resolved_relationships
+                    .iter()
+                    .filter(|edge| {
+                        edge.from == caller
+                            && edge.to == helper
+                            && edge.edge_type == open_kioku_core::GraphEdgeType::Calls
+                            && edge.confidence == Confidence::Exact
+                    })
+                    .count()
+            })
+        };
+        let conditional = "#[cfg_attr(windows, path = \"../common.rs\")]";
+        let unconditional = "#[path = \"../common.rs\"]";
+        assert_eq!(exact_calls(conditional, false), [0, 0, 1]);
+        // Read off the skipped file's lines, only the files it may compile are shared.
+        assert_eq!(exact_calls(conditional, true), [0, 0, 1]);
+        // Control: a `path` that always applies leaves `sys/imp.rs` to the library.
+        assert_eq!(exact_calls(unconditional, false), [1, 0, 1]);
+        // Unchanged: the scan does not read such a `path`, so the skipped file may mount any
+        // file of the package.
+        assert_eq!(exact_calls(unconditional, true), [0, 0, 0]);
+    }
+
+    #[test]
     fn discovery_reports_typed_skipped_paths_without_reading_secret_content() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
