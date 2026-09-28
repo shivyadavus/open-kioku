@@ -103,7 +103,13 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// and each naming the files; `cfg_attr(all(), ..)` and `X` beside `not(X)` leave no default
 /// location. Earlier indexes hold one authoritative edge into the placed default file, including
 /// one rustc never compiles. v25 is taken by an open change.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v26";
+/// v27: the symbol-registry pass reads a member's receiver the file imports by its import: one
+/// from outside the repository matches nothing, a Go receiver matches only in the package
+/// directory its import path names (under a declared module, the module's directory and the rest
+/// of the path), and a Java static import matches only a member of the class its path names.
+/// v26 indexes hold unique-name edges from receivers imported from another module or package and
+/// from static imports of library classes.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v27";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

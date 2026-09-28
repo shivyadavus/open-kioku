@@ -52,6 +52,25 @@ enum Origin<'t> {
     Outside,
     /// A path through a repository type, whose members are its own: `ScopeKind::File`.
     MemberOf(&'t str),
+    /// Java static imports of the name, at least one not from outside: the target is a member
+    /// of a class one of them names by its path (`import static org.example.Constants.ACCESS_KEY;`).
+    StaticMemberOf(&'t [ImportBinding]),
+}
+
+/// Where a member's receiver says the member is defined, for a match by name alone.
+#[derive(Clone, Copy)]
+enum ReceiverPlace<'t> {
+    /// Under a directory, module or type of the receiver's name: `ledger.NewEntry`,
+    /// `Constants.ACCESS_KEY`.
+    Named,
+    /// The receiver is imported from outside the repository.
+    Outside,
+    /// In the Go package directory the receiver's import path names: `dir` joined with `rest`
+    /// (a module's directory and the path below the module), either of which may be empty.
+    GoPackage { dir: &'t str, rest: &'t str },
+    /// A Go import, with no module declared, whose path ends with no directory of the
+    /// repository, which only the root package can be: at the root, under the receiver's name.
+    GoRoot,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -93,8 +112,8 @@ struct TokenUse {
     role: TokenRole,
     /// Rust: the segment before `::` when the token ends a path (`mem` of `std::mem::take`).
     qualifier: Option<String>,
-    /// A member's receiver when it is a plain name, outside an import line: `structs` of
-    /// `structs.NewCheckID(..)`, `Constants` of `Constants.ACCESS_KEY`.
+    /// A member's receiver when it is a plain name, outside an import line: `ledger` of
+    /// `ledger.NewEntry(..)`, `Constants` of `Constants.ACCESS_KEY`.
     receiver: Option<String>,
 }
 
@@ -147,6 +166,12 @@ pub struct RegistryScopeModel<'a> {
     /// Names of the repository's modules: a `use` path starting with one may name a module of
     /// this crate rather than an external crate.
     module_names: HashSet<&'a str>,
+    /// The directory of each Go file, which is its package: `billing/ledger`, or `` at the root.
+    go_packages: HashMap<&'a FileId, &'a str>,
+    /// Every directory holding a Go file, `` for the root.
+    go_package_dirs: HashSet<&'a str>,
+    /// Each module a `go.mod` declares, with the manifest's directory (`` at the root).
+    go_modules: Vec<(String, &'a str)>,
 }
 
 struct RustFileScopes<'a> {
@@ -187,6 +212,43 @@ impl<'a> RegistryScopeModel<'a> {
             .filter(|symbol| matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package))
             .map(|symbol| symbol.name.as_str())
             .collect();
+        let go_packages = files
+            .iter()
+            .filter(|file| file.language == Language::Go)
+            .filter_map(|file| {
+                let dir = file.path.parent().map_or(Some(""), Path::to_str)?;
+                Some((&file.id, dir))
+            })
+            .collect::<HashMap<_, _>>();
+        let go_package_dirs = go_packages.values().copied().collect();
+        let go_modules = repository
+            .project
+            .roots
+            .iter()
+            .filter(|root| root.language == Language::Go)
+            // The go command ignores `testdata` and `_`- or `.`-prefixed directories, so a
+            // `go.mod` there declares no module of the build.
+            .filter(|root| {
+                !root.path.components().any(|part| {
+                    let part = part.as_os_str().to_string_lossy();
+                    part == "testdata"
+                        || part.starts_with('_')
+                        || (part.starts_with('.') && part != ".")
+                })
+            })
+            .filter_map(|root| {
+                // `module example.com/app // comment` or `module "example.com/app"`.
+                let module = root.package_name.as_deref()?.split_whitespace().next()?;
+                let module = module.trim_matches('"');
+                let dir = root.path.to_str()?.trim_start_matches("./");
+                let dir = if dir == "." {
+                    ""
+                } else {
+                    dir.trim_end_matches('/')
+                };
+                (!module.is_empty()).then(|| (module.to_string(), dir))
+            })
+            .collect();
         Self {
             repository,
             symbols,
@@ -195,6 +257,101 @@ impl<'a> RegistryScopeModel<'a> {
             inheritance,
             rust_files,
             module_names,
+            go_packages,
+            go_package_dirs,
+            go_modules,
+        }
+    }
+
+    /// Where a Go import path puts its package. Under a module a `go.mod` declares, the path
+    /// below the module is the package's directory below the manifest's, whatever other
+    /// directory the path's tail also spells. Outside every declared module it is another
+    /// module's package, or the standard library's, unless an indexed `vendor` directory holds
+    /// a copy (vendored files are not indexed by default).
+    /// With no module declared, the longest directory of the repository the path ends with
+    /// stands in (`example.com/app/internal/cli` names `internal/cli`, not a top-level `cli`),
+    /// and a path ending with none can only be the root package.
+    ///
+    /// Two `go.mod` files may declare one module (a test fixture copying the root's): the one
+    /// whose directory holds the importing file, `importer_dir`, is the importer's own module,
+    /// and otherwise the shallowest one is taken.
+    fn go_import_place<'p>(&self, import_path: &'p str, importer_dir: &str) -> ReceiverPlace<'p>
+    where
+        'a: 'p,
+    {
+        if !self.go_modules.is_empty() {
+            let encloses = |dir: &str| {
+                dir.is_empty()
+                    || importer_dir
+                        .strip_prefix(dir)
+                        .is_some_and(|tail| tail.is_empty() || tail.starts_with('/'))
+            };
+            let mut modules = self
+                .go_modules
+                .iter()
+                .filter_map(|(module, dir)| {
+                    let rest = import_path.strip_prefix(module.as_str())?;
+                    let rest = if rest.is_empty() {
+                        rest
+                    } else {
+                        rest.strip_prefix('/')?
+                    };
+                    Some((module.len(), *dir, rest))
+                })
+                .collect::<Vec<_>>();
+            // The longest module path; then the importer's own, deepest first; then the
+            // shallowest.
+            modules.sort_by_key(|(len, dir, _)| {
+                let own = encloses(dir);
+                std::cmp::Reverse((
+                    *len,
+                    own,
+                    if own {
+                        dir.len()
+                    } else {
+                        usize::MAX - dir.len()
+                    },
+                ))
+            });
+            // A module whose directory holds no package at that path is passed over for the
+            // next that does: a stray `go.mod` must not hide the package the path names.
+            let holds_package = |dir: &str, rest: &str| {
+                let joined = match (dir.is_empty(), rest.is_empty()) {
+                    (true, _) => rest.to_string(),
+                    (false, true) => dir.to_string(),
+                    (false, false) => format!("{dir}/{rest}"),
+                };
+                self.go_package_dirs.contains(joined.as_str())
+            };
+            let module = modules
+                .iter()
+                .find(|(_, dir, rest)| holds_package(dir, rest))
+                .or(modules.first());
+            if let Some(&(_, dir, rest)) = module {
+                return ReceiverPlace::GoPackage { dir, rest };
+            }
+            let vendored = self.go_modules.iter().find_map(|(_, dir)| {
+                let vendor = if dir.is_empty() {
+                    format!("vendor/{import_path}")
+                } else {
+                    format!("{dir}/vendor/{import_path}")
+                };
+                self.go_package_dirs.get(vendor.as_str()).copied()
+            });
+            return match vendored {
+                Some(dir) => ReceiverPlace::GoPackage { dir, rest: "" },
+                None => ReceiverPlace::Outside,
+            };
+        }
+        let mut rest = import_path;
+        loop {
+            if let Some(dir) = self.go_package_dirs.get(rest) {
+                return ReceiverPlace::GoPackage { dir, rest: "" };
+            }
+            match rest.split_once('/') {
+                Some((_, tail)) => rest = tail,
+                None => return ReceiverPlace::GoRoot,
+            }
         }
     }
 
@@ -620,7 +777,7 @@ impl SymbolRegistry {
             }
             TokenRole::Member => {
                 // A receiver that names where the candidate is defined is evidence a bare
-                // member lacks: Go's `structs.NewCheckID`, Java's `Constants.ACCESS_KEY`.
+                // member lacks: Go's `ledger.NewEntry`, Java's `Constants.ACCESS_KEY`.
                 // A lowercase Java receiver is a variable, whose name may match a package's.
                 let receiver = token_use.receiver.as_deref().filter(|receiver| {
                     chunk.language != Language::Java || receiver.starts_with(char::is_uppercase)
@@ -628,12 +785,39 @@ impl SymbolRegistry {
                 let Some(receiver) = receiver else {
                     return unresolved(TokenRole::Member.withheld_reason().unwrap_or_default());
                 };
-                let owned =
-                    |symbol: &Symbol| admits(symbol) && segment_locates(self, receiver, symbol);
+                let place = self.receiver_place(chunk, receiver, scope.model);
+                if matches!(place, ReceiverPlace::Outside) {
+                    return unresolved(
+                        "the member's receiver is imported from outside the repository",
+                    );
+                }
+                let go_package = |symbol: &Symbol| {
+                    scope
+                        .model
+                        .and_then(|model| model.go_packages.get(&symbol.file_id).copied())
+                };
+                let owned = |symbol: &Symbol| {
+                    admits(symbol)
+                        && match place {
+                            ReceiverPlace::Named => segment_locates(self, receiver, symbol),
+                            ReceiverPlace::Outside => false,
+                            ReceiverPlace::GoPackage { dir, rest } => go_package(symbol)
+                                .is_some_and(|package| joined_path_is(package, dir, rest)),
+                            ReceiverPlace::GoRoot => {
+                                go_package(symbol) == Some("")
+                                    && segment_locates(self, receiver, symbol)
+                            }
+                        }
+                };
                 return self
                     .resolve_unique_project_name(chunk, token, &owned)
                     .unwrap_or_else(|| {
-                        unresolved(TokenRole::Member.withheld_reason().unwrap_or_default())
+                        unresolved(match place {
+                            ReceiverPlace::GoPackage { .. } | ReceiverPlace::GoRoot => {
+                                "no registry candidate is in the package the receiver's import names"
+                            }
+                            _ => TokenRole::Member.withheld_reason().unwrap_or_default(),
+                        })
                     });
             }
             role => {
@@ -650,6 +834,11 @@ impl SymbolRegistry {
                     Origin::Anywhere => true,
                     Origin::Outside => false,
                     Origin::MemberOf(owner) => segment_locates(self, owner, symbol),
+                    Origin::StaticMemberOf(bindings) => bindings.iter().any(|binding| {
+                        !self.import_leads_outside(binding)
+                            && static_import_owner(binding)
+                                .is_some_and(|owner| owner_locates(self, owner, symbol))
+                    }),
                 }
         };
         if let Some(resolution) = self.resolve_unique_project_name(chunk, token, &located) {
@@ -668,6 +857,9 @@ impl SymbolRegistry {
                     Origin::MemberOf(_) => {
                         "no registry candidate belongs to the type its path names"
                     }
+                    Origin::StaticMemberOf(_) => {
+                        "no registry candidate belongs to the class its static import names"
+                    }
                 })
             })
     }
@@ -677,7 +869,7 @@ impl SymbolRegistry {
         &self,
         chunk: &CodeChunk,
         token_use: &'t TokenUse,
-        model: Option<&RegistryScopeModel<'_>>,
+        model: Option<&RegistryScopeModel<'t>>,
     ) -> Origin<'t> {
         if let Some(qualifier) = token_use.qualifier.as_deref() {
             if matches!(qualifier, "crate" | "self" | "super" | "Self") || self.is_module(qualifier)
@@ -711,34 +903,110 @@ impl SymbolRegistry {
         }
         // The file's own import of the name, by the name it binds (`use std::fs::File as FsFile;`
         // binds `FsFile`, not `File`), when the resolver's import model is at hand.
-        let imported_from_outside = model.is_some_and(|model| {
-            let bindings = model.file_imports(&chunk.file_id, token);
-            !bindings.is_empty()
-                && bindings.iter().all(|binding| {
-                    // A Java static import keeps its keyword: `static org.x.Constants.NAME`.
-                    let source = binding.source_module.as_str();
-                    let source = source
-                        .strip_prefix("static ")
-                        .unwrap_or(source)
-                        .trim_start();
-                    let root = source
-                        .split([':', '.', '/'])
-                        .find(|segment| !segment.is_empty())
-                        .unwrap_or_default();
-                    !binding.is_glob
-                        && binding.target_symbol.is_none()
-                        && binding.target_file.is_none()
-                        && !source.starts_with('.')
-                        && !matches!(root, "crate" | "self" | "super" | "Self")
-                        && !self.is_module(root)
-                        && !self.by_simple_name.contains_key(root)
-                })
-        });
-        if imported_from_outside {
-            Origin::Outside
+        let Some(model) = model else {
+            return Origin::Anywhere;
+        };
+        let bindings = model.file_imports(&chunk.file_id, token);
+        if bindings.is_empty() {
+            return Origin::Anywhere;
+        }
+        if bindings
+            .iter()
+            .all(|binding| self.import_leads_outside(binding))
+        {
+            return Origin::Outside;
+        }
+        // A static import under the repository's package root may still import a library's
+        // class (`import static org.example.vendor.Keys.ACCESS_KEY;`): the class it names must
+        // be the one the candidate belongs to, as for a path through a type.
+        if bindings.iter().all(|binding| {
+            self.import_leads_outside(binding) || static_import_owner(binding).is_some()
+        }) {
+            Origin::StaticMemberOf(bindings)
         } else {
             Origin::Anywhere
         }
+    }
+
+    /// Whether the resolver left `binding` unplaced and its path starts outside the repository:
+    /// `use anyhow::Result;`, `import static com.vendor.Keys.ACCESS_KEY;`.
+    fn import_leads_outside(&self, binding: &ImportBinding) -> bool {
+        // A Java static import keeps its keyword: `static org.x.Constants.NAME`.
+        let source = binding.source_module.as_str();
+        let source = source
+            .strip_prefix("static ")
+            .unwrap_or(source)
+            .trim_start();
+        let root = source
+            .split([':', '.', '/'])
+            .find(|segment| !segment.is_empty())
+            .unwrap_or_default();
+        !binding.is_glob
+            && binding.target_symbol.is_none()
+            && binding.target_file.is_none()
+            && !source.starts_with('.')
+            && !matches!(root, "crate" | "self" | "super" | "Self")
+            && !self.is_module(root)
+            && !self.by_simple_name.contains_key(root)
+    }
+
+    /// Where a member's receiver says the member is. A receiver the file imports is where its
+    /// import leads: a library's package is not the repository's same-named one, and in Go the
+    /// whole import path, not its last segment, names the package directory.
+    fn receiver_place<'t>(
+        &self,
+        chunk: &CodeChunk,
+        receiver: &str,
+        model: Option<&RegistryScopeModel<'t>>,
+    ) -> ReceiverPlace<'t> {
+        let Some(model) = model else {
+            return ReceiverPlace::Named;
+        };
+        let bindings = model.file_imports(&chunk.file_id, receiver);
+        if chunk.language != Language::Go {
+            let outside = !bindings.is_empty()
+                && bindings
+                    .iter()
+                    .all(|binding| self.import_leads_outside(binding));
+            return if outside {
+                ReceiverPlace::Outside
+            } else {
+                ReceiverPlace::Named
+            };
+        }
+        let [binding] = bindings else {
+            return ReceiverPlace::Named;
+        };
+        let path = binding.source_module.as_str();
+        // With no module declared, the directory the path's tail spells is only a guess, which
+        // the resolver's standard-library verdict overrides. Under a declared module the
+        // module decides: the resolver calls any path without a dot the standard library's,
+        // `myapp/internal/store` of `module myapp` included.
+        let standard_library = model.go_modules.is_empty()
+            && matches!(
+                self.import_status(&chunk.file_id, path),
+                Some(ResolutionStatus::Builtin)
+            );
+        if standard_library {
+            ReceiverPlace::Outside
+        } else {
+            let importer_dir = model
+                .go_packages
+                .get(&chunk.file_id)
+                .copied()
+                .unwrap_or_default();
+            model.go_import_place(path, importer_dir)
+        }
+    }
+
+    /// How the resolver placed the import of `path` in `file_id`, when it saw one.
+    fn import_status(&self, file_id: &FileId, path: &str) -> Option<&ResolutionStatus> {
+        self.by_file_imports
+            .get(file_id)?
+            .iter()
+            .map(|&idx| &self.import_resolutions[idx])
+            .find(|resolution| resolution.import.imported == path)
+            .map(|resolution| &resolution.status)
     }
 
     /// Whether `name` is a place in the repository a path can go through: a directory, file or
@@ -2526,6 +2794,58 @@ fn segment_locates(registry: &SymbolRegistry, segment: &str, symbol: &Symbol) ->
             .is_some_and(|parent| parent.name == segment)
 }
 
+/// The class a Java static import takes its member from, by its path: `org.example.Constants`
+/// of `static org.example.Constants.ACCESS_KEY`. `None` for any other import.
+fn static_import_owner(binding: &ImportBinding) -> Option<&str> {
+    let path = binding.source_module.strip_prefix("static ")?.trim();
+    let (owner, _member) = path.rsplit_once('.')?;
+    (!owner.is_empty()).then_some(owner)
+}
+
+/// Whether `symbol` is a member of the Java class the dotted path `owner` names: the class's
+/// package and name end the symbol's qualified path (`org::example::Constants`). A nested class's
+/// member is qualified by its file's top-level class and has the nested class as its parent, so
+/// `org.example.Outer.Inner` also names a member under `org::example::Outer` whose parent is
+/// `Inner`.
+fn owner_locates(registry: &SymbolRegistry, owner: &str, symbol: &Symbol) -> bool {
+    let path = symbol
+        .qualified_name
+        .rsplit_once("::")
+        .map_or("", |(path, _)| path);
+    let ends_with = |segments: &[&str]| {
+        let mut path_segments = path.rsplit("::");
+        segments
+            .iter()
+            .rev()
+            .all(|segment| path_segments.next() == Some(segment))
+    };
+    let segments = owner.split('.').collect::<Vec<_>>();
+    if ends_with(&segments) {
+        return true;
+    }
+    let Some(class) = segments.last() else {
+        return false;
+    };
+    let in_class = symbol
+        .parent_symbol_id
+        .as_ref()
+        .and_then(|parent| registry.by_id.get(parent))
+        .is_some_and(|parent| parent.name == *class);
+    in_class && (0..segments.len() - 1).any(|last| ends_with(&segments[..=last]))
+}
+
+/// Whether the directory `path` is `dir` joined with `rest`, either of which may be empty.
+fn joined_path_is(path: &str, dir: &str, rest: &str) -> bool {
+    match (dir.is_empty(), rest.is_empty()) {
+        (true, _) => path == rest,
+        (false, true) => path == dir,
+        (false, false) => path
+            .strip_prefix(dir)
+            .and_then(|tail| tail.strip_prefix('/'))
+            .is_some_and(|tail| tail == rest),
+    }
+}
+
 fn symbol_matches_token(symbol: &Symbol, token: &str) -> bool {
     symbol.name == token
         || (symbol.qualified_name.len() > token.len() + 2
@@ -3660,7 +3980,57 @@ mod tests {
         symbols: &[Symbol],
         imports: &[(&str, &str)],
     ) -> RegistryReport {
+        resolve_in_repository(language, text, symbols, imports, &[], &[], &[])
+    }
+
+    /// `resolve_with_imports_in` over a repository of `files` (`(id, path)`) whose `go.mod` files
+    /// declare `go_modules` (`(directory, module)`), where the resolver placed the chunk's imports
+    /// as `resolutions` (`(import path, status)`) says.
+    fn resolve_in_repository(
+        language: Language,
+        text: &str,
+        symbols: &[Symbol],
+        imports: &[(&str, &str)],
+        files: &[(&str, &str)],
+        go_modules: &[(&str, &str)],
+        resolutions: &[(&str, ResolutionStatus)],
+    ) -> RegistryReport {
+        let files = files
+            .iter()
+            .map(|(id, path)| File {
+                id: FileId::new(*id),
+                repository_id: open_kioku_core::RepositoryId::new("repo"),
+                path: path.into(),
+                language: language.clone(),
+                size_bytes: 0,
+                content_hash: String::new(),
+                is_generated: false,
+                is_vendor: false,
+            })
+            .collect::<Vec<_>>();
+        let resolutions = resolutions
+            .iter()
+            .map(|(path, status)| ImportResolution {
+                status: status.clone(),
+                target_file: None,
+                ..import_resolution("entry", path, "none")
+            })
+            .collect::<Vec<_>>();
         let mut repository = SemanticRepository::new();
+        for (dir, module) in go_modules {
+            repository
+                .project
+                .roots
+                .push(open_kioku_semantic_model::ProjectRoot {
+                    path: dir.into(),
+                    language: Language::Go,
+                    package_name: Some(module.to_string()),
+                    source_roots: vec![dir.into()],
+                    library_root: None,
+                    cargo_targets: Default::default(),
+                    cargo_manifest: None,
+                });
+        }
         for (local, source) in imports {
             repository
                 .imports
@@ -3694,7 +4064,7 @@ mod tests {
             InheritanceIndex::default(),
         );
         let model = RegistryScopeModel::new(
-            &[],
+            &files,
             &repository,
             &symbol_index,
             &scopes,
@@ -3704,7 +4074,7 @@ mod tests {
         resolve_symbol_edges(
             &[chunk_in(language, text)],
             symbols,
-            &[],
+            &resolutions,
             false,
             Some(&model),
         )
@@ -3807,6 +4177,426 @@ mod tests {
     }
 
     #[test]
+    fn a_java_static_import_of_a_library_class_under_the_repositorys_root_is_not_its_member() {
+        let symbols = vec![
+            symbol_in(
+                Language::Java,
+                "caller",
+                "main",
+                "app::main",
+                SymbolKind::Function,
+            ),
+            symbol_in(
+                Language::Java,
+                "key",
+                "ACCESS_KEY",
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                SymbolKind::Field,
+            ),
+        ];
+        let text = "String key = ACCESS_KEY;";
+        // `org` is the repository's package root, but `Keys` is none of its classes.
+        let report = resolve_with_imports_in(
+            Language::Java,
+            text,
+            &symbols,
+            &[("ACCESS_KEY", "static org.example.Keys.ACCESS_KEY")],
+        );
+        assert_eq!(line_targets(&report), vec![]);
+        assert!(report.quality_notes.iter().any(|note| note
+            .message
+            .contains("no registry candidate belongs to the class its static import names")));
+
+        // Nor is a library's `Constants` in another package under that root the repository's.
+        let report = resolve_with_imports_in(
+            Language::Java,
+            text,
+            &symbols,
+            &[(
+                "ACCESS_KEY",
+                "static org.example.vendor.Constants.ACCESS_KEY",
+            )],
+        );
+        assert_eq!(line_targets(&report), vec![]);
+
+        // A nested class's member is qualified by the file's class and has the nested class
+        // as its parent.
+        let mut nested = symbols.clone();
+        nested.push(symbol_in(
+            Language::Java,
+            "inner",
+            "Inner",
+            "src::main::java::org::example::Outer::Inner",
+            SymbolKind::Class,
+        ));
+        let mut value = symbol_in(
+            Language::Java,
+            "nested-value",
+            "NESTED_VALUE",
+            "src::main::java::org::example::Outer::NESTED_VALUE",
+            SymbolKind::Field,
+        );
+        value.parent_symbol_id = Some(SymbolId::new("inner"));
+        nested.push(value);
+        let report = resolve_with_imports_in(
+            Language::Java,
+            "String value = NESTED_VALUE;",
+            &nested,
+            &[(
+                "NESTED_VALUE",
+                "static org.example.Outer.Inner.NESTED_VALUE",
+            )],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![reference(
+                "src::main::java::org::example::Outer::NESTED_VALUE",
+                1
+            )]
+        );
+
+        // A receiver imported from a library is the library's class, whatever its name.
+        let report = resolve_with_imports_in(
+            Language::Java,
+            "String key = Constants.ACCESS_KEY;",
+            &symbols,
+            &[("Constants", "com.vendor.Constants")],
+        );
+        assert_eq!(line_targets(&report), vec![]);
+        assert!(report.quality_notes.iter().any(|note| note.message.contains(
+            "caveat for `ACCESS_KEY` via unresolved: the member's receiver is imported from outside the repository"
+        )));
+
+        // Beside a static import from a library, the repository's class still counts.
+        let report = resolve_with_imports_in(
+            Language::Java,
+            text,
+            &symbols,
+            &[
+                ("ACCESS_KEY", "static com.vendor.Keys.ACCESS_KEY"),
+                ("ACCESS_KEY", "static org.example.Constants.ACCESS_KEY"),
+            ],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![reference(
+                "src::main::java::org::example::Constants::ACCESS_KEY",
+                1
+            )]
+        );
+    }
+
+    /// A Go caller in `entry` and, for each `(id, file path, name)`, a function in that file,
+    /// qualified by the file's directories and stem; with the files' `(id, path)`.
+    fn go_symbols(entries: &[(&str, &str, &str)]) -> (Vec<Symbol>, Vec<(String, String)>) {
+        let mut caller = symbol_in(
+            Language::Go,
+            "caller",
+            "main",
+            "cmd::main::main",
+            SymbolKind::Function,
+        );
+        caller.file_id = FileId::new("entry");
+        let mut symbols = vec![caller];
+        let mut files = vec![("entry".to_string(), "cmd/main/main.go".to_string())];
+        for (id, path, name) in entries {
+            let stem = path.strip_suffix(".go").unwrap_or(path).replace('/', "::");
+            let qualified = format!("{stem}::{name}");
+            let mut symbol = symbol_in(Language::Go, id, name, &qualified, SymbolKind::Function);
+            symbol.file_id = FileId::new(*id);
+            symbols.push(symbol);
+            files.push((id.to_string(), path.to_string()));
+        }
+        (symbols, files)
+    }
+
+    /// The registry's report over Go `text` in a repository of `entries` whose `go.mod` files
+    /// declare `modules` (`(directory, module)`).
+    fn resolve_go(
+        text: &str,
+        entries: &[(&str, &str, &str)],
+        imports: &[(&str, &str)],
+        modules: &[(&str, &str)],
+        resolutions: &[(&str, ResolutionStatus)],
+    ) -> RegistryReport {
+        let (symbols, files) = go_symbols(entries);
+        let files = files
+            .iter()
+            .map(|(id, path)| (id.as_str(), path.as_str()))
+            .collect::<Vec<_>>();
+        resolve_in_repository(
+            Language::Go,
+            text,
+            &symbols,
+            imports,
+            &files,
+            modules,
+            resolutions,
+        )
+    }
+
+    fn has_note(report: &RegistryReport, text: &str) -> bool {
+        report
+            .quality_notes
+            .iter()
+            .any(|note| note.message.contains(text))
+    }
+
+    #[test]
+    fn a_go_receiver_imported_from_another_module_is_not_the_repositorys_package() {
+        let app = [("", "example.com/app")];
+        let text = "func New(ui cli.Ui) {}\nid := uuid.Generate()";
+        let imports = [
+            ("cli", "example.com/vendor/cli"),
+            ("uuid", "example.com/app/lib/uuid"),
+        ];
+        let outside = "caveat for `Ui` via unresolved: the member's receiver is imported from outside the repository";
+        // Another module's `cli` is neither `command/cli` nor a top-level `cli`.
+        for dir in ["command/cli", "cli"] {
+            let entries = [
+                ("ui", &*format!("{dir}/cli.go"), "Ui"),
+                ("gen", "lib/uuid/uuid.go", "Generate"),
+            ];
+            let report = resolve_go(text, &entries, &imports, &app, &[]);
+            assert_eq!(
+                line_targets(&report),
+                vec![call("lib::uuid::uuid::Generate", 2)]
+            );
+            assert!(has_note(&report, outside));
+        }
+
+        // A vendored copy is the package.
+        let entries = [("ui", "vendor/example.com/vendor/cli/cli.go", "Ui")];
+        let report = resolve_go(text, &entries, &imports, &app, &[]);
+        assert_eq!(
+            line_targets(&report),
+            vec![reference("vendor::example.com::vendor::cli::cli::Ui", 1)]
+        );
+
+        // The standard library is outside every module, and with no module declared the
+        // resolver's standard-library verdict still says so.
+        let entries = [("ctx", "context/context.go", "Background")];
+        let text = "ctx := context.Background()";
+        let imports = [("context", "context")];
+        let report = resolve_go(text, &entries, &imports, &app, &[]);
+        assert_eq!(line_targets(&report), vec![]);
+        let builtin = [("context", ResolutionStatus::Builtin)];
+        let report = resolve_go(text, &entries, &imports, &[], &builtin);
+        assert_eq!(line_targets(&report), vec![]);
+    }
+
+    #[test]
+    fn a_go_receiver_names_the_package_its_whole_import_path_leads_to() {
+        // `ledger` also names the file `billing/ledgerutil/ledger.go`, and `worker` the
+        // directory `client/worker`; neither is the package the import leads to.
+        let entries = [
+            ("util-entry", "billing/ledgerutil/ledger.go", "Entry"),
+            ("client-start", "client/worker/worker.go", "Start"),
+            ("stop", "worker/worker.go", "Stop"),
+            ("version", "version.go", "Version"),
+        ];
+        let text = "e := ledger.Entry{}\nworker.Start()\nworker.Stop()\nw.Stop()\napp.Version()";
+        let imports = [
+            ("ledger", "example.com/app/billing/ledger"),
+            ("worker", "example.com/app/worker"),
+            // An alias names the package under another name.
+            ("w", "example.com/app/worker"),
+            // The module path itself is the root package.
+            ("app", "example.com/app"),
+        ];
+        let report = resolve_go(text, &entries, &imports, &[("", "example.com/app")], &[]);
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                call("worker::worker::Stop", 3),
+                call("worker::worker::Stop", 4),
+                call("version::Version", 5),
+            ]
+        );
+        assert!(has_note(
+            &report,
+            "caveat for `Entry` via unresolved: no registry candidate is in the package the receiver's import names"
+        ));
+
+        // Where no module is declared, the longest directory of the repository the path ends
+        // with stands in for the package.
+        let entries = [
+            ("entry", "internal/ledger/ledger.go", "Entry"),
+            ("total", "ledger/ledger.go", "Total"),
+        ];
+        let report = resolve_go(
+            "e := ledger.Entry{}\nt := ledger.Total()",
+            &entries,
+            &[("ledger", "example.com/app/internal/ledger")],
+            &[],
+            &[(
+                "example.com/app/internal/ledger",
+                ResolutionStatus::ExternalPackage,
+            )],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![reference("internal::ledger::ledger::Entry", 1)]
+        );
+    }
+
+    #[test]
+    fn a_go_import_under_a_declared_module_names_its_package_not_a_longer_directory() {
+        // The path below the module is the directory, though the longer `server/config` also
+        // ends the path.
+        let entries = [
+            ("load", "config/config.go", "LoadSettings"),
+            ("internal", "server/config/config.go", "Internal"),
+        ];
+        let report = resolve_go(
+            "config.LoadSettings()",
+            &entries,
+            &[("config", "example.com/server/config")],
+            &[("", "example.com/server")],
+            &[],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![call("config::config::LoadSettings", 1)]
+        );
+    }
+
+    #[test]
+    fn a_go_module_path_without_a_dot_is_the_repositorys_not_the_standard_librarys() {
+        // The resolver takes every path without a dot for the standard library's.
+        let entries = [("save", "internal/store/save.go", "SaveRecord")];
+        let report = resolve_go(
+            "store.SaveRecord(id)",
+            &entries,
+            &[("store", "myapp/internal/store")],
+            &[("", "myapp")],
+            &[("myapp/internal/store", ResolutionStatus::Builtin)],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![call("internal::store::save::SaveRecord", 1)]
+        );
+    }
+
+    #[test]
+    fn a_go_module_declared_twice_is_the_importers_own_or_else_the_shallowest() {
+        let entries = [
+            ("own", "cmd/internal/util/util.go", "Helper"),
+            ("root", "internal/util/util.go", "Other"),
+        ];
+        let text = "util.Helper()\nutil.Other()";
+        let imports = [("util", "example.com/app/internal/util")];
+        // A copy of the root's `go.mod` below the importer's directory is not its module.
+        let report = resolve_go(
+            text,
+            &entries,
+            &imports,
+            &[
+                ("", "example.com/app"),
+                ("testdata/copy", "example.com/app"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![call("internal::util::util::Other", 2)]
+        );
+        // One that holds the importer is.
+        let report = resolve_go(
+            text,
+            &entries,
+            &imports,
+            &[("cmd", "example.com/app"), ("", "example.com/app")],
+            &[],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![call("cmd::internal::util::util::Helper", 1)]
+        );
+    }
+
+    #[test]
+    fn a_go_mod_the_go_command_ignores_declares_no_module() {
+        let app = ("", "example.com/app");
+        // `testdata` and `_`-prefixed directories are not part of the build, whatever module
+        // their `go.mod` names and whatever Go files they hold.
+        let entries = [
+            ("x-func", "internal/x/a.go", "XFunc"),
+            ("fixture", "internal/x/testdata/fixture.go", "Fixture"),
+        ];
+        let report = resolve_go(
+            "x.XFunc()",
+            &entries,
+            &[("x", "example.com/app/internal/x")],
+            &[app, ("internal/x/testdata", "example.com/app/internal/x")],
+            &[],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![call("internal::x::a::XFunc", 1)]
+        );
+
+        let entries = [
+            ("y-func", "pkg/y/a.go", "YFunc"),
+            ("stub", "_scratch/y/stub.go", "Stub"),
+        ];
+        let report = resolve_go(
+            "y.YFunc()",
+            &entries,
+            &[("y", "example.com/app/pkg/y")],
+            &[app, ("_scratch", "example.com/app/pkg")],
+            &[],
+        );
+        assert_eq!(line_targets(&report), vec![call("pkg::y::a::YFunc", 1)]);
+    }
+
+    #[test]
+    fn a_go_module_holding_no_package_at_the_path_gives_way_to_one_that_does() {
+        let entries = [("y-func", "pkg/y/a.go", "YFunc")];
+        let report = resolve_go(
+            "y.YFunc()",
+            &entries,
+            &[("y", "example.com/app/pkg/y")],
+            &[("", "example.com/app"), ("tools", "example.com/app/pkg")],
+            &[],
+        );
+        assert_eq!(line_targets(&report), vec![call("pkg::y::a::YFunc", 1)]);
+    }
+
+    #[test]
+    fn a_nested_go_module_places_its_packages_below_its_own_directory() {
+        // Whatever module the root declares: the resolver places the root module's paths and
+        // leaves this one outside, reading its rest from the repository's root.
+        let entries = [
+            ("gen", "tools/gen/gen.go", "GenerateCode"),
+            ("helper", "internal/util/util.go", "Helper"),
+        ];
+        let report = resolve_go(
+            "util.Helper()\ngen.GenerateCode()",
+            &entries,
+            &[
+                ("util", "example.com/app/internal/util"),
+                ("gen", "example.com/tools/gen"),
+            ],
+            &[("", "example.com/app"), ("tools", "example.com/tools")],
+            &[
+                (
+                    "example.com/app/internal/util",
+                    ResolutionStatus::Ambiguous { candidates: 2 },
+                ),
+                ("example.com/tools/gen", ResolutionStatus::ExternalPackage),
+            ],
+        );
+        assert_eq!(
+            line_targets(&report),
+            vec![
+                call("internal::util::util::Helper", 1),
+                call("tools::gen::gen::GenerateCode", 2),
+            ]
+        );
+    }
+
+    #[test]
     fn a_member_matches_by_name_where_its_receiver_names_the_symbols_place() {
         let symbols = vec![
             symbol_in(
@@ -3818,17 +4608,17 @@ mod tests {
             ),
             symbol_in(
                 Language::Go,
-                "new-check",
-                "NewCheckID",
-                "agent::structs::checks::NewCheckID",
+                "new-entry",
+                "NewEntry",
+                "billing::ledger::entries::NewEntry",
                 SymbolKind::Function,
             ),
         ];
-        let text = "id := structs.NewCheckID(name)\nother := check.NewCheckID(name)";
+        let text = "id := ledger.NewEntry(name)\nother := entry.NewEntry(name)";
         let report = resolve_text(Language::Go, text, &symbols);
         assert_eq!(
             line_targets(&report),
-            vec![call("agent::structs::checks::NewCheckID", 1)]
+            vec![call("billing::ledger::entries::NewEntry", 1)]
         );
 
         let symbols = vec![
