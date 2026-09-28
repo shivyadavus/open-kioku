@@ -89,7 +89,7 @@ any of the files stays visible to callers and impact. A path written in one of t
 stays below the module (`self::inner::g()` in `imp.rs`) is proven as before, since that file is
 compiled only with its own subtree; a file a `path` attribute mounts is not placed, so a path written there reaches every file of the choice. `cfg_attr(all(), path = ..)`, and a condition written beside
 its own `not(..)` (compared as written, whitespace outside literals aside), hold on every build and
-leave no default location; any other set of conditions is read as one that may fail. A `use`
+leave no default location; any other set of conditions, or a `path` set inside a nested `cfg_attr`, is read as one that may fail. A `use`
 import of an item in such a module still binds the placed default file.
 
 Nodes and edges also support additive metadata fields. `properties` stores
