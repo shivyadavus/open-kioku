@@ -59,7 +59,7 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | SCIP exact references | 0 |
 | Static analysis facts | 22 |
 
-Indexed at `2026-09-28 00:45:19.211370 UTC`.
+Indexed at `2026-09-28 02:16:09.743054 UTC`.
 
 Build systems: `cargo`.
 
@@ -180,7 +180,7 @@ Quality notes (208): scip: 1, symbol_registry_caveat: 142, symbol_registry_unres
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
-| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-28 00:45:19.211370 UTC |
+| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-09-28 02:16:09.743054 UTC |
 | `pass` | `graph` | relationship graph present |
 | `pass` | `analysis-semantics` | compatible; fingerprint 53f02269c4e0ff6df60726107c83c011d70318ffab86fecbe72d4273a303cb38 |
 | `pass` | `generations` | legacy layout (adopts the generation layout on the next `ok index`) |

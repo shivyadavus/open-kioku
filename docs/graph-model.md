@@ -75,6 +75,23 @@ module tree and its `pub use` re-exports (import strategy `rust-reexport` when i
 impact reads the stored facts back for Cargo reachability instead of parsing manifests
 (`docs/ranking.md`, `crate_import`).
 
+A Rust module whose file configuration selects has more than one file, of which a build compiles
+one: `#[cfg_attr(windows, path = "win.rs")] mod imp;` beside `imp.rs`, or `#[cfg(unix)] mod imp;`
+beside `#[cfg(windows)] #[path = "win.rs"] mod imp;`. The index models no target configuration,
+so a call path into such a module, or below it (`crate::sys::imp::f()`,
+`crate::sys::imp::inner::g()`, a path through a type declared there), keeps a `CALLS` edge to the
+item in every file that may hold the module, at High confidence and never authoritative. Its
+`module_or_package_binding` and `qualified_name` proofs (strategies `rust_configured_module`,
+`rust_configured_member`, `rust_configured_type`) list those files in `ambiguity`, so neither is
+unique and the edge ranks with corroborated relationships; its evidence message names the files,
+and a `path` attribute the index cannot read is named too. No candidate is dropped, so a caller of
+any of the files stays visible to callers and impact. A path written in one of those files that
+stays below the module (`self::inner::g()` in `imp.rs`) is proven as before, since that file is
+compiled only with its own subtree; a file a `path` attribute mounts is not placed, so a path written there reaches every file of the choice. `cfg_attr(all(), path = ..)`, and a condition written beside
+its own `not(..)` (compared as written, whitespace outside literals aside), hold on every build and
+leave no default location; any other set of conditions is read as one that may fail. A `use`
+import of an item in such a module still binds the placed default file.
+
 Nodes and edges also support additive metadata fields. `properties` stores
 structured queryable facts that are specific to the node or edge family, such as
 qualified names, route names, relation kinds, package names, or resolver output.
