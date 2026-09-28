@@ -257,6 +257,11 @@ fn rust_import_names_another_item(
     binding: &ImportBinding,
     candidate: &Symbol,
 ) -> bool {
+    // An import through a module whose file configuration selects names the item of each file.
+    if let Some(configured) = &binding.configured_targets {
+        return !configured.items.contains(&candidate.id)
+            && !configured.module_files.contains(&candidate.file_id);
+    }
     if let Some(target) = &binding.target_symbol {
         return *target != candidate.id;
     }

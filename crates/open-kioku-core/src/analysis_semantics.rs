@@ -125,7 +125,12 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// package while its declaration names another, unique-name edges into `_test.go` declarations from
 /// other directories, and no edge for a member made ambiguous by an alias its package's external
 /// test package declares. v30 is taken by an open change.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v31";
+/// v32: a call through a Rust `use` import whose path, or a `pub use` it is followed through,
+/// passes through a module whose file configuration selects keeps a `CALLS` edge to the item in
+/// each file that may hold that module, none authoritative and each naming the files, as the
+/// path spelling does since v26. v31 indexes hold one authoritative edge into the placed default
+/// file.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v32";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

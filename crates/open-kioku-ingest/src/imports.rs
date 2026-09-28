@@ -7,8 +7,12 @@ use open_kioku_core::{
     File, FileId, ImportSite, Language, ModuleDeclarationSite, ScopeId, ScopeKind, SymbolId,
     SymbolKind,
 };
-use open_kioku_resolution::{RustConfiguredModules, RustCrateNames, RustModulePlacement};
-use open_kioku_semantic_model::{CargoImporter, ProjectModel, ProjectRoot};
+use open_kioku_resolution::{
+    RustConfiguredModules, RustCrateNames, RustModuleFiles, RustModulePlacement,
+};
+use open_kioku_semantic_model::{
+    CargoImporter, ConfiguredImportTargets, ProjectModel, ProjectRoot,
+};
 pub use open_kioku_semantic_model::{
     ExportBinding, ExportIndex, ImportBinding, ImportBindingRule, ImportIndex, ImportOrigin,
     GLOB_IMPORT_LOCAL_NAME,
@@ -88,6 +92,8 @@ pub(crate) struct RustModuleTree<'a> {
     declared_modules: HashMap<String, Vec<DeclaredModule>>,
     /// [`RustModuleTree::find_shared_files`], computed on first use.
     shared_files: OnceCell<SharedFiles>,
+    /// [`RustModuleTree::configured_modules`], computed on first use.
+    configured: OnceCell<HashMap<String, RustConfiguredModules>>,
     /// The `pub use` sites of each Rust file, which other crates reach items through.
     reexports: HashMap<FileId, Vec<ImportSite>>,
 }
@@ -120,6 +126,9 @@ struct RustPathTarget {
     item: Option<SymbolId>,
     /// Reached through at least one `pub use` of the crate the path starts in.
     reexport: bool,
+    /// What the path names in each file of a module whose file configuration selects, when it
+    /// passes through one the file writing it is not below (#615).
+    configured: Option<ConfiguredImportTargets>,
 }
 
 /// The file a `#[path]` attribute on a `mod` item mounts, as far as the index can tell.
@@ -340,6 +349,7 @@ impl<'a> RustModuleTree<'a> {
             path_mounts,
             declared_modules,
             shared_files: OnceCell::new(),
+            configured: OnceCell::new(),
             reexports: HashMap::new(),
         }
     }
@@ -437,7 +447,37 @@ impl<'a> RustModuleTree<'a> {
     /// its name in the declared parent module. A path naming both a module file and an item
     /// names the module. When the parent declares no item of the name and `follow_reexports` is
     /// set, the `pub use` sites of the parent are followed instead.
+    ///
+    /// A path through a module whose file configuration selects also names what it reaches in
+    /// each file of that module (see [`RustModuleTree::configured_path_targets`]); `writer` is
+    /// the file writing the path, `None` for a path through a crate name, which is written in
+    /// another crate.
     fn rust_path_target(
+        &self,
+        path: &RustUsePath,
+        writer: Option<&Path>,
+        follow_reexports: bool,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+        hops: usize,
+    ) -> Option<RustPathTarget> {
+        let placed = self.placed_path_target(path, follow_reexports, symbols, scopes, hops);
+        match self.configured_path_targets(path, writer, placed.as_ref(), symbols) {
+            Some(configured) => Some(RustPathTarget {
+                configured: Some(configured),
+                ..placed.unwrap_or(RustPathTarget {
+                    module_file: None,
+                    item: None,
+                    reexport: false,
+                    configured: None,
+                })
+            }),
+            None => placed,
+        }
+    }
+
+    /// [`RustModuleTree::rust_path_target`] as the module tree places the files.
+    fn placed_path_target(
         &self,
         path: &RustUsePath,
         follow_reexports: bool,
@@ -451,6 +491,7 @@ impl<'a> RustModuleTree<'a> {
                 module_file: Some(module_file),
                 item: None,
                 reexport: false,
+                configured: None,
             });
         }
         if !self.declares_file_modules(path, parent) {
@@ -462,12 +503,119 @@ impl<'a> RustModuleTree<'a> {
                 module_file: None,
                 item: Some(item.clone()),
                 reexport: false,
+                configured: None,
             }),
             // An item defined in the module is the name; a `pub use` of the same name beside it
             // does not compile, so it is followed only where the module defines none.
             [] if follow_reexports => self.reexported_target(path, symbols, scopes, hops),
             _ => None,
         }
+    }
+
+    /// What `path` names in each file of a module whose file configuration selects, when the
+    /// path ends at or below one that `writer` is not below (#615): each file of a module the
+    /// path names, or the item of its name in each file of the module holding it. What the
+    /// placed tree reached, `placed`, is one of them, including through a `pub use` of one file,
+    /// and a choice a `pub use` it was followed through passes, is kept too. `None` for a path
+    /// no such choice is on, whose `placed` target stands proven.
+    fn configured_path_targets(
+        &self,
+        path: &RustUsePath,
+        writer: Option<&Path>,
+        placed: Option<&RustPathTarget>,
+        symbols: &open_kioku_resolution::SymbolIndex,
+    ) -> Option<ConfiguredImportTargets> {
+        let (item_name, parent) = path.segments.split_last()?;
+        if item_name == "*" {
+            return None;
+        }
+        let mut found = ConfiguredImportTargets::default();
+        if let Some((Some(files), _)) = self.configured_choice(path, writer, &path.segments) {
+            found.module_files = files
+                .files
+                .iter()
+                .filter_map(|stem| self.files_by_stem.get(stem).cloned())
+                .collect();
+            found.files.clone_from(&files.files);
+            found.unread = files.unread;
+        }
+        if found.module_files.is_empty() {
+            if let Some((own, choice)) = self.configured_choice(path, writer, parent) {
+                let files = own.unwrap_or(choice);
+                if let Some(own) = own {
+                    found.items = rust_module_items(&own.files, item_name, symbols);
+                }
+                found.files.clone_from(&files.files);
+                found.unread = files.unread;
+            }
+        }
+        let inner = placed.and_then(|placed| placed.configured.as_ref());
+        if found.files.is_empty() && inner.is_none() {
+            return None;
+        }
+        if let Some(placed) = placed {
+            found.items.extend(placed.item.iter().cloned());
+            found
+                .module_files
+                .extend(placed.module_file.iter().cloned());
+        }
+        if let Some(inner) = inner {
+            found.items.extend(inner.items.iter().cloned());
+            found
+                .module_files
+                .extend(inner.module_files.iter().cloned());
+            found.files.extend(inner.files.iter().cloned());
+            found.unread |= inner.unread;
+        }
+        found.items.sort_by(|left, right| left.0.cmp(&right.0));
+        found.items.dedup();
+        found
+            .module_files
+            .sort_by(|left, right| left.0.cmp(&right.0));
+        found.module_files.dedup();
+        found.files.sort();
+        found.files.dedup();
+        (!found.items.is_empty() || !found.module_files.is_empty()).then_some(found)
+    }
+
+    /// The files that may hold `module` of the crate `path` is read in, when it is at or below
+    /// a module whose file configuration selects (`None` for a module below the choice that no
+    /// followed file module is, such as an inline `mod` block), and the files of that choice.
+    /// `None` when `writer` is placed below the same choice: it is compiled only with the file
+    /// of the choice holding it, so a path that stays below the choice names that file's modules
+    /// alone.
+    fn configured_choice(
+        &self,
+        path: &RustUsePath,
+        writer: Option<&Path>,
+        module: &[String],
+    ) -> Option<(Option<&RustModuleFiles>, &RustModuleFiles)> {
+        let configured = self.configured();
+        if configured.is_empty() {
+            return None;
+        }
+        self.crate_roots(path).iter().find_map(|root| {
+            let modules = configured.get(&root.replace('/', "::"))?;
+            // The innermost choice the module is at or below.
+            let choice = (1..=module.len())
+                .rev()
+                .map(|len| &module[..len])
+                .find(|prefix| modules.choices.contains(*prefix))?;
+            if writer
+                .and_then(|writer| self.placed_module(writer))
+                .is_some_and(|writer| writer.starts_with(choice))
+            {
+                return None;
+            }
+            Some((modules.files.get(module), modules.files.get(choice)?))
+        })
+    }
+
+    /// The module the declared tree places `file` at, `None` for a file it does not place.
+    fn placed_module(&self, file: &Path) -> Option<Vec<String>> {
+        let file = self.module_file_of(file)?;
+        let (placed, _) = self.declared_placement(&file);
+        placed.then_some(file.importer_module)
     }
 
     /// What the last segment of `path` names through the `pub use` sites of its parent module,
@@ -574,7 +722,7 @@ impl<'a> RustModuleTree<'a> {
             self.file_modules
                 .contains(&(stem, module_name(first).to_string()))
         });
-        let (path, _) = if declares_first {
+        let (path, crate_name) = if declares_first {
             self.rust_path(importer, None, &format!("self::{source}"), scopes)?
         } else {
             self.rust_path(importer, None, source, scopes)?
@@ -582,7 +730,10 @@ impl<'a> RustModuleTree<'a> {
         if path.segments.last().map(String::as_str) != Some(imported) {
             return None;
         }
-        self.rust_path_target(&path, true, symbols, scopes, hops + 1)
+        // `pub use imp::f;` in the module declaring a configuration-selected `imp` makes no
+        // choice, so the re-exported name is `f` of each file `imp` may be.
+        let writer = (!crate_name).then_some(importer);
+        self.rust_path_target(&path, writer, true, symbols, scopes, hops + 1)
     }
 
     /// Records the repository-relative paths discovery skipped; only Rust files matter.
@@ -593,6 +744,7 @@ impl<'a> RustModuleTree<'a> {
         self.unindexed_stems
             .extend(paths.into_iter().filter_map(rust_file_stem));
         self.shared_files = OnceCell::new();
+        self.configured = OnceCell::new();
         self
     }
 
@@ -651,6 +803,7 @@ impl<'a> RustModuleTree<'a> {
                 .filter_map(|(path, names)| Some((rust_file_stem(path)?, names))),
         );
         self.shared_files = OnceCell::new();
+        self.configured = OnceCell::new();
         self
     }
 
@@ -836,6 +989,16 @@ impl<'a> RustModuleTree<'a> {
     /// `name/mod.rs`, may name another file. Below a choice, the modules each of its files declares
     /// are followed as file modules, so a path below it can be read against every file.
     pub(crate) fn configured_modules(&self) -> HashMap<String, RustConfiguredModules> {
+        self.configured().clone()
+    }
+
+    /// [`RustModuleTree::configured_modules`], computed on first use.
+    fn configured(&self) -> &HashMap<String, RustConfiguredModules> {
+        self.configured
+            .get_or_init(|| self.find_configured_modules())
+    }
+
+    fn find_configured_modules(&self) -> HashMap<String, RustConfiguredModules> {
         let mut configured = HashMap::<String, RustConfiguredModules>::new();
         let mut declaring = self
             .declared_modules
@@ -1585,6 +1748,7 @@ impl ImportRegistry {
             is_glob: site.is_glob,
             evidence: Vec::new(),
             rule: ImportBindingRule::ModuleKey,
+            configured_targets: None,
         };
         if site.is_glob && site.bindings.is_empty() {
             // Recorded so name lookup can tell that a glob in a nearer scope may supply a name.
@@ -1697,6 +1861,7 @@ impl ImportRegistry {
                 };
                 binding.target_file = target.module_file;
                 binding.target_symbol = target.item;
+                binding.configured_targets = target.configured;
                 binding.origin = ImportOrigin::Internal;
                 binding.rule = if target.reexport {
                     ImportBindingRule::RustReexport
@@ -1725,7 +1890,10 @@ fn rust_import_target(
     if *item_name != binding.imported_name {
         return None;
     }
-    modules.rust_path_target(&path, crate_name, symbols, scopes, 0)
+    // A path through a crate name is written in another crate, where no choice of that crate's
+    // configuration-selected modules is made.
+    let writer = (!crate_name).then_some(importer);
+    modules.rust_path_target(&path, writer, crate_name, symbols, scopes, 0)
 }
 
 /// The module-level Rust items named `item` in the files at `module_stems`.
@@ -1946,7 +2114,9 @@ fn rust_import_edge(
     if last == "*" {
         return modules.module_or_root_file(path, parent).map(module_edge);
     }
-    let target = modules.rust_path_target(path, follow_reexports, symbols, scopes, 0)?;
+    // The file-level edge is read off the tree as placed; the alternatives a
+    // configuration-selected module adds bind the names, not this edge.
+    let target = modules.placed_path_target(path, follow_reexports, symbols, scopes, 0)?;
     let strategy = if target.reexport {
         RUST_REEXPORT_STRATEGY
     } else if target.module_file.is_some() {

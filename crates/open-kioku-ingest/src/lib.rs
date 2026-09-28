@@ -4146,6 +4146,242 @@ class Util {
         );
     }
 
+    /// Each `CALLS` edge from `caller` in a package `fx` of `files`, by the file of its target
+    /// and whether it is authoritative, with the files its proofs name as ambiguity.
+    fn rust_calls_from(files: &[(&str, &str)], caller: &str) -> Vec<(String, bool, Vec<String>)> {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fx\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        for (path, source) in files {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, source).unwrap();
+        }
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.history.enabled = false;
+        let snapshot = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Full)
+            .unwrap();
+        let caller = snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == caller)
+            .map(|symbol| symbol.id.clone())
+            .expect("the caller is indexed");
+        let file_of = |id: &SymbolId| {
+            let symbol = snapshot.symbols.iter().find(|symbol| symbol.id == *id)?;
+            snapshot
+                .files
+                .iter()
+                .find(|file| file.id == symbol.file_id)
+                .map(|file| file.path.to_string_lossy().replace('\\', "/"))
+        };
+        let mut edges = snapshot
+            .resolved_relationships
+            .iter()
+            .filter(|edge| {
+                edge.from == caller && edge.edge_type == open_kioku_core::GraphEdgeType::Calls
+            })
+            .map(|edge| {
+                let authoritative =
+                    open_kioku_core::relationship_authority(&edge.edge_type, &edge.proofs)
+                        == open_kioku_core::RelationshipAuthority::Authoritative;
+                let mut ambiguity = edge
+                    .proofs
+                    .iter()
+                    .flat_map(|proof| proof.ambiguity.iter().cloned())
+                    .collect::<Vec<_>>();
+                ambiguity.sort();
+                ambiguity.dedup();
+                (
+                    file_of(&edge.to).unwrap_or_default(),
+                    authoritative,
+                    ambiguity,
+                )
+            })
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges
+    }
+
+    #[test]
+    fn an_import_through_a_module_whose_file_configuration_selects_reaches_every_file_unproven() {
+        // `sys/mod.rs` gives `imp` its file with `declaring`; `lib.rs` is `root`. Each file of
+        // `sys` declares `pub fn f() {}` (#615).
+        let calls = |declaring: &str, root: &str, caller: &str| {
+            rust_calls_from(
+                &[
+                    ("src/lib.rs", root),
+                    ("src/sys/mod.rs", declaring),
+                    ("src/sys/imp.rs", "pub fn f() {}\n"),
+                    ("src/sys/win.rs", "pub fn f() {}\n"),
+                ],
+                caller,
+            )
+        };
+        let cfg_attr = "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n";
+        let both = |files: &[&str]| {
+            let named = files
+                .iter()
+                .map(|file| file.to_string())
+                .collect::<Vec<_>>();
+            named
+                .iter()
+                .map(|file| (file.clone(), false, named.clone()))
+                .collect::<Vec<_>>()
+        };
+        let imp_or_win = both(&["src/sys/imp.rs", "src/sys/win.rs"]);
+        let item = "mod sys;\nuse crate::sys::imp::f;\npub fn go() {\n    f();\n}\n";
+        // An item import, and the `#[cfg]` spelling of the same choice.
+        assert_eq!(calls(cfg_attr, item, "go"), imp_or_win);
+        assert_eq!(
+            calls(
+                "#[cfg(not(windows))]\npub mod imp;\n#[cfg(windows)]\n#[path = \"win.rs\"]\npub mod imp;\n",
+                item,
+                "go"
+            ),
+            imp_or_win
+        );
+        // A module import, called through.
+        assert_eq!(
+            calls(
+                cfg_attr,
+                "mod sys;\nuse crate::sys::imp;\npub fn go() {\n    imp::f();\n}\n",
+                "go"
+            ),
+            imp_or_win
+        );
+        // An import written in the declaring module makes no choice either.
+        assert_eq!(
+            calls(
+                &format!("{cfg_attr}use self::imp::f;\npub fn run() {{\n    f();\n}}\n"),
+                "mod sys;\n",
+                "run"
+            ),
+            imp_or_win
+        );
+        // A glob binds no call, with or without the choice, and an in-crate path through the
+        // `pub use` is not followed: neither reaches the default file alone.
+        for root in [
+            "mod sys;\nuse crate::sys::imp::*;\npub fn go() {\n    f();\n}\n",
+            "mod sys;\nuse crate::sys::f;\npub fn go() {\n    f();\n}\n",
+        ] {
+            assert_eq!(
+                calls(&format!("{cfg_attr}pub use imp::f;\n"), root, "go"),
+                Vec::new(),
+                "{root}"
+            );
+        }
+        // Control: with no choice the import proves the placed file.
+        assert_eq!(
+            calls("pub mod imp;\n", item, "go"),
+            vec![("src/sys/imp.rs".to_string(), true, Vec::new())]
+        );
+    }
+
+    #[test]
+    fn an_import_through_a_crate_name_into_a_module_whose_file_configuration_selects_is_unproven() {
+        // A binary imports `f` from the library, directly and through `sys`'s `pub use imp::f;`,
+        // which a crate-name path follows; the library compiles `imp` from one of two files.
+        let calls = |import: &str| {
+            rust_calls_from(
+                &[
+                    ("src/lib.rs", "pub mod sys;\n"),
+                    (
+                        "src/sys/mod.rs",
+                        "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\npub use imp::f;\n",
+                    ),
+                    ("src/sys/imp.rs", "pub fn f() {}\n"),
+                    ("src/sys/win.rs", "pub fn f() {}\n"),
+                    (
+                        "src/bin/tool.rs",
+                        &format!("use {import};\nfn main() {{\n    f();\n}}\n"),
+                    ),
+                ],
+                "main",
+            )
+        };
+        let files = vec!["src/sys/imp.rs".to_string(), "src/sys/win.rs".to_string()];
+        let imp_or_win = files
+            .iter()
+            .map(|file| (file.clone(), false, files.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(calls("fx::sys::imp::f"), imp_or_win);
+        assert_eq!(calls("fx::sys::f"), imp_or_win);
+    }
+
+    #[test]
+    fn an_import_below_a_module_whose_file_configuration_selects_is_proven_from_inside_it() {
+        // `sys/imp.rs` is compiled only when `imp` is that file, so its `use self::inner::g;` is
+        // `sys/imp/inner.rs` alone, though `sys/win.rs` declares an `inner` of its own (#615).
+        assert_eq!(
+            rust_calls_from(
+                &[
+                    ("src/lib.rs", "mod sys;\n"),
+                    (
+                        "src/sys/mod.rs",
+                        "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n"
+                    ),
+                    (
+                        "src/sys/imp.rs",
+                        "mod inner;\nuse self::inner::g;\npub fn f() {\n    g();\n}\n"
+                    ),
+                    ("src/sys/imp/inner.rs", "pub fn g() {}\n"),
+                    ("src/sys/win.rs", "mod inner;\n"),
+                    ("src/sys/inner.rs", "pub fn g() {}\n"),
+                ],
+                "f",
+            ),
+            vec![("src/sys/imp/inner.rs".to_string(), true, Vec::new())]
+        );
+    }
+
+    #[test]
+    fn a_configuration_selected_file_another_module_also_declares_stays_a_candidate() {
+        // `imp` is `src/other.rs` on unix, the file `crate::other` also names, and
+        // `src/sys/imp.rs` elsewhere (#616). Every spelling of a call into `imp` reaches both, and
+        // one into `crate::other` is `src/other.rs` alone.
+        let calls = |root: &str| {
+            rust_calls_from(
+                &[
+                    ("src/lib.rs", root),
+                    (
+                        "src/sys/mod.rs",
+                        "#[cfg_attr(unix, path = \"../other.rs\")]\npub mod imp;\n",
+                    ),
+                    ("src/sys/imp.rs", "pub fn f() {}\n"),
+                    ("src/other.rs", "pub fn f() {}\n"),
+                ],
+                "go",
+            )
+        };
+        let files = vec!["src/other.rs".to_string(), "src/sys/imp.rs".to_string()];
+        let other_or_imp = files
+            .iter()
+            .map(|file| (file.clone(), false, files.clone()))
+            .collect::<Vec<_>>();
+        for root in [
+            "mod other;\nmod sys;\npub fn go() {\n    crate::sys::imp::f();\n}\n",
+            "mod other;\nmod sys;\nuse crate::sys::imp::f;\npub fn go() {\n    f();\n}\n",
+        ] {
+            assert_eq!(calls(root), other_or_imp, "{root}");
+        }
+        let direct =
+            "mod other;\nmod sys;\nuse crate::other::f;\npub fn go() {\n    f();\n    crate::other::f();\n}\n";
+        assert_eq!(
+            calls(direct),
+            vec![
+                ("src/other.rs".to_string(), true, Vec::new()),
+                ("src/other.rs".to_string(), true, Vec::new()),
+            ]
+        );
+    }
+
     #[test]
     fn discovery_reports_typed_skipped_paths_without_reading_secret_content() {
         let temp = tempfile::tempdir().unwrap();
