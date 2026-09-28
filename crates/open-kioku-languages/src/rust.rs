@@ -56,12 +56,48 @@ pub fn cfg_attr_condition(attribute: &str) -> Option<String> {
             '=' if !arguments[at + 1..].starts_with('"') => return None,
             ',' if depth == 0 => {
                 let condition = &arguments[..at];
-                return (!condition.is_empty()).then(|| condition.to_string());
+                if condition.is_empty() {
+                    return None;
+                }
+                // The `path` must be set by this attribute's condition alone: one inside a
+                // nested `cfg_attr(unix, cfg_attr(feature = "x", path = ..))` holds on fewer
+                // builds than the outer condition says.
+                let items = top_level_items(&arguments[at + 1..])?;
+                if items.iter().any(|item| item.starts_with("cfg_attr("))
+                    || !items.iter().any(|item| item.starts_with("path=\""))
+                {
+                    return None;
+                }
+                return Some(condition.to_string());
             }
             _ => {}
         }
     }
     None
+}
+
+/// The comma-separated items of `text` outside brackets and literals, or `None` when a bracket
+/// does not close.
+fn top_level_items(text: &str) -> Option<Vec<&str>> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut from = 0;
+    for (at, ch) in text.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            _ if in_string => {}
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                items.push(&text[from..at]);
+                from = at + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&text[from..]);
+    (depth == 0).then_some(items)
 }
 
 /// Whether one of `conditions`, each as [`cfg_attr_condition`] reads it, holds on every build:
@@ -152,6 +188,10 @@ mod tests {
             "#[cfg_attr(unix /* why */, path = \"x.rs\")]",
             "#[cfg_attr(all(unix, path = \"x.rs\")]",
             "#[cfg_attr(feature = , path = \"x.rs\")]",
+            // The `path` is set on a narrower condition than the outer one, or not at all.
+            "#[cfg_attr(unix, cfg_attr(feature = \"x\", path = \"a.rs\"))]",
+            "#[cfg_attr(unix, path = \"a.rs\", cfg_attr(feature = \"x\", path = \"b.rs\"))]",
+            "#[cfg_attr(unix, doc = \"path = x\")]",
         ] {
             assert_eq!(cfg_attr_condition(unreadable), None, "{unreadable}");
         }
@@ -194,6 +234,10 @@ mod tests {
                 "#[cfg_attr(not(not(unix)), path = \"o.rs\")]",
             ],
             &["#[cfg_attr(any(unix, not(unix)), path = \"x.rs\")]"],
+            &[
+                "#[cfg_attr(unix, cfg_attr(feature = \"x\", path = \"a.rs\"))]",
+                "#[cfg_attr(not(unix), path = \"b.rs\")]",
+            ],
             &[
                 "#[cfg_attr(feature = \"a\", path = \"u.rs\")]",
                 "#[cfg_attr(not(feature = \"b\"), path = \"o.rs\")]",

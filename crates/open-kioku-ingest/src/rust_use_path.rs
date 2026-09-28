@@ -1420,6 +1420,10 @@ mod tests {
                 "#[cfg_attr(feature = \"a\\\"\", path = \"a.rs\")]\n#[cfg_attr(not(feature = \"a\\\"\"), path = \"b.rs\")]\nmod sys;\nmod cli;\n",
                 &["a.rs", "b.rs"],
             ),
+            (
+                "#[cfg_attr(unix, cfg_attr(feature = \"x\", path = \"a.rs\"))]\n#[cfg_attr(not(unix), path = \"b.rs\")]\nmod sys;\nmod cli;\n",
+                &["a.rs", "b.rs"],
+            ),
         ] {
             assert_eq!(scan(source), sys(paths), "{source}");
         }

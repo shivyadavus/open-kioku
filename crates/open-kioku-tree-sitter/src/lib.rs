@@ -3017,7 +3017,7 @@ mod ri3_rust_use_import_site_tests {
         };
         let facts = parse_file(
             &file,
-            "pub mod auth;\n#[cfg(test)]\nmod tests {\n    mod nested;\n}\n#[path = \"store_v2.rs\"]\nmod store;\n/// Platform glue.\n#[cfg_attr(unix, path = \"unix.rs\")]\nmod platform;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[cfg_attr( windows ,\n  path = \"b.rs\")]\nmod both;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[path = \"c.rs\"]\nmod mixed;\n#[cfg_attr(unix, path = r\"raw.rs\")]\nmod unread;\n#[cfg_attr( all( ), path = \"x.rs\")]\nmod always;\n#[cfg_attr(unix, path = \"u.rs\")]\n#[cfg_attr(not( unix ), path = \"o.rs\")]\nmod paired;\n#[cfg_attr(unix, path = \"u.rs\")]\n#[cfg_attr(not(windows), path = \"o.rs\")]\nmod unpaired;\n#[cfg_attr(feature = \"a b\", path = \"u.rs\")]\n#[cfg_attr(not(feature = \"ab\"), path = \"o.rs\")]\nmod spaced;\n",
+            "pub mod auth;\n#[cfg(test)]\nmod tests {\n    mod nested;\n}\n#[path = \"store_v2.rs\"]\nmod store;\n/// Platform glue.\n#[cfg_attr(unix, path = \"unix.rs\")]\nmod platform;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[cfg_attr( windows ,\n  path = \"b.rs\")]\nmod both;\n#[cfg_attr(unix, path = \"a.rs\")]\n#[path = \"c.rs\"]\nmod mixed;\n#[cfg_attr(unix, path = r\"raw.rs\")]\nmod unread;\n#[cfg_attr( all( ), path = \"x.rs\")]\nmod always;\n#[cfg_attr(unix, path = \"u.rs\")]\n#[cfg_attr(not( unix ), path = \"o.rs\")]\nmod paired;\n#[cfg_attr(unix, path = \"u.rs\")]\n#[cfg_attr(not(windows), path = \"o.rs\")]\nmod unpaired;\n#[cfg_attr(feature = \"a b\", path = \"u.rs\")]\n#[cfg_attr(not(feature = \"ab\"), path = \"o.rs\")]\nmod spaced;\n#[cfg_attr(unix, cfg_attr(feature = \"x\", path = \"a.rs\"))]\n#[cfg_attr(not(unix), path = \"b.rs\")]\nmod layered;\n",
         )
         .expect("Rust module fixture should parse");
         let declaration = |name: &str| {
@@ -3047,7 +3047,9 @@ mod ri3_rust_use_import_site_tests {
         assert_eq!(declaration("platform").path_attributes, vec!["unix.rs"]);
         // A module whose every `path` is set through `cfg_attr` also compiles from its default
         // location; one `path` that always applies moves it off that location for good (#608).
-        for conditional in ["platform", "both", "unread", "unpaired", "spaced"] {
+        for conditional in [
+            "platform", "both", "unread", "unpaired", "spaced", "layered",
+        ] {
             assert!(
                 declaration(conditional).path_is_conditional,
                 "{conditional}"
