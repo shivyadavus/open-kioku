@@ -152,10 +152,31 @@ token's place, and where it cannot tell, the token is matched as before:
   one `contains` or `expect` in the repository is not evidence of the call's target. A receiver
   that is a plain name (not itself a member, a call result, `self` or `this`) and names a
   directory, module or type the candidate is defined under is that evidence: Go's
-  `structs.NewCheckID`, Java's `Constants.ACCESS_KEY` (a Java receiver must be capitalized, since
+  `ledger.NewEntry`, Java's `Constants.ACCESS_KEY` (a Java receiver must be capitalized, since
   a lowercase one is a variable whose name may match a package's), a Python module's
   `misc.format_size`. On an `import`, `from`, `package` or `use` line the dotted path names
-  modules, so no receiver counts there.
+  modules, so no receiver counts there. A receiver the file imports is read by its import, from
+  the resolver's import model: one imported from outside the repository (by the same test as a
+  plain name, below) matches nothing. A Go receiver is read by its whole import path, which
+  names a package directory. Under a module a `go.mod` of the repository declares (the longest
+  one that prefixes the path, nested modules included), the rest of the path below the
+  manifest's directory is that directory exactly, whatever shorter or longer directory the
+  path's tail also spells; a path under no declared module is another module's package or the
+  standard library's and matches nothing (`vendor` directories are not indexed, so a vendored
+  package matches nothing either). A `go.mod` under a `testdata` or `_`- or `.`-prefixed
+  directory, which the go command ignores, declares no module, and when the longest module's
+  directory holds no package at the path, the next module that does is taken.
+  With no module declared, the longest directory of the repository the path ends with stands in,
+  the resolver's standard-library verdict rules a path out, and a path ending with no directory
+  can only be the root package, whose candidate must also be named by the receiver. The
+  candidate must be defined in that directory, so `ledger.Entry` with `ledger` imported from
+  `…/billing/ledger` does not match an `Entry` of `billing/ledgerutil/ledger.go`, and an aliased
+  import names its package under the alias. `go.work` files and `replace` directives are not
+  read: a workspace member or a `replace` target in the repository is placed through its own
+  `go.mod`, so one whose `go.mod` declares a path other than the one imported is not. A Go
+  receiver that no import binds under its name (a package whose name differs from
+  its path's last segment, such as a `go-uuid` path imported as `uuid` without an alias, or a
+  variable) is still matched by the directories and types its name spells.
 - A field or parameter name (a Rust `name: value` or `Foo { name, .. }`, a JavaScript or
   TypeScript object key or annotated name, a Go composite literal's `Key: value`, a Python keyword
   argument) matches only a symbol of kind field.
@@ -174,7 +195,13 @@ token's place, and where it cannot tell, the token is matched as before:
   nothing.
 - A name the file imports under that name from outside the repository (`use anyhow::Result;`,
   `use std::process::Command;`) is not matched by name alone; a Java `static` import is read by
-  its path. The resolver's import model
+  its path, and one that is not from outside matches only a member of the class its path names,
+  package included (a nested class's member is qualified by its file's class and belongs to the
+  nested class): `import static org.example.vendor.Constants.ACCESS_KEY;` under the
+  repository's `org.example` does not match the repository's `org.example.Constants.ACCESS_KEY`.
+  The package is read from the file's directories, so a member of a Java file whose directory
+  does not mirror its `package` declaration is not matched through a static import. The
+  resolver's import model
   supplies the name each import binds, so `use std::fs::File as FsFile;` leaves `File` alone, and
   an unresolved import through the repository's own modules (`use crate::evidence::X;`, often a
   re-export) constrains nothing.

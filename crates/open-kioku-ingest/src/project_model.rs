@@ -849,13 +849,16 @@ fn walk_discover(
                     "go.mod" => {
                         let mut pkg_name = None;
                         if let Ok(content) = fs::read_to_string(&path) {
-                            for line in content.lines() {
-                                if line.starts_with("module ") {
-                                    pkg_name =
-                                        Some(line.trim_start_matches("module ").trim().to_string());
-                                    break;
+                            // `module example.com/app`, indented or tab-separated, with an
+                            // optional quoted path or trailing comment.
+                            pkg_name = content.lines().find_map(|line| {
+                                let rest = line.trim().strip_prefix("module")?;
+                                if !rest.starts_with(char::is_whitespace) {
+                                    return None;
                                 }
-                            }
+                                let path = rest.split_whitespace().next()?.trim_matches('"');
+                                (!path.is_empty() && path != "//").then(|| path.to_string())
+                            });
                         }
                         push_project_root(
                             model,
@@ -985,6 +988,29 @@ mod tests {
             model.module_path_from_file(file, &Language::Go),
             "github.com/acme/orders/internal"
         );
+    }
+
+    #[test]
+    fn a_go_module_line_is_read_indented_tab_separated_quoted_or_commented() {
+        for content in [
+            "  module example.com/app\n",
+            "module\texample.com/app\n",
+            "module \"example.com/app\" // the service\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("go.mod"), content).unwrap();
+            let model = ProjectModel::discover(dir.path());
+            let root = model
+                .roots
+                .iter()
+                .find(|root| root.language == Language::Go)
+                .expect("the go.mod root");
+            assert_eq!(
+                root.package_name.as_deref(),
+                Some("example.com/app"),
+                "{content}"
+            );
+        }
     }
 
     #[test]
