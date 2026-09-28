@@ -444,3 +444,89 @@ func Handle() int {
         .expect("expected resolution quality report");
     assert!(quality.resolved_exact > 0 || quality.resolved_high > 0);
 }
+
+/// Copies the checked-in fixture `name` to a fresh directory, so indexing writes no `.ok/` into
+/// the source tree.
+fn copied_fixture(name: &str) -> tempfile::TempDir {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(name);
+    copy(&fixture, temp_dir.path());
+    temp_dir
+}
+
+#[test]
+fn go_members_reached_through_a_type_alias_link_to_the_aliased_type() {
+    let mut config = OkConfig::default();
+    config.history.enabled = false;
+    config.scip.enabled = false;
+    let repo = copied_fixture("go-alias-fixture");
+    let (snapshot, _) = Indexer::default()
+        .index_repo_with_history(repo.path(), &config)
+        .expect("indexing pipeline failed");
+
+    // The aliases are symbols that say what they stand for.
+    let signature = |name: &str| {
+        snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == format!("ledger::aliases::{name}"))
+            .unwrap_or_else(|| panic!("alias `{name}` is indexed"))
+            .signature
+            .clone()
+    };
+    assert_eq!(
+        signature("Entry").as_deref(),
+        Some("type Entry = store.Entry")
+    );
+    assert_eq!(signature("Raw").as_deref(), Some("type Raw = []byte"));
+
+    let record = snapshot
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Record")
+        .expect("Record is indexed");
+    let mut targets = snapshot
+        .analysis_facts
+        .iter()
+        .filter(|fact| {
+            fact.symbol_id.as_ref() == Some(&record.id)
+                && fact.source.starts_with("open-kioku-symbol-registry/")
+        })
+        .map(|fact| fact.target.as_str())
+        .collect::<Vec<_>>();
+    targets.sort_unstable();
+    targets.dedup();
+    // `ledger.Entry` and `ledger.Batch` are the store's types, not their aliases; `ledger.Raw`
+    // stands for no repository type and links nowhere.
+    assert!(targets.contains(&"store::store::Entry"), "{targets:?}");
+    assert!(targets.contains(&"store::store::Batch"), "{targets:?}");
+    assert!(
+        !targets.iter().any(|target| target.starts_with("ledger::")),
+        "{targets:?}"
+    );
+    let caveat = "`ledger::aliases::Raw` is a Go type alias of `[]byte`, which the registry could not place at one repository type";
+    assert!(
+        snapshot
+            .manifest
+            .quality
+            .quality_notes
+            .iter()
+            .any(|note| note.message.contains(caveat)),
+        "{:?}",
+        snapshot.manifest.quality.quality_notes
+    );
+}
