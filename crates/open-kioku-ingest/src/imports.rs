@@ -2314,6 +2314,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Public,
+            alias_of: None,
         };
 
         let symbol_index = open_kioku_resolution::SymbolIndex::build(vec![internal_sym]);
@@ -2385,6 +2386,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Public,
+            alias_of: None,
         }
     }
 

@@ -4356,6 +4356,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let validator_symbol = Symbol {
             id: SymbolId::new("validator-symbol"),
@@ -4372,6 +4373,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunks = vec![
             CodeChunk {
@@ -6585,6 +6587,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunks = vec![
             CodeChunk {
@@ -6658,6 +6661,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let history_symbol = Symbol {
             id: SymbolId::new("benchmark-history-ingest"),
@@ -6674,6 +6678,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunks = vec![
             CodeChunk {
@@ -6740,6 +6745,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let chunk = |id: &str, text: &str| CodeChunk {
             id: format!("{id}-chunk"),

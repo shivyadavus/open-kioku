@@ -130,7 +130,11 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// each file that may hold that module, none authoritative and each naming the files, as the
 /// path spelling does since v26. v31 indexes hold one authoritative edge into the placed default
 /// file.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v32";
+/// v33: the symbol-registry pass reports each Go type alias it placed, and the indexed alias
+/// symbol takes its target's kind and names it (`Symbol::alias_of`), which search ranks and
+/// symbol listings order by. v32 indexes hold every alias with its syntax kind and no target, so
+/// a one-line alias outranks the type it stands for.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v33";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
