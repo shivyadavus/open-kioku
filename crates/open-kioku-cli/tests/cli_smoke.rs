@@ -10069,3 +10069,60 @@ fn a_go_type_alias_file_does_not_outrank_the_type_through_a_neighbour() {
         );
     }
 }
+
+/// A type declared beside an alias is never carried below that alias's target: `store/store.go`
+/// declares `Entry`, which `ledger/aliases.go` aliases, beside `type Record = audit.Record`.
+/// Searching both names, the `Entry` alias ranks below `store.Entry` (#621).
+#[test]
+fn a_type_declared_beside_an_alias_stays_above_its_own_alias() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    for (path, content) in [
+        ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+        (
+            "ledger/aliases.go",
+            "package ledger\n\nimport \"example.com/app/store\"\n\ntype Entry = store.Entry\n",
+        ),
+        (
+            "audit/audit.go",
+            "package audit\n\n// Record is an audit record kept for compliance, with a long comment so it scores lower than\n// the short alias line that repeats its name in another package of this repository.\ntype Record struct {\n\tWho  string\n\tWhen int64\n\tWhat string\n}\n",
+        ),
+        (
+            "store/store.go",
+            "package store\n\nimport \"example.com/app/audit\"\n\n// Entry is a ledger line.\ntype Entry struct{ Amount int }\n\ntype Record = audit.Record\n",
+        ),
+    ] {
+        fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+        fs::write(repo.join(path), content).unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let search: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "Entry Record", "--limit", "20"]);
+        command
+    }))
+    .unwrap();
+    let symbols = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["symbol"]["qualified_name"].as_str().unwrap_or(""))
+        .collect::<Vec<_>>();
+    let at = |name: &str| {
+        symbols
+            .iter()
+            .position(|symbol| *symbol == name)
+            .unwrap_or_else(|| panic!("`{name}` is listed: {search}"))
+    };
+    assert!(
+        at("store::store::Entry") < at("ledger::aliases::Entry"),
+        "{search}"
+    );
+}
