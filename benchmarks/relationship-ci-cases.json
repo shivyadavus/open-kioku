@@ -2665,6 +2665,84 @@
       "notes": "Regression case (#633): with `#[path = \"elsewhere\"]` on the inline `mod b`, its `mod sys;` is not `src/b/sys.rs`, so no authoritative edge into it is emitted."
     },
     {
+      "id": "ci-rust-calls-129-use_in_2015_edition_starts_at_crate_root",
+      "fixture_id": "ci/ri3/rust/calls/use_in_2015_edition_starts_at_crate_root",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_in_2015_edition_starts_at_crate_root:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_in_2015_edition_starts_at_crate_root",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::target_fn",
+        "identity": "symbol:rust:calls:use_in_2015_edition_starts_at_crate_root:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#632): in a package of the 2015 edition, `use sys::target_fn;` in `src/a.rs`, which declares a `mod sys;` of its own, starts at the crate root and names `src/sys.rs`, not `src/a/sys.rs`."
+    },
+    {
+      "id": "ci-rust-calls-130-use_without_edition_starts_at_crate_root",
+      "fixture_id": "ci/ri3/rust/calls/use_without_edition_starts_at_crate_root",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_without_edition_starts_at_crate_root:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_without_edition_starts_at_crate_root",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::target_fn",
+        "identity": "symbol:rust:calls:use_without_edition_starts_at_crate_root:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#632): a package that sets no edition is 2015, so the same `use` names `src/sys.rs`."
+    },
+    {
+      "id": "ci-rust-calls-131-use_with_inherited_edition_starts_in_scope",
+      "fixture_id": "ci/ri3/rust/calls/use_with_inherited_edition_starts_in_scope",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_with_inherited_edition_starts_in_scope:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_with_inherited_edition_starts_in_scope",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::a::sys::target_fn",
+        "identity": "symbol:rust:calls:use_with_inherited_edition_starts_in_scope:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#632): `edition.workspace = true` under `[workspace.package] edition = \"2021\"` makes the package 2021, where the same `use` looks `sys` up in scope and names `src/a/sys.rs`."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
@@ -2789,6 +2867,27 @@
       "expected_outcome": "must_not_emit",
       "scenario": "module_in_scope_type_path_shadows_extern_crate",
       "notes": "Regression case (#632): with a dependency named `sys`, `&sys::imp::TargetType` may start from either, so no authoritative edge is emitted."
+    },
+    {
+      "id": "ci-rust-uses_type-06-type_through_use_in_2015_edition",
+      "fixture_id": "ci/ri3/rust/uses_type/type_through_use_in_2015_edition",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:type_through_use_in_2015_edition:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "type_through_use_in_2015_edition",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::TargetType",
+        "identity": "symbol:rust:uses_type:type_through_use_in_2015_edition:target"
+      },
+      "notes": "Regression case (#632): in a package of the 2015 edition, `caller_fn(value: TargetType)` after `use sys::TargetType;` in `src/a.rs`, which declares its own `mod sys;`, uses the crate root's `src/sys.rs` type."
     },
     {
       "id": "ci-rust-implements-01-metamorphic_a",
@@ -3016,6 +3115,30 @@
       "expected_outcome": "must_not_emit",
       "scenario": "reexport_through_module_in_scope_shadows_extern_crate",
       "notes": "Regression case (#632): with a dependency named `auth`, `pub use auth::issue_token;` may start from either, so no authoritative edge is emitted."
+    },
+    {
+      "id": "ci-rust-imports-08-use_in_2015_edition_imports_from_crate_root",
+      "fixture_id": "ci/ri3/rust/imports/use_in_2015_edition_imports_from_crate_root",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/session.rs",
+        "identity": "file:rust:imports:use_in_2015_edition_imports_from_crate_root:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_in_2015_edition_imports_from_crate_root",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/auth.rs",
+        "identity": "file:rust:imports:use_in_2015_edition_imports_from_crate_root:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#632): in a package of the 2015 edition, `use auth::issue_token;` in `src/session.rs`, which declares its own `mod auth;`, imports from the crate root's `src/auth.rs`."
     },
     {
       "id": "ci-rust-depends_on-01-metamorphic_a",

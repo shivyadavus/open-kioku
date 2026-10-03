@@ -143,6 +143,9 @@ pub struct ScopeIndex {
     /// The modules configuration selects a file for, by the qualified-name prefix of the crate
     /// root whose tree holds them.
     rust_configured_modules: HashMap<String, RustConfiguredModules>,
+    /// The Rust files whose crates read a `use` path's first segment in scope (the 2018 edition
+    /// and later). In a 2015 crate it is read from the crate root (#632).
+    rust_in_scope_use_paths: HashSet<FileId>,
 }
 
 /// The library crates code of one crate names by crate name: the dependencies its package's
@@ -507,6 +510,19 @@ impl ScopeIndex {
     /// in scope may start from either (#626, #632).
     pub fn rust_names_crate(&self, file: &FileId, name: &str) -> bool {
         self.rust_named_crate(file, name).is_some() || self.rust_names_external_crate(file, name)
+    }
+
+    /// Records the Rust files whose crates read a `use` path's first segment in scope, the 2018
+    /// edition and later, as their manifests set it.
+    pub fn record_rust_in_scope_use_paths(&mut self, files: HashSet<FileId>) {
+        self.rust_in_scope_use_paths.extend(files);
+    }
+
+    /// Whether a `use` path written in `file` looks its first segment up in scope, as the 2018
+    /// edition and later do. Not for a file of a 2015 crate, where it is read from the crate root,
+    /// nor for one whose edition the index could not read.
+    pub(crate) fn rust_reads_use_paths_in_scope(&self, file: &FileId) -> bool {
+        self.rust_in_scope_use_paths.contains(file)
     }
 
     /// Records which library crates each Rust file names by crate name. A path through one of

@@ -62,6 +62,13 @@ pub struct CargoManifest {
     /// indexed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_dependencies: Vec<CargoExternalDependency>,
+    /// The Rust edition the package's crates are compiled with: `[package] edition`, the
+    /// workspace's `[workspace.package] edition` for `edition.workspace = true`, or `2015` when
+    /// the package sets none. It decides where a `use` path's first segment is looked up: from
+    /// the crate root in 2015, in scope since 2018. `None` for a virtual manifest, and for an
+    /// edition the manifest does not let the index read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
 }
 
 /// One dependency of a Rust package on a package outside the repository.

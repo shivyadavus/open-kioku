@@ -697,6 +697,8 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
         "pub fn caller_fn() {\n    crate::sys::imp::target_fn();\n}\n";
     const MODULE_IN_SCOPE_CALLER: &str =
         "mod sys;\n\npub fn caller_fn() {\n    sys::imp::target_fn();\n}\n";
+    const EDITION_CALLER: &str =
+        "mod sys;\nuse sys::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
     const MODULE_IN_SCOPE_USE: &str =
         "mod sys;\nuse sys::imp::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
     const CFG_ATTR_ENGINE: &str =
@@ -2254,6 +2256,50 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // In the 2015 edition a `use` path starts at the crate root, so `use sys::target_fn;` in
+        // `src/a.rs` is the crate root's `sys`, not the `sys` `a.rs` declares (#632).
+        "use_in_2015_edition_starts_at_crate_root" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2015\"\n",
+                ),
+                ("src/lib.rs", "mod a;\nmod sys;\n"),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+                ("src/a.rs", EDITION_CALLER),
+                ("src/a/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // A package that sets no edition is 2015 (#632).
+        "use_without_edition_starts_at_crate_root" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\n",
+                ),
+                ("src/lib.rs", "mod a;\nmod sys;\n"),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+                ("src/a.rs", EDITION_CALLER),
+                ("src/a/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // An edition inherited from `[workspace.package]` is read: 2021 looks `sys` up in scope
+        // (#632).
+        "use_with_inherited_edition_starts_in_scope" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[workspace]\n\n[workspace.package]\nedition = \"2021\"\n\n[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition.workspace = true\n",
+                ),
+                ("src/lib.rs", "mod a;\nmod sys;\n"),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+                ("src/a.rs", EDITION_CALLER),
+                ("src/a/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
         // A method call on a type imported through a configuration-selected module reaches the
         // method in each file (#625).
         "cfg_attr_imported_type_method_alternatives" => (
@@ -2890,6 +2936,20 @@ fn rust_type_relation_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> 
             ("src/sys/mod.rs", "pub mod imp;\n"),
             ("src/sys/imp.rs", TYPES),
         ],
+        // In the 2015 edition a `use` path starts at the crate root (#632).
+        "type_through_use_in_2015_edition" => vec![
+            (
+                "Cargo.toml",
+                "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2015\"\n",
+            ),
+            ("src/lib.rs", "mod a;\nmod sys;\n"),
+            ("src/sys.rs", TYPES),
+            (
+                "src/a.rs",
+                "mod sys;\nuse sys::TargetType;\n\npub fn caller_fn(value: TargetType) {\n    let _ = value;\n}\n",
+            ),
+            ("src/a/sys.rs", TYPES),
+        ],
         // A type and a trait imported by a `use` path that starts at such a module (#632).
         "type_through_use_of_module_in_scope" => vec![
             ("Cargo.toml", PACKAGE),
@@ -2971,6 +3031,21 @@ fn rust_import_edge_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
             ("Cargo.toml", PACKAGE),
             ("src/lib.rs", "pub mod auth;\n\npub use auth::issue_token;\n"),
             ("src/auth.rs", AUTH),
+        ],
+        // In the 2015 edition `use auth::issue_token;` in `src/session.rs` is the crate root's
+        // `auth`, though `session.rs` declares one of its own (#632).
+        "use_in_2015_edition_imports_from_crate_root" => vec![
+            (
+                "Cargo.toml",
+                "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2015\"\n",
+            ),
+            ("src/lib.rs", "pub mod auth;\npub mod session;\n"),
+            ("src/auth.rs", AUTH),
+            (
+                "src/session.rs",
+                "mod auth;\nuse auth::issue_token;\n\npub fn open_session() {\n    issue_token();\n}\n",
+            ),
+            ("src/session/auth.rs", AUTH),
         ],
         // The package also depends on a crate named `auth`: the path may start from either.
         "reexport_through_module_in_scope_shadows_extern_crate" => vec![

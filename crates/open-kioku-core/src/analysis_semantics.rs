@@ -149,8 +149,10 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// a one-line alias outranks the type it stands for. v33 and v35 were reserved for this change
 /// and are left unused.
 /// v38: a Rust `use` path whose first segment is a module the file declares in scope
-/// (`use sys::imp::f;` beside `mod sys;`) is bound as its `self::` path, for calls, types and the
-/// file-level `IMPORTS` edge, and is ambiguous when that segment also names a crate; a type
+/// (`use sys::imp::f;` beside `mod sys;`) is bound as its `self::` path in a package of the 2018
+/// edition or later, and as its `crate::` path when the crate root declares that module in a 2015
+/// package, for calls, types and the file-level `IMPORTS` edge; it is ambiguous when that segment
+/// also names a crate a 2018 package can name; a type
 /// written as a module path (`s: sys::imp::S`) is read through the path; a relative path written
 /// in a file a `path` attribute mounts inside one alternative reads that alternative; and a file
 /// `mod name;` declares inside an inline `mod` block is placed below the directory the blocks

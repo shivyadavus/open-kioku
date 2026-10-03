@@ -442,11 +442,16 @@ fn rust_imported_module_path<'c>(
 
 /// Whether a Rust import's path starts at a module in scope where the import is written, rather
 /// than at `crate`, `self`, `super` or a crate name (#632): `use sys::imp::f;` beside `mod sys;`
-/// is `use self::sys::imp::f;`.
+/// is `use self::sys::imp::f;` since the 2018 edition. Never in a file of a 2015 crate, or of one
+/// whose edition the index could not read.
 fn rust_import_starts_at_module_in_scope(
     ctx: &ResolutionContext<'_>,
     binding: &ImportBinding,
 ) -> bool {
+    // In a 2015 crate the path starts at the crate root, which ingest reads.
+    if !ctx.scopes.rust_reads_use_paths_in_scope(ctx.file_id) {
+        return false;
+    }
     let source = binding.source_module.trim();
     let first = source.split("::").next().unwrap_or_default().trim();
     !matches!(first, "" | "self" | "super" | "crate" | "Self")
@@ -2306,6 +2311,22 @@ mod tests {
         imports: Vec<(&str, &str, &str)>,
         test: impl FnOnce(&ResolutionContext<'_>) -> T,
     ) -> T {
+        with_module_files_in_edition(
+            false,
+            (extra, declarations, misplaced, external),
+            imports,
+            test,
+        )
+    }
+
+    /// [`with_module_files_naming`] in a crate of the 2015 edition when `edition_2015` is set,
+    /// where a `use` path starts at the crate root, and of the 2018 edition otherwise.
+    fn with_module_files_in_edition<T>(
+        edition_2015: bool,
+        (extra, declarations, misplaced, external): (Vec<Symbol>, bool, &[&str], &[&str]),
+        imports: Vec<(&str, &str, &str)>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
         let worker = FileId::new("file:src/worker.rs");
         let range = |line: u32| SourceRange {
             start_line: line,
@@ -2390,6 +2411,9 @@ mod tests {
             )]
             .into(),
         );
+        if !edition_2015 {
+            scopes.record_rust_in_scope_use_paths([worker.clone()].into());
+        }
         let item = |id: &str, name: &str, kind: SymbolKind, file: &str, scope: &str| Symbol {
             id: SymbolId::new(id),
             name: name.into(),
@@ -3524,6 +3548,22 @@ mod tests {
             assert_eq!(
                 proven_target(ctx, &module_path_call("scope:worker", "inner", "g")).as_deref(),
                 Some("sym:inner:g")
+            );
+        });
+        // In a 2015 crate a `use` path starts at the crate root, so neither reads `worker.rs`'s
+        // modules.
+        with_module_files_in_edition(true, (Vec::new(), true, &[], &[]), imports.clone(), |ctx| {
+            let bare = crate::bare_calls::resolve_bare_call_outcome(
+                &bare_call_in("scope:worker", "c"),
+                ctx,
+            );
+            assert!(
+                matches!(&bare, ResolutionOutcome::Unresolved { candidates, .. } if candidates.is_empty()),
+                "{bare:?}"
+            );
+            assert_eq!(
+                proven_target(ctx, &module_path_call("scope:worker", "inner", "g")),
+                None
             );
         });
         // With crates of those names the paths may start from either, so nothing is proven.

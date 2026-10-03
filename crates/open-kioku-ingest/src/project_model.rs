@@ -403,6 +403,7 @@ fn cargo_manifest(dir: &Path, table: &toml::Table, manifests: &CargoTables) -> C
             .unwrap_or_default(),
         dependencies: Vec::new(),
         external_dependencies: Vec::new(),
+        edition: package.and_then(|package| cargo_edition(dir, package, manifests)),
     };
     let workspace_root = cargo_workspace_root(dir, package, manifests);
     let patched_in_repository = cargo_patched_in_repository(dir, package, manifests);
@@ -561,6 +562,32 @@ pub(crate) fn rust_external_crate_names(
     names
 }
 
+/// The Rust files of packages whose edition reads a `use` path's first segment in scope (2018
+/// and later, #632). A file of a 2015 package, or of one whose edition the index cannot read,
+/// is left out.
+pub(crate) fn rust_in_scope_use_path_files(
+    project: &ProjectModel,
+    files: &[File],
+) -> HashSet<FileId> {
+    files
+        .iter()
+        .filter(|file| file.language == Language::Rust)
+        .filter(|file| rust_edition(project, &file.path).is_some_and(|edition| edition != "2015"))
+        .map(|file| file.id.clone())
+        .collect()
+}
+
+/// The edition of the package holding the Rust file at `path`, when its manifest lets the index
+/// read one.
+pub(crate) fn rust_edition<'p>(project: &'p ProjectModel, path: &Path) -> Option<&'p str> {
+    project
+        .nearest_root_for(path, Language::Rust)?
+        .cargo_manifest
+        .as_ref()?
+        .edition
+        .as_deref()
+}
+
 /// Whether a dependency table entry places the dependency outside the repository: it names no
 /// `path` (a registry or git dependency), or its `path` leaves the repository, and the workspace
 /// root does not patch or replace its package with one of the repository. An inherited entry the
@@ -672,6 +699,30 @@ fn cargo_package_id_spec_name(spec: &str) -> Option<&str> {
         _ => name,
     };
     (!name.is_empty() && !name.contains(['/', ':'])).then_some(name)
+}
+
+/// The edition of the package whose `[package]` table is `package`, in `dir`: its `edition`, or
+/// with `edition.workspace = true` the `[workspace.package] edition` of the workspace holding it,
+/// and `2015` when it sets none, as Cargo reads it. `None` for a value the index cannot read,
+/// including an inherited edition the workspace does not declare.
+fn cargo_edition(dir: &Path, package: &toml::Value, manifests: &CargoTables) -> Option<String> {
+    match package.get("edition") {
+        None => Some("2015".to_string()),
+        Some(toml::Value::String(edition)) => Some(edition.clone()),
+        Some(toml::Value::Table(inherited))
+            if inherited.get("workspace").and_then(toml::Value::as_bool) == Some(true) =>
+        {
+            let root = cargo_workspace_root_dir(dir, Some(package), manifests)?;
+            manifests
+                .get(&root)?
+                .get("workspace")?
+                .get("package")?
+                .get("edition")?
+                .as_str()
+                .map(str::to_string)
+        }
+        Some(_) => None,
+    }
 }
 
 /// The directory of the workspace root whose `[patch]` and `[replace]` apply to the package in
@@ -1011,6 +1062,60 @@ mod tests {
                 "{content}"
             );
         }
+    }
+
+    #[test]
+    fn rust_manifests_carry_the_edition_their_packages_compile_with() {
+        // A workspace that sets `[workspace.package] edition`, and packages that set their own,
+        // inherit it, set none, or inherit one a workspace without it does not declare (#632).
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nedition = \"2021\"\n",
+        );
+        let package = |name: &str, edition: &str| {
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n{edition}")
+        };
+        write(
+            "crates/own/Cargo.toml",
+            &package("own", "edition = \"2018\"\n"),
+        );
+        write(
+            "crates/inherits/Cargo.toml",
+            &package("inherits", "edition.workspace = true\n"),
+        );
+        write("crates/unset/Cargo.toml", &package("unset", ""));
+        write(
+            "solo/Cargo.toml",
+            &format!(
+                "{}\n[workspace]\n",
+                package("solo", "edition = { workspace = true }\n")
+            ),
+        );
+        write(
+            "odd/Cargo.toml",
+            &format!("{}\n[workspace]\n", package("odd", "edition = 2021\n")),
+        );
+
+        let model = ProjectModel::discover(dir.path());
+        let edition = |path: &str| rust_edition(&model, Path::new(path)).map(str::to_string);
+        assert_eq!(edition("crates/own/src/lib.rs").as_deref(), Some("2018"));
+        assert_eq!(
+            edition("crates/inherits/src/lib.rs").as_deref(),
+            Some("2021")
+        );
+        // A package that sets none is compiled as 2015, as Cargo does.
+        assert_eq!(edition("crates/unset/src/lib.rs").as_deref(), Some("2015"));
+        // An inherited edition its workspace does not declare, or one that is not a string, is
+        // not read; nor is a virtual manifest's.
+        assert_eq!(edition("solo/src/lib.rs"), None);
+        assert_eq!(edition("odd/src/lib.rs"), None);
+        assert_eq!(edition("Cargo.toml"), None);
     }
 
     #[test]

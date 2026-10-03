@@ -473,15 +473,24 @@ impl<'a> RustModuleTree<'a> {
     }
 
     /// Where a Rust `use` path written in `file` at `scope` starts when its first segment is not
-    /// `crate`, `self` or `super` (#632). Since the 2018 edition that segment is looked up in scope
-    /// first, so `use sys::imp::f;` in a file declaring `mod sys;` is `use self::sys::imp::f;`.
-    /// The segment names such a module when the file declares `mod` items of the name at its top
-    /// level and no other item of the name in the type namespace, the path is written at that
-    /// level or in a function body inside it, and no scope between declares or imports the name
-    /// or holds a glob that may supply it. A site that records no scope is read as written at
-    /// the top level, and a file-backed `mod first;` the module tree holds stands for the item
-    /// when the index holds no symbol of the name there. A path written inside an inline `mod`
-    /// block, or at a scope the index does not hold, is not read.
+    /// `crate`, `self` or `super` (#632). That depends on the package's edition.
+    ///
+    /// In the 2015 edition the path starts at the crate root wherever it is written, so
+    /// `use sys::f;` in `src/a.rs` is `use crate::sys::f;` when the crate root declares `mod sys`,
+    /// even if `src/a.rs` declares a `mod sys` of its own.
+    ///
+    /// Since the 2018 edition the segment is looked up in scope first, so `use sys::imp::f;` in a
+    /// file declaring `mod sys;` is `use self::sys::imp::f;`. The segment names such a module
+    /// when the file declares `mod` items of the name at its top level and no other item of the
+    /// name in the type namespace, the path is written at that level or in a function body inside
+    /// it, and no scope between declares or imports the name or holds a glob that may supply it.
+    /// A site that records no scope is read as written at the top level, and a file-backed
+    /// `mod first;` the module tree holds stands for the item when the index holds no symbol of
+    /// the name there. A path written inside an inline `mod` block, or at a scope the index does
+    /// not hold, is not read.
+    ///
+    /// When the index cannot read the edition, only a path written in a crate root is read, where
+    /// the crate root and the module in scope are the same module.
     fn use_path_start(
         &self,
         file: &FileId,
@@ -496,6 +505,31 @@ impl<'a> RustModuleTree<'a> {
         let first = first.trim();
         if matches!(first, "" | "crate" | "self" | "super" | "Self") {
             return UsePathStart::Elsewhere;
+        }
+        let importer = self.files.get(file).copied();
+        let module_file = importer.and_then(|path| self.module_file_of(path));
+        let at_crate_root = module_file
+            .as_ref()
+            .is_some_and(|file| file.importer_root.is_some());
+        match importer.and_then(|path| crate::project_model::rust_edition(self.project, path)) {
+            Some("2015") => {
+                let Some(module_file) = module_file else {
+                    return UsePathStart::Elsewhere;
+                };
+                let roots = match &module_file.importer_root {
+                    Some(root) => vec![root.clone()],
+                    None => self.declared_crate_roots(&module_file),
+                };
+                return if !roots.is_empty()
+                    && roots.iter().all(|root| self.declares_top(root, first))
+                {
+                    UsePathStart::Module(format!("crate::{}", source.trim()))
+                } else {
+                    UsePathStart::Elsewhere
+                };
+            }
+            None if !at_crate_root => return UsePathStart::Elsewhere,
+            _ => {}
         }
         // The import registry records a site with no scope at `global`.
         let unscoped = scope.is_none_or(|scope| scope.0 == "global");
@@ -3699,14 +3733,15 @@ mod tests {
     }
 
     /// Binds the Rust `use` sites and follows them for the file-level `IMPORTS` edge as indexing
-    /// does, in one package at the repository root that names the crates `external`.
+    /// does, in one package at the repository root of `edition` (`None` for a manifest the index
+    /// could not read) that names the crates `external`.
     fn bind_and_follow_rust_imports(
         files: &[&str],
         declarations: Vec<ModuleDeclarationSite>,
         sites: &[ImportSite],
-        symbols: Vec<Symbol>,
-        scopes: Vec<Scope>,
+        (symbols, scopes): (Vec<Symbol>, Vec<Scope>),
         external: &[&str],
+        edition: Option<&str>,
     ) -> (ImportRegistry, RustImportEdgeTargets) {
         let files = files.iter().copied().map(source_file).collect::<Vec<_>>();
         let mut registry = ImportRegistry::default();
@@ -3714,7 +3749,14 @@ mod tests {
             registry.insert_unresolved_site(site);
         }
         let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
-        let project = rust_project(&[("", None)]);
+        let mut project = rust_project(&[("", None)]);
+        if let Some(edition) = edition {
+            project.roots[0].cargo_manifest = Some(CargoManifest {
+                package: Some("fx".into()),
+                edition: Some(edition.into()),
+                ..Default::default()
+            });
+        }
         let mut scopes = open_kioku_resolution::ScopeIndex::build(scopes);
         scopes.record_module_declarations(&declarations);
         let names = Arc::new(external.iter().map(ToString::to_string).collect());
@@ -3785,9 +3827,9 @@ mod tests {
             &files,
             declarations.clone(),
             &sites,
-            symbols.clone(),
-            scopes.clone(),
+            (symbols.clone(), scopes.clone()),
             &[],
+            Some("2021"),
         );
         assert_eq!(
             bound_target(&registry, "src/lib.rs", "f").as_deref(),
@@ -3812,13 +3854,93 @@ mod tests {
 
         // A crate the package can name `sys` may start the path too: nothing is bound, and the
         // file-level edge stays unresolved rather than matched against repository paths.
-        let (registry, edges) =
-            bind_and_follow_rust_imports(&files, declarations, &sites, symbols, scopes, &["sys"]);
+        let (registry, edges) = bind_and_follow_rust_imports(
+            &files,
+            declarations,
+            &sites,
+            (symbols, scopes),
+            &["sys"],
+            Some("2021"),
+        );
         assert_eq!(bound_target(&registry, "src/lib.rs", "f"), None);
         assert_eq!(binding(&registry, "src/lib.rs", "f").target_file, None);
         let lib = FileId::new("file:src/lib.rs");
         assert!(edges.is_in_crate(&lib, "sys::imp::f"));
         assert_eq!(edge_target(&edges, "src/lib.rs", "sys::imp::f"), None);
+    }
+
+    #[test]
+    fn rust_use_paths_start_at_the_crate_root_in_the_2015_edition() {
+        // `src/lib.rs` declares `mod sys;` and `mod a;`; `src/a.rs` declares a `mod sys;` of its
+        // own and holds `use sys::f;`, and `src/lib.rs` holds `use sys::g;` (#632).
+        let files = ["src/lib.rs", "src/a.rs", "src/sys.rs", "src/a/sys.rs"];
+        let declarations = vec![
+            mod_decl("src/lib.rs", "sys"),
+            mod_decl("src/lib.rs", "a"),
+            mod_decl("src/a.rs", "sys"),
+        ];
+        let scopes = vec![
+            file_scope("scope:lib", "src/lib.rs", None, ScopeKind::File, (1, 10)),
+            file_scope("scope:a", "src/a.rs", None, ScopeKind::File, (1, 10)),
+        ];
+        let symbols = vec![
+            module_symbol("src/lib.rs", "sys", "scope:lib"),
+            module_symbol("src/lib.rs", "a", "scope:lib"),
+            module_symbol("src/a.rs", "sys", "scope:a"),
+            rust_symbol("src/sys.rs", "f"),
+            rust_symbol("src/sys.rs", "g"),
+            rust_symbol("src/a/sys.rs", "f"),
+        ];
+        let sites = [
+            rust_use_site("src/a.rs", "sys::f", "f", Some("scope:a")),
+            rust_use_site("src/lib.rs", "sys::g", "g", Some("scope:lib")),
+        ];
+        let run = |edition: Option<&str>| {
+            bind_and_follow_rust_imports(
+                &files,
+                declarations.clone(),
+                &sites,
+                (symbols.clone(), scopes.clone()),
+                &[],
+                edition,
+            )
+        };
+        let edge = |edges: &RustImportEdgeTargets, importer: &str, path: &str| {
+            edge_target(edges, importer, path)
+        };
+        // 2015: from the crate root, wherever the path is written.
+        let (registry, edges) = run(Some("2015"));
+        assert_eq!(
+            bound_target(&registry, "src/a.rs", "f").as_deref(),
+            Some("symbol:src/sys.rs:f")
+        );
+        assert_eq!(
+            edge(&edges, "src/a.rs", "sys::f").as_deref(),
+            Some("rust-item-module:file:src/sys.rs")
+        );
+        // 2018 and later: in scope, so `a.rs`'s own `sys`.
+        let (registry, edges) = run(Some("2021"));
+        assert_eq!(
+            bound_target(&registry, "src/a.rs", "f").as_deref(),
+            Some("symbol:src/a/sys.rs:f")
+        );
+        assert_eq!(
+            edge(&edges, "src/a.rs", "sys::f").as_deref(),
+            Some("rust-item-module:file:src/a/sys.rs")
+        );
+        // An edition the index cannot read leaves the path below the crate root unread; in the
+        // crate root both readings name the same module.
+        let (registry, edges) = run(None);
+        assert_eq!(bound_target(&registry, "src/a.rs", "f"), None);
+        assert_eq!(edge(&edges, "src/a.rs", "sys::f"), None);
+        for edition in [Some("2015"), Some("2021"), None] {
+            let (registry, _) = run(edition);
+            assert_eq!(
+                bound_target(&registry, "src/lib.rs", "g").as_deref(),
+                Some("symbol:src/sys.rs:g"),
+                "{edition:?}"
+            );
+        }
     }
 
     #[test]

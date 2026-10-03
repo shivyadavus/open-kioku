@@ -838,6 +838,9 @@ impl Indexer {
             &project_model,
             &files,
         ));
+        scope_index.record_rust_in_scope_use_paths(
+            crate::project_model::rust_in_scope_use_path_files(&project_model, &files),
+        );
         let rust_placement_gaps = rust_modules.placement_gaps();
         import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
         // Import bindings and file-level import edges follow the same declared module tree, and
@@ -4174,7 +4177,7 @@ class Util {
         let root = temp.path();
         std::fs::write(
             root.join("Cargo.toml"),
-            "[package]\nname = \"fx\"\nversion = \"0.1.0\"\n",
+            "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
         for (path, source) in files {
