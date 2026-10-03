@@ -841,6 +841,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         }
     }
 
@@ -1301,6 +1302,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let occ1 = SymbolOccurrence {
             symbol_id: symbol.id.clone(),
@@ -1619,6 +1621,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         };
         let occ = SymbolOccurrence {
             symbol_id: symbol.id.clone(),

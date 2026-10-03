@@ -651,6 +651,7 @@ mod tests {
             scope_id: Some(ScopeId::new("scope:fn")),
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         }
     }
 
@@ -751,6 +752,7 @@ mod ri3_relationship_outcome_tests {
             scope_id: Some(ScopeId::new("scope:fn")),
             signature: None,
             visibility: Visibility::Public,
+            alias_of: None,
         }
     }
 

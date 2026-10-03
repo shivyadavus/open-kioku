@@ -270,7 +270,14 @@ token's place, and where it cannot tell, the token is matched as before:
   edges are not read through aliases: a `USES_TYPE` edge proven from an annotation that names an
   alias ends at the alias. Go has no same-package strategy in this pass, so a bare name used in
   its own package (`Entry` inside `store`) is ambiguous beside a same-named alias elsewhere, as
-  it is beside any same-named type.
+  it is beside any same-named type. Once every resolution pass has run, an alias the pass placed
+  takes the kind of the type it stands for and names it in `Symbol::alias_of`, so
+  `type Source = store.Source` is stored, listed and graphed as an interface when `store.Source`
+  is one. Its syntax node alone reads as any type declaration, which is why it was a class
+  before. An alias the pass could not place (`type R = io.Reader`, whose target is outside the
+  repository) keeps the kind its syntax gives it and names no target. Search ranks a placed
+  alias just below its target and symbol listings put it just after (`docs/ranking.md`,
+  `type_alias_below_target`).
 - A field or parameter name (a Rust `name: value` or `Foo { name, .. }`, a JavaScript or
   TypeScript object key or annotated name, a Go composite literal's `Key: value`, a Python keyword
   argument) matches only a symbol of kind field.

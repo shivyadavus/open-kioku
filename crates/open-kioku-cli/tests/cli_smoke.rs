@@ -9908,3 +9908,221 @@ fn a_file_with_runnable_and_skipped_tests_recommends_one_and_counts_the_other() 
         "{caveat}"
     );
 }
+
+/// A one-line Go alias, `type Entry = store.Entry`, repeats the name of the type it stands for
+/// in a much shorter chunk, so BM25 scores it above that type's declaration (#621). `ok search`,
+/// `ok symbol find` and MCP `search_symbols` list it just after the type instead, and an alias of
+/// an interface is an interface.
+#[test]
+fn a_go_type_alias_is_listed_just_after_the_type_it_stands_for() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    for (path, content) in [
+        ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+        (
+            "store/store.go",
+            "package store\n\ntype Entry struct {\n\tAmount int\n}\n\ntype Source interface {\n\tNext() (Entry, bool)\n}\n",
+        ),
+        (
+            "ledger/aliases.go",
+            "package ledger\n\nimport \"example.com/app/store\"\n\ntype Entry = store.Entry\n\ntype Source = store.Source\n",
+        ),
+    ] {
+        fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+        fs::write(repo.join(path), content).unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    let search: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "Entry"]);
+        command
+    }))
+    .unwrap();
+    let paths = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths[..2],
+        ["store/store.go", "ledger/aliases.go"],
+        "{search}"
+    );
+    assert!(
+        search["results"][1]["score_breakdown"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|component| component["signal"] == "type_alias_below_target"),
+        "{search}"
+    );
+
+    let found: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "symbol", "find", "Entry"]);
+        command
+    }))
+    .unwrap();
+    let listed = |symbols: &serde_json::Value| {
+        symbols
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|symbol| {
+                format!(
+                    "{} {}",
+                    symbol["qualified_name"].as_str().unwrap(),
+                    symbol["kind"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        listed(&found)[..2],
+        ["store::store::Entry class", "ledger::aliases::Entry class"],
+        "{found}"
+    );
+    assert_eq!(
+        found[1]["alias_of"]["qualified_name"], "store::store::Entry",
+        "{found}"
+    );
+
+    let served: serde_json::Value =
+        serde_json::from_str(&mcp_search_symbols(repo, Some("Source"))).unwrap();
+    assert_eq!(
+        listed(&served),
+        [
+            "store::store::Source interface",
+            "ledger::aliases::Source interface"
+        ],
+        "{served}"
+    );
+}
+
+/// `ok search` shows one result per file, so an alias's file must not keep the first rank
+/// through another line of it once the alias goes below its target (#621): a group of aliases
+/// whose file name spells the query, and an alias beside a helper that names the type.
+#[test]
+fn a_go_type_alias_file_does_not_outrank_the_type_through_a_neighbour() {
+    let store = "package store\n\n// Entry is a ledger line.\ntype Entry struct{ Amount int }\n\ntype Reader interface{ Read() Entry }\n";
+    let grouped = "package ledger\n\nimport (\n\t\"example.com/app/mid\"\n\t\"example.com/app/store\"\n)\n\ntype Entry = mid.Row\n\ntype Line = store.Entry\n\ntype Source = store.Reader\n\ntype Blob = []byte\n";
+    let helper = "package ledger\n\nimport \"example.com/app/store\"\n\ntype Entry = store.Entry\n\nfunc NewEntry(amount int) Entry { return Entry{Amount: amount} }\n";
+    for (ledger, alias_line) in [(grouped, 8), (helper, 5)] {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        for (path, content) in [
+            ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+            ("store/store.go", store),
+            (
+                "mid/mid.go",
+                "package mid\n\nimport \"example.com/app/store\"\n\ntype Row = store.Entry\n",
+            ),
+            ("ledger/entry.go", ledger),
+        ] {
+            fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            fs::write(repo.join(path), content).unwrap();
+        }
+        run({
+            let mut command = ok();
+            command.arg("index").arg(repo);
+            command
+        });
+        let search: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", "Entry"]);
+            command
+        }))
+        .unwrap();
+        let shown = search["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| {
+                (
+                    result["path"].as_str().unwrap().to_string(),
+                    result["line_range"]["start"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown[..2],
+            [
+                ("store/store.go".to_string(), 4),
+                ("ledger/entry.go".to_string(), alias_line)
+            ],
+            "{search}"
+        );
+    }
+}
+
+/// A type declared beside an alias is never carried below that alias's target: `store/store.go`
+/// declares `Entry`, which `ledger/aliases.go` aliases, beside `type Record = audit.Record`.
+/// Searching both names, the `Entry` alias ranks below `store.Entry` (#621).
+#[test]
+fn a_type_declared_beside_an_alias_stays_above_its_own_alias() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    for (path, content) in [
+        ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+        (
+            "ledger/aliases.go",
+            "package ledger\n\nimport \"example.com/app/store\"\n\ntype Entry = store.Entry\n",
+        ),
+        (
+            "audit/audit.go",
+            "package audit\n\n// Record is an audit record kept for compliance, with a long comment so it scores lower than\n// the short alias line that repeats its name in another package of this repository.\ntype Record struct {\n\tWho  string\n\tWhen int64\n\tWhat string\n}\n",
+        ),
+        (
+            "store/store.go",
+            "package store\n\nimport \"example.com/app/audit\"\n\n// Entry is a ledger line.\ntype Entry struct{ Amount int }\n\ntype Record = audit.Record\n",
+        ),
+    ] {
+        fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+        fs::write(repo.join(path), content).unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let search: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "Entry Record", "--limit", "20"]);
+        command
+    }))
+    .unwrap();
+    let symbols = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["symbol"]["qualified_name"].as_str().unwrap_or(""))
+        .collect::<Vec<_>>();
+    let at = |name: &str| {
+        symbols
+            .iter()
+            .position(|symbol| *symbol == name)
+            .unwrap_or_else(|| panic!("`{name}` is listed: {search}"))
+    };
+    assert!(
+        at("store::store::Entry") < at("ledger::aliases::Entry"),
+        "{search}"
+    );
+}

@@ -471,6 +471,7 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
                     scope_id: ctx.current_scope(),
                     signature,
                     visibility,
+                    alias_of: None,
                 };
 
                 out.symbols.push(symbol);

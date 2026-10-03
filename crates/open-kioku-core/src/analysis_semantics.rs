@@ -143,7 +143,12 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// declares it, as a `self::` path does, and is proven as such a path is; one whose first segment
 /// is also a crate the package can name is ambiguous. v34 indexes hold no edge for such a path.
 /// v35 is taken by an open change.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v36";
+/// v37: the symbol-registry pass reports each Go type alias it placed, and the indexed alias
+/// symbol takes its target's kind and names it (`Symbol::alias_of`), which search ranks and
+/// symbol listings order by. v36 indexes hold every alias with its syntax kind and no target, so
+/// a one-line alias outranks the type it stands for. v33 and v35 were reserved for this change
+/// and are left unused.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v37";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

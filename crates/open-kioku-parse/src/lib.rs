@@ -239,6 +239,7 @@ fn extract_with_patterns(
                         scope_id: None,
                         signature: None,
                         visibility: open_kioku_core::Visibility::Unknown,
+                        alias_of: None,
                     });
                 }
             }
@@ -1869,6 +1870,7 @@ endpoint = "https://orders.example.com/v1/orders"
                 scope_id: None,
                 signature: None,
                 visibility: open_kioku_core::Visibility::Unknown,
+                alias_of: None,
             },
             Symbol {
                 id: SymbolId::new("call"),
@@ -1885,6 +1887,7 @@ endpoint = "https://orders.example.com/v1/orders"
                 scope_id: None,
                 signature: None,
                 visibility: open_kioku_core::Visibility::Unknown,
+                alias_of: None,
             },
         ];
 
@@ -1948,6 +1951,7 @@ endpoint = "https://orders.example.com/v1/orders"
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         }
     }
 

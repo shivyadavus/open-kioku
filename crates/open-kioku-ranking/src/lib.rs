@@ -1,5 +1,7 @@
 use open_kioku_core::{ScoreComponent, SearchResult};
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Signals a lexical producer attaches to the score it wrote into `SearchResult.score`: the
 /// Tantivy index's `bm25_relevance` and the in-memory fallback's `lexical_relevance`. Only
@@ -280,7 +282,175 @@ pub fn rerank_with_options(
         }
     }
     results.sort_by(|a, b| compare_reranked(a, b, options.query.as_deref()));
+    if options.mode != RankingMode::Baseline
+        && rank_type_aliases_below_targets(&mut results, options.query.as_deref())
+    {
+        results.sort_by(|a, b| compare_reranked(a, b, options.query.as_deref()));
+    }
     results
+}
+
+/// The score component that ranks a Go type alias just below the type it stands for.
+pub const TYPE_ALIAS_BELOW_TARGET_SIGNAL: &str = "type_alias_below_target";
+
+/// Ranks each Go type alias the index placed (`Symbol::alias_of`) just below the type it stands
+/// for, when both are in the pool and the alias ranks above it: `type Entry = store.Entry` is one
+/// short line that repeats the type's name, so BM25 scores it above the declaration it names.
+/// The alias takes the largest score below its target's, recorded as a
+/// [`TYPE_ALIAS_BELOW_TARGET_SIGNAL`] component carrying both results' evidence ids.
+///
+/// Search keeps one result per file, so the other results of the alias's file that ranked above
+/// the target go below the file's demoted aliases too: otherwise the file would keep its rank
+/// through a neighbour that the alias's file name or the alias itself lifted (an unplaced
+/// `type Blob = []byte`, a `func NewEntry`) and show that line in place of the alias. A neighbour
+/// that declares a type of its own is never moved, nor one the query names when it does not name
+/// the target: a type declaration is a result on its own merit, and it may be the target of
+/// another alias in the pool (`store.go` holding `type Entry struct` beside
+/// `type Record = audit.Record`).
+///
+/// Only aliases and those neighbours lose score, and every target is a declared type, so no
+/// target moves and one pass leaves no alias above its in-pool target. An alias whose target is
+/// not in the pool is left where it is, and so is one the query names when it does not name the
+/// target (`ledger::aliases::Entry`, or Go's `ledger.Entry`). No result outside an alias's file
+/// moves relative to another. `results` must be in `compare_reranked` order; returns whether a
+/// score changed.
+fn rank_type_aliases_below_targets(results: &mut [SearchResult], query: Option<&str>) -> bool {
+    if !results
+        .iter()
+        .any(|result| result.symbol.as_ref().is_some_and(|s| s.alias_of.is_some()))
+    {
+        return false;
+    }
+    let names = |result: &SearchResult| {
+        query.is_some_and(|query| {
+            exact_identity_match(result, query) || go_qualified_name_match(result, query)
+        })
+    };
+    // The best-ranked result of each symbol, which is its first in `compare_reranked` order.
+    let mut first_of_symbol = HashMap::new();
+    for (index, result) in results.iter().enumerate() {
+        if let Some(symbol) = &result.symbol {
+            first_of_symbol.entry(symbol.id.clone()).or_insert(index);
+        }
+    }
+    let mut demotions: HashMap<usize, (f32, ScoreComponent)> = HashMap::new();
+    // Per file holding a demoted alias: the lowest score a demoted alias of it took, the rank
+    // of the lowest-ranked target among them, and those aliases.
+    let mut demoted_files: HashMap<PathBuf, (f32, usize, Vec<usize>)> = HashMap::new();
+    for (index, alias) in results.iter().enumerate() {
+        let Some(target) = alias.symbol.as_ref().and_then(|s| s.alias_of.as_ref()) else {
+            continue;
+        };
+        let Some(&target_index) = first_of_symbol.get(&target.symbol_id) else {
+            continue;
+        };
+        let target_result = &results[target_index];
+        if target_index < index
+            || (names(alias) && !names(target_result))
+            || !target_result.score.is_finite()
+        {
+            continue;
+        }
+        let score = target_result.score.next_down();
+        let mut evidence_ids = alias.derived_evidence_ids();
+        evidence_ids.extend(target_result.derived_evidence_ids());
+        let component = ScoreComponent::adjustment(
+            TYPE_ALIAS_BELOW_TARGET_SIGNAL,
+            score - alias.score,
+            evidence_ids,
+            format!(
+                "Go type alias of `{}`: ranked just below the type it stands for",
+                target.qualified_name
+            ),
+        );
+        demotions.insert(index, (score, component));
+        let file =
+            demoted_files
+                .entry(alias.path.clone())
+                .or_insert((score, target_index, Vec::new()));
+        file.0 = file.0.min(score);
+        file.1 = file.1.max(target_index);
+        file.2.push(index);
+    }
+    for (path, (floor, target_index, aliases)) in &demoted_files {
+        let target_result = &results[*target_index];
+        let target_names = names(target_result);
+        let score = floor.next_down();
+        for (index, result) in results.iter().enumerate().take(*target_index) {
+            if result.path != *path
+                || demotions.contains_key(&index)
+                || declares_a_type(result)
+                || (names(result) && !target_names)
+            {
+                continue;
+            }
+            let mut evidence_ids = result.derived_evidence_ids();
+            for &alias in aliases {
+                evidence_ids.extend(results[alias].derived_evidence_ids());
+            }
+            evidence_ids.extend(target_result.derived_evidence_ids());
+            let target_name = target_result
+                .symbol
+                .as_ref()
+                .map_or("", |symbol| symbol.qualified_name.as_str());
+            let component = ScoreComponent::adjustment(
+                TYPE_ALIAS_BELOW_TARGET_SIGNAL,
+                score - result.score,
+                evidence_ids,
+                format!(
+                    "in the file of a Go type alias of `{target_name}`: ranked below the type the alias stands for"
+                ),
+            );
+            demotions.insert(index, (score, component));
+        }
+    }
+    let changed = !demotions.is_empty();
+    for (index, (score, component)) in demotions {
+        let result = &mut results[index];
+        result.score = score;
+        result.add_score_component(component);
+    }
+    changed
+}
+
+/// Whether `result` is a type's own declaration: a symbol of a type kind that is not a Go type
+/// alias. An alias is read from `alias_of`, or, for one whose target the index could not place,
+/// from the signature the parser gives every Go alias (`type Blob = []byte`).
+fn declares_a_type(result: &SearchResult) -> bool {
+    let Some(symbol) = result.symbol.as_ref() else {
+        return false;
+    };
+    let type_kind = matches!(
+        symbol.kind,
+        open_kioku_core::SymbolKind::Class
+            | open_kioku_core::SymbolKind::Interface
+            | open_kioku_core::SymbolKind::Trait
+    );
+    let go_alias = symbol.alias_of.is_some()
+        || (symbol.language == open_kioku_core::Language::Go
+            && symbol.signature.as_deref().is_some_and(|signature| {
+                signature.starts_with(&format!("type {} = ", symbol.name))
+            }));
+    type_kind && !go_alias
+}
+
+/// Whether `query` spells `result`'s symbol as Go code outside its package does: `ledger.Entry`
+/// for `Entry` declared in a file under `ledger/`.
+fn go_qualified_name_match(result: &SearchResult, query: &str) -> bool {
+    let Some((package, name)) = query.trim().rsplit_once('.') else {
+        return false;
+    };
+    let Some(symbol) = result.symbol.as_ref() else {
+        return false;
+    };
+    symbol.language == open_kioku_core::Language::Go
+        && symbol.name == name
+        && result
+            .path
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(|dir| dir.to_str())
+            == Some(package)
 }
 
 /// Exact identity matches first, then descending score, then repository position (path, line
@@ -1081,10 +1251,11 @@ mod tests {
     use super::{
         rerank, rerank_baseline, rerank_with_options, rerank_without_signal, top_score_signals,
         RankingMode, RankingOptions, RankingSignal, RankingWeights, TextRelevanceScale,
+        TYPE_ALIAS_BELOW_TARGET_SIGNAL,
     };
     use open_kioku_core::{
         Confidence, EvidenceSourceType, FileId, Language, LineRange, ScoreComponent, SearchResult,
-        Symbol, SymbolId, SymbolKind,
+        Symbol, SymbolId, SymbolKind, TypeAliasTarget,
     };
     use std::path::{Path, PathBuf};
 
@@ -1276,6 +1447,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         });
         let test = make_result("src/test/TildePrefixValidatorTests.java", 48.1);
 
@@ -1318,6 +1490,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         });
         let mut prefix = make_result("src/Router.java", 42.0);
         prefix.symbol = Some(Symbol {
@@ -1335,6 +1508,7 @@ mod tests {
             scope_id: None,
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
         });
 
         let results = rerank_with_options(
@@ -1989,5 +2163,461 @@ mod tests {
         typed.exact_reference_provenance = Some(EvidenceSourceType::TreeSitter);
         let results = rerank(vec![typed]);
         assert!(has_exact_reference(&results[0]));
+    }
+
+    /// A Go type result: the type `store::store::Entry`, or, given `alias_of`, an alias of it.
+    fn go_type(
+        path: &str,
+        score: f32,
+        qualified_name: &str,
+        alias_of: Option<&str>,
+    ) -> SearchResult {
+        let mut result = make_result(path, score);
+        result.evidence_refs = vec![format!("{path}:1")];
+        result.symbol = Some(Symbol {
+            id: SymbolId::new(qualified_name),
+            name: qualified_name.rsplit("::").next().unwrap().into(),
+            qualified_name: qualified_name.into(),
+            kind: SymbolKind::Class,
+            file_id: FileId::new(path),
+            range: Some(LineRange::single(1)),
+            language: Language::Go,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Public,
+            alias_of: alias_of.map(|target| TypeAliasTarget {
+                symbol_id: SymbolId::new(target),
+                qualified_name: target.into(),
+            }),
+        });
+        result
+    }
+
+    /// `type Entry = store.Entry` scored above `type Entry struct`, as BM25 scores the one-line
+    /// alias, with an unrelated result between them and one below.
+    fn alias_pool(alias_of: Option<&str>) -> Vec<SearchResult> {
+        vec![
+            go_type(
+                "ledger/aliases.go",
+                11.35,
+                "ledger::aliases::Entry",
+                alias_of,
+            ),
+            make_result("ledger/journal.go", 11.0),
+            go_type("store/store.go", 10.62, "store::store::Entry", None),
+            make_result("main.go", 2.16),
+        ]
+    }
+
+    fn paths(results: &[SearchResult]) -> Vec<&str> {
+        results
+            .iter()
+            .map(|result| result.path.to_str().unwrap())
+            .collect()
+    }
+
+    fn alias_component(result: &SearchResult) -> Option<&ScoreComponent> {
+        result
+            .score_breakdown
+            .iter()
+            .find(|component| component.signal == TYPE_ALIAS_BELOW_TARGET_SIGNAL)
+    }
+
+    #[test]
+    fn a_go_type_alias_ranks_just_below_the_type_it_stands_for() {
+        for query in [None, Some("Entry")] {
+            let options = RankingOptions {
+                query: query.map(str::to_string),
+                ..RankingOptions::default()
+            };
+            let unmarked = rerank_with_options(alias_pool(None), &options);
+            let ranked = rerank_with_options(alias_pool(Some("store::store::Entry")), &options);
+            assert_eq!(
+                paths(&unmarked)[0],
+                "ledger/aliases.go",
+                "{query:?}: the fixture must rank the alias first when it is not marked"
+            );
+
+            let alias = paths(&ranked)
+                .iter()
+                .position(|path| *path == "ledger/aliases.go")
+                .unwrap();
+            assert!(
+                alias > 0,
+                "{query:?}: the alias still ranks first: {:?}",
+                paths(&ranked)
+            );
+            assert_eq!(
+                paths(&ranked)[alias - 1],
+                "store/store.go",
+                "{query:?}: {:?}",
+                paths(&ranked)
+            );
+            assert!(ranked[alias].score < ranked[alias - 1].score);
+            // No other result moves relative to another.
+            let others = |results: &[SearchResult]| {
+                paths(results)
+                    .into_iter()
+                    .filter(|path| *path != "ledger/aliases.go")
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(others(&ranked), others(&unmarked), "{query:?}");
+
+            let component = alias_component(&ranked[alias]).expect("the demotion is recorded");
+            assert!(component.contribution < 0.0, "{component:?}");
+            assert!(component.rationale.contains("`store::store::Entry`"));
+            assert!(component
+                .evidence_ids
+                .contains(&"store/store.go:1".to_string()));
+            assert!(component
+                .evidence_ids
+                .contains(&"ledger/aliases.go:1".to_string()));
+            let total = open_kioku_core::score_component_total(&ranked[alias].score_breakdown);
+            assert!((total - ranked[alias].score).abs() <= 0.001, "{total}");
+        }
+    }
+
+    #[test]
+    fn a_go_type_alias_keeps_its_rank_without_its_target_or_when_the_query_names_it() {
+        // The target is not in the pool: nothing to rank below.
+        let options = RankingOptions::default();
+        let mut pool = alias_pool(Some("store::store::Entry"));
+        pool.remove(2);
+        let ranked = rerank_with_options(pool, &options);
+        assert_eq!(paths(&ranked)[0], "ledger/aliases.go");
+        assert!(ranked
+            .iter()
+            .all(|result| alias_component(result).is_none()));
+
+        // The query spells the alias, not the type it stands for.
+        let options = RankingOptions {
+            query: Some("ledger::aliases::Entry".into()),
+            ..RankingOptions::default()
+        };
+        let ranked = rerank_with_options(alias_pool(Some("store::store::Entry")), &options);
+        assert_eq!(paths(&ranked)[0], "ledger/aliases.go");
+        assert!(ranked
+            .iter()
+            .all(|result| alias_component(result).is_none()));
+
+        // Lexical baseline ranking reads the lexical score alone.
+        let ranked = rerank_baseline(alias_pool(Some("store::store::Entry")));
+        assert_eq!(paths(&ranked)[0], "ledger/aliases.go");
+
+        // Go spells the alias `ledger.Entry` outside its package.
+        let options = RankingOptions {
+            query: Some("ledger.Entry".into()),
+            ..RankingOptions::default()
+        };
+        let mut pool = alias_pool(Some("store::store::Entry"));
+        pool[0].path = PathBuf::from("ledger/entry.go");
+        let ranked = rerank_with_options(pool, &options);
+        assert_eq!(paths(&ranked)[0], "ledger/entry.go");
+        assert!(ranked
+            .iter()
+            .all(|result| alias_component(result).is_none()));
+        // Another package's qualifier does not name it.
+        let options = RankingOptions {
+            query: Some("mid.Entry".into()),
+            ..RankingOptions::default()
+        };
+        let mut pool = alias_pool(Some("store::store::Entry"));
+        pool[0].path = PathBuf::from("ledger/entry.go");
+        let ranked = rerank_with_options(pool, &options);
+        assert_eq!(
+            paths(&ranked)[..3],
+            ["ledger/journal.go", "store/store.go", "ledger/entry.go"]
+        );
+    }
+
+    /// One result per file, best first, as `ok search` pages them.
+    fn file_representatives(results: &[SearchResult]) -> Vec<(String, u32)> {
+        let mut seen = std::collections::HashSet::new();
+        results
+            .iter()
+            .filter(|result| seen.insert(result.path.clone()))
+            .map(|result| {
+                (
+                    result.path.to_str().unwrap().to_string(),
+                    result.line_range.as_ref().map_or(0, |range| range.start),
+                )
+            })
+            .collect()
+    }
+
+    fn at_line(mut result: SearchResult, line: u32) -> SearchResult {
+        result.line_range = Some(LineRange::single(line));
+        result.evidence_refs = vec![format!("{}:{line}", result.path.display())];
+        result
+    }
+
+    #[test]
+    fn a_go_type_alias_file_does_not_outrank_the_target_through_a_neighbour() {
+        let options = RankingOptions {
+            query: Some("Entry".into()),
+            ..RankingOptions::default()
+        };
+        // `ledger/entry.go` groups aliases, and the file name lifts every line of it: an
+        // unplaced `type Blob = []byte` outscores the alias it sits beside.
+        let grouped = vec![
+            at_line(make_result("ledger/entry.go", 9.43), 14),
+            at_line(
+                go_type(
+                    "ledger/entry.go",
+                    9.40,
+                    "ledger::entry::Entry",
+                    Some("store::store::Entry"),
+                ),
+                8,
+            ),
+            at_line(
+                go_type(
+                    "ledger/entry.go",
+                    9.30,
+                    "ledger::entry::Line",
+                    Some("store::store::Entry"),
+                ),
+                10,
+            ),
+            at_line(
+                go_type("store/store.go", 8.80, "store::store::Entry", None),
+                4,
+            ),
+            at_line(make_result("api/api.go", 1.95), 5),
+        ];
+        // An alias beside a helper that names the type.
+        let helper = vec![
+            at_line(make_result("ledger/entry.go", 11.9), 7),
+            at_line(
+                go_type(
+                    "ledger/entry.go",
+                    10.4,
+                    "ledger::entry::Entry",
+                    Some("store::store::Entry"),
+                ),
+                5,
+            ),
+            at_line(
+                go_type("store/store.go", 9.27, "store::store::Entry", None),
+                4,
+            ),
+            at_line(make_result("api/api.go", 2.36), 5),
+        ];
+        for (pool, alias_line) in [(grouped, 8), (helper, 5)] {
+            let ranked = rerank_with_options(pool, &options);
+            assert_eq!(
+                file_representatives(&ranked),
+                [
+                    ("store/store.go".to_string(), 4),
+                    ("ledger/entry.go".to_string(), alias_line),
+                    ("api/api.go".to_string(), 5),
+                ],
+                "{:?}",
+                ranked
+                    .iter()
+                    .map(|result| (&result.path, &result.line_range, result.score))
+                    .collect::<Vec<_>>()
+            );
+            for result in ranked
+                .iter()
+                .filter(|result| result.path == Path::new("ledger/entry.go"))
+            {
+                let component = alias_component(result).expect("the file's results are demoted");
+                assert!(component
+                    .evidence_ids
+                    .contains(&"store/store.go:4".to_string()));
+            }
+        }
+    }
+
+    /// `results` in their ranked order, as (qualified name, score) of those with a symbol.
+    fn ranked_symbols(results: &[SearchResult]) -> Vec<(String, f32)> {
+        results
+            .iter()
+            .filter_map(|result| {
+                let symbol = result.symbol.as_ref()?;
+                Some((symbol.qualified_name.clone(), result.score))
+            })
+            .collect()
+    }
+
+    /// Every alias whose target is in `results` ranks below it, unless the query names the alias
+    /// and not the target.
+    fn assert_no_alias_above_its_target(results: &[SearchResult], query: &str) {
+        let position = |id: &SymbolId| {
+            results
+                .iter()
+                .position(|result| result.symbol.as_ref().is_some_and(|s| &s.id == id))
+        };
+        for (index, alias) in results.iter().enumerate() {
+            let Some(target) = alias.symbol.as_ref().and_then(|s| s.alias_of.as_ref()) else {
+                continue;
+            };
+            let Some(target_index) = position(&target.symbol_id) else {
+                continue;
+            };
+            let names = |result: &SearchResult| {
+                super::exact_identity_match(result, query)
+                    || super::go_qualified_name_match(result, query)
+            };
+            if names(alias) && !names(&results[target_index]) {
+                continue;
+            }
+            assert!(
+                target_index < index,
+                "{query:?}: {} ranks above its target {}: {:?}",
+                alias.symbol.as_ref().unwrap().qualified_name,
+                target.qualified_name,
+                ranked_symbols(results)
+            );
+            // An alias demoted for its own target says so, and now ranks below that target. One
+            // moved with a demoted alias of its file says that instead.
+            if let Some(component) = alias_component(alias) {
+                let own = format!("Go type alias of `{}`:", target.qualified_name);
+                assert!(
+                    component.rationale.starts_with(&own)
+                        || component
+                            .rationale
+                            .starts_with("in the file of a Go type alias"),
+                    "{component:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_type_declared_beside_an_alias_keeps_its_rank_as_another_alias_target() {
+        // `store/store.go` declares `Entry` and aliases `audit.Record`; `ledger/aliases.go`
+        // aliases `store.Entry`. Demoting the `Record` alias's file must not carry `Entry`, the
+        // target of the other alias, below that alias.
+        let mut store_entry = go_type("store/store.go", 7.10, "store::store::Entry", None);
+        store_entry.line_range = Some(LineRange::single(6));
+        let mut store_record = go_type(
+            "store/store.go",
+            7.40,
+            "store::store::Record",
+            Some("audit::audit::Record"),
+        );
+        store_record.line_range = Some(LineRange::single(8));
+        store_record.evidence_refs = vec!["store/store.go:8".into()];
+        let pool = vec![
+            store_record,
+            go_type(
+                "ledger/aliases.go",
+                7.17,
+                "ledger::aliases::Entry",
+                Some("store::store::Entry"),
+            ),
+            store_entry,
+            go_type("audit/audit.go", 7.05, "audit::audit::Record", None),
+        ];
+        let options = RankingOptions {
+            query: Some("Entry Record".into()),
+            ..RankingOptions::default()
+        };
+        let ranked = rerank_with_options(pool, &options);
+        let order = ranked_symbols(&ranked)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        let at = |name: &str| order.iter().position(|n| n == name).unwrap();
+        assert!(
+            at("store::store::Entry") < at("ledger::aliases::Entry"),
+            "{:?}",
+            ranked_symbols(&ranked)
+        );
+        assert!(
+            at("audit::audit::Record") < at("store::store::Record"),
+            "{order:?}"
+        );
+        let entry = ranked
+            .iter()
+            .find(|result| result.symbol.as_ref().unwrap().qualified_name == "store::store::Entry")
+            .unwrap();
+        assert!(
+            alias_component(entry).is_none(),
+            "a declared type is never moved"
+        );
+        assert_no_alias_above_its_target(&ranked, "Entry Record");
+    }
+
+    /// Small pools of aliases, their targets and neighbours spread over three files, with
+    /// scores, targets and file placement drawn from a fixed-seed generator: no alias may end
+    /// above a target in the pool.
+    #[test]
+    fn no_alias_ends_above_its_target_in_random_pools() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let files = ["ledger/entry.go", "store/store.go", "audit/audit.go"];
+        let types = ["Entry", "Record", "Batch"];
+        for round in 0..500 {
+            let mut pool = Vec::new();
+            for (index, name) in types.iter().enumerate() {
+                if next(4) == 0 {
+                    continue;
+                }
+                let file = files[next(3) as usize];
+                let dir = file.split('/').next().unwrap();
+                let mut result = go_type(
+                    file,
+                    1.0 + next(1000) as f32 / 100.0,
+                    &format!("{dir}::{dir}::{name}"),
+                    None,
+                );
+                result.line_range = Some(LineRange::single(index as u32 * 10 + 1));
+                result.evidence_refs = vec![format!("{file}:{}", index * 10 + 1)];
+                pool.push(result);
+            }
+            let targets = pool
+                .iter()
+                .map(|result| result.symbol.as_ref().unwrap().qualified_name.clone())
+                .collect::<Vec<_>>();
+            for alias in 0..1 + next(4) {
+                if targets.is_empty() {
+                    break;
+                }
+                let file = files[next(3) as usize];
+                let dir = file.split('/').next().unwrap();
+                let target = &targets[next(targets.len() as u64) as usize];
+                let name = ["Entry", "Record", "Line"][next(3) as usize];
+                let mut result = go_type(
+                    file,
+                    1.0 + next(1000) as f32 / 100.0,
+                    &format!("{dir}::{dir}::{name}{alias}"),
+                    Some(target),
+                );
+                result.symbol.as_mut().unwrap().name = name.into();
+                let line = 100 + alias as u32;
+                result.line_range = Some(LineRange::single(line));
+                result.evidence_refs = vec![format!("{file}:{line}")];
+                pool.push(result);
+            }
+            for neighbour in 0..next(3) {
+                let file = files[next(3) as usize];
+                let line = 200 + neighbour as u32;
+                pool.push(at_line(
+                    make_result(file, 1.0 + next(1000) as f32 / 100.0),
+                    line,
+                ));
+            }
+            let query = ["Entry", "Entry Record", "Record", "ledger.Entry"][next(4) as usize];
+            let options = RankingOptions {
+                query: Some(query.into()),
+                ..RankingOptions::default()
+            };
+            let ranked = rerank_with_options(pool, &options);
+            assert_no_alias_above_its_target(&ranked, query);
+            let _ = round;
+        }
     }
 }
