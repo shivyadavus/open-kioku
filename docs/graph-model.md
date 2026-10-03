@@ -133,6 +133,28 @@ default file would claim a certainty the index does not have and leave the other
 with no user. A `use` of the type written inside one alternative binds that alternative's type,
 and is proven, as above.
 
+A Rust call path need not start with `crate`, `self` or `super` (#626). Since the 2018 edition a
+path's first segment is looked up in scope at the call, so `sys::imp::f()` in a file that
+declares `mod sys;` is `self::sys::imp::f()`: from module `a::b` it names `a::b::sys`, never a
+`sys` the crate root declares. The resolver reads such a path from the module or file scope whose
+`mod` item the first segment names by lexical lookup: an item of the module around the call, or
+one that module reaches through `use super::name;` or `use super::*` (`mod tests` beside the
+file's `mod sys;`). It then follows the path as that `self::` path, with the same strategies,
+proofs and configuration choices: a path into a module whose file configuration selects keeps a
+candidate per file as above, and one written inside an alternative reads that alternative. A
+first segment that an import in scope binds instead (`use crate::alt as sys;` in the function
+body, or `use crate::sys;` in another file) is read through the import: when the nearest import
+of the name is one explicit import whose path starts with `crate`, `self` or `super`, that path
+takes the segment's place and is read from the scope the import is written in, so
+`sys::imp::f()` after `use crate::sys;` is `crate::sys::imp::f()`; a one-segment path such as
+`sys::f()` keeps its import proofs as before. A type or other item of the name shadows the
+module, a glob that may supply the name leaves the path unread, and a `mod` item inside a
+function body is not followed. A first segment that names such a module and also a crate the package can name (a
+dependency in the manifest, `std`, `core` or `alloc`) may start from either, so the call is
+reported ambiguous with the module's item as its candidate (strategies
+`rust_module_or_crate_path` and `rust_module_or_crate_member`) and gets no edge. A path through a
+crate name the package declares is read as before, when nothing in scope shadows the name.
+
 Nodes and edges also support additive metadata fields. `properties` stores
 structured queryable facts that are specific to the node or edge family, such as
 qualified names, route names, relation kinds, package names, or resolver output.

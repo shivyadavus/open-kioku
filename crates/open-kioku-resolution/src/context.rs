@@ -509,6 +509,52 @@ pub(crate) fn rust_relative_module<'s>(
     Some(RustRelativeModule::InFile(&module.id))
 }
 
+/// The module a Rust path's first segment `name` names when written at `scope_id` without
+/// `crate`, `self` or `super` (#626): a `mod` item of the module around the use site, or one
+/// that module reaches by lexical lookup (`use super::name;`, `use super::*`). Returns the
+/// module or file scope declaring that `mod` item and the module's own name, which a
+/// `use super::sys as s;` renames; the path then continues from there as a `self::` path does.
+/// `None` when the nearest item of the name in the type namespace is anything but a module, a
+/// `mod` item inside a function body included, or when lexical lookup cannot prove an item of
+/// this file, such as behind an import of another path.
+pub(crate) fn rust_module_in_scope<'s>(
+    ctx: &ResolutionContext<'s>,
+    scope_id: &ScopeId,
+    name: &str,
+) -> Option<(&'s ScopeId, &'s str)> {
+    // Functions, fields and constants live in the value namespace and never begin a path.
+    let items = nearest_lexical_items(ctx, scope_id, name, |symbol| {
+        !matches!(
+            symbol.kind,
+            SymbolKind::Function
+                | SymbolKind::Method
+                | SymbolKind::Field
+                | SymbolKind::Variable
+                | SymbolKind::Constant
+                | SymbolKind::Test
+                | SymbolKind::Endpoint
+                | SymbolKind::DatabaseTable
+        )
+    })?;
+    let mut declared = None;
+    for item in &items {
+        let symbol = ctx.symbols.get(item)?;
+        if symbol.kind != SymbolKind::Module {
+            return None;
+        }
+        let scope = ctx.scopes.get(symbol.scope_id.as_ref()?)?;
+        if !matches!(scope.kind, ScopeKind::Module | ScopeKind::File) {
+            return None;
+        }
+        let here = (&scope.id, symbol.name.as_str());
+        if declared.is_some_and(|found| found != here) {
+            return None;
+        }
+        declared = Some(here);
+    }
+    declared
+}
+
 /// The names of the inline `mod` blocks from the file's own module down to `module`.
 fn rust_inline_module_path(ctx: &ResolutionContext<'_>, module: &Scope) -> Option<Vec<String>> {
     let mut names = Vec::new();

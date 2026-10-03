@@ -138,7 +138,12 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// from such a file into every alternative, and one authoritative edge into the placed default
 /// file for the type's method, declared type and implemented trait. v33 is taken by an open
 /// change.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v34";
+/// v36: a Rust call path whose first segment is a module in scope at the call rather than
+/// `crate`, `self` or `super` (`sys::imp::f()` beside `mod sys;`) starts from the module that
+/// declares it, as a `self::` path does, and is proven as such a path is; one whose first segment
+/// is also a crate the package can name is ambiguous. v34 indexes hold no edge for such a path.
+/// v35 is taken by an open change.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v36";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

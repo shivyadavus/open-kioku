@@ -2222,6 +2222,238 @@
       "notes": "Regression case (#624): `src/lib.rs` also mounts `src/sys/imp/util.rs`, below the placed default alternative, with `#[path]`; its `crate::sys::imp::target_fn()` keeps a candidate in `src/sys/imp/mod.rs` and `src/sys/win/mod.rs` and no authoritative edge."
     },
     {
+      "id": "ci-rust-calls-109-module_in_scope_path",
+      "fixture_id": "ci/ri3/rust/calls/module_in_scope_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_in_scope_path:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "module_in_scope_path",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::target_fn",
+        "identity": "symbol:rust:calls:module_in_scope_path:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#626): `sys::imp::target_fn()` in `src/lib.rs`, which declares `mod sys;`, starts from the crate root's own module as `self::sys::imp::target_fn()` does and names `src/sys/imp.rs`."
+    },
+    {
+      "id": "ci-rust-calls-110-module_in_scope_nested_module",
+      "fixture_id": "ci/ri3/rust/calls/module_in_scope_nested_module",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_in_scope_nested_module:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "module_in_scope_nested_module",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::a::b::sys::target_fn",
+        "identity": "symbol:rust:calls:module_in_scope_nested_module:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#626): `sys::target_fn()` in `src/a/b.rs`, which declares `mod sys;`, names `a::b::sys` in `src/a/b/sys.rs`, not the crate root's `sys` in `src/sys.rs`."
+    },
+    {
+      "id": "ci-rust-calls-111-module_in_scope_super_glob",
+      "fixture_id": "ci/ri3/rust/calls/module_in_scope_super_glob",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_in_scope_super_glob:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "module_in_scope_super_glob",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::target_fn",
+        "identity": "symbol:rust:calls:module_in_scope_super_glob:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#626): `sys::target_fn()` in `mod tests { use super::*; }` of `src/lib.rs` reaches the `sys` module the crate root declares."
+    },
+    {
+      "id": "ci-rust-calls-112-module_in_scope_type_path",
+      "fixture_id": "ci/ri3/rust/calls/module_in_scope_type_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_in_scope_type_path:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "module_in_scope_type_path",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:module_in_scope_type_path:target"
+      },
+      "expected_proof_kinds": [
+        "containing_type",
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#626): `sys::Engine::target_fn()` beside `mod sys;` reaches the associated function of `Engine` in `src/sys.rs`."
+    },
+    {
+      "id": "ci-rust-calls-113-module_in_scope_shadowed_by_block_import",
+      "fixture_id": "ci/ri3/rust/calls/module_in_scope_shadowed_by_block_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_in_scope_shadowed_by_block_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "module_in_scope_shadowed_by_block_import",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::alt::target_fn",
+        "identity": "symbol:rust:calls:module_in_scope_shadowed_by_block_import:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#626): `use crate::alt as sys;` in the function body shadows the crate root's `mod sys;`, so `sys::target_fn()` names `src/alt.rs`, never `src/sys.rs`."
+    },
+    {
+      "id": "ci-rust-calls-114-module_in_scope_inside_default_alternative",
+      "fixture_id": "ci/ri3/rust/calls/module_in_scope_inside_default_alternative",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_in_scope_inside_default_alternative:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "module_in_scope_inside_default_alternative",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::util::target_fn",
+        "identity": "symbol:rust:calls:module_in_scope_inside_default_alternative:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#626): `util::target_fn()` in `src/sys/imp/mod.rs`, the placed default of `#[cfg_attr(windows, path = \"win/mod.rs\")] pub mod imp;`, names the `util` that file declares, `src/sys/imp/util.rs`: that file is compiled only when `imp` is `imp/mod.rs`."
+    },
+    {
+      "id": "ci-rust-calls-115-module_not_in_scope_in_child_file",
+      "fixture_id": "ci/ri3/rust/calls/module_not_in_scope_in_child_file",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_not_in_scope_in_child_file:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "module_not_in_scope_in_child_file",
+      "notes": "Regression case (#626): `src/caller.rs` declares no `sys`; the crate root's `mod sys;` is not in scope there, so `sys::target_fn()` must not bind to `src/sys.rs`."
+    },
+    {
+      "id": "ci-rust-calls-116-module_in_scope_shadows_extern_crate",
+      "fixture_id": "ci/ri3/rust/calls/module_in_scope_shadows_extern_crate",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_in_scope_shadows_extern_crate:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "module_in_scope_shadows_extern_crate",
+      "notes": "Regression case (#626): the package depends on a crate named `sys` and `src/lib.rs` declares `mod sys;`: `sys::imp::target_fn()` may start from either, so no authoritative edge into `src/sys/imp.rs` is emitted."
+    },
+    {
+      "id": "ci-rust-calls-117-module_in_scope_cfg_attr_choice",
+      "fixture_id": "ci/ri3/rust/calls/module_in_scope_cfg_attr_choice",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_in_scope_cfg_attr_choice:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "module_in_scope_cfg_attr_choice",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#626): `sys::imp::target_fn()` beside `mod sys;` passes `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` and keeps a candidate in `src/sys/imp.rs` and `src/sys/win.rs`, neither authoritative."
+    },
+    {
+      "id": "ci-rust-calls-118-module_imported_path",
+      "fixture_id": "ci/ri3/rust/calls/module_imported_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_imported_path:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "module_imported_path",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::target_fn",
+        "identity": "symbol:rust:calls:module_imported_path:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#626): `sys::imp::target_fn()` in `src/other.rs` after `use crate::sys;` reads through the import as `crate::sys::imp::target_fn()` and names `src/sys/imp.rs`."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",

@@ -695,6 +695,8 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
     const CFG_ATTR_BACKEND: &str = "pub mod util;\n\npub fn target_fn() {}\n";
     const CFG_ATTR_UTIL_CALLER: &str =
         "pub fn caller_fn() {\n    crate::sys::imp::target_fn();\n}\n";
+    const MODULE_IN_SCOPE_CALLER: &str =
+        "mod sys;\n\npub fn caller_fn() {\n    sys::imp::target_fn();\n}\n";
     const CFG_ATTR_ENGINE: &str =
         "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
@@ -1953,6 +1955,148 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                 ("src/sys/imp/util.rs", CFG_ATTR_UTIL_CALLER),
                 ("src/sys/win/mod.rs", CFG_ATTR_BACKEND),
                 ("src/sys/win/util.rs", "pub fn other_fn() {}\n"),
+            ],
+            false,
+        ),
+        // A path whose first segment is a module the calling file declares starts from the
+        // caller's module, as `self::` does (#626).
+        "module_in_scope_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", MODULE_IN_SCOPE_CALLER),
+                ("src/sys/mod.rs", "pub mod imp;\n"),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // From `a::b`, `sys` is `a::b::sys`, not the crate root's `sys` (#626).
+        "module_in_scope_nested_module" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod a;\nmod sys;\n"),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+                ("src/a/mod.rs", "pub mod b;\n"),
+                (
+                    "src/a/b.rs",
+                    "mod sys;\n\npub fn caller_fn() {\n    sys::target_fn();\n}\n",
+                ),
+                ("src/a/b/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // `mod tests { use super::*; }` sees the modules its parent declares (#626).
+        "module_in_scope_super_glob" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    fn caller_fn() {\n        sys::target_fn();\n    }\n}\n",
+                ),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // A path through a type of such a module reaches its associated function (#626).
+        "module_in_scope_type_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n\npub fn caller_fn() {\n    sys::Engine::target_fn();\n}\n",
+                ),
+                (
+                    "src/sys.rs",
+                    "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn() {}\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A block import of the name shadows the module the file declares (#626).
+        "module_in_scope_shadowed_by_block_import" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod alt;\nmod sys;\n\npub fn caller_fn() {\n    use crate::alt as sys;\n    sys::target_fn();\n}\n",
+                ),
+                ("src/alt.rs", "pub fn target_fn() {}\n"),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // Inside the placed default alternative of a choice, a path into a module that file
+        // declares names that file's module alone (#626, #624).
+        "module_in_scope_inside_default_alternative" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n",
+                ),
+                (
+                    "src/sys/imp/mod.rs",
+                    "pub mod util;\n\npub fn caller_fn() {\n    util::target_fn();\n}\n",
+                ),
+                ("src/sys/imp/util.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win/mod.rs", "pub mod util;\n"),
+                ("src/sys/win/util.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // A path whose first segment an import binds reads through the import (#626).
+        "module_imported_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod other;\nmod sys;\n"),
+                (
+                    "src/other.rs",
+                    "use crate::sys;\n\npub fn caller_fn() {\n    sys::imp::target_fn();\n}\n",
+                ),
+                ("src/sys/mod.rs", "pub mod imp;\n"),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // `sys` is declared by the crate root, not by `caller.rs`, so it is not in scope there.
+        "module_not_in_scope_in_child_file" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod caller;\nmod sys;\n"),
+                (
+                    "src/caller.rs",
+                    "pub fn caller_fn() {\n    sys::target_fn();\n}\n",
+                ),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // The package also depends on a crate named `sys`, so the path may start from either
+        // and proves nothing (#626).
+        "module_in_scope_shadows_extern_crate" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nsys = \"1\"\n",
+                ),
+                ("src/lib.rs", MODULE_IN_SCOPE_CALLER),
+                ("src/sys/mod.rs", "pub mod imp;\n"),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // A path through a module in scope into a choice keeps a candidate in each file (#626,
+        // #613).
+        "module_in_scope_cfg_attr_choice" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", MODULE_IN_SCOPE_CALLER),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
             ],
             false,
         ),
