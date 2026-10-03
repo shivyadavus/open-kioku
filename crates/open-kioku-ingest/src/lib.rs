@@ -800,7 +800,7 @@ impl Indexer {
                 .filter(|skipped| skipped.safe_to_show)
                 .map(|skipped| skipped.path.as_path()),
         )
-        .with_reexports(&import_sites);
+        .with_import_sites(&import_sites);
         let rust_modules = {
             // Only a file skipped for its size has its `mod` lines read; a path policy's
             // exclusion is never read around. A mounted file read this way can mount another

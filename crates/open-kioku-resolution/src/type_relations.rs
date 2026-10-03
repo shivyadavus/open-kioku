@@ -489,14 +489,22 @@ pub fn resolve_declared_type_use_outcome(
     // Through a module whose file configuration selects, the declared type names the type of each
     // file that may hold it: every proof lists those files, so none is unique and each candidate
     // is kept below authoritative (#625).
+    // A type written as a path reaches the module through that path (#632), any other through
+    // an import.
+    let (route, reason) = if type_name.contains("::") {
+        let path = format!("the Rust path of the declared type `{type_name}`");
+        (path.clone(), path)
+    } else {
+        (
+            format!("the declared type `{type_name}` through a Rust import"),
+            format!("the Rust import of `{type_name}`"),
+        )
+    };
     let (confidence, ambiguity, message, import_strategy) = match &found.configured {
         Some(files) => (
             Confidence::High,
             crate::typed_calls::configured_file_names(files),
-            crate::typed_calls::configured_type_message(
-                &format!("the declared type `{type_name}` through a Rust import"),
-                files,
-            ),
+            crate::typed_calls::configured_type_message(&route, files),
             "rust_configured_type_import",
         ),
         None => (
@@ -546,10 +554,7 @@ pub fn resolve_declared_type_use_outcome(
     let outcome = match &found.configured {
         Some(files) => ResolutionOutcome::Alternatives {
             candidates: normalize_candidates(candidates),
-            reason: crate::typed_calls::configured_type_message(
-                &format!("the Rust import of `{type_name}`"),
-                files,
-            ),
+            reason: crate::typed_calls::configured_type_message(&reason, files),
         },
         None => evaluate_candidates(&GraphEdgeType::UsesType, candidates),
     };

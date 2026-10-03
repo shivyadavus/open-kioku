@@ -155,6 +155,33 @@ reported ambiguous with the module's item as its candidate (strategies
 `rust_module_or_crate_path` and `rust_module_or_crate_member`) and gets no edge. A path through a
 crate name the package declares is read as before, when nothing in scope shadows the name.
 
+A `use` path starts the same way (#632): `use sys::imp::f;` in a file that declares `mod sys;` is
+`use self::sys::imp::f;`, and `pub use error::Error;` in a crate root re-exports what the root's
+`mod error;` declares. Ingest binds such an import, and follows it for the file-level `IMPORTS`
+edge, as it does the `self::` spelling, when the file declares `mod` items of the first segment's
+name at its top level and no other item of that name in the type namespace, and the `use` is
+written at that level or in a function body below it, with no scope between declaring or
+importing the name or holding a glob that may supply it. A first segment that also names a crate
+the package can name leaves the import unbound and its `IMPORTS` edge unresolved; a call through
+it is reported ambiguous with the module's item as its candidate, as a call path is. A `use`
+written inside an inline `mod` block is left to the resolver, which reads a call through it as
+the path it spells. A type written as a path whose first segment is a module in scope
+(`s: &sys::imp::S`, or the `sys::imp::S` of `sys::imp::S::new()`) is read through that path, for
+`USES_TYPE` and for a receiver's type; a type written as a `crate::`, `self::`, `super::` or
+crate-name path is looked up by name only.
+
+A file a `path` attribute mounts inside one alternative is not placed in the module tree, but it
+is the module its route holds (#633): `unix/mod.rs` mounted by
+`#[cfg_attr(unix, path = "unix/mod.rs")] mod imp;` is `sys::imp`. A relative path written there,
+`util::g()`, `self::util::g()` or `super::f()`, is read off that module, so it reaches that
+alternative's files alone and is proven as the `crate::` spelling is. A file with no one route,
+such as one both alternatives mount, holds no module the index can tell, and its relative paths
+get no edge. A `mod name;` declared inside inline `mod` blocks is placed below the directory the
+blocks spell, as rustc reads it: `mod sys;` inside the crate root's `mod b { .. }` is
+`src/b/sys.rs`, and inside `mod c { .. }` of `src/a.rs` it is `src/a/c/sys.rs`. A `path`
+attribute on any of the blocks moves the files below it, and a block inside a function body has
+no files of its own, so neither places a file.
+
 Nodes and edges also support additive metadata fields. `properties` stores
 structured queryable facts that are specific to the node or edge family, such as
 qualified names, route names, relation kinds, package names, or resolver output.

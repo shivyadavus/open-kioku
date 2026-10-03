@@ -148,7 +148,14 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// symbol listings order by. v36 indexes hold every alias with its syntax kind and no target, so
 /// a one-line alias outranks the type it stands for. v33 and v35 were reserved for this change
 /// and are left unused.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v37";
+/// v38: a Rust `use` path whose first segment is a module the file declares in scope
+/// (`use sys::imp::f;` beside `mod sys;`) is bound as its `self::` path, for calls, types and the
+/// file-level `IMPORTS` edge, and is ambiguous when that segment also names a crate; a type
+/// written as a module path (`s: sys::imp::S`) is read through the path; a relative path written
+/// in a file a `path` attribute mounts inside one alternative reads that alternative; and a file
+/// `mod name;` declares inside an inline `mod` block is placed below the directory the blocks
+/// spell. v37 indexes hold no edge for any of these.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v38";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.

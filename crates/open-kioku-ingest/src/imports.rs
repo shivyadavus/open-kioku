@@ -71,6 +71,18 @@ pub(crate) struct RustModuleTree<'a> {
     /// through `cfg_attr`, which leave the module at its default location whenever their
     /// conditions do not hold (#608). `mod r#type;` is `type`.
     file_modules: HashSet<(String, String)>,
+    /// `(declaring file without `.rs`, module path)` for each `mod name;` with no body declared
+    /// inside inline `mod` blocks of the file, the path spelling the blocks from the outermost
+    /// down and then the module (`mod b { mod sys; }` is `["b", "sys"]`). Rustc reads such a
+    /// module's file below the directory those blocks spell, as it does a file module's: only
+    /// one with no `path` attribute, inside blocks with none and inside no function, is kept.
+    inline_file_modules: InlineFileModules,
+    /// The first block of each path in `inline_file_modules`, by declaring file.
+    inline_file_module_tops: HashSet<(String, String)>,
+    /// The names each scope of a Rust file imports, by `(file, scope)`, with
+    /// [`GLOB_IMPORT_LOCAL_NAME`] for a glob: a name a nearer scope imports, or one its glob may
+    /// supply, is not the module the file declares.
+    scope_imports: HashSet<(FileId, ScopeId, String)>,
     /// Rust files discovery saw but did not index (over `max_file_size`, excluded, ignored,
     /// unreadable), by repository-relative path without `.rs`. A crate root among them owns
     /// modules the index cannot place.
@@ -139,6 +151,19 @@ enum ConfiguredPath {
     /// The writer fixes every choice on the path: what the path names in the one file each
     /// choice is compiled from with it, in place of what the placed tree reached.
     Proven(Option<RustPathTarget>),
+}
+
+/// Where a Rust `use` path whose first segment is not `crate`, `self` or `super` starts (#632).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UsePathStart {
+    /// Not at a module the writing file declares in scope: a crate name, or nothing the module
+    /// tree reads.
+    Elsewhere,
+    /// At such a module: the path is this `self::` path.
+    Module(String),
+    /// At such a module whose name is also a crate the package can name, so the path may start
+    /// from either.
+    ModuleOrCrate,
 }
 
 /// The file a `#[path]` attribute on a `mod` item mounts, as far as the index can tell.
@@ -286,6 +311,8 @@ impl<'a> RustModuleTree<'a> {
                 ))
             })
             .collect();
+        let (inline_file_modules, inline_file_module_tops) =
+            inline_file_modules(&files, declarations, scopes);
         let mut declared_modules = HashMap::<String, Vec<DeclaredModule>>::new();
         for declaration in declarations.iter().filter(|declaration| {
             !declaration.has_body
@@ -354,6 +381,9 @@ impl<'a> RustModuleTree<'a> {
             stems_in_dir,
             project,
             file_modules,
+            inline_file_modules,
+            inline_file_module_tops,
+            scope_imports: HashSet::new(),
             unindexed_stems: HashSet::new(),
             scanned_files: HashMap::new(),
             path_mounts,
@@ -364,16 +394,33 @@ impl<'a> RustModuleTree<'a> {
         }
     }
 
-    /// Records the `pub use` sites a path through a crate name may be re-exported by.
-    pub(crate) fn with_reexports(mut self, sites: &[ImportSite]) -> Self {
+    /// Records the Rust import sites: the `pub use` sites a path through a crate name may be
+    /// re-exported by, and the names each scope imports.
+    pub(crate) fn with_import_sites(mut self, sites: &[ImportSite]) -> Self {
         for site in sites
             .iter()
-            .filter(|site| site.reexported && self.files.contains_key(&site.file_id))
+            .filter(|site| self.files.contains_key(&site.file_id))
         {
-            self.reexports
-                .entry(site.file_id.clone())
-                .or_default()
-                .push(site.clone());
+            if let Some(scope) = &site.scope_id {
+                let mut bound = site
+                    .bindings
+                    .iter()
+                    .map(|binding| binding.local.clone())
+                    .collect::<Vec<_>>();
+                if site.is_glob {
+                    bound.push(GLOB_IMPORT_LOCAL_NAME.to_string());
+                }
+                for local in bound {
+                    self.scope_imports
+                        .insert((site.file_id.clone(), scope.clone(), local));
+                }
+            }
+            if site.reexported {
+                self.reexports
+                    .entry(site.file_id.clone())
+                    .or_default()
+                    .push(site.clone());
+            }
         }
         self
     }
@@ -425,20 +472,139 @@ impl<'a> RustModuleTree<'a> {
         })
     }
 
-    /// `source`, written in `importer` in `scope`, mapped onto a crate module tree: through a
-    /// crate name, or `crate::`/`self::`/`super::` in the importer's own crate. The flag is set for
-    /// a crate-name path, whose items may be reached through that crate's `pub use` re-exports.
-    fn rust_path(
+    /// Where a Rust `use` path written in `file` at `scope` starts when its first segment is not
+    /// `crate`, `self` or `super` (#632). Since the 2018 edition that segment is looked up in scope
+    /// first, so `use sys::imp::f;` in a file declaring `mod sys;` is `use self::sys::imp::f;`.
+    /// The segment names such a module when the file declares `mod` items of the name at its top
+    /// level and no other item of the name in the type namespace, the path is written at that
+    /// level or in a function body inside it, and no scope between declares or imports the name
+    /// or holds a glob that may supply it. A site that records no scope is read as written at
+    /// the top level, and a file-backed `mod first;` the module tree holds stands for the item
+    /// when the index holds no symbol of the name there. A path written inside an inline `mod`
+    /// block, or at a scope the index does not hold, is not read.
+    fn use_path_start(
         &self,
-        importer: &Path,
+        file: &FileId,
         scope: Option<&ScopeId>,
         source: &str,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> UsePathStart {
+        let Some((first, _)) = source.split_once("::") else {
+            return UsePathStart::Elsewhere;
+        };
+        let first = first.trim();
+        if matches!(first, "" | "crate" | "self" | "super" | "Self") {
+            return UsePathStart::Elsewhere;
+        }
+        // The import registry records a site with no scope at `global`.
+        let unscoped = scope.is_none_or(|scope| scope.0 == "global");
+        let mut current = scope.and_then(|scope| scopes.get(scope));
+        let mut at_file_level = unscoped;
+        for _ in 0..=scopes.scopes.len() {
+            let Some(here) = current else {
+                break;
+            };
+            match here.kind {
+                ScopeKind::File => {
+                    at_file_level = true;
+                    break;
+                }
+                // A `mod` block does not see the items of the module around it.
+                ScopeKind::Module => break,
+                _ => {}
+            }
+            let imports = |local: &str| {
+                self.scope_imports
+                    .contains(&(file.clone(), here.id.clone(), local.to_string()))
+            };
+            if !symbols
+                .lookup_file_scope_name(file, &here.id, first)
+                .is_empty()
+                || imports(first)
+                || imports(GLOB_IMPORT_LOCAL_NAME)
+            {
+                return UsePathStart::Elsewhere;
+            }
+            current = here
+                .parent_id
+                .as_ref()
+                .and_then(|parent| scopes.get(parent));
+        }
+        if !at_file_level {
+            return UsePathStart::Elsewhere;
+        }
+        // Functions, fields and constants live in the value namespace and never begin a path.
+        let items = symbols
+            .lookup_file_name(file, first)
+            .iter()
+            .filter_map(|id| symbols.get(id))
+            .filter(|symbol| {
+                symbol
+                    .scope_id
+                    .as_ref()
+                    .and_then(|scope| scopes.get(scope))
+                    .is_some_and(|scope| scope.kind == ScopeKind::File)
+                    && !matches!(
+                        symbol.kind,
+                        SymbolKind::Function
+                            | SymbolKind::Method
+                            | SymbolKind::Field
+                            | SymbolKind::Variable
+                            | SymbolKind::Constant
+                            | SymbolKind::Test
+                            | SymbolKind::Endpoint
+                            | SymbolKind::DatabaseTable
+                    )
+            })
+            .collect::<Vec<_>>();
+        let declared = if items.is_empty() {
+            self.files
+                .get(file)
+                .and_then(|path| rust_file_stem(path))
+                .is_some_and(|stem| {
+                    self.file_modules
+                        .contains(&(stem, module_name(first).to_string()))
+                })
+        } else {
+            items.iter().all(|item| item.kind == SymbolKind::Module)
+        };
+        if !declared {
+            return UsePathStart::Elsewhere;
+        }
+        // A crate of the same name may start the path too, and rustc rejects it as ambiguous.
+        if scopes.rust_names_crate(file, first) {
+            return UsePathStart::ModuleOrCrate;
+        }
+        UsePathStart::Module(format!("self::{}", source.trim()))
+    }
+
+    /// `source`, written in `file` (at `importer`) in `scope`, mapped onto a crate module tree:
+    /// through a module the file declares in scope there (see [`RustModuleTree::use_path_start`]),
+    /// through a crate name, or `crate::`/`self::`/`super::` in the importer's own crate. The flag
+    /// is set for a crate-name path, whose items may be reached through that crate's `pub use`
+    /// re-exports. A path whose first segment names both such a module and a crate is mapped
+    /// onto neither.
+    fn rust_path(
+        &self,
+        (file, importer): (&FileId, &Path),
+        scope: Option<&ScopeId>,
+        source: &str,
+        symbols: &open_kioku_resolution::SymbolIndex,
         scopes: &open_kioku_resolution::ScopeIndex,
     ) -> Option<(RustUsePath, bool)> {
         self.project.nearest_root_for(importer, Language::Rust)?;
-        if let Some(path) = self.crate_name_path(importer, source) {
-            return Some((path, true));
+        let in_scope = match self.use_path_start(file, scope, source, symbols, scopes) {
+            UsePathStart::ModuleOrCrate => return None,
+            UsePathStart::Module(path) => Some(path),
+            UsePathStart::Elsewhere => None,
+        };
+        if in_scope.is_none() {
+            if let Some(path) = self.crate_name_path(importer, source) {
+                return Some((path, true));
+            }
         }
+        let source = in_scope.as_deref().unwrap_or(source);
         // `self` and `super` are read off the importer's file path, which cannot see an inline
         // `mod` block: in `mod tests { use super::*; }` `super` is the file's own module.
         if !source.starts_with("crate::")
@@ -750,9 +916,14 @@ impl<'a> RustModuleTree<'a> {
                         continue;
                     };
                     let source = format!("{prefix}::{name}");
-                    match self
-                        .reexport_source_target(importer, &source, name, symbols, scopes, hops)
-                    {
+                    match self.reexport_source_target(
+                        (file, importer),
+                        site.scope_id.as_ref(),
+                        &source,
+                        name,
+                        (symbols, scopes),
+                        hops,
+                    ) {
                         Some(target) => globbed.push(target),
                         None => glob_unresolved = true,
                     }
@@ -764,11 +935,11 @@ impl<'a> RustModuleTree<'a> {
                     .filter(|binding| binding.local == *name)
                 {
                     match self.reexport_source_target(
-                        importer,
+                        (file, importer),
+                        site.scope_id.as_ref(),
                         &site.source,
                         &binding.imported,
-                        symbols,
-                        scopes,
+                        (symbols, scopes),
                         hops,
                     ) {
                         Some(target) => named.push(target),
@@ -793,28 +964,24 @@ impl<'a> RustModuleTree<'a> {
         }
     }
 
-    /// What the path a `pub use` in `importer` names, when its last segment is `imported`. Such a
-    /// path may also be a Rust 2018 path from the re-exporting module (`pub use auth::Token;`
-    /// beside `mod auth;`).
+    /// What the path a `pub use` in `importer`, written at `scope`, names, when its last segment
+    /// is `imported`. Such a path may also be a Rust 2018 path from the re-exporting module
+    /// (`pub use auth::Token;` beside `mod auth;`), read as [`RustModuleTree::use_path_start`]
+    /// reads it.
     fn reexport_source_target(
         &self,
-        importer: &Path,
+        importer: (&FileId, &Path),
+        scope: Option<&ScopeId>,
         source: &str,
         imported: &str,
-        symbols: &open_kioku_resolution::SymbolIndex,
-        scopes: &open_kioku_resolution::ScopeIndex,
+        (symbols, scopes): (
+            &open_kioku_resolution::SymbolIndex,
+            &open_kioku_resolution::ScopeIndex,
+        ),
         hops: usize,
     ) -> Option<RustPathTarget> {
-        let first = source.split("::").next()?;
-        let declares_first = rust_file_stem(importer).is_some_and(|stem| {
-            self.file_modules
-                .contains(&(stem, module_name(first).to_string()))
-        });
-        let (path, crate_name) = if declares_first {
-            self.rust_path(importer, None, &format!("self::{source}"), scopes)?
-        } else {
-            self.rust_path(importer, None, source, scopes)?
-        };
+        let (path, crate_name) = self.rust_path(importer, scope, source, symbols, scopes)?;
+        let (_, importer) = importer;
         if path.segments.last().map(String::as_str) != Some(imported) {
             return None;
         }
@@ -949,22 +1116,65 @@ impl<'a> RustModuleTree<'a> {
         module.is_empty() || self.declared_below(&self.crate_roots(path), path, module)
     }
 
-    /// [`RustModuleTree::declares_file_modules`] from the crate roots `roots`.
+    /// [`RustModuleTree::declares_file_modules`] from the crate roots `roots`. A module file may
+    /// also be declared inside inline `mod` blocks of the file above it (#633): `mod b { mod sys;
+    /// }` in the crate root declares `b::sys` as a file, though `b` is no file.
     fn declared_below(&self, roots: &[String], path: &RustUsePath, module: &[String]) -> bool {
-        (0..module.len()).all(|depth| {
-            let name = module_name(&module[depth]);
-            let declares = |stem: &String| {
-                self.file_modules
-                    .contains(&(stem.clone(), name.to_string()))
+        let mut depth = 0;
+        while depth < module.len() {
+            // How far each file holding `module[..depth]` declares the path as a file: one
+            // module further, or through inline blocks to the module file they declare.
+            let next = |stem: &String| {
+                let mut found = (depth..module.len()).filter(|&end| {
+                    if end == depth {
+                        self.file_modules
+                            .contains(&(stem.clone(), module_name(&module[depth]).to_string()))
+                    } else {
+                        let chain = module[depth..=end]
+                            .iter()
+                            .map(|segment| module_name(segment).to_string())
+                            .collect::<Vec<_>>();
+                        self.inline_file_modules.contains(&(stem.clone(), chain))
+                    }
+                });
+                match (found.next(), found.next()) {
+                    (Some(end), None) => Some(end + 1),
+                    _ => None,
+                }
             };
-            if depth == 0 {
-                !roots.is_empty() && roots.iter().all(declares)
+            let reached = if depth == 0 {
+                // Every crate root that holds the file declares the path the same way.
+                let mut reached = roots.iter().map(next);
+                match reached.next() {
+                    Some(Some(first)) if reached.all(|other| other == Some(first)) => Some(first),
+                    _ => None,
+                }
             } else {
-                path.module_file_stems(&module[..depth])
+                let mut reached = path
+                    .module_file_stems(&module[..depth])
                     .iter()
-                    .any(declares)
-            }
-        })
+                    .filter_map(next)
+                    .collect::<Vec<_>>();
+                reached.sort_unstable();
+                reached.dedup();
+                match reached.as_slice() {
+                    [only] => Some(*only),
+                    _ => None,
+                }
+            };
+            let Some(reached) = reached else {
+                return false;
+            };
+            depth = reached;
+        }
+        true
+    }
+
+    /// Whether the file at `stem` declares a module file whose path starts with `top`: `mod top;`,
+    /// or `mod top { .. }` holding such a declaration.
+    fn declares_top(&self, stem: &str, top: &str) -> bool {
+        let key = (stem.to_string(), module_name(top).to_string());
+        self.file_modules.contains(&key) || self.inline_file_module_tops.contains(&key)
     }
 
     /// The crate root files whose module tree holds the importer: the root file itself, or the
@@ -999,7 +1209,7 @@ impl<'a> RustModuleTree<'a> {
         };
         let declaring = roots
             .iter()
-            .filter(|stem| self.file_modules.contains(&((*stem).clone(), top.clone())))
+            .filter(|stem| self.declares_top(stem, top))
             .cloned()
             .collect::<Vec<_>>();
         if declaring.is_empty() {
@@ -1258,6 +1468,33 @@ impl<'a> RustModuleTree<'a> {
                 let (candidates, _) = self.module_candidates(declaring, name, &[]);
                 reached.extend(candidates.into_iter().map(|(stem, _)| stem));
             }
+        }
+        // A `mod name;` inside inline blocks reaches its file below the directory they spell.
+        for (declaring, chain) in &self.inline_file_modules {
+            if walked.contains(declaring) {
+                continue;
+            }
+            let below = chain.join("/");
+            let mut default = self
+                .files_by_stem
+                .get(declaring)
+                .and_then(|id| self.files.get(id))
+                .and_then(|path| self.module_file_of(path))
+                .map(|file| {
+                    let mut module = file.importer_module.clone();
+                    module.extend(chain.iter().cloned());
+                    file.module_file_stems(&module)
+                })
+                .unwrap_or_default();
+            for dir in [parent_dir(declaring), declaring.as_str()] {
+                default.push(join_dir(dir, &below));
+                default.push(join_dir(dir, &format!("{below}/mod")));
+            }
+            reached.extend(
+                default
+                    .into_iter()
+                    .filter(|stem| self.files_by_stem.contains_key(stem)),
+            );
         }
         reached
     }
@@ -1529,9 +1766,17 @@ impl<'a> RustModuleTree<'a> {
     /// from its directory, nor for one a root that may use `#[path]` or a `#[path]` the index cannot
     /// follow may mount. A crate root file is left out: its own crate is the one it roots.
     fn find_shared_files(&self) -> SharedFiles {
-        let mut modules_by_file = HashMap::<&str, Vec<&str>>::new();
+        // The module files each file declares, by their path below its directory: `name`, or
+        // `b/sys` for a `mod sys;` inside its inline `mod b`.
+        let mut modules_by_file = HashMap::<&str, Vec<String>>::new();
         for (file, name) in &self.file_modules {
-            modules_by_file.entry(file).or_default().push(name);
+            modules_by_file.entry(file).or_default().push(name.clone());
+        }
+        for (file, module) in &self.inline_file_modules {
+            modules_by_file
+                .entry(file)
+                .or_default()
+                .push(module.join("/"));
         }
         let mut mounts_by_file = HashMap::<&str, Vec<(usize, &PathMount)>>::new();
         for (at, (declaring, mount)) in self.path_mounts.iter().enumerate() {
@@ -1704,7 +1949,7 @@ impl<'a> RustModuleTree<'a> {
     fn mounted_subtree(
         &self,
         mounted: &str,
-        modules_by_file: &HashMap<&str, Vec<&str>>,
+        modules_by_file: &HashMap<&str, Vec<String>>,
         mounts_by_file: &HashMap<&str, Vec<(usize, &PathMount)>>,
     ) -> MountedSubtree {
         let mut subtree = MountedSubtree {
@@ -1726,7 +1971,7 @@ impl<'a> RustModuleTree<'a> {
                     .get(file.as_str())
                     .into_iter()
                     .flatten()
-                    .copied()
+                    .map(String::as_str)
                     .collect::<Vec<_>>()
             } else if !self.unindexed_stems.contains(&file) {
                 // A path naming no file discovery saw mounts nothing the index holds.
@@ -2204,9 +2449,10 @@ fn rust_import_target(
     modules: &RustModuleTree<'_>,
 ) -> Option<RustPathTarget> {
     let (path, crate_name) = modules.rust_path(
-        importer,
+        (&binding.file_id, importer),
         Some(&binding.scope_id),
         &binding.source_module,
+        symbols,
         scopes,
     )?;
     let (item_name, _) = path.segments.split_last()?;
@@ -2344,7 +2590,16 @@ pub(crate) fn rust_import_edge_targets(
         let Some(root) = modules.project.nearest_root_for(importer, Language::Rust) else {
             continue;
         };
-        let in_crate = is_rust_in_crate_path(&site.source, root.package_name.as_deref());
+        // A path starting at a module the file declares in scope is of its own crate (#632),
+        // and stays unresolved when its first segment may name a crate instead.
+        let in_crate = is_rust_in_crate_path(&site.source, root.package_name.as_deref())
+            || modules.use_path_start(
+                &site.file_id,
+                site.scope_id.as_ref(),
+                &site.source,
+                symbols,
+                scopes,
+            ) != UsePathStart::Elsewhere;
         if !in_crate && !modules.names_dependency(importer, &site.source) {
             continue;
         }
@@ -2355,7 +2610,13 @@ pub(crate) fn rust_import_edge_targets(
             })
         } else {
             modules
-                .rust_path(importer, site.scope_id.as_ref(), &site.source, scopes)
+                .rust_path(
+                    (&site.file_id, importer),
+                    site.scope_id.as_ref(),
+                    &site.source,
+                    symbols,
+                    scopes,
+                )
                 .and_then(|(path, crate_name)| {
                     // A path through a crate name is written in another crate, where no choice
                     // of that crate's configuration-selected modules is made.
@@ -2464,6 +2725,95 @@ fn rust_import_edge(
         (None, None) => return None,
     };
     Some(RustImportEdge { file, strategy })
+}
+
+/// `(declaring file without `.rs`, module path)` of each `mod name;` inline blocks declare.
+type InlineFileModules = HashSet<(String, Vec<String>)>;
+
+/// The `mod name;` items with no body that inline `mod` blocks declare, as
+/// [`RustModuleTree::inline_file_modules`] keeps them, and the first block of each. A block's
+/// `mod` item is found as the resolver's scope index finds it, by the scope enclosing it and its
+/// range. Left out: an item with a `path` attribute, or inside a block that has one, since the
+/// attribute moves the files below it, and an item inside a function body or a block the index
+/// cannot name.
+fn inline_file_modules(
+    files: &HashMap<FileId, &Path>,
+    declarations: &[ModuleDeclarationSite],
+    scopes: &open_kioku_resolution::ScopeIndex,
+) -> (InlineFileModules, HashSet<(String, String)>) {
+    let range = |range: &open_kioku_core::SourceRange| {
+        (
+            range.start_line,
+            range.start_column,
+            range.end_line,
+            range.end_column,
+        )
+    };
+    let blocks = declarations
+        .iter()
+        .filter(|declaration| declaration.has_body)
+        .map(|declaration| {
+            (
+                (declaration.scope_id.as_ref(), range(&declaration.range)),
+                declaration,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut modules = HashSet::new();
+    let mut tops = HashSet::new();
+    for declaration in declarations
+        .iter()
+        .filter(|declaration| !declaration.has_body && !declaration.has_path_attribute)
+    {
+        let Some(scope_id) = declaration.scope_id.as_ref() else {
+            continue;
+        };
+        if !is_inside_inline_module(scope_id, scopes) {
+            continue;
+        }
+        let Some(declaring) = files
+            .get(&declaration.file_id)
+            .and_then(|path| rust_file_stem(path))
+        else {
+            continue;
+        };
+        let mut module = vec![module_name(&declaration.name).to_string()];
+        let mut current = scopes.get(scope_id);
+        let mut complete = false;
+        for _ in 0..=scopes.scopes.len() {
+            let Some(scope) = current else {
+                break;
+            };
+            match scope.kind {
+                ScopeKind::File => {
+                    complete = true;
+                    break;
+                }
+                ScopeKind::Module => {
+                    let Some(block) = blocks.get(&(scope.parent_id.as_ref(), range(&scope.range)))
+                    else {
+                        break;
+                    };
+                    if block.has_path_attribute {
+                        break;
+                    }
+                    module.push(module_name(&block.name).to_string());
+                }
+                _ => break,
+            }
+            current = scope
+                .parent_id
+                .as_ref()
+                .and_then(|parent| scopes.get(parent));
+        }
+        if !complete {
+            continue;
+        }
+        module.reverse();
+        tops.insert((declaring.clone(), module[0].clone()));
+        modules.insert((declaring, module));
+    }
+    (modules, tops)
 }
 
 fn is_inside_inline_module(scope_id: &ScopeId, scopes: &open_kioku_resolution::ScopeIndex) -> bool {
@@ -3207,7 +3557,8 @@ mod tests {
     fn module_placements_place_only_files_the_module_tree_declares_at_their_path() {
         // `w.rs` mounts `elsewhere.rs` as `w::pathed` with `#[path]`, so neither `elsewhere.rs`
         // nor the `w/pathed.rs` at the default location is the module its path spells. `deep` is
-        // declared inside an inline `mod inner` and `orphan.rs` by nothing.
+        // declared inside an inline `mod inner` whose own `mod` item the index did not record,
+        // and `orphan.rs` by nothing.
         let files = [
             "src/lib.rs",
             "src/w.rs",
@@ -3291,6 +3642,251 @@ mod tests {
         let no_manifest = ProjectModel::new();
         let bare = RustModuleTree::new(&files, &no_manifest, &declarations, &scopes);
         assert_eq!(bare.module_placements(), placements);
+    }
+
+    /// A scope of `file` spanning `lines`.
+    fn file_scope(
+        id: &str,
+        file: &str,
+        parent: Option<&str>,
+        kind: ScopeKind,
+        lines: (u32, u32),
+    ) -> Scope {
+        Scope {
+            id: ScopeId::new(id),
+            file_id: FileId::new(format!("file:{file}")),
+            parent_id: parent.map(ScopeId::new),
+            owner_symbol_id: None,
+            kind,
+            range: SourceRange {
+                start_line: lines.0,
+                start_column: 1,
+                end_line: lines.1,
+                end_column: 1,
+            },
+        }
+    }
+
+    /// The `mod` item `name` in `file`, written at `scope`, with a body or not, spanning `lines`.
+    fn mod_item(
+        file: &str,
+        scope: &str,
+        name: &str,
+        has_body: bool,
+        lines: (u32, u32),
+    ) -> ModuleDeclarationSite {
+        ModuleDeclarationSite {
+            scope_id: Some(ScopeId::new(scope)),
+            has_body,
+            range: SourceRange {
+                start_line: lines.0,
+                start_column: 1,
+                end_line: lines.1,
+                end_column: 1,
+            },
+            ..mod_decl(file, name)
+        }
+    }
+
+    /// The module symbol a `mod name` item of `file` declares at `scope`.
+    fn module_symbol(file: &str, name: &str, scope: &str) -> Symbol {
+        Symbol {
+            id: SymbolId::new(format!("symbol:{file}:mod:{name}")),
+            kind: SymbolKind::Module,
+            scope_id: Some(ScopeId::new(scope)),
+            ..rust_symbol(file, name)
+        }
+    }
+
+    /// Binds the Rust `use` sites and follows them for the file-level `IMPORTS` edge as indexing
+    /// does, in one package at the repository root that names the crates `external`.
+    fn bind_and_follow_rust_imports(
+        files: &[&str],
+        declarations: Vec<ModuleDeclarationSite>,
+        sites: &[ImportSite],
+        symbols: Vec<Symbol>,
+        scopes: Vec<Scope>,
+        external: &[&str],
+    ) -> (ImportRegistry, RustImportEdgeTargets) {
+        let files = files.iter().copied().map(source_file).collect::<Vec<_>>();
+        let mut registry = ImportRegistry::default();
+        for site in sites {
+            registry.insert_unresolved_site(site);
+        }
+        let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
+        let project = rust_project(&[("", None)]);
+        let mut scopes = open_kioku_resolution::ScopeIndex::build(scopes);
+        scopes.record_module_declarations(&declarations);
+        let names = Arc::new(external.iter().map(ToString::to_string).collect());
+        scopes.record_rust_external_crates(
+            files
+                .iter()
+                .map(|file| (file.id.clone(), Arc::clone(&names)))
+                .collect(),
+        );
+        let modules =
+            RustModuleTree::new(&files, &project, &declarations, &scopes).with_import_sites(sites);
+        registry.resolve_rust_imports(&symbols, &scopes, &modules);
+        let edges = rust_import_edge_targets(sites, &symbols, &scopes, &modules);
+        (registry, edges)
+    }
+
+    #[test]
+    fn rust_use_paths_starting_at_a_module_in_scope_bind_as_self_paths() {
+        // `src/lib.rs` declares `mod sys;` and `mod a;`, and holds `use sys::imp::f;`, a
+        // `use sys::imp::g;` in `fn go`'s body, and `fn shadow() { use crate::a as sys;
+        // use sys::imp::h; }`; `src/a.rs` declares no `sys` and holds `use sys::imp::f;` (#632).
+        let files = ["src/lib.rs", "src/a.rs", "src/sys/mod.rs", "src/sys/imp.rs"];
+        let declarations = vec![
+            mod_decl("src/lib.rs", "sys"),
+            mod_decl("src/lib.rs", "a"),
+            mod_decl("src/sys/mod.rs", "imp"),
+        ];
+        let scopes = vec![
+            file_scope("scope:lib", "src/lib.rs", None, ScopeKind::File, (1, 40)),
+            file_scope(
+                "scope:go",
+                "src/lib.rs",
+                Some("scope:lib"),
+                ScopeKind::Function,
+                (5, 9),
+            ),
+            file_scope(
+                "scope:go:body",
+                "src/lib.rs",
+                Some("scope:go"),
+                ScopeKind::Block,
+                (5, 9),
+            ),
+            file_scope(
+                "scope:shadow",
+                "src/lib.rs",
+                Some("scope:lib"),
+                ScopeKind::Function,
+                (10, 14),
+            ),
+            file_scope("scope:a", "src/a.rs", None, ScopeKind::File, (1, 10)),
+        ];
+        let symbols = vec![
+            module_symbol("src/lib.rs", "sys", "scope:lib"),
+            module_symbol("src/lib.rs", "a", "scope:lib"),
+            rust_symbol("src/sys/imp.rs", "f"),
+            rust_symbol("src/sys/imp.rs", "g"),
+            rust_symbol("src/sys/imp.rs", "h"),
+        ];
+        let sites = [
+            rust_use_site("src/lib.rs", "sys::imp::f", "f", Some("scope:lib")),
+            rust_use_site("src/lib.rs", "sys::imp::g", "g", Some("scope:go:body")),
+            rust_use_site("src/lib.rs", "crate::a", "sys", Some("scope:shadow")),
+            rust_use_site("src/lib.rs", "sys::imp::h", "h", Some("scope:shadow")),
+            rust_use_site("src/a.rs", "sys::imp::f", "f", Some("scope:a")),
+        ];
+        let (registry, edges) = bind_and_follow_rust_imports(
+            &files,
+            declarations.clone(),
+            &sites,
+            symbols.clone(),
+            scopes.clone(),
+            &[],
+        );
+        assert_eq!(
+            bound_target(&registry, "src/lib.rs", "f").as_deref(),
+            Some("symbol:src/sys/imp.rs:f")
+        );
+        assert_eq!(
+            binding(&registry, "src/lib.rs", "f").rule,
+            ImportBindingRule::RustModulePath
+        );
+        assert_eq!(
+            bound_target(&registry, "src/lib.rs", "g").as_deref(),
+            Some("symbol:src/sys/imp.rs:g")
+        );
+        // The function's own import of `sys` shadows the module, and `a.rs` declares none.
+        assert_eq!(bound_target(&registry, "src/lib.rs", "h"), None);
+        assert_eq!(bound_target(&registry, "src/a.rs", "f"), None);
+        assert_eq!(
+            edge_target(&edges, "src/lib.rs", "sys::imp::f").as_deref(),
+            Some("rust-item-module:file:src/sys/imp.rs")
+        );
+        assert!(!edges.is_in_crate(&FileId::new("file:src/a.rs"), "sys::imp::f"));
+
+        // A crate the package can name `sys` may start the path too: nothing is bound, and the
+        // file-level edge stays unresolved rather than matched against repository paths.
+        let (registry, edges) =
+            bind_and_follow_rust_imports(&files, declarations, &sites, symbols, scopes, &["sys"]);
+        assert_eq!(bound_target(&registry, "src/lib.rs", "f"), None);
+        assert_eq!(binding(&registry, "src/lib.rs", "f").target_file, None);
+        let lib = FileId::new("file:src/lib.rs");
+        assert!(edges.is_in_crate(&lib, "sys::imp::f"));
+        assert_eq!(edge_target(&edges, "src/lib.rs", "sys::imp::f"), None);
+    }
+
+    #[test]
+    fn module_placements_follow_a_mod_item_inside_inline_blocks() {
+        // `src/lib.rs` holds `mod a;`, `pub mod b { mod sys; }` and
+        // `#[path = "elsewhere"] mod x { mod sys; }`; `src/a.rs` holds `mod c { mod d; }` (#633).
+        let files = [
+            "src/lib.rs",
+            "src/a.rs",
+            "src/b/sys.rs",
+            "src/a/c/d.rs",
+            "src/x/sys.rs",
+            "src/elsewhere/sys.rs",
+        ]
+        .map(source_file);
+        let declarations = vec![
+            mod_decl("src/lib.rs", "a"),
+            mod_item("src/lib.rs", "scope:lib", "b", true, (3, 9)),
+            mod_item("src/lib.rs", "scope:lib:b", "sys", false, (4, 4)),
+            ModuleDeclarationSite {
+                has_path_attribute: true,
+                path_attributes: vec!["elsewhere".into()],
+                ..mod_item("src/lib.rs", "scope:lib", "x", true, (10, 15))
+            },
+            mod_item("src/lib.rs", "scope:lib:x", "sys", false, (12, 12)),
+            mod_item("src/a.rs", "scope:a", "c", true, (1, 4)),
+            mod_item("src/a.rs", "scope:a:c", "d", false, (2, 2)),
+        ];
+        let mut scopes = open_kioku_resolution::ScopeIndex::build(vec![
+            file_scope("scope:lib", "src/lib.rs", None, ScopeKind::File, (1, 40)),
+            file_scope(
+                "scope:lib:b",
+                "src/lib.rs",
+                Some("scope:lib"),
+                ScopeKind::Module,
+                (3, 9),
+            ),
+            file_scope(
+                "scope:lib:x",
+                "src/lib.rs",
+                Some("scope:lib"),
+                ScopeKind::Module,
+                (10, 15),
+            ),
+            file_scope("scope:a", "src/a.rs", None, ScopeKind::File, (1, 10)),
+            file_scope(
+                "scope:a:c",
+                "src/a.rs",
+                Some("scope:a"),
+                ScopeKind::Module,
+                (1, 4),
+            ),
+        ]);
+        scopes.record_module_declarations(&declarations);
+        let project = rust_project(&[("", None)]);
+        let modules = RustModuleTree::new(&files, &project, &declarations, &scopes);
+        let placements = modules.module_placements();
+        let module = |file: &str| {
+            placements[&FileId::new(format!("file:{file}"))]
+                .module
+                .clone()
+                .map(|module| module.join("::"))
+        };
+        assert_eq!(module("src/b/sys.rs").as_deref(), Some("b::sys"));
+        assert_eq!(module("src/a/c/d.rs").as_deref(), Some("a::c::d"));
+        // A `path` on the block moves the module files below it, wherever it mounts them.
+        assert_eq!(module("src/x/sys.rs"), None);
+        assert_eq!(module("src/elsewhere/sys.rs"), None);
     }
 
     fn rust_project(roots: &[(&str, Option<&str>)]) -> ProjectModel {
@@ -5555,7 +6151,7 @@ mod tests {
         let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
         let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
         let modules =
-            RustModuleTree::new(&files, &project, &declarations, &scopes).with_reexports(&sites);
+            RustModuleTree::new(&files, &project, &declarations, &scopes).with_import_sites(&sites);
         let mut registry = ImportRegistry::default();
         for site in &sites {
             registry.insert_unresolved_site(site);
@@ -5668,7 +6264,7 @@ mod tests {
         let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
         let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
         let modules =
-            RustModuleTree::new(&files, &project, &declarations, &scopes).with_reexports(&sites);
+            RustModuleTree::new(&files, &project, &declarations, &scopes).with_import_sites(&sites);
         let targets = rust_import_edge_targets(&sites, &symbols, &scopes, &modules);
 
         let edge = |importer: &str, path: &str| edge_target(&targets, importer, path);

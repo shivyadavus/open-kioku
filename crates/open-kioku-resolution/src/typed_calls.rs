@@ -252,7 +252,7 @@ fn resolve_rust_qualified_module_outcome(
 ) -> Option<ResolutionOutcome> {
     let receiver = receiver.trim();
     if let Some((targets, strategy)) =
-        rust_module_path_items(call, ctx, receiver, &call.callee_name, |symbol| {
+        rust_module_path_items(&call.scope_id, ctx, receiver, &call.callee_name, |symbol| {
             !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
         })
     {
@@ -263,13 +263,18 @@ fn resolve_rust_qualified_module_outcome(
     if matches!(type_name, "" | "self" | "super" | "crate") {
         return None;
     }
-    let (types, strategy) =
-        rust_module_path_items(call, ctx, module_path.trim(), type_name, |symbol| {
+    let (types, strategy) = rust_module_path_items(
+        &call.scope_id,
+        ctx,
+        module_path.trim(),
+        type_name,
+        |symbol| {
             matches!(
                 symbol.kind,
                 SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface
             )
-        })?;
+        },
+    )?;
     let mut members = types
         .iter()
         .flat_map(|type_id| find_members_by_name(ctx, type_id, &call.callee_name))
@@ -286,27 +291,24 @@ fn resolve_rust_qualified_module_outcome(
     Some(rust_type_path_outcome(call, ctx, members, strategy))
 }
 
-/// The items named `name` that `accept` admits in the module a Rust path names, and how the path
-/// reached them; `None` when the path is not one the resolver reads or reaches no such item.
+/// The items named `name` that `accept` admits in the module a Rust path written at `scope_id`
+/// names, and how the path reached them; `None` when the path is not one the resolver reads or
+/// reaches no such item.
 fn rust_module_path_items(
-    call: &CallSite,
+    scope_id: &ScopeId,
     ctx: &ResolutionContext<'_>,
     path: &str,
     name: &str,
     accept: impl Fn(&Symbol) -> bool,
 ) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
-    if let Some(found) = rust_crate_name_items(call, ctx, path, name, &accept) {
+    if let Some(found) = rust_crate_name_items(scope_id, ctx, path, name, &accept) {
         return Some(found);
     }
     let own = ctx.scopes.rust_module_placement(ctx.file_id);
     // A file another crate may compile too is read against no one crate.
     let mut placement = own.filter(|placement| !placement.in_other_crates);
-    if let Some((import_scope, imported)) = rust_imported_module_path(call, ctx, path) {
-        let through_import = CallSite {
-            scope_id: import_scope.clone(),
-            ..call.clone()
-        };
-        return rust_module_path_items(&through_import, ctx, &imported, name, accept);
+    if let Some((import_scope, imported)) = rust_imported_module_path(scope_id, ctx, path) {
+        return rust_module_path_items(import_scope, ctx, &imported, name, accept);
     }
     // A path starting at a module in scope that is also a crate name: the module is kept as a
     // candidate that proves nothing.
@@ -315,13 +317,11 @@ fn rust_module_path_items(
         rust_crate_path_module(path)?
     } else {
         let (start, depth, segments) = match rust_relative_path(path) {
-            Some((depth, segments)) => (&call.scope_id, depth, segments),
+            Some((depth, segments)) => (scope_id, depth, segments),
             None => {
-                let (start, segments) = rust_scoped_module_path(call, ctx, path)?;
+                let (start, segments) = rust_scoped_module_path(scope_id, ctx, path)?;
                 let first = path.split("::").next().unwrap_or_default().trim();
-                if ctx.scopes.rust_named_crate(ctx.file_id, first).is_some()
-                    || ctx.scopes.rust_names_external_crate(ctx.file_id, first)
-                {
+                if ctx.scopes.rust_names_crate(ctx.file_id, first) {
                     crate_named = Some(first.to_string());
                 }
                 (start, 0, segments)
@@ -345,8 +345,15 @@ fn rust_module_path_items(
                         !placement.in_other_crates || placement.own_subtree_in_every_crate
                     });
                 }
-                // The path is read off this file's module, which only a placed file has.
-                rust_outside_module(placement?, climbs, &path)?
+                // The path is read off this file's module: the one the tree places it at, or,
+                // for a file a `path` attribute mounts inside one alternative of a module whose
+                // file configuration selects, the module its route holds (#633).
+                let placement = placement?;
+                let module = match placement.module.as_deref() {
+                    Some(module) => module,
+                    None => ctx.scopes.rust_routed_module(placement, ctx.file_id)?,
+                };
+                rust_outside_module(module, climbs, &path)?
             }
         }
     };
@@ -378,56 +385,128 @@ fn rust_module_path_items(
     }
 }
 
-/// A Rust path of two or more segments whose first segment an import in scope at the call binds
-/// (#626): `sys::imp::f()` after `use crate::sys;` is `crate::sys::imp::f()`. Returns the scope
-/// the import is written in, which a `self::` or `super::` import path is read from, and the path
-/// with the import's path in place of the first segment. `None` unless the nearest import of the
-/// name is one explicit import whose path starts with `crate`, `self` or `super`: a path through
-/// a crate name is left to the crate-name rule, and a glob that may supply the name leaves it
-/// unread. A module the name declares in a nearer scope is read by [`rust_scoped_module_path`]
-/// instead.
+/// A Rust path whose first segment an import in scope at `scope_id` binds (#626): `sys::imp::f()`
+/// after `use crate::sys;` is `crate::sys::imp::f()`. Returns the scope the import is written
+/// in, which a `self::` or `super::` import path is read from, and the path with the import's
+/// path in place of the first segment. `None` unless the nearest import of the name is one
+/// explicit import whose path starts with `crate`, `self` or `super`, or with a module in scope
+/// where the import is written (`use sys::imp;` beside `mod sys;`, #632): a path through a crate
+/// name is left to the crate-name rule, and a glob that may supply the name leaves it unread. A
+/// module the name declares in a nearer scope is read by [`rust_scoped_module_path`] instead.
+///
+/// A one-segment path (`imp::f()` after `use crate::sys::imp;`) is read through the import's
+/// binding by `imported_receiver_outcome`, with its import proofs, unless the index left an
+/// import starting at a module in scope unbound: that one is read here as its path, so a first
+/// segment that also names a crate is reported ambiguous rather than unresolved.
 fn rust_imported_module_path<'c>(
-    call: &CallSite,
+    scope_id: &ScopeId,
     ctx: &ResolutionContext<'c>,
     path: &str,
 ) -> Option<(&'c ScopeId, String)> {
-    // A one-segment path (`sys::f()` after `use crate::sys;`) is read through the import's
-    // binding by `imported_receiver_outcome`.
-    let (first, rest) = path.split_once("::")?;
-    let (first, rest) = (first.trim(), rest.trim());
+    let (first, rest) = match path.split_once("::") {
+        Some((first, rest)) => (first.trim(), Some(rest.trim())),
+        None => (path.trim(), None),
+    };
     if matches!(first, "" | "self" | "super" | "crate" | "Self") {
         return None;
     }
-    if crate::context::rust_module_in_scope(ctx, &call.scope_id, first).is_some() {
+    if crate::context::rust_module_in_scope(ctx, scope_id, first).is_some() {
         return None;
     }
-    let ScopedImport::Resolved(bindings) = ctx.scoped_import(&call.scope_id, first, |_| true)
-    else {
+    let ScopedImport::Resolved(bindings) = ctx.scoped_import(scope_id, first, |_| true) else {
         return None;
     };
     let [binding] = bindings.as_slice() else {
         return None;
     };
     let source = binding.source_module.trim();
+    if binding.is_glob || source.ends_with("::*") {
+        return None;
+    }
     let relative = ["crate", "self", "super"].iter().any(|prefix| {
         source
             .strip_prefix(prefix)
             .is_some_and(|tail| tail.starts_with("::"))
     });
-    if binding.is_glob || !relative || source.ends_with("::*") {
-        return None;
+    let in_scope = !relative && rust_import_starts_at_module_in_scope(ctx, binding);
+    match rest {
+        Some(rest) if relative || in_scope => {
+            Some((&binding.scope_id, format!("{source}::{rest}")))
+        }
+        None if in_scope && !rust_import_is_bound(binding) => {
+            Some((&binding.scope_id, source.to_string()))
+        }
+        _ => None,
     }
-    Some((&binding.scope_id, format!("{source}::{rest}")))
 }
 
-/// A Rust path whose first segment names a module in scope at the call rather than `crate`,
+/// Whether a Rust import's path starts at a module in scope where the import is written, rather
+/// than at `crate`, `self`, `super` or a crate name (#632): `use sys::imp::f;` beside `mod sys;`
+/// is `use self::sys::imp::f;`.
+fn rust_import_starts_at_module_in_scope(
+    ctx: &ResolutionContext<'_>,
+    binding: &ImportBinding,
+) -> bool {
+    let source = binding.source_module.trim();
+    let first = source.split("::").next().unwrap_or_default().trim();
+    !matches!(first, "" | "self" | "super" | "crate" | "Self")
+        && source.contains("::")
+        && crate::context::rust_module_in_scope(ctx, &binding.scope_id, first).is_some()
+}
+
+/// Whether ingest bound a Rust import to a file, an item, or the files of a module whose file
+/// configuration selects.
+fn rust_import_is_bound(binding: &ImportBinding) -> bool {
+    binding.target_file.is_some()
+        || binding.target_symbol.is_some()
+        || binding.configured_targets.is_some()
+}
+
+/// A call through a Rust item import whose path starts at a module in scope (#632) that the index
+/// left unbound: the path is read from the scope the import is written in, as a call path with
+/// that first segment is, so `f()` after `use sys::f;` beside `mod sys;` in a package that also
+/// depends on a crate named `sys` is ambiguous, with the module's item as its candidate. `None`
+/// for any other call, which the import rule reads as before.
+pub(crate) fn rust_unbound_item_import_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+) -> Option<ResolutionOutcome> {
+    let ScopedImport::Resolved(bindings) =
+        ctx.scoped_import(&call.scope_id, &call.callee_name, |_| true)
+    else {
+        return None;
+    };
+    let [binding] = bindings.as_slice() else {
+        return None;
+    };
+    if binding.is_glob
+        || rust_import_is_bound(binding)
+        || !rust_import_starts_at_module_in_scope(ctx, binding)
+    {
+        return None;
+    }
+    let (module_path, item) = binding.source_module.trim().rsplit_once("::")?;
+    if item.trim() != binding.imported_name {
+        return None;
+    }
+    let (targets, strategy) = rust_module_path_items(
+        &binding.scope_id,
+        ctx,
+        module_path.trim(),
+        &binding.imported_name,
+        |symbol| symbol.kind == SymbolKind::Function,
+    )?;
+    Some(rust_module_path_outcome(call, ctx, targets, strategy))
+}
+
+/// A Rust path whose first segment names a module in scope at `scope_id` rather than `crate`,
 /// `self` or `super` (#626): `sys::imp::f()` in the file declaring `mod sys;` is
 /// `self::sys::imp::f()`, and in `mod tests` with `use super::*;` it is `super::sys::imp::f()`.
 /// Returns the module scope the path starts from and its segments, the first spelled as the
 /// module is named. `None` when the first segment names no such module, and the path is left to
 /// the crate-name and import rules.
 fn rust_scoped_module_path<'a>(
-    call: &CallSite,
+    scope_id: &ScopeId,
     ctx: &ResolutionContext<'a>,
     path: &'a str,
 ) -> Option<(&'a ScopeId, Vec<&'a str>)> {
@@ -441,7 +520,7 @@ fn rust_scoped_module_path<'a>(
     {
         return None;
     }
-    let (start, module) = crate::context::rust_module_in_scope(ctx, &call.scope_id, first)?;
+    let (start, module) = crate::context::rust_module_in_scope(ctx, scope_id, first)?;
     Some((start, std::iter::once(module).chain(rest).collect()))
 }
 
@@ -813,13 +892,13 @@ fn rust_module_path_outcome(
 /// receiver text of `engine::run()`, and a closure, pattern or loop binding named `engine` is not
 /// recorded as a binding.
 fn rust_crate_name_items(
-    call: &CallSite,
+    scope_id: &ScopeId,
     ctx: &ResolutionContext<'_>,
     path: &str,
     name: &str,
     accept: impl Fn(&Symbol) -> bool,
 ) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
-    let (module, crate_placement) = rust_crate_name_module(call, ctx, path.trim())?;
+    let (module, crate_placement) = rust_crate_name_module(scope_id, ctx, path.trim())?;
     let names = rust_module_member_names(crate_placement, &module, name);
     let mut targets = rust_qualified_targets(ctx, &names, &accept);
     targets.retain(|target| {
@@ -862,7 +941,7 @@ enum RustModulePathStrategy {
 /// the name, or an item of it in lexical scope, such as a module, shadows the crate. A glob
 /// importing a module of that name from another file is not seen.
 fn rust_crate_name_module<'c>(
-    call: &CallSite,
+    scope_id: &ScopeId,
     ctx: &ResolutionContext<'c>,
     receiver: &str,
 ) -> Option<(Vec<String>, &'c RustModulePlacement)> {
@@ -876,7 +955,7 @@ fn rust_crate_name_module<'c>(
         .get(&(ctx.file_id.clone(), first.to_string()))
         .is_some_and(|bindings| bindings.iter().any(|binding| !binding.is_glob));
     if explicitly_imported
-        || crate::context::nearest_lexical_items(ctx, &call.scope_id, first, |_| true).is_some()
+        || crate::context::nearest_lexical_items(ctx, scope_id, first, |_| true).is_some()
     {
         return None;
     }
@@ -946,15 +1025,9 @@ fn rust_crate_path_module(receiver: &str) -> Option<Vec<String>> {
     Some(module)
 }
 
-/// The module `climbs` modules above the caller's own module and then down `path`, below the
-/// caller's crate root. `None` when the caller is not placed at its path or the climb leaves the
-/// crate.
-fn rust_outside_module(
-    placement: &RustModulePlacement,
-    climbs: usize,
-    path: &[String],
-) -> Option<Vec<String>> {
-    let own = placement.module.as_ref()?;
+/// The module `climbs` modules above `own`, the caller's own module, and then down `path`,
+/// below the caller's crate root. `None` when the climb leaves the crate.
+fn rust_outside_module(own: &[String], climbs: usize, path: &[String]) -> Option<Vec<String>> {
     let kept = own.len().checked_sub(climbs)?;
     let module = own[..kept]
         .iter()
@@ -1406,6 +1479,9 @@ pub(crate) fn collect_type_candidate_set(
     let mut configured = None::<RustModuleFiles>;
 
     if ctx.language == Language::Rust {
+        if let Some(found) = rust_path_type_candidates(ctx, scope_id, type_name) {
+            return found;
+        }
         // A Rust type of this file is nameable only from its own module, or through an import
         // the scoped lookup below reads. A type in a nearer scope shadows every import further
         // out, and one in a sibling `mod` block is never a candidate.
@@ -1510,6 +1586,45 @@ pub(crate) fn collect_type_candidate_set(
         targets: candidates.into_values().collect(),
         configured,
     }
+}
+
+/// The types a Rust type written as a path whose first segment is a module in scope names
+/// (`s: sys::imp::S` beside `mod sys;`, #632), read as a call path through a type is: the last
+/// segment is a type of the module the rest of the path reaches. References and generic
+/// arguments are read through as for a receiver. A path whose first segment names both such a
+/// module and a crate reaches no candidate, since it may start from either. `None` for any other
+/// type, which is looked up by name as before: a path starting at `crate`, `self`, `super`, a
+/// crate name or an import is not read here.
+fn rust_path_type_candidates(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    type_name: &str,
+) -> Option<TypeCandidates> {
+    let path = rust_annotated_receiver_type(type_name)?;
+    let (module_path, name) = path.rsplit_once("::")?;
+    let (module_path, name) = (module_path.trim(), name.trim());
+    if module_path.is_empty() || matches!(name, "" | "self" | "super" | "crate" | "Self") {
+        return None;
+    }
+    let first = module_path.split("::").next().unwrap_or_default().trim();
+    if matches!(first, "" | "self" | "super" | "crate" | "Self") {
+        return None;
+    }
+    crate::context::rust_module_in_scope(ctx, scope_id, first)?;
+    let (targets, strategy) = rust_module_path_items(scope_id, ctx, module_path, name, |symbol| {
+        symbol.kind != SymbolKind::Module && is_type_symbol(&symbol.kind)
+    })?;
+    let (targets, configured) = match strategy {
+        RustModulePathStrategy::ModuleOrCrate(_) => (Vec::new(), None),
+        RustModulePathStrategy::Configured(files) => (targets, Some(files)),
+        RustModulePathStrategy::CrateQualified
+        | RustModulePathStrategy::ModuleScope
+        | RustModulePathStrategy::CrateName => (targets, None),
+    };
+    Some(TypeCandidates {
+        targets: targets.into_iter().map(|target| (target, false)).collect(),
+        configured,
+    })
 }
 
 fn is_type_symbol(kind: &SymbolKind) -> bool {
@@ -1636,7 +1751,7 @@ mod tests {
         path: &[String],
         callee: &str,
     ) -> Option<Vec<String>> {
-        let module = rust_outside_module(placement, climbs, path)?;
+        let module = rust_outside_module(placement.module.as_deref()?, climbs, path)?;
         Some(rust_module_member_names(placement, &module, callee))
     }
 
@@ -2542,10 +2657,15 @@ mod tests {
         test(&context)
     }
 
-    #[test]
-    fn a_rust_path_into_a_module_whose_file_configuration_selects_keeps_every_file_unproven() {
-        // `src/sys/mod.rs` declares `#[cfg_attr(windows, path = "win.rs")] mod imp;`: `imp` is
-        // `sys/imp.rs`, placed at its path, or `sys/win.rs`, which is not. Each declares `inner`.
+    /// The items, placements and configuration choices of a crate whose `src/sys/mod.rs` declares
+    /// `#[cfg_attr(windows, path = "win.rs")] mod imp;`: `imp` is `sys/imp.rs`, placed at its
+    /// path, or `sys/win.rs`, which is not. Each declares `inner`.
+    #[allow(clippy::type_complexity)]
+    fn configured_imp_layout() -> (
+        [(&'static str, &'static str); 7],
+        Vec<(&'static str, RustModulePlacement)>,
+        HashMap<String, crate::index::RustConfiguredModules>,
+    ) {
         let at = |module: &[&str]| placement("src", &["src::lib"], Some(module));
         let items = [
             ("src::sys::imp::f", "src/sys/imp.rs"),
@@ -2628,6 +2748,12 @@ mod tests {
                 ..Default::default()
             },
         )]);
+        (items, placements, configured)
+    }
+
+    #[test]
+    fn a_rust_path_into_a_module_whose_file_configuration_selects_keeps_every_file_unproven() {
+        let (items, placements, configured) = configured_imp_layout();
         let alternatives = |outcome: ResolutionOutcome| match outcome {
             ResolutionOutcome::Alternatives { candidates, .. } => candidates
                 .into_iter()
@@ -2736,6 +2862,52 @@ mod tests {
                 Some("src::sys::imp::f")
             );
         });
+    }
+
+    #[test]
+    fn rust_relative_paths_in_a_path_mounted_alternative_read_the_module_its_route_holds() {
+        // `sys/win.rs` is the module `sys::imp` on the builds that mount it, and the tree does
+        // not place it: a `self::` or `super::` path written there is read off that module
+        // (#633), as `crate::sys::imp::..` from the same file already is (#624).
+        let (items, placements, configured) = configured_imp_layout();
+        with_rust_modules(
+            "src/sys/win.rs",
+            &items,
+            placements.clone(),
+            Vec::new(),
+            configured.clone(),
+            |ctx| {
+                let proven = |receiver: &str, callee: &str| {
+                    proven_target(ctx, &module_path_call("scope:worker", receiver, callee))
+                };
+                assert_eq!(
+                    proven("self::inner", "g").as_deref(),
+                    Some("src::sys::inner::g")
+                );
+                assert_eq!(proven("super", "f").as_deref(), Some("src::sys::f"));
+                // Climbing past the crate root names nothing.
+                assert_eq!(proven("super::super::super", "f"), None);
+            },
+        );
+        // Without its route the file holds no module the index can tell.
+        let mut unrouted = configured;
+        for modules in unrouted.values_mut() {
+            modules.routes.remove("src/sys/win");
+        }
+        with_rust_modules(
+            "src/sys/win.rs",
+            &items,
+            placements,
+            Vec::new(),
+            unrouted,
+            |ctx| {
+                let proven = |receiver: &str, callee: &str| {
+                    proven_target(ctx, &module_path_call("scope:worker", receiver, callee))
+                };
+                assert_eq!(proven("self::inner", "g"), None);
+                assert_eq!(proven("super", "f"), None);
+            },
+        );
     }
 
     #[test]
@@ -3319,6 +3491,107 @@ mod tests {
                 resolve_module_member_outcome(&call, ctx),
                 ResolutionOutcome::Ambiguous { .. }
             ));
+        });
+    }
+
+    /// A bare call of `callee` written at `scope` of `src/worker.rs`.
+    fn bare_call_in(scope: &str, callee: &str) -> CallSite {
+        CallSite {
+            receiver: None,
+            receiver_kind: ReceiverKind::None,
+            ..module_path_call(scope, "", callee)
+        }
+    }
+
+    #[test]
+    fn rust_imports_starting_at_a_module_in_scope_read_as_their_paths_when_left_unbound() {
+        // `use child::c;` and `use outer::inner;` beside `worker.rs`'s `mod child;` and
+        // `mod outer { .. }` (#632), which ingest left unbound here.
+        let imports = vec![
+            ("scope:worker", "c", "child::c"),
+            ("scope:worker", "inner", "outer::inner"),
+        ];
+        with_module_files_naming(Vec::new(), true, &[], &[], imports.clone(), |ctx| {
+            match crate::bare_calls::resolve_bare_call_outcome(
+                &bare_call_in("scope:worker", "c"),
+                ctx,
+            ) {
+                ResolutionOutcome::Proven { candidate } => {
+                    assert_eq!(candidate.target_symbol_id.0, "sym:child:c");
+                }
+                other => panic!("expected the import read as its path, got {other:?}"),
+            }
+            assert_eq!(
+                proven_target(ctx, &module_path_call("scope:worker", "inner", "g")).as_deref(),
+                Some("sym:inner:g")
+            );
+        });
+        // With crates of those names the paths may start from either, so nothing is proven.
+        with_module_files_naming(Vec::new(), true, &[], &["child", "outer"], imports, |ctx| {
+            match crate::bare_calls::resolve_bare_call_outcome(
+                &bare_call_in("scope:worker", "c"),
+                ctx,
+            ) {
+                ResolutionOutcome::Ambiguous {
+                    candidates, reason, ..
+                } => {
+                    assert_eq!(candidates.len(), 1);
+                    assert_eq!(candidates[0].target_symbol_id.0, "sym:child:c");
+                    assert_ne!(
+                        candidates[0].authority(&GraphEdgeType::Calls),
+                        open_kioku_core::RelationshipAuthority::Authoritative
+                    );
+                    assert!(reason.contains("`child`"), "{reason}");
+                }
+                other => panic!("expected the import read as ambiguous, got {other:?}"),
+            }
+            assert!(matches!(
+                resolve_module_member_outcome(&module_path_call("scope:worker", "inner", "g"), ctx),
+                ResolutionOutcome::Ambiguous { .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn rust_types_written_as_paths_are_read_through_the_module_path() {
+        // `pub struct Thing;` in `src/worker/child.rs`, which `worker.rs` declares (#632).
+        let thing = Symbol {
+            id: SymbolId::new("sym:child:Thing"),
+            name: "Thing".into(),
+            qualified_name: "src::worker::child::Thing".into(),
+            kind: SymbolKind::Class,
+            file_id: FileId::new("file:src/worker/child.rs"),
+            range: None,
+            language: Language::Rust,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: Some(ScopeId::new("scope:c")),
+            signature: None,
+            visibility: Visibility::Public,
+            alias_of: None,
+        };
+        let types = |ctx: &ResolutionContext<'_>, written: &str| {
+            collect_type_candidates(ctx, &ScopeId::new("scope:worker"), written)
+                .into_iter()
+                .map(|target| target.0)
+                .collect::<Vec<_>>()
+        };
+        with_module_files_naming(vec![thing.clone()], true, &[], &[], Vec::new(), |ctx| {
+            for written in ["child::Thing", "&child::Thing", "&'a mut child::Thing<u8>"] {
+                assert_eq!(types(ctx, written), vec!["sym:child:Thing"], "{written}");
+            }
+            // The path names no type there, or starts nowhere in scope.
+            assert!(types(ctx, "child::Missing").is_empty());
+            assert!(types(ctx, "stray::Thing").is_empty());
+            // Only a path starting at a module in scope is read this way.
+            assert!(types(ctx, "self::child::Thing").is_empty());
+            assert!(types(ctx, "crate::worker::child::Thing").is_empty());
+        });
+        // A first segment that is also a crate's name may start from either.
+        with_module_files_naming(vec![thing], true, &[], &["child"], Vec::new(), |ctx| {
+            assert!(types(ctx, "child::Thing").is_empty());
         });
     }
 

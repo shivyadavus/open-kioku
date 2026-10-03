@@ -161,10 +161,12 @@ pub struct RustModulePlacement {
     /// module either declares belongs to that one only.
     pub crate_roots: Vec<String>,
     /// The file's module below the crate root (`["auth", "keys"]`, empty for a crate root) when
-    /// every module from the root down is declared as a file by the module above it. `None` for a
-    /// file the tree does not place there, such as the default location of a `#[path]` module, a
-    /// file a `#[path]` mounts, or one declared inside an inline `mod` or a macro: its `self::`
-    /// and `super::` paths cannot be read off its path, and a path must not end in it.
+    /// every module from the root down is declared as a file by the module above it, or by a
+    /// `mod name;` inside inline `mod` blocks of the file above it (#633). `None` for a file the
+    /// tree does not place there, such as the default location of a `#[path]` module, a file a
+    /// `#[path]` mounts, one below an inline `mod` block that has a `path` attribute, or one
+    /// declared inside a macro: its `self::` and `super::` paths cannot be read off its path, and
+    /// a path must not end in it.
     pub module: Option<Vec<String>>,
     /// The file may also be compiled into a crate other than those of `crate_roots`: a crate
     /// root the index could not read may declare it, or another crate mounts it with `#[path]`.
@@ -474,6 +476,37 @@ impl ScopeIndex {
             }
             Some(read)
         })
+    }
+
+    /// The module `file` holds by its route through the modules of `placement`'s crate whose file
+    /// configuration selects (#633): for a file a `path` attribute mounts inside one alternative,
+    /// which the tree does not place, the module that alternative makes it, so a `self::` or
+    /// `super::` path written there is read off that module. `None` for a file with no one route,
+    /// such as one both alternatives mount, and when the crates of `placement` disagree.
+    pub(crate) fn rust_routed_module(
+        &self,
+        placement: &RustModulePlacement,
+        file: &FileId,
+    ) -> Option<&[String]> {
+        let mut found = None;
+        for root in &placement.crate_roots {
+            let configured = self.rust_configured_modules.get(root)?;
+            let stem = configured.stems.get(file)?;
+            let module = configured.route_of(stem, None)?.module.as_slice();
+            if found.is_some_and(|known| known != module) {
+                return None;
+            }
+            found = Some(module);
+        }
+        found
+    }
+
+    /// Whether `name` in `file` names a crate its package can name: a dependency its manifest
+    /// declares, inside the repository or not, its own library from another of its crates, or
+    /// `std`, `core` or `alloc`. A Rust path whose first segment names such a crate and a module
+    /// in scope may start from either (#626, #632).
+    pub fn rust_names_crate(&self, file: &FileId, name: &str) -> bool {
+        self.rust_named_crate(file, name).is_some() || self.rust_names_external_crate(file, name)
     }
 
     /// Records which library crates each Rust file names by crate name. A path through one of
