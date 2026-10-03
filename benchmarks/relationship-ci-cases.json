@@ -2454,6 +2454,295 @@
       "notes": "Regression case (#626): `sys::imp::target_fn()` in `src/other.rs` after `use crate::sys;` reads through the import as `crate::sys::imp::target_fn()` and names `src/sys/imp.rs`."
     },
     {
+      "id": "ci-rust-calls-119-use_through_module_in_scope",
+      "fixture_id": "ci/ri3/rust/calls/use_through_module_in_scope",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_through_module_in_scope:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_through_module_in_scope",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::target_fn",
+        "identity": "symbol:rust:calls:use_through_module_in_scope:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#632): `use sys::imp::target_fn;` in `src/lib.rs`, which declares `mod sys;`, is `use self::sys::imp::target_fn;`, so the call names `src/sys/imp.rs`."
+    },
+    {
+      "id": "ci-rust-calls-120-use_through_module_in_scope_in_function_body",
+      "fixture_id": "ci/ri3/rust/calls/use_through_module_in_scope_in_function_body",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_through_module_in_scope_in_function_body:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_through_module_in_scope_in_function_body",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::target_fn",
+        "identity": "symbol:rust:calls:use_through_module_in_scope_in_function_body:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#632): the same `use` written in the function body still starts at the module the file declares."
+    },
+    {
+      "id": "ci-rust-calls-121-use_through_module_in_scope_shadows_extern_crate",
+      "fixture_id": "ci/ri3/rust/calls/use_through_module_in_scope_shadows_extern_crate",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_through_module_in_scope_shadows_extern_crate:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "use_through_module_in_scope_shadows_extern_crate",
+      "notes": "Regression case (#632): the package depends on a crate named `sys` and `src/lib.rs` declares `mod sys;`: `use sys::imp::target_fn;` may start from either, so no authoritative edge into `src/sys/imp.rs` is emitted."
+    },
+    {
+      "id": "ci-rust-calls-122-use_through_module_not_in_scope_in_child_file",
+      "fixture_id": "ci/ri3/rust/calls/use_through_module_not_in_scope_in_child_file",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_through_module_not_in_scope_in_child_file:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "use_through_module_not_in_scope_in_child_file",
+      "notes": "Regression case (#632): `use sys::target_fn;` in `src/caller.rs`, which declares no `sys`, does not reach the crate root's `src/sys.rs`."
+    },
+    {
+      "id": "ci-rust-calls-123-use_through_module_in_scope_cfg_attr_choice",
+      "fixture_id": "ci/ri3/rust/calls/use_through_module_in_scope_cfg_attr_choice",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_through_module_in_scope_cfg_attr_choice:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "use_through_module_in_scope_cfg_attr_choice",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#632): `use sys::imp::target_fn;` beside `mod sys;` passes `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` and keeps a candidate in `src/sys/imp.rs` and `src/sys/win.rs`, neither authoritative."
+    },
+    {
+      "id": "ci-rust-calls-124-relative_path_inside_mounted_alternative",
+      "fixture_id": "ci/ri3/rust/calls/relative_path_inside_mounted_alternative",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:relative_path_inside_mounted_alternative:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "relative_path_inside_mounted_alternative",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::unix::util::target_fn",
+        "identity": "symbol:rust:calls:relative_path_inside_mounted_alternative:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#633): `util::target_fn()` in `src/sys/unix/mod.rs`, which `#[cfg_attr(unix, path = \"unix/mod.rs\")]` mounts as `imp`, names that alternative's `src/sys/unix/util.rs` and not `src/sys/other/util.rs`."
+    },
+    {
+      "id": "ci-rust-calls-125-super_path_inside_mounted_alternative",
+      "fixture_id": "ci/ri3/rust/calls/super_path_inside_mounted_alternative",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:super_path_inside_mounted_alternative:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "super_path_inside_mounted_alternative",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::mod::target_fn",
+        "identity": "symbol:rust:calls:super_path_inside_mounted_alternative:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#633): `super::target_fn()` in `src/sys/win/mod.rs`, mounted as `imp` beside the placed default `src/sys/imp/mod.rs`, names the `target_fn` of `src/sys/mod.rs`."
+    },
+    {
+      "id": "ci-rust-calls-126-relative_path_in_file_both_alternatives_mount",
+      "fixture_id": "ci/ri3/rust/calls/relative_path_in_file_both_alternatives_mount",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:relative_path_in_file_both_alternatives_mount:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "relative_path_in_file_both_alternatives_mount",
+      "notes": "Regression case (#633): `src/sys/common.rs`, which both alternatives mount with `#[path]`, is compiled with either, so `super::util::target_fn()` there proves neither alternative's `util.rs`."
+    },
+    {
+      "id": "ci-rust-calls-127-module_file_inside_inline_module",
+      "fixture_id": "ci/ri3/rust/calls/module_file_inside_inline_module",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_file_inside_inline_module:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "module_file_inside_inline_module",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::b::sys::target_fn",
+        "identity": "symbol:rust:calls:module_file_inside_inline_module:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "module_or_package_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#633): `mod sys;` inside the crate root's inline `pub mod b` is `src/b/sys.rs`, so `sys::target_fn()` in the block names it."
+    },
+    {
+      "id": "ci-rust-calls-128-module_file_inside_inline_module_with_path",
+      "fixture_id": "ci/ri3/rust/calls/module_file_inside_inline_module_with_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:module_file_inside_inline_module_with_path:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "module_file_inside_inline_module_with_path",
+      "notes": "Regression case (#633): with `#[path = \"elsewhere\"]` on the inline `mod b`, its `mod sys;` is not `src/b/sys.rs`, so no authoritative edge into it is emitted."
+    },
+    {
+      "id": "ci-rust-calls-129-use_in_2015_edition_starts_at_crate_root",
+      "fixture_id": "ci/ri3/rust/calls/use_in_2015_edition_starts_at_crate_root",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_in_2015_edition_starts_at_crate_root:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_in_2015_edition_starts_at_crate_root",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::target_fn",
+        "identity": "symbol:rust:calls:use_in_2015_edition_starts_at_crate_root:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#632): in a package of the 2015 edition, `use sys::target_fn;` in `src/a.rs`, which declares a `mod sys;` of its own, starts at the crate root and names `src/sys.rs`, not `src/a/sys.rs`."
+    },
+    {
+      "id": "ci-rust-calls-130-use_without_edition_starts_at_crate_root",
+      "fixture_id": "ci/ri3/rust/calls/use_without_edition_starts_at_crate_root",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_without_edition_starts_at_crate_root:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_without_edition_starts_at_crate_root",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::target_fn",
+        "identity": "symbol:rust:calls:use_without_edition_starts_at_crate_root:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#632): a package that sets no edition is 2015, so the same `use` names `src/sys.rs`."
+    },
+    {
+      "id": "ci-rust-calls-131-use_with_inherited_edition_starts_in_scope",
+      "fixture_id": "ci/ri3/rust/calls/use_with_inherited_edition_starts_in_scope",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:use_with_inherited_edition_starts_in_scope:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_with_inherited_edition_starts_in_scope",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::a::sys::target_fn",
+        "identity": "symbol:rust:calls:use_with_inherited_edition_starts_in_scope:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#632): `edition.workspace = true` under `[workspace.package] edition = \"2021\"` makes the package 2021, where the same `use` looks `sys` up in scope and names `src/a/sys.rs`."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
@@ -2522,6 +2811,85 @@
       "notes": "Regression case (#625): `caller_fn(value: TargetType)` after `use crate::sys::imp::TargetType;` through `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` uses the `TargetType` of either file, so it keeps a `USES_TYPE` candidate in each and no authoritative edge."
     },
     {
+      "id": "ci-rust-uses_type-03-module_in_scope_type_path",
+      "fixture_id": "ci/ri3/rust/uses_type/module_in_scope_type_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:module_in_scope_type_path:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "module_in_scope_type_path",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::TargetType",
+        "identity": "symbol:rust:uses_type:module_in_scope_type_path:target"
+      },
+      "notes": "Regression case (#632): `caller_fn(value: &sys::imp::TargetType)` beside `mod sys;` uses the `TargetType` of `src/sys/imp.rs`."
+    },
+    {
+      "id": "ci-rust-uses_type-04-type_through_use_of_module_in_scope",
+      "fixture_id": "ci/ri3/rust/uses_type/type_through_use_of_module_in_scope",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:type_through_use_of_module_in_scope:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "type_through_use_of_module_in_scope",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::TargetType",
+        "identity": "symbol:rust:uses_type:type_through_use_of_module_in_scope:target"
+      },
+      "notes": "Regression case (#632): `caller_fn(value: TargetType)` after `use sys::imp::TargetType;` beside `mod sys;` uses the `TargetType` of `src/sys/imp.rs`."
+    },
+    {
+      "id": "ci-rust-uses_type-05-module_in_scope_type_path_shadows_extern_crate",
+      "fixture_id": "ci/ri3/rust/uses_type/module_in_scope_type_path_shadows_extern_crate",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:module_in_scope_type_path_shadows_extern_crate:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "module_in_scope_type_path_shadows_extern_crate",
+      "notes": "Regression case (#632): with a dependency named `sys`, `&sys::imp::TargetType` may start from either, so no authoritative edge is emitted."
+    },
+    {
+      "id": "ci-rust-uses_type-06-type_through_use_in_2015_edition",
+      "fixture_id": "ci/ri3/rust/uses_type/type_through_use_in_2015_edition",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:type_through_use_in_2015_edition:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "type_through_use_in_2015_edition",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::TargetType",
+        "identity": "symbol:rust:uses_type:type_through_use_in_2015_edition:target"
+      },
+      "notes": "Regression case (#632): in a package of the 2015 edition, `caller_fn(value: TargetType)` after `use sys::TargetType;` in `src/a.rs`, which declares its own `mod sys;`, uses the crate root's `src/sys.rs` type."
+    },
+    {
       "id": "ci-rust-implements-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/implements/metamorphic_a",
       "split": "development",
@@ -2558,6 +2926,27 @@
       "scenario": "cfg_attr_imported_trait_alternatives",
       "candidate_count_expected": 2,
       "notes": "Regression case (#625): `impl TargetTrait for SourceType {}` after `use crate::sys::imp::TargetTrait;` through `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` implements the `TargetTrait` of either file, so it keeps an `IMPLEMENTS` candidate in each and no authoritative edge."
+    },
+    {
+      "id": "ci-rust-implements-03-trait_through_use_of_module_in_scope",
+      "fixture_id": "ci/ri3/rust/implements/trait_through_use_of_module_in_scope",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPLEMENTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "SourceType",
+        "identity": "symbol:rust:implements:trait_through_use_of_module_in_scope:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "trait_through_use_of_module_in_scope",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::TargetTrait",
+        "identity": "symbol:rust:implements:trait_through_use_of_module_in_scope:target"
+      },
+      "notes": "Regression case (#632): `impl TargetTrait for SourceType {}` after `use sys::imp::TargetTrait;` beside `mod sys;` implements the trait of `src/sys/imp.rs`."
     },
     {
       "id": "ci-rust-extends-01-metamorphic_a",
@@ -2686,6 +3075,70 @@
         "import_binding"
       ],
       "notes": "Regression case (#587): `use engine::issue_token;` in a package declaring `engine` by `path` follows the dependency crate root's `pub use auth::issue_token;` to `crates/engine/src/auth.rs`, the file declaring the item."
+    },
+    {
+      "id": "ci-rust-imports-06-crate_root_reexport_through_module_in_scope",
+      "fixture_id": "ci/ri3/rust/imports/crate_root_reexport_through_module_in_scope",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/lib.rs",
+        "identity": "file:rust:imports:crate_root_reexport_through_module_in_scope:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "crate_root_reexport_through_module_in_scope",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/auth.rs",
+        "identity": "file:rust:imports:crate_root_reexport_through_module_in_scope:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#632): `pub use auth::issue_token;` in a crate root that declares `pub mod auth;` imports from `src/auth.rs`."
+    },
+    {
+      "id": "ci-rust-imports-07-reexport_through_module_in_scope_shadows_extern_crate",
+      "fixture_id": "ci/ri3/rust/imports/reexport_through_module_in_scope_shadows_extern_crate",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/lib.rs",
+        "identity": "file:rust:imports:reexport_through_module_in_scope_shadows_extern_crate:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "reexport_through_module_in_scope_shadows_extern_crate",
+      "notes": "Regression case (#632): with a dependency named `auth`, `pub use auth::issue_token;` may start from either, so no authoritative edge is emitted."
+    },
+    {
+      "id": "ci-rust-imports-08-use_in_2015_edition_imports_from_crate_root",
+      "fixture_id": "ci/ri3/rust/imports/use_in_2015_edition_imports_from_crate_root",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/session.rs",
+        "identity": "file:rust:imports:use_in_2015_edition_imports_from_crate_root:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "use_in_2015_edition_imports_from_crate_root",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/auth.rs",
+        "identity": "file:rust:imports:use_in_2015_edition_imports_from_crate_root:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#632): in a package of the 2015 edition, `use auth::issue_token;` in `src/session.rs`, which declares its own `mod auth;`, imports from the crate root's `src/auth.rs`."
     },
     {
       "id": "ci-rust-depends_on-01-metamorphic_a",

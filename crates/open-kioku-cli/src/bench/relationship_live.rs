@@ -697,6 +697,10 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
         "pub fn caller_fn() {\n    crate::sys::imp::target_fn();\n}\n";
     const MODULE_IN_SCOPE_CALLER: &str =
         "mod sys;\n\npub fn caller_fn() {\n    sys::imp::target_fn();\n}\n";
+    const EDITION_CALLER: &str =
+        "mod sys;\nuse sys::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
+    const MODULE_IN_SCOPE_USE: &str =
+        "mod sys;\nuse sys::imp::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
     const CFG_ATTR_ENGINE: &str =
         "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
@@ -2100,6 +2104,202 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // A `use` path whose first segment is a module the file declares is that `self::` path
+        // (#632).
+        "use_through_module_in_scope" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", MODULE_IN_SCOPE_USE),
+                ("src/sys/mod.rs", "pub mod imp;\n"),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // So it is in a function body, which sees the module's items (#632).
+        "use_through_module_in_scope_in_function_body" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n\npub fn caller_fn() {\n    use sys::imp::target_fn;\n    target_fn();\n}\n",
+                ),
+                ("src/sys/mod.rs", "pub mod imp;\n"),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // The package also depends on a crate named `sys`: the path may start from either (#632).
+        "use_through_module_in_scope_shadows_extern_crate" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nsys = \"1\"\n",
+                ),
+                ("src/lib.rs", MODULE_IN_SCOPE_USE),
+                ("src/sys/mod.rs", "pub mod imp;\n"),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // `sys` is declared by the crate root, not by `caller.rs`, so its `use` cannot start there.
+        "use_through_module_not_in_scope_in_child_file" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod caller;\nmod sys;\n"),
+                (
+                    "src/caller.rs",
+                    "use sys::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // Such a `use` into a choice keeps a candidate in each file (#632, #615).
+        "use_through_module_in_scope_cfg_attr_choice" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", MODULE_IN_SCOPE_USE),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // A relative path written in a `path`-mounted alternative reads that alternative (#633).
+        "relative_path_inside_mounted_alternative" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(unix, path = \"unix/mod.rs\")]\n#[cfg_attr(not(unix), path = \"other/mod.rs\")]\npub mod imp;\n",
+                ),
+                (
+                    "src/sys/unix/mod.rs",
+                    "pub mod util;\n\npub fn caller_fn() {\n    util::target_fn();\n}\n",
+                ),
+                ("src/sys/unix/util.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/other/mod.rs", "pub mod util;\n"),
+                ("src/sys/other/util.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // `super` from that alternative is the module declaring the choice (#633).
+        "super_path_inside_mounted_alternative" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n\npub fn target_fn() {}\n",
+                ),
+                ("src/sys/imp/mod.rs", "pub fn local() {}\n"),
+                (
+                    "src/sys/win/mod.rs",
+                    "pub fn caller_fn() {\n    super::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A file both alternatives mount is compiled with either, so its relative path reaches a
+        // file of each and proves neither (#633).
+        "relative_path_in_file_both_alternatives_mount" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(unix, path = \"unix/mod.rs\")]\n#[cfg_attr(not(unix), path = \"other/mod.rs\")]\npub mod imp;\n",
+                ),
+                (
+                    "src/sys/unix/mod.rs",
+                    "#[path = \"../common.rs\"]\nmod common;\npub mod util;\n",
+                ),
+                (
+                    "src/sys/other/mod.rs",
+                    "#[path = \"../common.rs\"]\nmod common;\npub mod util;\n",
+                ),
+                ("src/sys/unix/util.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/other/util.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/sys/common.rs",
+                    "pub fn caller_fn() {\n    super::util::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `mod sys;` inside an inline `mod b` is `src/b/sys.rs`, reached from the block (#633).
+        "module_file_inside_inline_module" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod b {\n    mod sys;\n\n    pub fn caller_fn() {\n        sys::target_fn();\n    }\n}\n",
+                ),
+                ("src/b/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // A `path` on the block moves the files below it, so `src/b/sys.rs` is not the module.
+        "module_file_inside_inline_module_with_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "#[path = \"elsewhere\"]\npub mod b {\n    mod sys;\n\n    pub fn caller_fn() {\n        sys::target_fn();\n    }\n}\n",
+                ),
+                ("src/b/sys.rs", "pub fn target_fn() {}\n"),
+                ("src/elsewhere/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            false,
+        ),
+        // In the 2015 edition a `use` path starts at the crate root, so `use sys::target_fn;` in
+        // `src/a.rs` is the crate root's `sys`, not the `sys` `a.rs` declares (#632).
+        "use_in_2015_edition_starts_at_crate_root" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2015\"\n",
+                ),
+                ("src/lib.rs", "mod a;\nmod sys;\n"),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+                ("src/a.rs", EDITION_CALLER),
+                ("src/a/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // A package that sets no edition is 2015 (#632).
+        "use_without_edition_starts_at_crate_root" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\n",
+                ),
+                ("src/lib.rs", "mod a;\nmod sys;\n"),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+                ("src/a.rs", EDITION_CALLER),
+                ("src/a/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
+        // An edition inherited from `[workspace.package]` is read: 2021 looks `sys` up in scope
+        // (#632).
+        "use_with_inherited_edition_starts_in_scope" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[workspace]\n\n[workspace.package]\nedition = \"2021\"\n\n[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition.workspace = true\n",
+                ),
+                ("src/lib.rs", "mod a;\nmod sys;\n"),
+                ("src/sys.rs", "pub fn target_fn() {}\n"),
+                ("src/a.rs", EDITION_CALLER),
+                ("src/a/sys.rs", "pub fn target_fn() {}\n"),
+            ],
+            true,
+        ),
         // A method call on a type imported through a configuration-selected module reaches the
         // method in each file (#625).
         "cfg_attr_imported_type_method_alternatives" => (
@@ -2713,6 +2913,62 @@ fn rust_type_relation_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> 
             ("src/sys/imp.rs", TYPES),
             ("src/sys/win.rs", TYPES),
         ],
+        // A type written as a path through a module the file declares (#632).
+        "module_in_scope_type_path" => vec![
+            ("Cargo.toml", PACKAGE),
+            (
+                "src/lib.rs",
+                "mod sys;\n\npub fn caller_fn(value: &sys::imp::TargetType) {\n    let _ = value;\n}\n",
+            ),
+            ("src/sys/mod.rs", "pub mod imp;\n"),
+            ("src/sys/imp.rs", TYPES),
+        ],
+        // The same path where the package also depends on a crate named `sys` (#632).
+        "module_in_scope_type_path_shadows_extern_crate" => vec![
+            (
+                "Cargo.toml",
+                "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nsys = \"1\"\n",
+            ),
+            (
+                "src/lib.rs",
+                "mod sys;\n\npub fn caller_fn(value: &sys::imp::TargetType) {\n    let _ = value;\n}\n",
+            ),
+            ("src/sys/mod.rs", "pub mod imp;\n"),
+            ("src/sys/imp.rs", TYPES),
+        ],
+        // In the 2015 edition a `use` path starts at the crate root (#632).
+        "type_through_use_in_2015_edition" => vec![
+            (
+                "Cargo.toml",
+                "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2015\"\n",
+            ),
+            ("src/lib.rs", "mod a;\nmod sys;\n"),
+            ("src/sys.rs", TYPES),
+            (
+                "src/a.rs",
+                "mod sys;\nuse sys::TargetType;\n\npub fn caller_fn(value: TargetType) {\n    let _ = value;\n}\n",
+            ),
+            ("src/a/sys.rs", TYPES),
+        ],
+        // A type and a trait imported by a `use` path that starts at such a module (#632).
+        "type_through_use_of_module_in_scope" => vec![
+            ("Cargo.toml", PACKAGE),
+            (
+                "src/lib.rs",
+                "mod sys;\nuse sys::imp::TargetType;\n\npub fn caller_fn(value: TargetType) {\n    let _ = value;\n}\n",
+            ),
+            ("src/sys/mod.rs", "pub mod imp;\n"),
+            ("src/sys/imp.rs", TYPES),
+        ],
+        "trait_through_use_of_module_in_scope" => vec![
+            ("Cargo.toml", PACKAGE),
+            (
+                "src/lib.rs",
+                "mod sys;\nuse sys::imp::TargetTrait;\n\npub struct SourceType;\n\nimpl TargetTrait for SourceType {}\n",
+            ),
+            ("src/sys/mod.rs", "pub mod imp;\n"),
+            ("src/sys/imp.rs", TYPES),
+        ],
         _ => return None,
     };
     Some(
@@ -2768,6 +3024,37 @@ fn rust_import_edge_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
                 "use engine::issue_token;\n\npub fn open_session() {\n    issue_token();\n}\n",
             ),
             ("crates/app/src/lib.rs", "pub mod session;\n"),
+        ],
+        // A crate root's `pub use` whose path starts at a module it declares names that
+        // module's file (#632).
+        "crate_root_reexport_through_module_in_scope" => vec![
+            ("Cargo.toml", PACKAGE),
+            ("src/lib.rs", "pub mod auth;\n\npub use auth::issue_token;\n"),
+            ("src/auth.rs", AUTH),
+        ],
+        // In the 2015 edition `use auth::issue_token;` in `src/session.rs` is the crate root's
+        // `auth`, though `session.rs` declares one of its own (#632).
+        "use_in_2015_edition_imports_from_crate_root" => vec![
+            (
+                "Cargo.toml",
+                "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2015\"\n",
+            ),
+            ("src/lib.rs", "pub mod auth;\npub mod session;\n"),
+            ("src/auth.rs", AUTH),
+            (
+                "src/session.rs",
+                "mod auth;\nuse auth::issue_token;\n\npub fn open_session() {\n    issue_token();\n}\n",
+            ),
+            ("src/session/auth.rs", AUTH),
+        ],
+        // The package also depends on a crate named `auth`: the path may start from either.
+        "reexport_through_module_in_scope_shadows_extern_crate" => vec![
+            (
+                "Cargo.toml",
+                "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nauth = \"1\"\n",
+            ),
+            ("src/lib.rs", "pub mod auth;\n\npub use auth::issue_token;\n"),
+            ("src/auth.rs", AUTH),
         ],
         // `crate::issue_token` reaches the item only through the crate root's re-export, which no
         // module declaration proves; the crate root must not absorb the edge.

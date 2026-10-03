@@ -177,6 +177,14 @@ pub(crate) fn resolve_bare_call_outcome(
         }
     }
 
+    // A Rust item import whose path starts at a module in scope and that the index left unbound,
+    // such as one whose first segment also names a crate, is read as that path (#632).
+    if ctx.language == Language::Rust {
+        if let Some(outcome) = crate::typed_calls::rust_unbound_item_import_outcome(call, ctx) {
+            return outcome;
+        }
+    }
+
     if ctx.language != Language::Java {
         let mut same_file_candidates = ctx
             .symbols
