@@ -524,7 +524,9 @@ impl SqliteStore {
         )
         .map_err(storage_err)?;
         migrate_history_schema(&mut conn)?;
-        migrate_symbol_alias_order(&mut conn)?;
+        if opener == StoreOpener::Writer {
+            migrate_symbol_list_order(&mut conn)?;
+        }
         migrate_graph_schema(&mut conn, opener)?;
         // Every writer this file will see clears excluded content as it removes it, so nothing
         // it holds needs the one-time compaction an older file does.
@@ -847,6 +849,24 @@ impl SqliteStore {
                 .map_err(storage_err)?;
             if count > 0 {
                 violations.push(format!("{count} row(s): {check}"));
+            }
+        }
+        // Listings order by a key generated from `alias_order_key`, so it must name the alias
+        // target the row's JSON does. The key's own definition is this version's whenever a
+        // writer has opened the file (`migrate_symbol_list_order`).
+        if has_column(&conn, "symbols", "alias_order_key")? {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM symbols WHERE alias_order_key \
+                     IS NOT json_extract(json, '$.alias_of.qualified_name')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(storage_err)?;
+            if count > 0 {
+                violations.push(format!(
+                    "{count} row(s): symbols whose alias order key disagrees with their JSON"
+                ));
             }
         }
         let mut stmt = conn
@@ -1495,10 +1515,13 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let pattern = format!("%{}%", query.unwrap_or_default());
-        // An index written before the column existed, read without a writer's open, lists in
-        // plain qualified-name order: it records no alias target to order by.
-        let sql = if has_column(&conn, "symbols", "alias_order_key")? {
+        // An index no writer of this version has opened has no `list_order_key`; a read
+        // surface does not add it, and lists in the order the index's own writer kept: through
+        // `alias_order_key` when that writer recorded alias targets, else by qualified name.
+        let sql = if has_column(&conn, "symbols", "list_order_key")? {
             LIST_SYMBOLS_SQL
+        } else if has_column(&conn, "symbols", "alias_order_key")? {
+            LIST_SYMBOLS_BY_ALIAS_ORDER_SQL
         } else {
             LIST_SYMBOLS_BY_QUALIFIED_NAME_SQL
         };
@@ -4122,6 +4145,7 @@ fn insert_index_rows(
         }
     }
     {
+        // `list_order_key` is generated from `alias_order_key` and `qualified_name`.
         let mut stmt = tx.prepare_cached("INSERT INTO symbols(id, name, qualified_name, file_id, json, alias_order_key) VALUES(?1, ?2, ?3, ?4, ?5, ?6)").map_err(storage_err)?;
         for symbol in rows.symbols {
             stmt.execute(params![
@@ -5212,10 +5236,18 @@ const LIST_SYMBOLS_BY_QUALIFIED_NAME_SQL: &str = "SELECT json FROM symbols \
      ORDER BY qualified_name LIMIT ?2 OFFSET ?3";
 
 /// Symbols in qualified-name order, except that a Go type alias whose target the index placed is
-/// listed just after that type: under the target's qualified name, after the target itself. Two
-/// arms, each read in index order and merged, so a page costs what the plain order did: the rest
-/// by `idx_symbols_qualified_name`, the few aliases by `idx_symbols_alias_order`.
-const LIST_SYMBOLS_SQL: &str = "SELECT json, qualified_name AS list_key, 0 AS is_alias, qualified_name \
+/// listed just after that type, through `idx_symbols_list_order`: one index read in order, so a
+/// page costs what the plain qualified-name order did. See [`SYMBOL_LIST_ORDER_KEY_COLUMN`].
+const LIST_SYMBOLS_SQL: &str = "SELECT json FROM symbols \
+     WHERE (?1 = '%%' OR name LIKE ?1 COLLATE NOCASE OR qualified_name LIKE ?1 COLLATE NOCASE) \
+     ORDER BY list_order_key LIMIT ?2 OFFSET ?3";
+
+/// The same order as [`LIST_SYMBOLS_SQL`] over an index that has `alias_order_key` (the target's
+/// qualified name on an alias, `NULL` on every other row) but that no writer of this version has
+/// opened since: written by #621's Open Kioku. SQLite sorts the whole match before
+/// skipping to the page, so a deep page costs a read of every row; only a read surface on such
+/// an index pays it, until the next writer's open.
+const LIST_SYMBOLS_BY_ALIAS_ORDER_SQL: &str = "SELECT json, qualified_name AS list_key, 0 AS is_alias, qualified_name \
      FROM symbols WHERE alias_order_key IS NULL \
      AND (?1 = '%%' OR name LIKE ?1 COLLATE NOCASE OR qualified_name LIKE ?1 COLLATE NOCASE) \
      UNION ALL \
@@ -5223,19 +5255,209 @@ const LIST_SYMBOLS_SQL: &str = "SELECT json, qualified_name AS list_key, 0 AS is
      AND (?1 = '%%' OR name LIKE ?1 COLLATE NOCASE OR qualified_name LIKE ?1 COLLATE NOCASE) \
      ORDER BY 2, 3, 4 LIMIT ?2 OFFSET ?3";
 
-/// Adds `symbols.alias_order_key`, the qualified name of the type a Go type alias stands for
-/// (`Symbol::alias_of`), and the partial index symbol listings read aliases through. A row an
-/// older Open Kioku inserts names no such column and gets `NULL`, which lists it by its own
-/// qualified name: that writer records no alias target either. `user_version` is not raised.
-fn migrate_symbol_alias_order(conn: &mut Connection) -> Result<()> {
-    add_column_if_not_exists(conn, "ALTER TABLE symbols ADD COLUMN alias_order_key TEXT")?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_symbols_alias_order ON symbols(alias_order_key, qualified_name) \
-         WHERE alias_order_key IS NOT NULL",
+/// `symbols.list_order_key`, the key symbol listings sort by: a symbol's qualified name, or for
+/// a Go type alias whose target the index placed (`Symbol::alias_of`, stored as
+/// `alias_order_key`) the target's qualified name, `U+0001` (`char(1)`), then its own. `U+0001`
+/// sorts below every printable character, so a type's own key is a prefix of its aliases' and
+/// sorts first, and every alias sorts before the names that extend its target's (`store::Entry` <
+/// `store::Entry\u{1}ledger::Entry` < `store::Entry::Amount`): the key sorts as the pair (target
+/// or own name, own name) does, with a type before its aliases, which is the order
+/// [`LIST_SYMBOLS_BY_ALIAS_ORDER_SQL`] sorts by. A row with no alias target concatenates `NULL`,
+/// which `COALESCE` turns into the empty prefix; `qualified_name` is `NOT NULL`, so no key is.
+macro_rules! symbol_list_order_key_sql {
+    () => {
+        "COALESCE(alias_order_key || char(1), '') || qualified_name"
+    };
+}
+
+/// The column definition [`migrate_symbol_list_order`] adds, as SQLite keeps it in the table's
+/// `CREATE TABLE` text.
+const SYMBOL_LIST_ORDER_KEY_COLUMN: &str = concat!(
+    "list_order_key TEXT GENERATED ALWAYS AS (",
+    symbol_list_order_key_sql!(),
+    ") VIRTUAL"
+);
+
+/// The index listings read through, as SQLite keeps it in `sqlite_master`.
+macro_rules! symbol_list_order_index {
+    ($if_not_exists:literal) => {
+        concat!(
+            "CREATE INDEX ",
+            $if_not_exists,
+            "idx_symbols_list_order ON symbols(list_order_key)"
+        )
+    };
+}
+const SYMBOL_LIST_ORDER_INDEX: &str = symbol_list_order_index!("");
+const SYMBOL_LIST_ORDER_INDEX_IF_NOT_EXISTS: &str = symbol_list_order_index!("IF NOT EXISTS ");
+
+/// #621's partial index, which an Open Kioku of that version reads aliases through.
+const SYMBOL_ALIAS_ORDER_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_symbols_alias_order \
+     ON symbols(alias_order_key, qualified_name) WHERE alias_order_key IS NOT NULL";
+
+/// Brings the listing order up to date on a writer's open, in one transaction.
+///
+/// `symbols.alias_order_key` (#621) holds each placed alias's target, written with the row.
+/// `list_order_key` is a virtual column SQLite generates from it ([`SYMBOL_LIST_ORDER_KEY_COLUMN`]),
+/// under a full index. Every row has a key whichever Open Kioku inserted it: #621's writes
+/// `alias_order_key` as this one does, and one from before #621 records no alias target and
+/// names no such column. Adding a virtual column rewrites no row, and nothing here reads a
+/// row's JSON; building the index reads every row once, on the first writer's open of an older
+/// index. An Open Kioku of #621 reading a file this one wrote still finds `alias_order_key` and
+/// its partial index, and lists in the same order, sorting on read. A read surface's open does
+/// not run this, and lists through [`LIST_SYMBOLS_BY_ALIAS_ORDER_SQL`] or by qualified name until
+/// a writer has.
+///
+/// The file's schema is checked, not just its column names, since a snapshot artifact brings
+/// its own ([`symbol_list_order_current`]). A wrong `idx_symbols_list_order` is dropped and
+/// built again. Any shape other than the two columns an Open Kioku adds, with no trigger on the
+/// table, rebuilds `symbols` as this version creates it, with `alias_order_key` read from each
+/// row's JSON: `ALTER TABLE` cannot take a definition back out of the table's `CREATE TABLE`
+/// text, so dropping and adding the column again would not converge on such a file. Values in a
+/// plain `alias_order_key` are checked against the JSON by
+/// [`SqliteStore::consistency_violations`].
+///
+/// `user_version` is not raised: an older Open Kioku keeps reading and writing the file. Whether
+/// anything is to do is read first, outside a transaction, so an open of an index that is up to
+/// date takes no write lock. The work runs under `BEGIN IMMEDIATE`, which waits out another
+/// writer through the busy timeout; a deferred transaction that read first would fail at once on
+/// upgrading to a write while another connection holds the lock.
+fn migrate_symbol_list_order(conn: &mut Connection) -> Result<()> {
+    if symbol_list_order_current(conn)? {
+        return Ok(());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(storage_err)?;
+    // Another writer may have brought the file up to date while this one waited for the lock.
+    if symbol_list_order_current(&tx)? {
+        return tx.commit().map_err(storage_err);
+    }
+    let alias_order_kind = column_kind(&tx, "symbols", "alias_order_key")?;
+    let key_kind = column_kind(&tx, "symbols", "list_order_key")?;
+    let as_written = matches!(alias_order_kind, None | Some(0))
+        && (key_kind.is_none() || list_order_key_column_current(&tx)?)
+        && !symbols_trigger_exists(&tx)?;
+    if as_written {
+        if alias_order_kind.is_none() {
+            tx.execute("ALTER TABLE symbols ADD COLUMN alias_order_key TEXT", [])
+                .map_err(storage_err)?;
+        }
+        if key_kind.is_none() {
+            tx.execute(
+                &format!("ALTER TABLE symbols ADD COLUMN {SYMBOL_LIST_ORDER_KEY_COLUMN}"),
+                [],
+            )
+            .map_err(storage_err)?;
+        }
+        if !list_order_index_current(&tx)? {
+            tx.execute("DROP INDEX IF EXISTS idx_symbols_list_order", [])
+                .map_err(storage_err)?;
+        }
+    } else {
+        rebuild_symbols_table(&tx)?;
+    }
+    tx.execute(SYMBOL_LIST_ORDER_INDEX_IF_NOT_EXISTS, [])
+        .map_err(storage_err)?;
+    tx.execute(SYMBOL_ALIAS_ORDER_INDEX, [])
+        .map_err(storage_err)?;
+    tx.commit().map_err(storage_err)
+}
+
+/// `symbols` as a writer of this version creates it, every row kept, `alias_order_key` taken from
+/// each row's JSON, and the indexes `initialize_as` creates on it. Dropping the old table drops
+/// its indexes and triggers; the listing indexes are created by the caller.
+fn rebuild_symbols_table(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(&format!(
+        "DROP TABLE IF EXISTS symbols_rebuilt; \
+         CREATE TABLE symbols_rebuilt ( \
+           id TEXT PRIMARY KEY, name TEXT NOT NULL, qualified_name TEXT NOT NULL, \
+           file_id TEXT NOT NULL, json TEXT NOT NULL, alias_order_key TEXT, \
+           {SYMBOL_LIST_ORDER_KEY_COLUMN}); \
+         INSERT INTO symbols_rebuilt(id, name, qualified_name, file_id, json, alias_order_key) \
+           SELECT id, name, qualified_name, file_id, json, \
+           json_extract(json, '$.alias_of.qualified_name') FROM symbols ORDER BY rowid; \
+         DROP TABLE symbols; \
+         ALTER TABLE symbols_rebuilt RENAME TO symbols; \
+         CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name); \
+         CREATE INDEX IF NOT EXISTS idx_symbols_name_nocase ON symbols(name COLLATE NOCASE); \
+         CREATE INDEX IF NOT EXISTS idx_symbols_qualified_name ON symbols(qualified_name);"
+    ))
+    .map_err(storage_err)
+}
+
+/// Whether [`migrate_symbol_list_order`] has nothing to do. Reads the schema only: a plain
+/// `alias_order_key`, `list_order_key` generated by exactly [`SYMBOL_LIST_ORDER_KEY_COLUMN`],
+/// `idx_symbols_list_order` exactly [`SYMBOL_LIST_ORDER_INDEX`], #621's partial index, and no
+/// trigger on `symbols`, which no Open Kioku creates and which could rewrite keys as rows arrive.
+fn symbol_list_order_current(conn: &Connection) -> Result<bool> {
+    Ok(column_kind(conn, "symbols", "alias_order_key")? == Some(0)
+        && list_order_key_column_current(conn)?
+        && list_order_index_current(conn)?
+        && schema_sql(conn, "index", "idx_symbols_alias_order")?.is_some()
+        && !symbols_trigger_exists(conn)?)
+}
+
+fn symbols_trigger_exists(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'symbols' LIMIT 1",
         [],
+        |_| Ok(()),
     )
-    .map_err(storage_err)?;
-    Ok(())
+    .optional()
+    .map(|found| found.is_some())
+    .map_err(storage_err)
+}
+
+/// Whether `symbols.list_order_key` is a virtual column generated by exactly
+/// [`SYMBOL_LIST_ORDER_KEY_COLUMN`]. `table_xinfo` reports a virtual generated column as hidden
+/// `2`. The definition must be the only place the table's `CREATE TABLE` text names the column
+/// (compared without regard to case, as SQLite compares names), so a comment or another
+/// column's default that spells the definition does not stand in for it.
+fn list_order_key_column_current(conn: &Connection) -> Result<bool> {
+    if column_kind(conn, "symbols", "list_order_key")? != Some(2) {
+        return Ok(false);
+    }
+    let Some(sql) = schema_sql(conn, "table", "symbols")? else {
+        return Ok(false);
+    };
+    Ok(sql.matches(SYMBOL_LIST_ORDER_KEY_COLUMN).count() == 1
+        && sql.to_ascii_lowercase().matches("list_order_key").count() == 1)
+}
+
+fn list_order_index_current(conn: &Connection) -> Result<bool> {
+    Ok(
+        schema_sql(conn, "index", "idx_symbols_list_order")?.as_deref()
+            == Some(SYMBOL_LIST_ORDER_INDEX),
+    )
+}
+
+/// The `sql` `sqlite_master` holds for the named object, or `None` when there is none.
+fn schema_sql(conn: &Connection, kind: &str, name: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+        params![kind, name],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(storage_err)
+}
+
+/// `table_xinfo`'s `hidden` for `column` of `table` (0 for a plain column, 2 for a virtual
+/// generated one, 3 for a stored generated one), or `None` when there is no such column.
+fn column_kind(conn: &Connection, table: &str, column: &str) -> Result<Option<i64>> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_xinfo({table})"))
+        .map_err(storage_err)?;
+    let mut rows = stmt.query([]).map_err(storage_err)?;
+    while let Some(row) = rows.next().map_err(storage_err)? {
+        let name: String = row.get(1).map_err(storage_err)?;
+        if name.eq_ignore_ascii_case(column) {
+            return Ok(Some(row.get(6).map_err(storage_err)?));
+        }
+    }
+    Ok(None)
 }
 
 /// Marker recording that the file was created or compacted by a writer that clears excluded
@@ -5609,10 +5831,11 @@ fn reset_legacy_graph_storage(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// Whether `table` exists and has `column`. A missing table reports `false`.
+/// Whether `table` exists and has `column`. A missing table reports `false`. `table_xinfo`, since
+/// `table_info` leaves out generated columns such as `symbols.list_order_key`.
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({table})"))
+        .prepare(&format!("PRAGMA table_xinfo({table})"))
         .map_err(storage_err)?;
     let mut rows = stmt.query([]).map_err(storage_err)?;
     while let Some(row) = rows.next().map_err(storage_err)? {
@@ -6266,11 +6489,13 @@ fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact, decode_index_manifest, has_column, newer_index_message, ranked_window_sql,
-        schema_meta_flag, set_schema_meta_flag, typed_endpoint_filter, window_ranks_current,
-        SqliteStore, EDGES_BETWEEN, GRAPH_INDEXES, GRAPH_REBUILD_REQUIRED_FLAG, NEIGHBOR_INCOMING,
-        NEIGHBOR_INCOMING_WITH_LOOPS, NEIGHBOR_LOOPS_BY_INCOMING, NEIGHBOR_LOOPS_BY_OUTGOING,
-        NEIGHBOR_OUTGOING, SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION,
+        collect_json, compact, decode_index_manifest, has_column, newer_index_message,
+        ranked_window_sql, schema_meta_flag, set_schema_meta_flag, typed_endpoint_filter,
+        window_ranks_current, SqliteStore, EDGES_BETWEEN, GRAPH_INDEXES,
+        GRAPH_REBUILD_REQUIRED_FLAG, LIST_SYMBOLS_BY_ALIAS_ORDER_SQL, LIST_SYMBOLS_SQL,
+        NEIGHBOR_INCOMING, NEIGHBOR_INCOMING_WITH_LOOPS, NEIGHBOR_LOOPS_BY_INCOMING,
+        NEIGHBOR_LOOPS_BY_OUTGOING, NEIGHBOR_OUTGOING, SQLITE_GRAPH_SCHEMA_VERSION,
+        SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION, SYMBOL_LIST_ORDER_KEY_COLUMN,
     };
     use chrono::{TimeZone, Utc};
     use open_kioku_core::{
@@ -6286,9 +6511,10 @@ mod tests {
     use open_kioku_storage::{
         GraphStore, HistoryStore, IndexData, MetadataStore, PartialIndexUpdate,
     };
-    use rusqlite::{params, Connection};
+    use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::json;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+    use std::path::Path;
     use std::time::Duration;
 
     fn make_store() -> SqliteStore {
@@ -8953,41 +9179,568 @@ mod tests {
         assert_eq!(paged, all);
     }
 
+    /// `go_alias_symbols` in the order listings give them, alias after target.
+    const GO_ALIAS_LIST_ORDER: [&str; 5] = [
+        "ledger::aliases::Journal",
+        "store::store::Entry",
+        "ledger::aliases::Entry",
+        "store::store::Entry::Amount",
+        "zeta::Entry",
+    ];
+
+    /// `go_alias_symbols` in plain qualified-name order.
+    const GO_ALIAS_QUALIFIED_NAME_ORDER: [&str; 5] = [
+        "ledger::aliases::Entry",
+        "ledger::aliases::Journal",
+        "store::store::Entry",
+        "store::store::Entry::Amount",
+        "zeta::Entry",
+    ];
+
+    /// `go_alias_symbols` and more, with qualified names that meet the separator at every
+    /// comparison: names that extend a target with a character below `:` (` `, `!`, `.`), above
+    /// it (`_`, `I`) or with another segment; several aliases of one target, including one whose
+    /// own name extends its target's; an alias of an alias; one whose target is not in the
+    /// index; a target that is a prefix of another; non-ASCII; then pseudo-random names over a
+    /// small alphabet, one in four an alias of an earlier symbol.
+    fn mixed_alias_symbols() -> Vec<Symbol> {
+        let symbol = |qualified_name: &str, alias_of: Option<&str>| {
+            let name = qualified_name.rsplit("::").next().unwrap();
+            let mut symbol = make_symbol(qualified_name, name, "f1");
+            symbol.qualified_name = qualified_name.into();
+            symbol.alias_of = alias_of.map(|target| open_kioku_core::TypeAliasTarget {
+                symbol_id: SymbolId::new(target),
+                qualified_name: target.into(),
+            });
+            symbol
+        };
+        let mut symbols = go_alias_symbols();
+        for (qualified_name, alias_of) in [
+            ("store::store::Entry Space", None),
+            ("store::store::Entry!", None),
+            ("store::store::Entry.Field", None),
+            ("store::store::EntryID", None),
+            ("store::store::Entry_", None),
+            ("audit::Entry", Some("store::store::Entry")),
+            ("zz::Entry", Some("store::store::Entry")),
+            (
+                "store::store::Entry::Amount::Alias",
+                Some("store::store::Entry"),
+            ),
+            ("ledger::aliases::ID", Some("store::store::EntryID")),
+            (
+                "ledger::aliases::Amount",
+                Some("store::store::Entry::Amount"),
+            ),
+            ("ledger::aliases::Again", Some("ledger::aliases::Entry")),
+            ("ledger::aliases::Gone", Some("missing::Type")),
+            ("a", Some("zeta::Entry")),
+            ("zeta::Entr", None),
+            ("zeta::Entr\u{e9}e", None),
+        ] {
+            symbols.push(symbol(qualified_name, alias_of));
+        }
+        let alphabet = [
+            "a", "A", "b", "_", "0", ".", "-", ":", "~", " ", "Z", "\u{e9}",
+        ];
+        let mut state = 0x5eed_u64;
+        let mut next = |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize % bound
+        };
+        let mut seen = symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.clone())
+            .collect::<HashSet<_>>();
+        while symbols.len() < 200 {
+            let segments = 1 + next(3);
+            let qualified_name = (0..segments)
+                .map(|_| {
+                    (0..1 + next(4))
+                        .map(|_| alphabet[next(alphabet.len())])
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("::");
+            if !seen.insert(qualified_name.clone()) {
+                continue;
+            }
+            let target = (next(4) == 0)
+                .then(|| symbols[next(symbols.len())].qualified_name.clone())
+                .filter(|target| *target != qualified_name);
+            symbols.push(symbol(&qualified_name, target.as_deref()));
+        }
+        symbols
+    }
+
+    /// A page of #621's listing, sorted on read through `alias_order_key`.
+    fn alias_order_page(
+        conn: &Connection,
+        query: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<String> {
+        let pattern = format!("%{}%", query.unwrap_or_default());
+        let mut stmt = conn.prepare(LIST_SYMBOLS_BY_ALIAS_ORDER_SQL).unwrap();
+        let rows = stmt
+            .query_map(params![pattern, limit as i64, offset as i64], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        qualified_names(collect_json(rows).unwrap())
+    }
+
+    /// Every page of `limit` rows from offset 0 until one comes back short.
+    fn paged(page: impl Fn(usize) -> Vec<String>, limit: usize) -> Vec<String> {
+        let mut all = Vec::new();
+        loop {
+            let rows = page(all.len());
+            let done = rows.len() < limit;
+            all.extend(rows);
+            if done {
+                return all;
+            }
+        }
+    }
+
+    /// Rewrites the index at `path` to the shape an older writer left: no `list_order_key` or
+    /// its index. With `alias_order`, #621's: `alias_order_key` holds each placed alias's
+    /// target, under its partial index. Without, an index from before #621, whose rows name no
+    /// alias target.
+    fn strip_list_order_key(path: &Path, alias_order: bool) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "DROP INDEX idx_symbols_list_order; ALTER TABLE symbols DROP COLUMN list_order_key;",
+        )
+        .unwrap();
+        if !alias_order {
+            conn.execute_batch(
+                "DROP INDEX idx_symbols_alias_order; \
+                 ALTER TABLE symbols DROP COLUMN alias_order_key; \
+                 UPDATE symbols SET json = json_remove(json, '$.alias_of');",
+            )
+            .unwrap();
+        }
+    }
+
+    fn schema_object_exists(conn: &Connection, kind: &str, name: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            params![kind, name],
+            |_| Ok(()),
+        )
+        .optional()
+        .unwrap()
+        .is_some()
+    }
+
     #[test]
-    fn list_symbols_reads_an_index_written_before_alias_order_in_qualified_name_order() {
+    fn list_order_key_lists_every_page_in_the_order_alias_order_key_sorted_on_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.sqlite");
-        index_symbols(&SqliteStore::open(&path).unwrap(), &go_alias_symbols());
+        let store = SqliteStore::open(&path).unwrap();
+        index_symbols(&store, &mixed_alias_symbols());
+        assert!(store.consistency_violations().unwrap().is_empty());
+        // #621's sort on read over the same rows: what this file lists as when #621's Open
+        // Kioku reads it.
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "DROP INDEX idx_symbols_alias_order; ALTER TABLE symbols DROP COLUMN alias_order_key;",
-        )
-        .unwrap();
-        drop(conn);
 
-        // A read surface's probe open runs no schema statement.
-        let reader = SqliteStore::connect(
-            path.clone(),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .unwrap();
-        assert_eq!(
-            qualified_names(reader.list_symbols(None, 100, 0).unwrap()),
-            [
-                "ledger::aliases::Entry",
-                "ledger::aliases::Journal",
-                "store::store::Entry",
-                "store::store::Entry::Amount",
-                "zeta::Entry",
-            ]
+        for query in [None, Some("entry"), Some("a"), Some(".")] {
+            let reference = alias_order_page(&conn, query, usize::MAX, 0);
+            assert!(reference.len() > 1, "{query:?}");
+            assert_eq!(
+                qualified_names(store.list_symbols(query, usize::MAX, 0).unwrap()),
+                reference,
+                "{query:?}"
+            );
+            for limit in [1, 2, 7, 50] {
+                let pages = paged(
+                    |offset| qualified_names(store.list_symbols(query, limit, offset).unwrap()),
+                    limit,
+                );
+                assert_eq!(pages, reference, "{query:?} in pages of {limit}");
+                let reference_pages = paged(
+                    |offset| alias_order_page(&conn, query, limit, offset),
+                    limit,
+                );
+                assert_eq!(reference_pages, reference, "{query:?} in pages of {limit}");
+            }
+        }
+        let all = qualified_names(store.list_symbols(None, usize::MAX, 0).unwrap());
+        let position = |name: &str| all.iter().position(|listed| listed == name).unwrap();
+        assert!(position("store::store::Entry") < position("audit::Entry"));
+        assert!(position("zz::Entry") < position("store::store::Entry Space"));
+        assert!(position("store::store::Entry::Amount") < position("ledger::aliases::Amount"));
+    }
+
+    #[test]
+    fn list_symbols_pages_through_the_list_order_index_without_a_sort() {
+        let store = make_store();
+        index_symbols(&store, &mixed_alias_symbols());
+        let conn = store.connection.lock().unwrap();
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {LIST_SYMBOLS_SQL}"))
+            .unwrap();
+        let plan = stmt
+            .query_map(params!["%%", 50_i64, 1000_i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("USING INDEX idx_symbols_list_order")),
+            "{plan:?}"
         );
-        drop(reader);
-        // A writer's open adds the column back; the rows it did not write stay unordered by it.
-        let writer = SqliteStore::open(&path).unwrap();
-        assert_eq!(
-            qualified_names(writer.list_symbols(None, 100, 0).unwrap())[0],
-            "ledger::aliases::Entry"
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "{plan:?}"
         );
+    }
+
+    #[test]
+    fn a_writer_open_keys_every_row_of_an_index_written_before_list_order_key() {
+        for alias_order in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("index.sqlite");
+            index_symbols(&SqliteStore::open(&path).unwrap(), &go_alias_symbols());
+            strip_list_order_key(&path, alias_order);
+            let older_order = if alias_order {
+                GO_ALIAS_LIST_ORDER
+            } else {
+                GO_ALIAS_QUALIFIED_NAME_ORDER
+            };
+
+            // A read surface's probe open runs no schema statement, and a status surface's
+            // open does not add the key: both list in the order the index's writer kept.
+            let probe = SqliteStore::connect(
+                path.clone(),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .unwrap();
+            assert_eq!(
+                qualified_names(probe.list_symbols(None, 100, 0).unwrap()),
+                older_order
+            );
+            drop(probe);
+            let reader = SqliteStore::open_existing(&path).unwrap();
+            assert_eq!(
+                qualified_names(reader.list_symbols(None, 2, 2).unwrap()),
+                older_order[2..4]
+            );
+            assert!(!has_column(
+                &reader.connection.lock().unwrap(),
+                "symbols",
+                "list_order_key"
+            )
+            .unwrap());
+            drop(reader);
+
+            // A writer's open keys every row from its JSON, so #621's rows list as they did.
+            let writer = SqliteStore::open(&path).unwrap();
+            assert_eq!(
+                qualified_names(writer.list_symbols(None, 100, 0).unwrap()),
+                older_order,
+                "alias_order: {alias_order}"
+            );
+            assert!(writer.consistency_violations().unwrap().is_empty());
+            let conn = writer.connection.lock().unwrap();
+            let unkeyed: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM symbols WHERE list_order_key IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(unkeyed, 0);
+            assert!(schema_object_exists(
+                &conn,
+                "index",
+                "idx_symbols_list_order"
+            ));
+            // Kept for #621's Open Kioku, which reads aliases through it.
+            assert!(schema_object_exists(
+                &conn,
+                "index",
+                "idx_symbols_alias_order"
+            ));
+            drop(conn);
+            drop(writer);
+
+            // The next writer's open finds every row keyed and writes nothing.
+            let conn = Connection::open(&path).unwrap();
+            let before: i64 = conn
+                .pragma_query_value(None, "data_version", |row| row.get(0))
+                .unwrap();
+            drop(SqliteStore::open(&path).unwrap());
+            let after: i64 = conn
+                .pragma_query_value(None, "data_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(before, after, "alias_order: {alias_order}");
+        }
+    }
+
+    #[test]
+    fn a_row_an_older_writer_inserts_lists_by_its_generated_key() {
+        let store = make_store();
+        let symbols = go_alias_symbols();
+        index_symbols(&store, &symbols[1..]);
+        {
+            // #621's Open Kioku names `alias_order_key` but not the key; one from before #621
+            // names neither, and records no alias target.
+            let conn = store.connection.lock().unwrap();
+            let alias = &symbols[0];
+            conn.execute(
+                "INSERT INTO symbols(id, name, qualified_name, file_id, json, alias_order_key) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    &alias.id.0,
+                    &alias.name,
+                    &alias.qualified_name,
+                    &alias.file_id.0,
+                    serde_json::to_string(alias).unwrap(),
+                    "store::store::Entry"
+                ],
+            )
+            .unwrap();
+            let mut first = make_symbol("aaa::First", "First", "f1");
+            first.qualified_name = "aaa::First".into();
+            conn.execute(
+                "INSERT INTO symbols(id, name, qualified_name, file_id, json) \
+                 VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &first.id.0,
+                    &first.name,
+                    &first.qualified_name,
+                    &first.file_id.0,
+                    serde_json::to_string(&first).unwrap()
+                ],
+            )
+            .unwrap();
+        }
+        let mut expected = vec!["aaa::First"];
+        expected.extend(GO_ALIAS_LIST_ORDER);
+        assert_eq!(
+            qualified_names(store.list_symbols(None, 100, 0).unwrap()),
+            expected
+        );
+        assert!(store.consistency_violations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_partial_update_keys_the_symbols_it_writes() {
+        let store = make_store();
+        let symbols = go_alias_symbols();
+        index_symbols(&store, &symbols[1..]);
+        let manifest = make_manifest();
+        let aliases = make_file("f2", "ledger/aliases.go");
+        let mut alias = symbols[0].clone();
+        alias.file_id = aliases.id.clone();
+        store
+            .replace_files_index(PartialIndexUpdate {
+                manifest: &manifest,
+                changed_files: std::slice::from_ref(&aliases),
+                deleted_file_ids: &[],
+                symbols: std::slice::from_ref(&alias),
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+                graph_nodes: &[],
+                graph_edges: &[],
+            })
+            .unwrap();
+        assert_eq!(
+            qualified_names(store.list_symbols(None, 100, 0).unwrap()),
+            GO_ALIAS_LIST_ORDER
+        );
+    }
+
+    #[test]
+    fn an_alias_order_key_that_disagrees_with_its_json_is_a_consistency_violation() {
+        let store = make_store();
+        index_symbols(&store, &go_alias_symbols());
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE symbols SET alias_order_key = 'a' WHERE qualified_name = 'zeta::Entry'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.consistency_violations().unwrap(),
+            ["1 row(s): symbols whose alias order key disagrees with their JSON"]
+        );
+    }
+
+    /// A snapshot artifact brings its own schema. Each of these lists today's rows in the right
+    /// order and passes the consistency checks, and would list rows written later in another:
+    /// a writer's open must replace it with this version's definition.
+    #[test]
+    fn a_writer_open_rebuilds_a_list_order_key_defined_otherwise() {
+        let key = symbol_list_order_key_sql!();
+        let late_differs = "CASE WHEN name GLOB 'Late*' THEN qualified_name ELSE";
+        // `REOPEN;` separates steps run on a new connection.
+        let crafted = [
+            // A plain column holding today's keys: a later insert gets `NULL`, which sorts first.
+            format!(
+                "ALTER TABLE symbols ADD COLUMN list_order_key TEXT; \
+                 UPDATE symbols SET list_order_key = {key};"
+            ),
+            // Generated by an expression that agrees with every row there is.
+            format!(
+                "ALTER TABLE symbols ADD COLUMN list_order_key TEXT GENERATED ALWAYS AS \
+                 ({late_differs} {key} END) VIRTUAL;"
+            ),
+            // The same, behind a comment that spells this version's definition.
+            format!(
+                "PRAGMA writable_schema = ON; \
+                 UPDATE sqlite_master SET sql = replace(sql, 'json TEXT NOT NULL', \
+                 'json TEXT NOT NULL /* {} */') WHERE name = 'symbols'; \
+                 PRAGMA writable_schema = OFF; REOPEN; \
+                 ALTER TABLE symbols ADD COLUMN list_order_key TEXT GENERATED ALWAYS AS \
+                 ({late_differs} {key} END) VIRTUAL;",
+                SYMBOL_LIST_ORDER_KEY_COLUMN.replace('\'', "''")
+            ),
+            // `alias_order_key` generated, so the value a writer gives it is not kept.
+            format!(
+                "DROP INDEX idx_symbols_alias_order; \
+                 ALTER TABLE symbols DROP COLUMN alias_order_key; \
+                 ALTER TABLE symbols ADD COLUMN alias_order_key TEXT GENERATED ALWAYS AS \
+                 (CASE WHEN name GLOB 'Late*' THEN NULL \
+                 ELSE json_extract(json, '$.alias_of.qualified_name') END) VIRTUAL; \
+                 CREATE INDEX idx_symbols_alias_order ON symbols(alias_order_key, qualified_name) \
+                 WHERE alias_order_key IS NOT NULL; \
+                 ALTER TABLE symbols ADD COLUMN {SYMBOL_LIST_ORDER_KEY_COLUMN};"
+            ),
+            // This version's column under an index over something else.
+            format!("ALTER TABLE symbols ADD COLUMN {SYMBOL_LIST_ORDER_KEY_COLUMN};"),
+            // This version's column, and a trigger that clears the target a later row records.
+            format!(
+                "ALTER TABLE symbols ADD COLUMN {SYMBOL_LIST_ORDER_KEY_COLUMN}; \
+                 CREATE TRIGGER symbols_late AFTER INSERT ON symbols \
+                 WHEN NEW.name GLOB 'Late*' \
+                 BEGIN UPDATE symbols SET alias_order_key = NULL WHERE rowid = NEW.rowid; END;"
+            ),
+        ];
+        let symbol = |qualified_name: &str, alias_of: Option<&str>, file: &str| {
+            let name = qualified_name.rsplit("::").next().unwrap();
+            let mut symbol = make_symbol(qualified_name, name, file);
+            symbol.qualified_name = qualified_name.into();
+            symbol.alias_of = alias_of.map(|target| open_kioku_core::TypeAliasTarget {
+                symbol_id: SymbolId::new(target),
+                qualified_name: target.into(),
+            });
+            symbol
+        };
+        for (case, sql) in crafted.iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("index.sqlite");
+            index_symbols(&SqliteStore::open(&path).unwrap(), &go_alias_symbols());
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP INDEX idx_symbols_list_order; \
+                 ALTER TABLE symbols DROP COLUMN list_order_key;",
+            )
+            .unwrap();
+            // SQLite reads an edited `sqlite_master` on a new connection.
+            for step in sql.split("REOPEN;") {
+                drop(conn);
+                conn = Connection::open(&path).unwrap();
+                conn.execute_batch(step).unwrap();
+            }
+            let index = if case == 4 {
+                "CREATE INDEX idx_symbols_list_order ON symbols(qualified_name);"
+            } else {
+                "CREATE INDEX idx_symbols_list_order ON symbols(list_order_key);"
+            };
+            conn.execute_batch(index).unwrap();
+            if case == 2 {
+                // The comment spells this version's definition exactly.
+                let sql = super::schema_sql(&conn, "table", "symbols")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    sql.matches(SYMBOL_LIST_ORDER_KEY_COLUMN).count(),
+                    1,
+                    "{sql}"
+                );
+            }
+            assert!(
+                !super::symbol_list_order_current(&conn).unwrap(),
+                "case {case}"
+            );
+            drop(conn);
+
+            let writer = SqliteStore::open(&path).unwrap();
+            assert!(
+                super::symbol_list_order_current(&writer.connection.lock().unwrap()).unwrap(),
+                "case {case}"
+            );
+            assert!(
+                writer.consistency_violations().unwrap().is_empty(),
+                "case {case}"
+            );
+            assert_eq!(
+                qualified_names(writer.list_symbols(None, 100, 0).unwrap()),
+                GO_ALIAS_LIST_ORDER,
+                "case {case}"
+            );
+            let manifest = make_manifest();
+            let file = make_file("f2", "store/late.go");
+            let late = [
+                symbol("store::store::Late", None, "f2"),
+                symbol("ledger::aliases::Late", Some("store::store::Late"), "f2"),
+            ];
+            writer
+                .replace_files_index(PartialIndexUpdate {
+                    manifest: &manifest,
+                    changed_files: std::slice::from_ref(&file),
+                    deleted_file_ids: &[],
+                    symbols: &late,
+                    chunks: &[],
+                    tests: &[],
+                    imports: &[],
+                    occurrences: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                    graph_nodes: &[],
+                    graph_edges: &[],
+                })
+                .unwrap();
+            let listed = qualified_names(writer.list_symbols(None, 100, 0).unwrap());
+            let position = |name: &str| listed.iter().position(|item| item == name).unwrap();
+            assert_eq!(
+                position("ledger::aliases::Late"),
+                position("store::store::Late") + 1,
+                "case {case}: {listed:?}"
+            );
+            let conn = writer.connection.lock().unwrap();
+            let mut stmt = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {LIST_SYMBOLS_SQL}"))
+                .unwrap();
+            let plan = stmt
+                .query_map(params!["%%", 50_i64, 0_i64], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+                "case {case}: {plan:?}"
+            );
+        }
     }
 
     #[test]
