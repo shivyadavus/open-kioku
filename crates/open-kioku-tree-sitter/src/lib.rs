@@ -1607,6 +1607,21 @@ fn extract_binding(
                     .last()
                     .and_then(|tid| tid.0.split(':').next_back().map(|s| s.to_string()));
                 extracted.push(("self".to_string(), None, inferred));
+            } else if kind == "field_declaration" && rust_is_struct_field(node) {
+                // A named field of a struct, in the struct's scope, which no function body is
+                // inside: the resolver reads `self.field` and `value.field` through it (#630).
+                // A field typed by a type parameter of the struct has no declared type.
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .and_then(|text| rust_declared_type(node, text, source_bytes));
+                if let Some(n) = name {
+                    extracted.push((n, declared_type, None));
+                }
             }
         }
         Language::Go => {
@@ -1659,6 +1674,16 @@ fn extract_binding(
             });
         }
     }
+}
+
+/// Whether a Rust `field_declaration` is a named field of a `struct` item, rather than of an enum
+/// variant or a union.
+fn rust_is_struct_field(field: Node<'_>) -> bool {
+    field
+        .parent()
+        .filter(|list| list.kind() == "field_declaration_list")
+        .and_then(|list| list.parent())
+        .is_some_and(|item| item.kind() == "struct_item")
 }
 
 /// A Rust binding's written type, unless it names a type parameter of an enclosing function, impl
@@ -3281,6 +3306,58 @@ mod ri3_rust_binding_type_tests {
         assert_eq!(scope_of(ctx[0]), Some(ScopeKind::Function));
         assert_eq!(ctx[1].declared_type.as_deref(), Some("mut Ring"));
         assert_eq!(scope_of(ctx[1]), Some(ScopeKind::Closure));
+    }
+
+    #[test]
+    fn rust_struct_fields_bind_in_the_struct_with_their_declared_types() {
+        let file = File {
+            id: FileId::new("file:src/caller.rs"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/caller.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "pub struct Holder<T> {\n    pub store: &'static Store,\n    item: T,\n    boxed: Box<T>,\n}\npub enum Shape {\n    Named { side: Side },\n}\npub union Bits {\n    raw: Raw,\n}\npub struct Pair(Left, Right);\n",
+        )
+        .expect("Rust struct fixture should parse");
+        let owner_of = |binding: &Binding| {
+            let scope = facts
+                .scopes
+                .iter()
+                .find(|scope| scope.id == binding.scope_id)?;
+            let owner = facts
+                .symbols
+                .iter()
+                .find(|symbol| Some(&symbol.id) == scope.owner_symbol_id.as_ref())?;
+            Some((scope.kind, owner.name.clone()))
+        };
+        let fields = facts
+            .bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.name.as_str(),
+                    binding.declared_type.as_deref(),
+                    owner_of(binding),
+                )
+            })
+            .collect::<Vec<_>>();
+        let holder = Some((ScopeKind::Class, "Holder".to_string()));
+        // A field typed by the struct's own type parameter has no declared type; the fields of an
+        // enum variant, a union or a tuple struct are not recorded.
+        assert_eq!(
+            fields,
+            vec![
+                ("store", Some("&'static Store"), holder.clone()),
+                ("item", None, holder.clone()),
+                ("boxed", Some("Box<T>"), holder),
+            ]
+        );
     }
 }
 

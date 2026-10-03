@@ -157,7 +157,12 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// in a file a `path` attribute mounts inside one alternative reads that alternative; and a file
 /// `mod name;` declares inside an inline `mod` block is placed below the directory the blocks
 /// spell. v37 indexes hold no edge for any of these.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v38";
+/// v39: a Rust type written as a `crate::`, `self::` or `super::` path is read through the path
+/// for `USES_TYPE` and for a receiver's type, with the configuration-selected module rules of a
+/// call path; and a method call through a struct field (`self.store.save()`,
+/// `entry.store.save()`) is read through the type the field declares. v38 indexes hold no edge
+/// for either.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v39";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -209,7 +214,9 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// it stands for; a v12 index holds no symbol for it.
 /// v15: a Java file records the package its `package` declaration names and a Go file its
 /// `package` clause; a v13 index records neither. v14 is taken by an open change.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v15";
+/// v16: each named field of a Rust `struct` is a binding in the struct's scope, with its written
+/// type unless that names a type parameter of the struct; a v15 index records no field.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v16";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

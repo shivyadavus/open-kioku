@@ -4527,6 +4527,156 @@ class Util {
     }
 
     #[test]
+    fn a_type_written_as_a_crate_self_or_super_path_is_read_for_uses_type_and_receivers() {
+        // `Entry` with `save` in `src/model.rs`, named by a `crate::`, `self::` and `super::`
+        // path from three files (#637).
+        let model = "pub mod inner;\npub struct Entry;\nimpl Entry {\n    pub fn new() -> Self {\n        Entry\n    }\n    pub fn save(&self) {}\n}\npub fn here(e: &self::Entry) {\n    e.save();\n}\n";
+        let files = [
+            (
+                "src/lib.rs",
+                "pub mod model;\npub fn go(e: crate::model::Entry) {\n    e.save();\n}\npub fn made() {\n    let e = crate::model::Entry::new();\n    e.save();\n}\npub fn stray(e: crate::missing::Entry) {\n    e.save();\n}\n",
+            ),
+            ("src/model.rs", model),
+            (
+                "src/model/inner.rs",
+                "pub fn up(e: &mut super::Entry) {\n    e.save();\n}\npub fn wrong(e: super::super::Entry) {\n    e.save();\n}\n",
+            ),
+        ];
+        let relations = |edge_type| {
+            rust_relations(&files, edge_type)
+                .into_iter()
+                .map(|(from, to, authoritative, ambiguity)| {
+                    (from, to, authoritative, ambiguity.len())
+                })
+                .collect::<Vec<_>>()
+        };
+        let edge = |from: &str, authoritative: bool, files: usize| {
+            (
+                from.to_string(),
+                "src/model.rs".to_string(),
+                authoritative,
+                files,
+            )
+        };
+        let calls = relations(open_kioku_core::GraphEdgeType::Calls)
+            .into_iter()
+            .filter(|(_, to, ..)| to == "src/model.rs")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![
+                edge("src/lib.rs::go", true, 0),
+                edge("src/lib.rs::made", true, 0),
+                edge("src/model.rs::here", true, 0),
+                edge("src/model/inner.rs::up", true, 0),
+            ]
+        );
+        assert_eq!(
+            relations(open_kioku_core::GraphEdgeType::UsesType),
+            vec![
+                edge("src/lib.rs::go", true, 0),
+                edge("src/model.rs::here", true, 0),
+                edge("src/model/inner.rs::up", true, 0),
+            ]
+        );
+
+        // Through a module whose file configuration selects, each file's type is a candidate,
+        // unproven, from outside the choice; a path written inside one alternative reads its own.
+        let types = "pub mod user;\npub struct S;\nimpl S {\n    pub fn m(&self) {}\n}\n";
+        let user =
+            |name: &str, path: &str| format!("pub fn {name}(s: {path}) {{\n    s.m();\n}}\n");
+        let (imp_user, win_user) = (user("u", "crate::sys::imp::S"), user("w", "super::S"));
+        let files = [
+            (
+                "src/lib.rs",
+                "mod sys;\npub fn go(s: &crate::sys::imp::S) {\n    s.m();\n}\n",
+            ),
+            (
+                "src/sys/mod.rs",
+                "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n",
+            ),
+            ("src/sys/imp/mod.rs", types),
+            ("src/sys/imp/user.rs", imp_user.as_str()),
+            ("src/sys/win/mod.rs", types),
+            ("src/sys/win/user.rs", win_user.as_str()),
+        ];
+        let (imp, win) = ("src/sys/imp/mod.rs", "src/sys/win/mod.rs");
+        let edge = |from: &str, to: &str, authoritative: bool, files: usize| {
+            (from.to_string(), to.to_string(), authoritative, files)
+        };
+        let expected = vec![
+            edge("src/lib.rs::go", imp, false, 2),
+            edge("src/lib.rs::go", win, false, 2),
+            edge("src/sys/imp/user.rs::u", imp, true, 0),
+            edge("src/sys/win/user.rs::w", win, true, 0),
+        ];
+        for edge_type in [
+            open_kioku_core::GraphEdgeType::Calls,
+            open_kioku_core::GraphEdgeType::UsesType,
+        ] {
+            let found = rust_relations(&files, edge_type.clone())
+                .into_iter()
+                .map(|(from, to, authoritative, ambiguity)| {
+                    (from, to, authoritative, ambiguity.len())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(found, expected, "{edge_type:?}");
+        }
+    }
+
+    #[test]
+    fn a_method_call_through_a_struct_field_is_read_through_the_fields_type() {
+        // `Store::save` in `src/store.rs`; `src/other.rs` declares another `Store` with `save`.
+        // `src/app.rs` imports the first, and its structs hold fields of it (#630).
+        let store = "pub struct Store;\nimpl Store {\n    pub fn save(&self) {}\n}\n";
+        let app = "use crate::store::Store;\n\
+            pub struct Inner {\n    pub store: Store,\n    pub missing: Missing,\n}\n\
+            pub struct App<T> {\n    inner: Inner,\n    store: &'static Store,\n    boxed: Box<Store>,\n    generic: T,\n    #[cfg(unix)]\n    gated: Store,\n    #[cfg(not(unix))]\n    gated: Store,\n}\n\
+            impl<T> App<T> {\n\
+            \x20   pub fn direct(&self) {\n        self.store.save();\n    }\n\
+            \x20   pub fn chained(&self) {\n        self.inner.store.save();\n    }\n\
+            \x20   pub fn boxed(&self) {\n        self.boxed.save();\n    }\n\
+            \x20   pub fn generic(&self) {\n        self.generic.save();\n    }\n\
+            \x20   pub fn gated(&self) {\n        self.gated.save();\n    }\n\
+            \x20   pub fn unknown(&self) {\n        self.inner.missing.save();\n    }\n\
+            }\n\
+            pub fn through(inner: &Inner) {\n    inner.store.save();\n}\n\
+            pub fn nested(app: &App<u8>) {\n    app.inner.store.save();\n}\n";
+        let other = "pub struct Store;\nimpl Store {\n    pub fn save(&self) {}\n}\npub fn elsewhere(inner: &crate::app::Inner) {\n    inner.store.save();\n}\n";
+        let files = [
+            ("src/lib.rs", "mod store;\nmod app;\nmod other;\n"),
+            ("src/store.rs", store),
+            ("src/app.rs", app),
+            ("src/other.rs", other),
+        ];
+        let calls = rust_relations(&files, open_kioku_core::GraphEdgeType::Calls)
+            .into_iter()
+            .filter(|(_, to, ..)| to != "src/app.rs")
+            .map(|(from, to, authoritative, ambiguity)| (from, to, authoritative, ambiguity.len()))
+            .collect::<Vec<_>>();
+        let edge = |from: &str| (from.to_string(), "src/store.rs".to_string(), true, 0usize);
+        // The field's type is read where the struct is declared: `other.rs`'s own `Store` is
+        // not the field's. A boxed, generic, `#[cfg]`-duplicated or unresolved field reaches
+        // nothing.
+        assert_eq!(
+            calls,
+            vec![
+                edge("src/app.rs::chained"),
+                edge("src/app.rs::direct"),
+                edge("src/app.rs::nested"),
+                edge("src/app.rs::through"),
+                edge("src/other.rs::elsewhere"),
+            ]
+        );
+        // A field's type is not read as a type the struct uses.
+        assert!(
+            rust_relations(&files, open_kioku_core::GraphEdgeType::UsesType)
+                .iter()
+                .all(|(from, ..)| !from.ends_with("::Inner") && !from.ends_with("::App"))
+        );
+    }
+
+    #[test]
     fn a_type_imported_through_a_module_whose_file_configuration_selects_is_every_files_type() {
         // `use crate::sys::imp::{S, T};` where `imp` is `imp/mod.rs` or `win/mod.rs`, each
         // declaring `S` with `new` and `m`, and a trait `T`. `win/user.rs` is below the mounted

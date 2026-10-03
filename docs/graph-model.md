@@ -174,8 +174,25 @@ the path it spells in a 2018 package. Where the edition cannot be read, only a `
 root is read, since there the crate root and the module in scope are one module. A call or type
 path is read from the module around it in either edition. A type written as a path whose first segment is a module in scope
 (`s: &sys::imp::S`, or the `sys::imp::S` of `sys::imp::S::new()`) is read through that path, for
-`USES_TYPE` and for a receiver's type; a type written as a `crate::`, `self::`, `super::` or
-crate-name path is looked up by name only.
+`USES_TYPE` and for a receiver's type. So is a type written as a `crate::`, `self::` or
+`super::` path (`e: crate::model::Entry`, #637), with the configuration reading of a call path:
+through a module whose file configuration selects, each file's type is a candidate, unproven,
+unless the file writing the path is inside one alternative, which reads its own. A type written as
+a crate-name path is looked up by name only.
+
+A method call through a field of a Rust struct (`self.store.save()`, `entry.store.save()`,
+`self.a.b.m()`) is read through the type the field declares (#630). Each named field of a `struct`
+is a binding in the struct's scope with its written type. The receiver's first segment is `self`,
+whose type is the one the caller's `impl` names, looked up where the `impl` is written, or a
+binding whose type the index proves; that type must be one struct, not reached through a module
+whose file configuration selects. Each field after it is looked up in that struct's scope, and its
+type is read from there, with the struct's own imports and module, not the caller's. References
+and generic arguments are read through as for a binding (`&'a S` and `S<u8>` are an `S`); `Box<S>`
+and `Option<S>` are not an `S`. The edge carries the `receiver_type` proof with strategy
+`rust_field_declared_type`. A field declared more than once (`#[cfg]`-gated fields), one typed by a
+type parameter of the struct, or a type on the way that is not one struct reaches no candidate.
+Fields of an enum variant, a union or a tuple struct are not read, and a field's type is not a
+`USES_TYPE` of its struct.
 
 A file a `path` attribute mounts inside one alternative is not placed in the module tree, but it
 is the module its route holds (#633): `unix/mod.rs` mounted by
