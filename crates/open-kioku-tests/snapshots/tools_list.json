@@ -496,7 +496,7 @@
               "type": "string"
             },
             "since": {
-              "description": "Optional git revision or range compared with git diff --unified=0. With `path` or `symbol`, the symbols on the lines it changed in that file are read first; alone, the changed files are analyzed and the result is {since, changed_files, impact_reports}, as ok impact --since returns: at most 25 reports, files whose touched symbols have the most proven dependents first, none started after 10 s, with impact_reports_omitted and caveats saying what was left out. Outside a git repository it is an invalid-params error.",
+              "description": "Optional git revision or range compared with git diff --unified=0. With `path` or `symbol`, the symbols on the lines it changed in that file are read first; alone, the changed files are analyzed and the result is {since, changed_files, impact_reports}, as ok impact --since returns: at most 25 reports, files whose touched symbols have the most proven dependents first, none started after 10 s, with impact_reports_omitted and caveats saying what was left out. A file the diff deletes or renames away is reported from its last-indexed dependents, or listed in removed_paths_not_indexed when the index does not hold it. Outside a git repository it is an invalid-params error.",
               "type": "string"
             },
             "symbol": {

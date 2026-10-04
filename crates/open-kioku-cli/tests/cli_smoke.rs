@@ -1630,10 +1630,22 @@ fn verify_git_checks_both_sides_of_a_rename() {
         impact["changed_files"][0]["new_path"], "src/keys.rs",
         "{impact}"
     );
+    // A rename is analysed at its new and its previous path. The previous path is secret-like,
+    // so the index never held it: it has no dependents to read, and is listed apart rather than
+    // reported as a file nothing depends on.
     assert_eq!(
         impact["impact_reports"].as_array().unwrap().len(),
-        2,
-        "a rename is analysed at its new and its previous path: {impact}"
+        1,
+        "{impact}"
+    );
+    assert_eq!(
+        impact["impact_reports"][0]["target"], "src/keys.rs",
+        "{impact}"
+    );
+    assert_eq!(
+        impact["removed_paths_not_indexed"],
+        serde_json::json!(["src/secrets/keys.rs"]),
+        "{impact}"
     );
 }
 
@@ -4323,6 +4335,216 @@ fn impact_and_plan_accept_since_changed_ranges() {
     });
     assert!(plan.contains("git diff HEAD --unified=0"));
     assert!(plan.contains("src/lib.rs"));
+}
+
+/// A file the diff deletes had no report and was not counted, though its dependents are the ones
+/// most certain to break. `ok impact --since` and MCP `impact_analysis` report it from the
+/// dependents the index last held, and once the index drops it, list it apart.
+#[test]
+fn impact_since_reports_deleted_and_renamed_files_on_cli_and_mcp() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+    fn impact_since(repo: &std::path::Path) -> serde_json::Value {
+        let impact = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "impact", "--since", "HEAD"]);
+            command
+        });
+        serde_json::from_str(&impact).unwrap()
+    }
+    fn mcp_impact_since(repo: &std::path::Path) -> serde_json::Value {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "impact_analysis", "arguments": {"since": "HEAD"}}
+        })
+        .to_string();
+        let response = run_with_stdin(
+            {
+                let mut command = ok();
+                command.arg("--repo").arg(repo).arg("mcp").arg("serve");
+                command
+            },
+            &(request + "\n"),
+        );
+        let response: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        response["result"]["structuredContent"].clone()
+    }
+    /// What both surfaces must agree on: each report's target, proven dependents and
+    /// caveats, and the paths left out or no longer indexed.
+    fn shape(answer: &serde_json::Value) -> serde_json::Value {
+        let reports = answer["impact_reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|report| {
+                serde_json::json!({
+                    "target": report["target"],
+                    "proven": report["proven_impact"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|impact| impact["path"].clone())
+                        .collect::<Vec<_>>(),
+                    "caveats": report["relationship_impact_caveats"],
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "reports": reports,
+            "omitted": answer["impact_reports_omitted"],
+            "not_indexed": answer["removed_paths_not_indexed"],
+            "caveats": answer["caveats"],
+        })
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    // A manifest makes the crate's `use` paths resolve, so the callers' edges are proven.
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"ledger\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub mod books;\npub mod journal;\npub mod ledger;\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/ledger.rs"),
+        "pub fn settle() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/journal.rs"),
+        "pub fn entry() -> u32 {\n    2\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/books.rs"),
+        "use crate::journal::entry;\nuse crate::ledger::settle;\n\npub fn close() -> u32 {\n    settle() + entry()\n}\n",
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "cli@example.com"]);
+    git(repo, &["config", "user.name", "CLI Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "--quiet", "-m", "initial"]);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    git(repo, &["rm", "--quiet", "src/ledger.rs"]);
+    git(repo, &["mv", "src/journal.rs", "src/diary.rs"]);
+
+    // The index still holds both removed paths: each is reported from its last-indexed
+    // dependents, the caller in `src/books.rs` proven.
+    let impact = impact_since(repo);
+    let report = |target: &str| {
+        impact["impact_reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|report| report["target"] == target)
+            .unwrap_or_else(|| panic!("no report for {target}: {impact:#}"))
+            .clone()
+    };
+    for (target, caveat) in [
+        ("src/ledger.rs", "the diff deletes `src/ledger.rs`"),
+        (
+            "src/journal.rs",
+            "the diff renames `src/journal.rs` to `src/diary.rs`",
+        ),
+    ] {
+        let report = report(target);
+        assert!(
+            report["proven_impact"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|impact| impact["path"] == "src/books.rs"),
+            "{report:#}"
+        );
+        assert!(
+            report["relationship_impact_caveats"][0]
+                .as_str()
+                .unwrap()
+                .contains(caveat),
+            "{report:#}"
+        );
+    }
+    // The rename's new path is a changed path of its own; nothing is left out or unindexed.
+    report("src/diary.rs");
+    assert!(impact["removed_paths_not_indexed"].is_null(), "{impact:#}");
+    assert_eq!(shape(&mcp_impact_since(repo)), shape(&impact));
+
+    // Indexed after the change, the removed paths have no dependents left to read. They are
+    // listed apart, with their own caveat, not reported as files with nothing depending on them.
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let impact = impact_since(repo);
+    assert_eq!(
+        impact["removed_paths_not_indexed"],
+        serde_json::json!(["src/journal.rs", "src/ledger.rs"]),
+        "{impact:#}"
+    );
+    assert!(
+        impact["impact_reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|report| report["target"] == "src/diary.rs"),
+        "{impact:#}"
+    );
+    assert!(
+        impact["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|caveat| caveat
+                .as_str()
+                .unwrap()
+                .contains("2 path(s) the diff deletes or renames away are not in the index")),
+        "{impact:#}"
+    );
+    assert_eq!(shape(&mcp_impact_since(repo)), shape(&impact));
+    let text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["impact", "--since", "HEAD"]);
+        command
+    });
+    assert!(
+        text.contains(
+            "Removed paths not in the index (no report):\n  src/journal.rs\n  src/ledger.rs"
+        ),
+        "{text}"
+    );
 }
 
 #[test]
