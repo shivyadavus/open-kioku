@@ -4407,4 +4407,67 @@ mod tests {
             RelationshipAuthority::Authoritative
         );
     }
+
+    /// `src/ledger.rs` defines `post` and imports `src/audit.rs`. A route from `post` up to
+    /// ledger.rs and across its import would read "post depends on audit.rs"; no hop range can
+    /// produce it, because the walk only follows edges leaving the node it is on and a reverse
+    /// hop range does not parse. `graph_route_hop_authority` relies on this to need no cap for
+    /// that ascent.
+    #[test]
+    fn a_symbol_never_reaches_its_file_s_imports() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        for (id, path) in [
+            ("file:ledger", "src/ledger.rs"),
+            ("file:audit", "src/audit.rs"),
+        ] {
+            store.nodes.insert(id.into(), file_node(id, path));
+        }
+        insert_function(&mut store, "fn:post");
+        store.edges.push(parsed_containment(
+            "d-ledger-post",
+            "file:ledger",
+            "fn:post",
+            GraphEdgeType::Defines,
+        ));
+        let mut imports = test_edge(
+            "i-ledger-audit",
+            "file:ledger",
+            "file:audit",
+            GraphEdgeType::Imports,
+        );
+        imports
+            .set_relationship_proofs(vec![open_kioku_core::RelationshipProof::new(
+                open_kioku_core::RelationshipProofKind::ImportBinding,
+                "test",
+                1,
+            )])
+            .unwrap();
+        store.edges.push(imports);
+
+        for query in [
+            "MATCH (a:Function)-[*1..3]->(b) WHERE a.label = 'fn:post' RETURN b",
+            "MATCH (a:Function)-[:DEFINES *1..3]->(b) WHERE a.label = 'fn:post' RETURN b",
+            "MATCH (a:Function)-[:IMPORTS *1..3]->(b) WHERE a.label = 'fn:post' RETURN b",
+        ] {
+            let result = run(&store, query);
+            assert!(result.rows.is_empty(), "{query}: {:?}", result.rows);
+        }
+        // From the file, the import is reached directly: the file's relation, not post's.
+        assert_eq!(
+            column_ids(
+                &run(
+                    &store,
+                    "MATCH (a:File)-[*1..3]->(b) WHERE a.label = 'src/ledger.rs' RETURN b"
+                ),
+                0
+            ),
+            ["file:audit", "fn:post"]
+        );
+        assert!(
+            parse_graph_query("MATCH (b:Function)<-[:DEFINES *1..2]-(a:File) RETURN a, b").is_err()
+        );
+    }
 }

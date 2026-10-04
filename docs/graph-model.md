@@ -589,7 +589,12 @@ relationship hop contributes at most `corroborating`
 (`open_kioku_core::graph_route_hop_authority`, and `graph_route_authorities` for a whole route).
 Containment before any relationship hop is not capped: a file's own symbol, then that symbol's
 call, is the file's call. Every route the graph returns is followed forward, so a containment hop
-after a relationship hop is always a descent into what the route reached. MCP `dependency_path`
+after a relationship hop is always a descent into what the route reached. For the same reason no
+route climbs from a symbol to its file and across the file's relationship ("this symbol's file
+imports X" is not "this symbol depends on X"): that needs a containment edge walked backwards,
+and `shortest_path`, the query walk and `explain_flow` follow only outgoing edges, while a reverse
+hop range does not parse. Tests pin it; a surface that starts walking edges backwards has to cap
+that ascent too. MCP `dependency_path`
 returns `route_authority` and, for a capped hop, `hop_route_authority` and a caveat; `ok path`
 prints the hop's contribution beside its class and the route's authority.
 

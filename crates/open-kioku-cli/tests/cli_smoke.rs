@@ -7826,6 +7826,31 @@ fn a_route_into_an_imported_file_s_other_symbols_is_not_authoritative() {
         "{text}"
     );
     assert!(text.contains("route authority: Corroborating"), "{text}");
+
+    // The converse overclaim, `post` up to ledger.rs and across its import ("post depends on
+    // audit.rs"), needs a containment edge walked backwards. No surface walks one, which is why
+    // `graph_route_hop_authority` caps only the descent; this pins that on a real index.
+    let response = mcp_tool_call(
+        repo,
+        "dependency_path",
+        serde_json::json!({"from": "src::ledger::post", "to": "src/audit.rs"}),
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["edges"],
+        serde_json::json!([]),
+        "{response}"
+    );
+    let text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["path", "src::ledger::post", "src/audit.rs"]);
+        command
+    });
+    assert!(text.contains("No dependency path found."), "{text}");
+    let upward = query("MATCH (a:Function)-[*1..3]->(b:File) RETURN a, b");
+    assert_eq!(upward["returned"], 0, "{upward:#}");
 }
 
 /// What the lock holder prints once it holds the lock.

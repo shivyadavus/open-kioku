@@ -434,6 +434,15 @@ pub fn graph_route_hop_authority(
 /// Each hop's [`graph_route_hop_authority`] along a forward route, in order. Every graph route a
 /// surface returns (`shortest_path`, a multi-hop query walk) follows edges from `from` to `to`,
 /// so a containment hop after a relationship hop is always a descent.
+///
+/// The converse overclaim, a symbol up to its containing file and then across that file's
+/// relationship ("this symbol's file imports X" read as "this symbol depends on X"), needs a
+/// containment edge traversed backwards. No route surface does that: `shortest_path` reads only a
+/// node's outgoing edges, the query walk follows only edges leaving the current node and rejects
+/// reverse hop ranges, and `explain_flow` follows outgoing `CALLS` only. A surface that starts
+/// walking edges backwards must cap that ascent here first;
+/// `a_symbol_never_reaches_its_file_s_imports` (open-kioku-graph) and
+/// `a_route_into_an_imported_file_s_other_symbols_is_not_authoritative` (open-kioku-cli) pin it.
 pub fn graph_route_authorities(edges: &[GraphEdge]) -> Vec<RelationshipAuthority> {
     let mut after_relationship = false;
     edges
