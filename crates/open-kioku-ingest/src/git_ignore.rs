@@ -1,3 +1,4 @@
+use crate::prune::DirVerdict;
 use ignore::WalkBuilder;
 use open_kioku_errors::{OkError, Result};
 use std::collections::{HashMap, HashSet};
@@ -13,7 +14,7 @@ use std::thread;
 /// fall back to filesystem-style ignore handling.
 ///
 /// Discovery first collects the same lightweight filesystem candidates used by
-/// indexing (without descending into known heavy build/cache directories), then
+/// indexing (without descending into the directories `crate::prune` cuts), then
 /// sends them through one `git check-ignore --stdin -z` process. This preserves
 /// Git's nested `.gitignore`, negation, `.git/info/exclude`, and global-exclude
 /// semantics without spawning a process per file. We intentionally do not pass
@@ -52,6 +53,36 @@ pub(crate) fn ignored_among(
         .cloned()
         .collect::<Vec<_>>();
     check_ignored_candidates(root, &candidates).map(Some)
+}
+
+/// Files Git tracks below `root`, relative to it; `None` outside a Git work tree. Discovery
+/// asks only when it pruned a directory, to tell committed source under it from build output.
+pub(crate) fn tracked_files(root: &Path) -> Result<Option<Vec<PathBuf>>> {
+    if !inside_work_tree(root)? {
+        return Ok(None);
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--cached"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| OkError::Repository(format!("git tracked-file listing failed: {err}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(OkError::Repository(format!(
+            "git tracked-file listing failed: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(Some(
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| PathBuf::from(String::from_utf8_lossy(raw).into_owned()))
+            .collect(),
+    ))
 }
 
 fn inside_work_tree(root: &Path) -> Result<bool> {
@@ -137,7 +168,13 @@ fn filesystem_candidates(root: &Path) -> Vec<PathBuf> {
         .parents(false)
         .ignore(false)
         .follow_links(false)
-        .filter_entry(|entry| !is_heavy_discovery_dir(entry.path()))
+        .filter_entry({
+            let root = root.to_path_buf();
+            move |entry| {
+                let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+                crate::prune::classify(&root, entry.path(), is_dir) == DirVerdict::Walk
+            }
+        })
         .build()
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
@@ -158,16 +195,6 @@ fn filesystem_candidates(root: &Path) -> Vec<PathBuf> {
 fn has_git_marker(root: &Path) -> bool {
     root.ancestors()
         .any(|ancestor| ancestor.join(".git").exists())
-}
-
-fn is_heavy_discovery_dir(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    matches!(
-        name,
-        ".git" | ".ok" | "target" | "node_modules" | "dist" | "build" | ".venv"
-    )
 }
 
 #[cfg(test)]

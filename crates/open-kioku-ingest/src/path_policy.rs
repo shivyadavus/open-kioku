@@ -152,12 +152,11 @@ impl IndexPathPolicy {
     }
 }
 
-/// Whether discovery never reaches `rel` because a directory on its way is pruned by name
-/// (`.git`, `.ok`, `target`, `node_modules`, `dist`, `build`, `.venv`).
-pub fn is_pruned_by_discovery(rel: &Path) -> bool {
-    rel.ancestors()
-        .filter(|ancestor| !ancestor.as_os_str().is_empty())
-        .any(crate::is_heavy_discovery_dir)
+/// Whether discovery never reaches `rel` (relative to `root`) because a directory on its way is
+/// pruned: `.git`, `.ok`, or build output and installed packages as `crate::prune` judges them
+/// from what is on disk under `root` now.
+pub fn is_pruned_by_discovery(root: &Path, rel: &Path) -> bool {
+    crate::prune::is_under_pruned_dir(root, rel)
 }
 
 /// Record in `quality` that `file`, which an index counted as indexed, is excluded by
@@ -214,6 +213,14 @@ pub fn redact_recorded_skips(quality: &mut IndexQuality, config: &OkConfig) -> u
             .policy_excluded_dirs
             .retain(|dir, _| !open_kioku_core::is_secret_like_path(Path::new(dir)));
         withheld += before - coverage.policy_excluded_dirs.len();
+        // A pruned directory stays counted in `pruned_dirs`; only its name is withheld.
+        let before = coverage.pruned.len();
+        coverage
+            .pruned
+            .retain(|dir| !open_kioku_core::is_secret_like_path(Path::new(&dir.path)));
+        let dropped = before - coverage.pruned.len();
+        coverage.pruned_unlisted += dropped;
+        withheld += dropped;
     }
     withheld
 }
@@ -366,11 +373,18 @@ mod tests {
 
     #[test]
     fn pruned_directories_are_recognised_at_any_depth() {
-        assert!(is_pruned_by_discovery(Path::new(".ok/index.sqlite")));
-        assert!(is_pruned_by_discovery(Path::new(
-            "web/node_modules/x/index.js"
-        )));
-        assert!(!is_pruned_by_discovery(Path::new("src/build.rs")));
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("web/node_modules/x")).unwrap();
+        fs::create_dir_all(root.join("src/build")).unwrap();
+        fs::write(root.join("src/build/mod.rs"), "").unwrap();
+        assert!(is_pruned_by_discovery(root, Path::new(".ok/index.sqlite")));
+        assert!(is_pruned_by_discovery(
+            root,
+            Path::new("web/node_modules/x/index.js")
+        ));
+        assert!(!is_pruned_by_discovery(root, Path::new("src/build.rs")));
+        assert!(!is_pruned_by_discovery(root, Path::new("src/build/mod.rs")));
     }
 
     #[test]

@@ -422,7 +422,7 @@ fn assess_snapshot_revision(
                 paths
                     .iter()
                     .filter(|path| {
-                        !open_kioku_ingest::path_policy::is_pruned_by_discovery(path)
+                        !open_kioku_ingest::path_policy::is_pruned_by_discovery(repo, path)
                     })
                     .count()
             })

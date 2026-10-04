@@ -14,7 +14,7 @@ use open_kioku_storage::{
 };
 use open_kioku_storage_sqlite::SqliteStore;
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -623,20 +623,12 @@ fn is_relevant_event(root: &Path, event: &Event) -> bool {
     ) && event.paths.iter().any(|path| is_relevant_path(root, path))
 }
 
+/// A change discovery would see: not under `.git`, `.ok`, or a directory it prunes as build
+/// output or installed packages. The same rule as the walk, so an edit to a `src/build/`
+/// module triggers a re-index and a `cargo build` writing `target/` does not.
 fn is_relevant_path(root: &Path, path: &Path) -> bool {
     let rel = path.strip_prefix(root).unwrap_or(path);
-    !has_component(rel, ".git")
-        && !has_component(rel, ".ok")
-        && !has_component(rel, "target")
-        && !has_component(rel, "node_modules")
-        && !has_component(rel, ".venv")
-}
-
-fn has_component(path: &Path, name: &str) -> bool {
-    path.components().any(|component| match component {
-        Component::Normal(value) => value == name,
-        _ => false,
-    })
+    !open_kioku_ingest::path_policy::is_pruned_by_discovery(root, rel)
 }
 
 fn watch_err(err: notify::Error) -> OkError {
@@ -651,11 +643,22 @@ mod tests {
 
     #[test]
     fn filters_internal_index_paths() {
-        let root = Path::new("/repo");
-        assert!(!is_relevant_path(root, Path::new("/repo/.ok/index.sqlite")));
-        assert!(!is_relevant_path(root, Path::new("/repo/.git/index")));
-        assert!(!is_relevant_path(root, Path::new("/repo/target/debug/app")));
-        assert!(is_relevant_path(root, Path::new("/repo/src/lib.rs")));
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::create_dir_all(root.join("src/build")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(root.join("src/build/mod.rs"), "").unwrap();
+        assert!(!is_relevant_path(root, &root.join(".ok/index.sqlite")));
+        assert!(!is_relevant_path(root, &root.join(".git/index")));
+        assert!(!is_relevant_path(root, &root.join("target/debug/app")));
+        assert!(!is_relevant_path(
+            root,
+            &root.join("node_modules/x/index.js")
+        ));
+        assert!(is_relevant_path(root, &root.join("src/lib.rs")));
+        // A source module named like build output is watched like any other.
+        assert!(is_relevant_path(root, &root.join("src/build/mod.rs")));
     }
 
     #[test]

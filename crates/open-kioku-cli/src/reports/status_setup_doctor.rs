@@ -1839,8 +1839,12 @@ fn coverage_check(
     // count as hidden; with it on they count here, and `[index] exclude`, checked before
     // the git rules, is how an intended exclusion is marked.
     let git_ignored = coverage.languages_mostly_excluded_by(open_kioku_core::SkipSource::GitIgnore);
-    let judged_omission =
-        coverage.below_warn_threshold() || !low.is_empty() || coverage.walk_errors > 0;
+    // Committed source under a directory pruned as build output warns at any count, like a
+    // walk error: no ratio threshold can say a named `tools/build/` package was meant to vanish.
+    let judged_omission = coverage.below_warn_threshold()
+        || !low.is_empty()
+        || coverage.walk_errors > 0
+        || coverage.pruned_source_files() > 0;
     if judged_omission || !git_ignored.is_empty() {
         if !git_ignored.is_empty() {
             message.push_str(&format!(
@@ -1945,6 +1949,23 @@ fn policy_exclusion_next_step(coverage: &IndexCoverage) -> String {
 /// exclusions (`hidden`, `ignored`, ...) are outside the ratio and name their own
 /// setting in the check message.
 fn coverage_next_step(coverage: &IndexCoverage) -> String {
+    if coverage.pruned_source_files() > 0 {
+        let dirs = coverage
+            .pruned_source_dirs()
+            .iter()
+            .take(3)
+            .map(|dir| format!("`{}/`", dir.path))
+            .collect::<Vec<_>>();
+        return format!(
+            "Coverage: {} git-tracked source file(s) are not indexed because discovery pruned {} as build output; no ok.toml key governs that. Discovery walks a `build`, `dist` or `target` directory that a module or package declares (a `mod.rs`, a `<name>.rs` beside it, an `__init__.py`, Go files, or a place under `src/` with no build manifest beside it); if these files are source, declare the directory that way, otherwise an absence among them is not evidence. The files are listed in `ok --json status --full` `quality.skipped_paths` with reason `pruned`.",
+            group_thousands(coverage.pruned_source_files()),
+            if dirs.is_empty() {
+                "their directories".to_owned()
+            } else {
+                dirs.join(", ")
+            }
+        );
+    }
     match coverage.top_skip_reasons(1).first() {
         Some((open_kioku_core::SkipReason::TooLarge, count)) => format!(
             "Coverage: {} source file(s) were skipped as too-large; `[index] max_file_size` governs that. Raise it if the omissions are unintended, then run `ok index .`.",

@@ -53,12 +53,6 @@ impl Default for OkConfig {
                     "**/.git/**".into(),
                     "node_modules/**".into(),
                     "**/node_modules/**".into(),
-                    "target/**".into(),
-                    "**/target/**".into(),
-                    "dist/**".into(),
-                    "**/dist/**".into(),
-                    "build/**".into(),
-                    "**/build/**".into(),
                     ".venv/**".into(),
                     "**/.venv/**".into(),
                     ".ok/**".into(),
@@ -528,13 +522,13 @@ impl OkConfig {
         }
     }
 
+    /// `target`, `build` and `dist` are not here: discovery prunes them only when they are
+    /// build output, and a glob would also exclude a `src/build/` module it declares (#477).
+    /// A pattern an existing `ok.toml` lists is the user's and still applies.
     fn apply_builtin_excludes(&mut self) {
         for pattern in [
             ".git/**",
             "node_modules/**",
-            "target/**",
-            "dist/**",
-            "build/**",
             ".venv/**",
             ".ok/**",
             "package-lock.json",
