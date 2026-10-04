@@ -1,0 +1,64 @@
+{
+  "id": "dependency-strongest-route",
+  "jsonrpc": "2.0",
+  "result": {
+    "edge_authority": {
+      "edge-ledger-defines-post": "authoritative",
+      "edge-post-calls-record": "authoritative"
+    },
+    "edges": [
+      {
+        "edge_type": "DEFINES",
+        "evidence": {
+          "confidence": "exact",
+          "file_range": null,
+          "id": "",
+          "indexed_at": "<indexed_at>",
+          "message": "",
+          "source": "open-kioku-graph",
+          "source_type": "tree_sitter",
+          "symbol_id": null
+        },
+        "from": "file:file-ledger",
+        "id": "edge-ledger-defines-post",
+        "to": "symbol:symbol-post"
+      },
+      {
+        "edge_type": "CALLS",
+        "evidence": {
+          "confidence": "exact",
+          "file_range": null,
+          "id": "",
+          "indexed_at": "<indexed_at>",
+          "message": "",
+          "source": "open-kioku-resolution",
+          "source_type": "tree_sitter",
+          "symbol_id": null
+        },
+        "from": "symbol:symbol-post",
+        "id": "edge-post-calls-record",
+        "properties": {
+          "relationship_proofs": [
+            {
+              "authority": "authoritative",
+              "candidate_count": 1,
+              "kind": "exact_call_site",
+              "resolver_strategy": "fixture"
+            },
+            {
+              "authority": "corroborating",
+              "candidate_count": 1,
+              "kind": "same_scope_definition",
+              "resolver_strategy": "fixture"
+            }
+          ]
+        },
+        "to": "symbol:symbol-record"
+      }
+    ],
+    "evidence_source": "sqlite_graph_store",
+    "from": "file:file-ledger",
+    "route_authority": "authoritative",
+    "to": "symbol:symbol-record"
+  }
+}

@@ -8,16 +8,20 @@ use open_kioku_core::{
 };
 use open_kioku_errors::Result;
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 pub mod buffer;
 pub mod query;
 mod resolve;
+mod route;
 pub mod schema;
 
 pub use buffer::{GraphBuffer, GraphBufferMergeReport, WorkerGraphBuffer};
 pub use resolve::resolve_graph_node;
+pub use route::{
+    dependency_route, DependencyRoute, DEPENDENCY_ROUTE_MAX_HOPS, ROUTE_CONTAINMENT_DESCENT_CAVEAT,
+};
 #[derive(Default, Clone)]
 pub struct InMemoryGraph {
     pub nodes: HashMap<String, GraphNode>,
@@ -646,18 +650,10 @@ impl InMemoryGraph {
     }
 
     pub fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Vec<GraphEdge> {
-        let mut queue = VecDeque::from([(from.to_string(), Vec::<GraphEdge>::new())]);
-        let mut seen = std::collections::HashSet::new();
-        while let Some((node, path)) = queue.pop_front() {
-            if node == to {
-                return path;
-            }
-            if path.len() >= max_depth || !seen.insert(node.clone()) {
-                continue;
-            }
-            // A derived sibling is not a dependency hop; see the SQLite store for the rationale.
-            // Hops are enqueued in window order, as the SQLite store does, so where equally short
-            // routes first diverge the stronger hop is tried first.
+        // A derived sibling is not a dependency hop; see the SQLite store for the rationale.
+        // Hops are read in window order, as the SQLite store reads them, so both stores pick
+        // the same route among equally short and equally strong ones.
+        let route = open_kioku_core::strongest_shortest_route(from, to, max_depth, |node| {
             let mut hops = self
                 .edges
                 .iter()
@@ -665,13 +661,12 @@ impl InMemoryGraph {
                 .cloned()
                 .collect::<Vec<_>>();
             open_kioku_core::sort_graph_edges_for_window(&mut hops);
-            for edge in hops {
-                let mut next_path = path.clone();
-                next_path.push(edge.clone());
-                queue.push_back((edge.to.0.clone(), next_path));
-            }
+            Ok::<_, std::convert::Infallible>(hops)
+        });
+        match route {
+            Ok(route) => route,
+            Err(never) => match never {},
         }
-        Vec::new()
     }
 }
 
@@ -1004,6 +999,56 @@ mod tests {
         assert_eq!(path.len(), 2);
         assert_eq!(path[0].id.0, "e1");
         assert_eq!(path[1].id.0, "e2");
+    }
+
+    /// The in-memory graph picks the route the SQLite store picks: of two equally short routes
+    /// from `ledger.rs` to `record`, the one through ledger.rs's own `post` rather than the
+    /// import whose DEFINES hop is capped (`shortest_path_prefers_the_route_whose_weakest_hop_is_
+    /// strongest` in open-kioku-storage-sqlite).
+    #[test]
+    fn in_memory_shortest_path_prefers_the_route_whose_weakest_hop_is_strongest() {
+        let parsed = |id: &str, from: &str, to: &str| GraphEdge {
+            id: EdgeId::new(id),
+            from: NodeId::new(from),
+            to: NodeId::new(to),
+            edge_type: GraphEdgeType::Defines,
+            evidence: Evidence {
+                source_type: EvidenceSourceType::TreeSitter,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let proven = |id: &str, from: &str, to: &str| {
+            let mut edge = GraphEdge {
+                id: EdgeId::new(id),
+                from: NodeId::new(from),
+                to: NodeId::new(to),
+                edge_type: GraphEdgeType::Imports,
+                ..Default::default()
+            };
+            edge.set_relationship_proofs(vec![RelationshipProof::new(
+                RelationshipProofKind::ImportBinding,
+                "test",
+                1,
+            )])
+            .unwrap();
+            edge
+        };
+        let graph = InMemoryGraph {
+            nodes: HashMap::new(),
+            edges: vec![
+                proven("a-imports", "file:ledger.rs", "file:audit.rs"),
+                parsed("b-defines-record", "file:audit.rs", "symbol:record"),
+                parsed("c-defines-post", "file:ledger.rs", "symbol:post"),
+                proven("d-post-record", "symbol:post", "symbol:record"),
+            ],
+        };
+        let ids = graph
+            .shortest_path("file:ledger.rs", "symbol:record", 12)
+            .into_iter()
+            .map(|edge| edge.id.0)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["c-defines-post", "d-post-record"]);
     }
 
     #[test]

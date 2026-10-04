@@ -969,33 +969,11 @@ async fn dispatch(
                 return Ok(response);
             };
             let to = open_kioku_graph::resolve_graph_node(store, to)?;
-            let edges = store.shortest_path(&from, &to, 12)?;
-            let mut response = json!({
-                "from": from,
-                "to": to,
-                "edge_authority": edge_authority(&edges),
-                "edges": edges,
-                "evidence_source": "sqlite_graph_store"
-            });
-            // `edge_authority` is what each edge establishes on its own; the route is only as
-            // established as the weakest hop's contribution to it, and containment does not carry
-            // across a relationship hop (`graph_route_hop_authority`).
-            let route = open_kioku_core::graph_route_authorities(&edges);
-            if let Some(weakest) = route.iter().min() {
-                response["route_authority"] = json!(weakest);
-                let capped = edges
-                    .iter()
-                    .zip(&route)
-                    .filter(|(edge, contribution)| {
-                        **contribution != open_kioku_core::graph_edge_authority(edge)
-                    })
-                    .map(|(edge, contribution)| (edge.id.0.clone(), *contribution))
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                if !capped.is_empty() {
-                    response["hop_route_authority"] = json!(capped);
-                    response["caveats"] = json!([ROUTE_CONTAINMENT_DESCENT_CAVEAT]);
-                }
-            }
+            // `edge_authority` is what each edge establishes on its own; `route_authority` is the
+            // weakest hop's contribution, with containment after a relationship hop capped. `ok
+            // --json path` prints the same report, so the two surfaces cannot drift apart.
+            let mut response = json!(open_kioku_graph::dependency_route(store, from, to)?);
+            response["evidence_source"] = json!("sqlite_graph_store");
             Ok(response)
         }
         "explain_flow" => explain_flow_tool(store, &params),
@@ -2079,8 +2057,6 @@ where
     }
     Ok(call_path)
 }
-
-const ROUTE_CONTAINMENT_DESCENT_CAVEAT: &str = "this route descends through CONTAINS or DEFINES after a relationship hop; containment is not transitive across a relationship (a file importing the file that defines X does not establish a relation to X), so hop_route_authority caps that hop at corroborating and route_authority reflects it, while edge_authority still reports what each edge establishes on its own";
 
 /// Each edge's authority, recomputed from its proofs and keyed by edge id. A serialized edge
 /// carries its proofs but not the authority they amount to, so a proof-less edge read alone
@@ -3624,6 +3600,130 @@ mod tests {
             (
                 "find_recent_failures_disabled.json",
                 r#"{"jsonrpc":"2.0","id":"recent-failures","method":"find_recent_failures","params":{"limit":1}}"#,
+            ),
+        ] {
+            let response = handle_line(
+                &fixture.repo,
+                ServedIndex::Ready(&fixture.store),
+                &fixture.config,
+                line,
+            )
+            .await
+            .expect("snapshot request should return a response");
+            assert_mcp_snapshot(name, &response);
+        }
+    }
+
+    /// `dependency_path` routes whose authority depends on the route, not on any one edge
+    /// (#660). `src/ledger.rs` imports `src/audit.rs`, which defines `record` and `seal`;
+    /// ledger.rs also defines `post`, which calls `record`. Every edge is established.
+    ///
+    /// - To `seal` the only route is the import and then DEFINES: containment does not carry
+    ///   across a relationship, so the DEFINES hop is capped and the route reads corroborating.
+    /// - To `record` there are two routes of two hops. The import is tried first (a proven
+    ///   relationship ranks above containment), but the route through `post` has no capped hop,
+    ///   so it is the one returned and the route reads authoritative.
+    #[tokio::test]
+    async fn golden_dependency_path_route_authority_snapshots_are_stable() {
+        let fixture = McpSnapshotFixture::new();
+        let node = |id: &str, node_type: GraphNodeType, label: &str| GraphNode {
+            id: NodeId::new(id),
+            node_type,
+            label: label.into(),
+            ..Default::default()
+        };
+        let parsed_defines = |id: &str, from: &str, to: &str| GraphEdge {
+            id: EdgeId::new(id),
+            from: NodeId::new(from),
+            to: NodeId::new(to),
+            edge_type: GraphEdgeType::Defines,
+            evidence: open_kioku_core::Evidence {
+                source: "open-kioku-graph".into(),
+                source_type: EvidenceSourceType::TreeSitter,
+                confidence: Confidence::Exact,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let proven = |id: &str, from: &str, to: &str, edge_type: GraphEdgeType| {
+            let kinds = match edge_type {
+                GraphEdgeType::Imports => {
+                    vec![open_kioku_core::RelationshipProofKind::ImportBinding]
+                }
+                _ => vec![
+                    open_kioku_core::RelationshipProofKind::ExactCallSite,
+                    open_kioku_core::RelationshipProofKind::SameScopeDefinition,
+                ],
+            };
+            // Resolver evidence, as an indexed proven edge carries; the class comes from the
+            // proofs either way.
+            let mut edge = GraphEdge {
+                id: EdgeId::new(id),
+                from: NodeId::new(from),
+                to: NodeId::new(to),
+                edge_type,
+                evidence: open_kioku_core::Evidence {
+                    source: "open-kioku-resolution".into(),
+                    source_type: EvidenceSourceType::TreeSitter,
+                    confidence: Confidence::Exact,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            edge.set_relationship_proofs(
+                kinds
+                    .into_iter()
+                    .map(|kind| open_kioku_core::RelationshipProof::new(kind, "fixture", 1))
+                    .collect(),
+            )
+            .unwrap();
+            edge
+        };
+        let nodes = [
+            node("file:file-ledger", GraphNodeType::File, "src/ledger.rs"),
+            node("file:file-audit", GraphNodeType::File, "src/audit.rs"),
+            node("symbol:symbol-post", GraphNodeType::Function, "post"),
+            node("symbol:symbol-record", GraphNodeType::Function, "record"),
+            node("symbol:symbol-seal", GraphNodeType::Function, "seal"),
+        ];
+        let edges = [
+            proven(
+                "edge-ledger-imports-audit",
+                "file:file-ledger",
+                "file:file-audit",
+                GraphEdgeType::Imports,
+            ),
+            parsed_defines(
+                "edge-audit-defines-record",
+                "file:file-audit",
+                "symbol:symbol-record",
+            ),
+            parsed_defines(
+                "edge-audit-defines-seal",
+                "file:file-audit",
+                "symbol:symbol-seal",
+            ),
+            parsed_defines(
+                "edge-ledger-defines-post",
+                "file:file-ledger",
+                "symbol:symbol-post",
+            ),
+            proven(
+                "edge-post-calls-record",
+                "symbol:symbol-post",
+                "symbol:symbol-record",
+                GraphEdgeType::Calls,
+            ),
+        ];
+        fixture.store.replace_graph(&nodes, &edges).unwrap();
+        for (name, line) in [
+            (
+                "dependency_path_capped_route.json",
+                r#"{"jsonrpc":"2.0","id":"dependency-capped-route","method":"dependency_path","params":{"from":"file:file-ledger","to":"symbol:symbol-seal"}}"#,
+            ),
+            (
+                "dependency_path_strongest_route.json",
+                r#"{"jsonrpc":"2.0","id":"dependency-strongest-route","method":"dependency_path","params":{"from":"file:file-ledger","to":"symbol:symbol-record"}}"#,
             ),
         ] {
             let response = handle_line(
