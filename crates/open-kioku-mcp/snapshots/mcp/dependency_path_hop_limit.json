@@ -1,0 +1,15 @@
+{
+  "id": "dependency-hop-limit",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [
+      "no route within 12 hops: the search stopped at the 12-hop limit with nodes it had reached still unexpanded, so a longer route may exist; this empty route does not show that `from` and `to` are unconnected"
+    ],
+    "edge_authority": {},
+    "edges": [],
+    "evidence_source": "sqlite_graph_store",
+    "from": "symbol:step-00",
+    "stopped_at_hop_limit": 12,
+    "to": "symbol:step-13"
+  }
+}

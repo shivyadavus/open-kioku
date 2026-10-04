@@ -403,6 +403,14 @@ read:
   carries its proofs but not the authority they amount to; `ok path` prints it after each hop,
   and `ok --json path` returns it as `dependency_path` does.
   `explain_flow` ends a flow at its first hop no proof establishes.
+- `dependency_path` and `ok path` search at most 12 hops, and an empty route says why it is
+  empty. When the walk took all 12 with nodes it had reached still unexpanded, the report
+  carries `stopped_at_hop_limit: 12` and a caveat naming the limit: a longer route may exist.
+  Otherwise the walk read every node `from` reaches without meeting `to`, so there is no route
+  at any length, but only over the edges it follows: each node's outgoing edges, never one
+  walked backwards, and never `DERIVED_FROM`, `SIMILAR_TO` or `SEMANTICALLY_RELATED`, which
+  are not dependencies (see above and below). The walk knows which of the two ended it, so the
+  distinction costs no extra read.
 - `ok graph query` and MCP `query_evidence_graph` return `paths` beside `rows`, one per row:
   the edges the row was matched through, each with its authority, and `weakest_authority`. A
   multi-hop row reports the strongest route the walk found to it at that depth, and a caveat

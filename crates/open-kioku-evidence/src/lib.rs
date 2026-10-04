@@ -391,8 +391,8 @@ mod tests {
             _from: &str,
             _to: &str,
             _max_depth: usize,
-        ) -> Result<Vec<GraphEdge>, OkError> {
-            Ok(Vec::new())
+        ) -> Result<open_kioku_core::RouteSearch, OkError> {
+            Ok(open_kioku_core::RouteSearch::default())
         }
 
         fn edges_by_type(
@@ -435,8 +435,8 @@ mod tests {
             _from: &str,
             _to: &str,
             _max_depth: usize,
-        ) -> Result<Vec<GraphEdge>, OkError> {
-            Ok(Vec::new())
+        ) -> Result<open_kioku_core::RouteSearch, OkError> {
+            Ok(open_kioku_core::RouteSearch::default())
         }
 
         fn edges_by_type(

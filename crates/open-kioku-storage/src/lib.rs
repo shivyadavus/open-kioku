@@ -3,8 +3,8 @@ use open_kioku_core::{
     EvidenceSourceType, File, FileId, FileProvenance, GitCochangeEdge, GitCommitRecord, GraphEdge,
     GraphEdgeType, GraphNode, GraphNodeType, HistorySignalQuery, HistorySignalSummary,
     HistorySnapshot, HistorySummary, ImpactReport, Import, IndexCoverage, IndexManifest,
-    ScoreComponent, SearchResult, SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId,
-    SymbolOccurrence, SymbolProvenance, TestTarget,
+    RouteSearch, ScoreComponent, SearchResult, SimilarChangeQuery, SimilarChangeReport, Symbol,
+    SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 
@@ -745,8 +745,10 @@ pub trait GraphStore: Send + Sync {
     /// The shortest forward route from `from` to `to`, of at most `max_depth` hops, or no edges.
     /// Among equally short routes, the one whose weakest hop contributes most to the route
     /// ([`open_kioku_core::strongest_shortest_route`]), so the route authority a surface reports
-    /// is the strongest any shortest route supports.
-    fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>>;
+    /// is the strongest any shortest route supports. With no route, whether the walk stopped at
+    /// `max_depth` with nodes left to expand ([`RouteSearch::stopped_at_hop_limit`]) rather than
+    /// running out of nodes, so a caller can tell "too far to see" from "not connected".
+    fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<RouteSearch>;
 
     fn node_type_stats(&self) -> Result<std::collections::HashMap<String, TypeStats>> {
         Ok(std::collections::HashMap::new())

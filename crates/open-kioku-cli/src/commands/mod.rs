@@ -994,7 +994,14 @@ pub async fn run_cli() -> anyhow::Result<()> {
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&route)?);
             } else if route.edges.is_empty() {
-                println!("No dependency path found.");
+                // A search cut short by the hop limit is not a proven absence; the caveat says so.
+                match route.stopped_at_hop_limit {
+                    Some(limit) => println!("No dependency path found within {limit} hops."),
+                    None => println!("No dependency path found."),
+                }
+                for caveat in &route.caveats {
+                    println!("caveat: {caveat}");
+                }
             } else {
                 // Each hop's authority: a route through a name match the symbol registry made
                 // is a possible route, not a traced one. A hop whose contribution to the route

@@ -463,8 +463,43 @@ struct KeptRoute {
     edges: Vec<GraphEdge>,
 }
 
+/// The edge types no untyped graph read follows: `shortest_path` (`ok path`, MCP
+/// `dependency_path` with `to`) and the untyped neighbourhood reads (`neighbors`,
+/// `neighbor_window`). None is a dependency: `DERIVED_FROM` joins a test or generated file to
+/// what it is named after or produced from, and similarity (`SIMILAR_TO`,
+/// `SEMANTICALLY_RELATED`) joins two symbols whose code looks alike. So an empty route proves
+/// absence only over the other edge types. Every store reads this list, so they and the docs
+/// cannot drift apart; a consumer that wants these edges reads them by type.
+pub const UNTYPED_WALK_EXCLUDED_EDGE_TYPES: [GraphEdgeType; 3] = [
+    GraphEdgeType::DerivedFrom,
+    GraphEdgeType::SimilarTo,
+    GraphEdgeType::SemanticallyRelated,
+];
+
+/// Whether an untyped graph read leaves out edges of this type
+/// ([`UNTYPED_WALK_EXCLUDED_EDGE_TYPES`]).
+pub fn is_untyped_walk_excluded(edge_type: &GraphEdgeType) -> bool {
+    UNTYPED_WALK_EXCLUDED_EDGE_TYPES.contains(edge_type)
+}
+
+/// What [`strongest_shortest_route`] found between two nodes: the route, and when there is none,
+/// whether the walk showed that no route exists or ran out of hops before it could tell.
+#[derive(Debug, Clone, Default)]
+pub struct RouteSearch {
+    /// The route, or no edges when none was found (or `from == to`).
+    pub edges: Vec<GraphEdge>,
+    /// No route was found and the walk stopped at its hop limit with nodes it had reached at
+    /// that depth left unexpanded, so a longer route may exist. `false` when a route was found,
+    /// and when no route was found because the walk ran out of nodes to expand: then no route
+    /// of any length exists over the edges `outgoing` returns.
+    pub stopped_at_hop_limit: bool,
+}
+
 /// The shortest forward route from `from` to `to` of at most `max_hops` hops whose weakest hop
-/// contributes the most, or no edges when there is none (or `from == to`).
+/// contributes the most, or no edges when there is none (or `from == to`), with whether a
+/// search that found none stopped at `max_hops` rather than exhausting what `from` reaches
+/// ([`RouteSearch::stopped_at_hop_limit`]). That comes from the walk itself: it is set when the
+/// last depth the walk may take still reached unsettled nodes, at no extra read.
 ///
 /// A route is only as established as its weakest hop, so among routes of equal length a caller
 /// that reports [`graph_route_authorities`] must not be handed one through a heuristic or capped
@@ -495,11 +530,11 @@ pub fn strongest_shortest_route<E>(
     to: &str,
     max_hops: usize,
     mut outgoing: impl FnMut(&str) -> Result<Vec<GraphEdge>, E>,
-) -> Result<Vec<GraphEdge>, E> {
+) -> Result<RouteSearch, E> {
     use std::collections::{HashMap, HashSet};
 
     if from == to {
-        return Ok(Vec::new());
+        return Ok(RouteSearch::default());
     }
     // Index 0 is a route that has crossed no relationship hop, index 1 one that has.
     type States = [Option<KeptRoute>; 2];
@@ -571,10 +606,14 @@ pub fn strongest_shortest_route<E>(
                     .cmp(&b.weakest)
                     .then_with(|| b.found.cmp(&a.found))
             });
-            return Ok(best.map(|route| route.edges).unwrap_or_default());
+            return Ok(RouteSearch {
+                edges: best.map(|route| route.edges).unwrap_or_default(),
+                stopped_at_hop_limit: false,
+            });
         }
         if next.is_empty() {
-            break;
+            // Every node `from` reaches is settled and none is `to`: no route at any length.
+            return Ok(RouteSearch::default());
         }
         settled.extend(slots.into_keys());
         let mut kept = next
@@ -588,7 +627,12 @@ pub fn strongest_shortest_route<E>(
         kept.sort_by_key(|(_, _, route)| route.found);
         layer = kept;
     }
-    Ok(Vec::new())
+    // The walk took every hop it may and `layer`, the nodes reached at the last depth, is never
+    // empty here (an empty depth returns above), so what lies beyond them was not read.
+    Ok(RouteSearch {
+        edges: Vec::new(),
+        stopped_at_hop_limit: true,
+    })
 }
 
 /// Rank of an evidence confidence for window ordering: higher is stronger. `Confidence` has no
@@ -1218,7 +1262,52 @@ mod tests {
             Ok::<_, ()>(out)
         })
         .unwrap();
-        route.into_iter().map(|edge| edge.id.0).collect()
+        route.edges.into_iter().map(|edge| edge.id.0).collect()
+    }
+
+    /// A search that finds no route says whether it ran out of hops or of nodes, so an empty
+    /// route at the hop limit is not read as "not connected" (#666). `n0` reaches `n4` in four
+    /// hops and nothing else; nothing reaches `n0`.
+    #[test]
+    fn a_search_that_finds_no_route_says_whether_it_stopped_at_the_hop_limit() {
+        let chain = (0..4)
+            .map(|i| {
+                let (from, to) = (format!("n{i}"), format!("n{}", i + 1));
+                route_hop(&format!("{from}-{to}"), &from, &to, "proven")
+            })
+            .collect::<Vec<_>>();
+        let search = |from: &str, to: &str, max_hops: usize| {
+            strongest_shortest_route(from, to, max_hops, |node| {
+                Ok::<_, ()>(
+                    chain
+                        .iter()
+                        .filter(|edge| edge.from.0 == node)
+                        .cloned()
+                        .collect(),
+                )
+            })
+            .unwrap()
+        };
+
+        // The route is one hop longer than the limit: the walk stops with `n3` unexpanded.
+        let cut = search("n0", "n4", 3);
+        assert!(cut.edges.is_empty());
+        assert!(cut.stopped_at_hop_limit);
+        let found = search("n0", "n4", 4);
+        assert_eq!(found.edges.len(), 4);
+        assert!(!found.stopped_at_hop_limit);
+
+        // Unconnected: everything `n2` reaches is read well inside the limit.
+        let absent = search("n2", "n0", 12);
+        assert!(absent.edges.is_empty());
+        assert!(!absent.stopped_at_hop_limit);
+        // A walk whose last depth reached a node it may not expand cannot tell: `n4` might lead
+        // on. One more hop reads it and finds nothing beyond.
+        assert!(search("n0", "elsewhere", 4).stopped_at_hop_limit);
+        assert!(!search("n0", "elsewhere", 5).stopped_at_hop_limit);
+        // No hops allowed at all is a limit too; a node is its own route.
+        assert!(search("n0", "n1", 0).stopped_at_hop_limit);
+        assert!(!search("n0", "n0", 0).stopped_at_hop_limit);
     }
 
     /// Two routes of two hops: the one tried first (`a-b` sorts before `a-c`) has a heuristic

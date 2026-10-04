@@ -20,7 +20,8 @@ pub mod schema;
 pub use buffer::{GraphBuffer, GraphBufferMergeReport, WorkerGraphBuffer};
 pub use resolve::resolve_graph_node;
 pub use route::{
-    dependency_route, DependencyRoute, DEPENDENCY_ROUTE_MAX_HOPS, ROUTE_CONTAINMENT_DESCENT_CAVEAT,
+    dependency_route, route_hop_limit_caveat, DependencyRoute, DEPENDENCY_ROUTE_MAX_HOPS,
+    ROUTE_CONTAINMENT_DESCENT_CAVEAT,
 };
 #[derive(Default, Clone)]
 pub struct InMemoryGraph {
@@ -636,12 +637,7 @@ impl InMemoryGraph {
             .iter()
             .filter(|edge| {
                 (edge.from.0 == node || edge.to.0 == node)
-                    && !matches!(
-                        edge.edge_type,
-                        GraphEdgeType::DerivedFrom
-                            | GraphEdgeType::SimilarTo
-                            | GraphEdgeType::SemanticallyRelated
-                    )
+                    && !open_kioku_core::is_untyped_walk_excluded(&edge.edge_type)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -655,7 +651,12 @@ impl InMemoryGraph {
         (nodes, edges)
     }
 
-    pub fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Vec<GraphEdge> {
+    pub fn shortest_path(
+        &self,
+        from: &str,
+        to: &str,
+        max_depth: usize,
+    ) -> open_kioku_core::RouteSearch {
         // A derived sibling or a similar symbol is not a dependency hop; see the SQLite store
         // for the rationale.
         // Hops are read in window order, as the SQLite store reads them, so both stores pick
@@ -666,12 +667,7 @@ impl InMemoryGraph {
                 .iter()
                 .filter(|edge| {
                     edge.from.0 == node
-                        && !matches!(
-                            edge.edge_type,
-                            GraphEdgeType::DerivedFrom
-                                | GraphEdgeType::SimilarTo
-                                | GraphEdgeType::SemanticallyRelated
-                        )
+                        && !open_kioku_core::is_untyped_walk_excluded(&edge.edge_type)
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -844,7 +840,12 @@ impl open_kioku_storage::GraphStore for InMemoryGraph {
         Ok(self.neighbors(node, limit))
     }
 
-    fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>> {
+    fn shortest_path(
+        &self,
+        from: &str,
+        to: &str,
+        max_depth: usize,
+    ) -> Result<open_kioku_core::RouteSearch> {
         Ok(self.shortest_path(from, to, max_depth))
     }
 }
@@ -1013,7 +1014,7 @@ mod tests {
             ..Default::default()
         });
 
-        let path = graph.shortest_path("A", "C", 5);
+        let path = graph.shortest_path("A", "C", 5).edges;
         assert_eq!(path.len(), 2);
         assert_eq!(path[0].id.0, "e1");
         assert_eq!(path[1].id.0, "e2");
@@ -1063,6 +1064,7 @@ mod tests {
         };
         let ids = graph
             .shortest_path("file:ledger.rs", "symbol:record", 12)
+            .edges
             .into_iter()
             .map(|edge| edge.id.0)
             .collect::<Vec<_>>();
@@ -1927,6 +1929,7 @@ mod tests {
         assert!(graph.nodes.keys().all(|id| !id.starts_with("analysis:")));
         assert!(graph
             .shortest_path("symbol:s-close", "symbol:s-settle", 4)
+            .edges
             .is_empty());
         let (_, neighbours) = graph.neighbors("symbol:s-close", 10);
         assert!(
