@@ -298,7 +298,8 @@
         "symbols_touched": 0,
         "symbols_unread_with_dependents": 0,
         "windows_at_limit": 0,
-        "windows_cutting_proven": 0
+        "windows_cutting_proven": 0,
+        "windows_widened": 0
       },
       "risk_report": {
         "level": "low",

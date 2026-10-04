@@ -5906,6 +5906,11 @@ pub struct RelationshipImpactReads {
     /// every proven dependent of the nodes read was read, and is in `proven_impact` or counted in
     /// `proven_impact_omitted`.
     pub windows_cutting_proven: usize,
+    /// Reads whose window was widened past the usual edge limit because the store counted more
+    /// proven edges in it than that limit holds. A widened read takes every proven edge up to a
+    /// bound, so it is at its limit, or cuts a proven edge, only past that bound.
+    #[serde(default)]
+    pub windows_widened: usize,
 }
 
 impl ImpactReport {

@@ -928,6 +928,12 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         for caveat in &answer.caveats {
                             println!("caveat: {caveat}");
                         }
+                        if !answer.removed_paths_not_indexed.is_empty() {
+                            println!("Removed paths not in the index (no report):");
+                            for path in &answer.removed_paths_not_indexed {
+                                println!("  {}", path.display());
+                            }
+                        }
                         for report in &answer.reports {
                             println!("\nImpact target: {}", report.target);
                             println!(

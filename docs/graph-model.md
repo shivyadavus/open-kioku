@@ -368,12 +368,19 @@ read:
   reads the proven ones off the persisted window rank), and reads only the symbols that have any,
   at most 256: the symbols the change touches first, then those with a proven dependent, so no
   run of name matches pushes a proof out of the read, then public ones, then those with the most
-  inbound edges. It reads at most 40 inbound edges of each type into each, proven ones first. It
-  used to read the first 16 symbols in file order, so a change deep in a large file lost its
-  dependents, proven ones included, and the truncation caveat fired for nearly every large file
+  inbound edges. It reads at most 40 inbound edges of each type into each, proven ones first.
+  Where the counts show a window holds more proven edges than that, the read is widened to take
+  every proven edge, up to 400 in one window and 2,000 past the first 40 across one report, spent
+  in the order the nodes are read (the changed file's own node, then its symbols most important
+  first). Measured on this repository at commit 6fcaae00, 31 windows held more than 40 proven
+  edges, the most 121, and 735 past their first 40 in all, so no report there met either bound;
+  before the widening, eight hub windows of `crates/open-kioku-core/src/lib.rs` left 228 counted
+  proven edges unread. It used to read the first 16 symbols in file order, so a change deep in a
+  large file lost its dependents, proven ones included, and the truncation caveat fired for nearly every large file
   whether or not anything was skipped. `relationship_impact_reads` reports the reads as numbers
   (symbols read and in all, unread symbols with dependents, edges and proven edges left unread,
-  windows that held more edges than they read and how many of those may have cut a proven edge).
+  windows that held more edges than they read and how many of those may have cut a proven edge,
+  and windows widened to take counted proven edges).
   `relationship_impact_caveats` says so in prose only when something that matters was left
   unread: symbols with dependents, proven edges, or possibilities beside a `possible_impact` the
   cap did not cut (where it did, its omitted count already reads as a lower bound). Each read asks
@@ -392,6 +399,19 @@ read:
   dependents of touched symbols are listed up to 200, a bound for a diff that rewrites a large
   file. MCP `impact_analysis` takes the same focus (`symbol`, `since`) and answers through the same
   `ImpactEngine::answer`.
+
+  A path the diff deletes, or renames away, is reported too: its dependents are the ones most
+  certain to break. It used to get no report and was not counted. While the index still holds
+  it, its report reads the dependents the index last held for it, the file itself and every
+  symbol it defined touched, so its proven dependents, the files that import it by path included,
+  are kept up to the same bound of 200, and its first caveat and risk reason say the file is
+  gone. It ranks among the other changed paths by those dependents, ahead of a path with as many proven ones. When the index does not hold it (it was
+  rebuilt after the change, or never held the path, as with a secret-like path), there are no
+  edges into it to read: it is listed in `removed_paths_not_indexed` with a caveat of its own,
+  apart from `impact_reports_omitted`, so the reports, the paths the cap left out and the removed
+  paths not indexed add up to every changed path. A rename counts as a removal of its previous path
+  beside a change to its new one; two files swapping names remove neither. `ok impact --file F
+  --since R` for a removed `F` gives the same report.
 - The context pack's graph stream gives a neighbour `corroborating` retrieval authority only
   when a proven or corroborated edge, or parsed containment, joins it to the anchor; a
   neighbour reached only by heuristic edges is `heuristic`. The stream ranks and cuts its
