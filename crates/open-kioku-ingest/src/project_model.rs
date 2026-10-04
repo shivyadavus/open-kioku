@@ -1,3 +1,4 @@
+use crate::prune::{DirVerdict, DiscoveryPruner};
 use crate::rust_use_path::normalize_path;
 use open_kioku_core::{File, FileId, Language};
 use open_kioku_semantic_model::CargoImporter;
@@ -11,12 +12,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub trait ProjectModelDiscovery {
+    /// [`ProjectModelDiscovery::discover_in`] with nothing kept by `[index] keep_dirs`.
     fn discover(repo_root: &Path) -> ProjectModel;
+    /// The project roots whose manifests lie in directories discovery walks under `pruner`.
+    fn discover_in(pruner: &DiscoveryPruner) -> ProjectModel;
     fn module_path_from_file(&self, relative_path: &Path, language: &Language) -> String;
 }
 
 impl ProjectModelDiscovery for ProjectModel {
     fn discover(repo_root: &Path) -> ProjectModel {
+        Self::discover_in(&DiscoveryPruner::evidence_only(repo_root))
+    }
+
+    fn discover_in(pruner: &DiscoveryPruner) -> ProjectModel {
+        let repo_root = pruner.root();
         let mut model = ProjectModel::new();
 
         if !repo_root.exists() {
@@ -24,7 +33,7 @@ impl ProjectModelDiscovery for ProjectModel {
         }
 
         let mut manifests = HashMap::new();
-        walk_discover(repo_root, repo_root, &mut model, &mut manifests);
+        walk_discover(repo_root, pruner, &mut model, &mut manifests);
         read_cargo_manifests(&mut model, &manifests);
         model
     }
@@ -847,12 +856,16 @@ fn push_project_root(
 /// runs: a dependency inherited from a workspace is read from the workspace's manifest.
 type CargoTables = HashMap<PathBuf, toml::Table>;
 
+/// Manifests in a directory discovery prunes describe build output or installed packages
+/// (Cargo's packaged crates under `target/package/`), never indexed source, so the walk skips
+/// what discovery skips; a crate directory named `target` that discovery walks is a crate.
 fn walk_discover(
     current: &Path,
-    repo_root: &Path,
+    pruner: &DiscoveryPruner,
     model: &mut ProjectModel,
     manifests: &mut CargoTables,
 ) {
+    let repo_root = pruner.root();
     let entries = match fs::read_dir(current) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -863,13 +876,12 @@ fn walk_discover(
         if path.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with('.')
-                || name == "target"
-                || name == "node_modules"
                 || name == "vendor"
+                || pruner.classify(&path, true) != DirVerdict::Walk
             {
                 continue;
             }
-            walk_discover(&path, repo_root, model, manifests);
+            walk_discover(&path, pruner, model, manifests);
         } else if path.is_file() {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 match file_name {
@@ -1019,6 +1031,64 @@ mod tests {
         assert_eq!(
             model.module_path_from_file(file, &Language::TypeScript),
             "@acme/inner/index"
+        );
+    }
+
+    /// Manifest discovery skips what discovery skips, by evidence rather than by name: a crate
+    /// directory named `target` is a project root, Cargo's packaged copy under the real
+    /// `target/` and a manifest copied into a bundle's `dist/` are not, and a directory
+    /// `[index] keep_dirs` lists is walked.
+    #[test]
+    fn manifest_discovery_follows_the_discovery_pruner() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write = |rel: &str, content: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/target\"]\n");
+        write(
+            "crates/target/Cargo.toml",
+            "[package]\nname = \"ledger\"\nversion = \"0.1.0\"\n",
+        );
+        write("crates/target/src/lib.rs", "pub mod post;\n");
+        write(
+            "target/CACHEDIR.TAG",
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        );
+        write(
+            "target/package/ledger-0.1.0/Cargo.toml",
+            "[package]\nname = \"ledger\"\nversion = \"0.1.0\"\n",
+        );
+        write("web/package.json", r#"{"name":"@acme/web"}"#);
+        write("web/dist/package.json", r#"{"name":"@acme/web"}"#);
+        write("tools/dist/package.json", r#"{"name":"@acme/emit"}"#);
+
+        let roots = |model: &ProjectModel| {
+            let mut paths = model
+                .roots
+                .iter()
+                .map(|root| root.path.to_string_lossy().replace('\\', "/"))
+                .collect::<Vec<_>>();
+            // A `package.json` roots both JavaScript and TypeScript.
+            paths.sort();
+            paths.dedup();
+            paths
+        };
+        let model = ProjectModel::discover(root);
+        assert_eq!(roots(&model), vec!["", "crates/target", "web"]);
+        assert_eq!(
+            model.module_path_from_file(Path::new("crates/target/src/post.rs"), &Language::Rust),
+            "crate::post"
+        );
+
+        let mut config = open_kioku_config::OkConfig::default();
+        config.index.keep_dirs = vec!["tools/dist".into()];
+        let model = ProjectModel::discover_in(&DiscoveryPruner::new(root, &config).unwrap());
+        assert_eq!(
+            roots(&model),
+            vec!["", "crates/target", "tools/dist", "web"]
         );
     }
 

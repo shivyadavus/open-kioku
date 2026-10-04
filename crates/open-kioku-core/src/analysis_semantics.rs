@@ -8,7 +8,13 @@ pub const ANALYSIS_SEMANTICS_DESCRIPTOR_VERSION: u32 = 1;
 /// case), so case-variant names such as a `TempDir` type and a `tempdir` function are separate
 /// nodes; a v1 index merged them into one node and attached both items' edges to it.
 pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v2";
-pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
+/// v2: the project model's manifest walk and the import resolver's manifest index skip the
+/// directories discovery prunes, and only those (`[index] keep_dirs` included): a crate
+/// directory named `target` is a project root, and a manifest under pruned build output (a
+/// `package.json` copied into a bundle's `dist/`) is not read. v1 skipped every `target` by name
+/// and read manifests under `build/` and `dist/`, so a member crate in a `target` directory had
+/// no module tree and its `crate::` paths proved no edge.
+pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v2";
 /// v3: a Rust `use` path inside the importing file's own crate resolves through that crate's
 /// declared module tree, so its `IMPORTS` edge names the file declaring the module or the item;
 /// v2 resolved such a path against the repository-root `src/` and fell back to the crate root,

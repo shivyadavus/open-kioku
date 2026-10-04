@@ -1915,13 +1915,16 @@ fn read_targets(path: &Path) -> Result<HashMap<String, SemanticTarget>> {
         .collect())
 }
 
+/// `file` is a row of the index, which discovery admitted: build output (Cargo's or Maven's
+/// `target`, an undeclared or manifest-adjacent `build`/`dist`) was pruned before it, on
+/// evidence, so no path rule here repeats that judgement. A name rule did, and dropped a Java
+/// `com.acme.target` package and a Rust `src/target/` module the lexical index holds (#661).
 fn excluded_path(file: &File) -> bool {
     let path = file.path.to_string_lossy().to_ascii_lowercase();
     file.is_vendor
         || file.is_generated
         || path.contains("/vendor/")
         || path.contains("node_modules")
-        || path.contains("/target/")
         || path.ends_with("lock")
         || path.ends_with(".lock")
         // The discovery rule, so the semantic corpus and the lexical index agree: a file named
@@ -2073,6 +2076,30 @@ mod tests {
         assert!(!scoped.contains("unmeasured"), "{scoped}");
         assert!(scoped.contains("1000000"), "{scoped}");
         assert!(scoped.contains("150000"), "{scoped}");
+    }
+
+    /// The corpus is what discovery admitted, less vendored, generated, lock and secret-like
+    /// files; a source directory named `target` that discovery walked is embedded like any other.
+    #[test]
+    fn walked_target_packages_are_in_the_corpus() {
+        for kept in [
+            "core/src/main/java/com/acme/target/Entry.java",
+            "crates/ledger/src/target/mod.rs",
+            "docs/target/notes.md",
+        ] {
+            assert!(!excluded_path(&file("f", kept)), "{kept}");
+        }
+        for excluded in [
+            "third/vendor/dep/lib.rs",
+            "web/node_modules/pkg/index.js",
+            "Cargo.lock",
+            "deploy/server.key",
+        ] {
+            assert!(excluded_path(&file("f", excluded)), "{excluded}");
+        }
+        let mut generated = file("f", "src/gen.rs");
+        generated.is_generated = true;
+        assert!(excluded_path(&generated));
     }
 
     #[test]

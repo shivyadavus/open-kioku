@@ -319,9 +319,20 @@ copy of the artifact:
   `../utils/foo`, a route like `/api/users`), so they are judged by the security rules alone
   (`SecurityPathPolicy`, the rules history ingestion uses) and never sent to Git. File-level
   history of a path excluded for any other reason is kept, as `ok index` keeps it. Secret-like paths the exporter
-  listed as skipped are withheld under the importing repository's `redact_secrets`. Rules
-  that do not depend on local configuration — vendor detection, pruning of build and
-  dependency directories, the size limit, symlinks — are not applied again. Every SCIP symbol
+  listed as skipped are withheld under the importing repository's `redact_secrets`. Pruning
+  is applied again too, because it reads `[index] keep_dirs` and `ok.toml` is not committed:
+  an indexed file under a directory discovery here prunes (an exporter that kept `build/`,
+  an importer that does not) is removed with its rows, counted as `pruned`, and recorded as
+  discovery here records it. Under an undeclared build directory it stays a visible
+  `pruned` omission; under one pruned on strong evidence it leaves the ratio. Its directory
+  is named in `coverage.pruned`, with no tracked count, since the import does not ask Git.
+  An imported index's coverage is therefore an approximation of what `ok index` here would
+  record: every file the import removed under an undeclared build directory counts as
+  missing, committed or not, so it can read lower than a local index.
+  Every path the import then serves is one discovery here walks, so the revision check's
+  changed-file count, which leaves pruned paths out, misses no served file. Rules that do
+  not depend on local configuration — vendor detection, the size limit, symlinks — are not
+  applied again. Every SCIP symbol
   and occurrence no indexed file owns is removed as well, with the graph edges at those
   symbols (an indexed file's `references` edge names the symbol): such a row records only a
   hash of its document's path, so the local policy cannot be checked against it, and a path

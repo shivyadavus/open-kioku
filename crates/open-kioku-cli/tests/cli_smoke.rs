@@ -2432,6 +2432,120 @@ fn snapshot_import_serves_no_path_the_local_policy_excludes() {
     assert!(!status.to_string().contains("vault.key"), "{status}");
 }
 
+/// `[index] keep_dirs` lives in `ok.toml`, which a team need not commit, so an exporter and an
+/// importer can disagree about a `build` directory (#661). The importer serves only what
+/// `ok index` here would reach: a file the exporter kept is removed, counted as `pruned`, and
+/// recorded where discovery would record it, and a later edit to it is not served stale. With
+/// the same setting, the file is served and an edit to it is counted as a change.
+#[test]
+fn snapshot_import_prunes_what_the_importers_keep_dirs_does_not_keep() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    for (path, content) in [
+        ("src/lib.rs", "pub struct Worker;\n"),
+        ("build/gen.ts", "export function generatedLedger() {}\n"),
+    ] {
+        let path = repo.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    let defaults = fs::read_to_string(repo.join("ok.toml")).unwrap();
+    let keeping = defaults.replacen("[index]\n", "[index]\nkeep_dirs = [\"build\"]\n", 1);
+    assert_ne!(keeping, defaults);
+    fs::write(repo.join("ok.toml"), &keeping).unwrap();
+    commit_all(repo, "initial");
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let served = |repo: &std::path::Path| -> bool {
+        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'build/gen.ts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        count > 0
+    };
+    assert!(served(repo), "the exporter keeps build/");
+    export_snapshot(repo);
+
+    // The importer has no `keep_dirs`, so discovery here prunes `build/` as undeclared.
+    fs::write(repo.join("ok.toml"), &defaults).unwrap();
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(imported["snapshot"]["policy_filtered"], 1, "{imported}");
+    assert_eq!(
+        imported["policy_filtered_by_source"],
+        serde_json::json!({"pruned": 1}),
+        "{imported}"
+    );
+    assert!(!served(repo));
+    let search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "generatedLedger"]);
+        command
+    });
+    assert!(!search.contains("build/gen.ts"), "{search}");
+    let status = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "status", "--full"]);
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    let coverage = &status["coverage"];
+    assert_eq!(
+        coverage["pruned"],
+        serde_json::json!([{"path": "build", "reason": "undeclared_build_dir"}]),
+        "{status}"
+    );
+    // The weak rule's file stays visible as an omission, as discovery here would count it.
+    assert_eq!(coverage["skipped"]["pruned"], 1, "{status}");
+    assert!(status["quality"]["skipped_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skip| skip["path"] == "build/gen.ts" && skip["reason"] == "pruned"));
+
+    // An edit to the pruned file is not drift in what the index serves.
+    fs::write(
+        repo.join("build/gen.ts"),
+        "export function generatedLedger() {}\nexport function regenerated() {}\n",
+    )
+    .unwrap();
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(imported["snapshot"]["policy_filtered"], 1, "{imported}");
+    assert!(!served(repo));
+
+    // With the exporter's setting, the file is served and its edit is counted as a change.
+    fs::write(repo.join("ok.toml"), &keeping).unwrap();
+    let imported = import_snapshot_json(repo, &[]);
+    assert_eq!(imported["snapshot"]["policy_filtered"], 0, "{imported}");
+    assert!(served(repo));
+    assert_eq!(imported["snapshot"]["changed_files"], 1, "{imported}");
+    assert!(
+        imported["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|caveat| caveat.as_str().unwrap().contains("1 file")),
+        "{imported}"
+    );
+}
+
 /// An import that removes a path the local policy excludes leaves nothing on disk that names
 /// it (#549): not the facts other files hold about its symbols, which spell its module path
 /// (`internal::vault::keys::KeyAnchored`) where no path glob matches; not the graph nodes

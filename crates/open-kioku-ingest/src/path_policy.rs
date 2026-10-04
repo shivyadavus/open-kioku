@@ -9,10 +9,13 @@ use crate::{
 };
 use globset::GlobSet;
 use open_kioku_config::OkConfig;
-use open_kioku_core::{File, IndexQuality, QualityNoteKind, SkipReason, SkipSource, SkippedPath};
+use open_kioku_core::{
+    File, IndexQuality, PruneReason, PrunedDir, QualityNoteKind, SkipReason, SkipSource,
+    SkippedPath,
+};
 use open_kioku_errors::Result;
 use open_kioku_languages::is_supported_code;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Why the local policy keeps a path out of the index.
@@ -76,7 +79,8 @@ pub struct IndexPathPolicy {
 impl IndexPathPolicy {
     /// The policy discovery applies, with Git asked about every file present under `root`.
     pub(crate) fn for_scan(root: &Path, config: &OkConfig) -> Result<Self> {
-        let git_ignored = git_ignore::ignored_paths(root)?;
+        let pruner = DiscoveryPruner::new(root, config)?;
+        let git_ignored = git_ignore::ignored_paths(&pruner)?;
         Self::build(root, config, git_ignored)
     }
 
@@ -92,8 +96,9 @@ impl IndexPathPolicy {
         config: &OkConfig,
         git_ignored: Option<HashSet<PathBuf>>,
     ) -> Result<Self> {
+        let pruner = DiscoveryPruner::new(root, config)?;
         let git_ignores = if git_ignored.is_none() {
-            Some(build_ignore_matcher(root, ".gitignore")?)
+            Some(build_ignore_matcher(&pruner, ".gitignore")?)
         } else {
             None
         };
@@ -104,7 +109,7 @@ impl IndexPathPolicy {
             allow_hidden_files: config.security.allow_hidden_files,
             git_ignored,
             git_ignores,
-            ok_ignores: build_ignore_matcher(root, ".okignore")?,
+            ok_ignores: build_ignore_matcher(&pruner, ".okignore")?,
         })
     }
 
@@ -152,12 +157,11 @@ impl IndexPathPolicy {
     }
 }
 
-/// Whether discovery never reaches `rel` (relative to `root`) because a directory on its way is
-/// pruned: `.git`, `.ok`, or build output and installed packages as `crate::prune` judges them
-/// from what is on disk under `root` now.
-pub fn is_pruned_by_discovery(root: &Path, rel: &Path) -> bool {
-    crate::prune::is_under_pruned_dir(root, rel)
-}
+/// Which directories discovery cuts from the walk: `.git`, `.ok`, and build output and
+/// installed packages as judged from what is on disk now, less the `build` and `dist`
+/// directories `[index] keep_dirs` lists. [`DiscoveryPruner::is_pruned`] answers whether
+/// discovery never reaches a path.
+pub use crate::prune::DiscoveryPruner;
 
 /// Record in `quality` that `file`, which an index counted as indexed, is excluded by
 /// `exclusion` after all: moved from `indexed` to the skip reason in the coverage record and
@@ -189,6 +193,77 @@ pub fn record_excluded_indexed_file(
             .flatten();
         coverage.record_policy_exclusion(&file.language, exclusion.source, top_dir.as_deref());
     }
+}
+
+/// Record in `quality` that `files`, which an index counted as indexed, lie under directories
+/// discovery here prunes (`dirs`, each with its reason), as `ok index` here would have
+/// recorded them. Under an undeclared build directory, the weak rule, a file stays discovered
+/// and is skipped as `pruned`: an omission, so the coverage it costs is visible. Under one
+/// pruned on strong evidence, or under `.git`/`.ok` (no reason), discovery counts no file, so
+/// the file leaves the ratio altogether. Each directory is named in the coverage record and
+/// skipped paths, unless its path is secret-like, when it is only counted.
+pub fn record_pruned_indexed_files(
+    quality: &mut IndexQuality,
+    files: &[(File, Option<PruneReason>)],
+    dirs: &BTreeMap<PathBuf, PruneReason>,
+) {
+    for (file, reason) in files {
+        let weak = reason.is_some_and(PruneReason::counts_tracked_source);
+        if weak {
+            quality.skipped_paths.push(SkippedPath {
+                path: file.path.clone(),
+                reason: SkipReason::Pruned,
+                source: SkipSource::Detector,
+                safe_to_show: true,
+            });
+        }
+        if !is_supported_code(&file.language) {
+            continue;
+        }
+        if let Some(coverage) = quality.coverage.as_mut() {
+            if weak {
+                coverage.record_indexed_dropped(
+                    &file.language,
+                    file.is_generated,
+                    SkipReason::Pruned,
+                );
+            } else {
+                coverage.record_indexed_undiscovered(&file.language, file.is_generated);
+            }
+        }
+    }
+    let Some(coverage) = quality.coverage.as_mut() else {
+        return;
+    };
+    let mut listed = coverage.pruned.clone();
+    let mut unlisted = coverage.pruned_unlisted;
+    for (dir, reason) in dirs {
+        let path = dir
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if listed.iter().any(|known| known.path == path) {
+            continue;
+        }
+        if open_kioku_core::is_secret_like_path(dir) {
+            unlisted += 1;
+            continue;
+        }
+        quality.skipped_paths.push(SkippedPath {
+            path: dir.clone(),
+            reason: SkipReason::Pruned,
+            source: SkipSource::Detector,
+            safe_to_show: true,
+        });
+        // The import cannot ask Git what this checkout tracks under it.
+        listed.push(PrunedDir {
+            path,
+            reason: *reason,
+            tracked_source_files: None,
+        });
+    }
+    coverage.record_pruned_dirs(listed, unlisted);
 }
 
 /// Withhold, under this repository's `[security] redact_secrets`, every secret-like path an
@@ -378,13 +453,11 @@ mod tests {
         fs::create_dir_all(root.join("web/node_modules/x")).unwrap();
         fs::create_dir_all(root.join("src/build")).unwrap();
         fs::write(root.join("src/build/mod.rs"), "").unwrap();
-        assert!(is_pruned_by_discovery(root, Path::new(".ok/index.sqlite")));
-        assert!(is_pruned_by_discovery(
-            root,
-            Path::new("web/node_modules/x/index.js")
-        ));
-        assert!(!is_pruned_by_discovery(root, Path::new("src/build.rs")));
-        assert!(!is_pruned_by_discovery(root, Path::new("src/build/mod.rs")));
+        let pruner = DiscoveryPruner::new(root, &OkConfig::default()).unwrap();
+        assert!(pruner.is_pruned(Path::new(".ok/index.sqlite")));
+        assert!(pruner.is_pruned(Path::new("web/node_modules/x/index.js")));
+        assert!(!pruner.is_pruned(Path::new("src/build.rs")));
+        assert!(!pruner.is_pruned(Path::new("src/build/mod.rs")));
     }
 
     #[test]

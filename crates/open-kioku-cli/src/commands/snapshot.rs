@@ -414,18 +414,16 @@ fn assess_snapshot_revision(
         .or_else(|| artifact_commit.clone())
         .unwrap_or_else(|| "unknown".into());
     // Paths discovery never reaches (`.ok` itself, `.git`, build and dependency directories)
-    // do not make the index differ from the checkout.
+    // do not make the index differ from the checkout. Every path the import serves is one this
+    // rule walks: `apply_local_policy_to_snapshot` removes what it prunes, whatever the
+    // exporter's `[index] keep_dirs` said, so no served file is skipped here.
+    let config = OkConfig::load_from_repo(repo)
+        .with_context(|| format!("loading the index policy of {}", repo.display()))?;
+    let pruner = open_kioku_ingest::path_policy::DiscoveryPruner::new(repo, &config)?;
     let changed_files = |commit: &str| {
         open_kioku_git::changed_paths_since_commit(repo, commit)
             .ok()
-            .map(|paths| {
-                paths
-                    .iter()
-                    .filter(|path| {
-                        !open_kioku_ingest::path_policy::is_pruned_by_discovery(repo, path)
-                    })
-                    .count()
-            })
+            .map(|paths| paths.iter().filter(|path| !pruner.is_pruned(path)).count())
     };
     let refusal = match (artifact_commit, &comparison) {
         (None, _) => "the snapshot does not record the commit it was built from".to_string(),
@@ -534,12 +532,16 @@ fn withdrawn_resolutions_caveat(count: usize) -> String {
 /// - every SCIP symbol and occurrence no indexed file owns is removed with the graph edges at
 ///   those symbols: `ok index` keeps them for generated or ignored code the security policy
 ///   admits, but they record only a hash of their path, so the policy here cannot judge them;
+/// - every indexed file under a directory discovery here prunes is removed with its rows and
+///   counted as `pruned`: pruning reads `[index] keep_dirs`, and `ok.toml` is not committed,
+///   so the exporter's configuration routinely differs (#661). The file and its directory
+///   are recorded as discovery here would record them;
 /// - secret-like paths the exporter recorded as skipped are withheld under this repository's
 ///   `redact_secrets`.
 ///
-/// Rules that do not depend on local configuration — vendor detection, pruning of build and
-/// dependency directories, the size limit, symlinks — are not applied again. The search index
-/// is rebuilt from the database afterwards, so it never sees what was removed.
+/// Rules that do not depend on local configuration — vendor detection, the size limit,
+/// symlinks — are not applied again. The search index is rebuilt from the database
+/// afterwards, so it never sees what was removed.
 fn apply_local_policy_to_snapshot(
     repo: &Path,
     temp_db: &Path,
@@ -600,6 +602,28 @@ fn apply_local_policy_to_snapshot(
             history.insert(path.clone());
         }
     }
+    // Pruning depends on local configuration too: `[index] keep_dirs` lives in `ok.toml`,
+    // which is not committed, so an exporter that kept `build/` hands over files `ok index`
+    // here never reaches. Each is removed and counted as `pruned`.
+    let pruner = open_kioku_ingest::path_policy::DiscoveryPruner::new(repo, &config)?;
+    let mut pruned_files = Vec::new();
+    let mut pruned_dirs = BTreeMap::new();
+    for path in &stored.indexed {
+        if indexed.contains(path) {
+            continue;
+        }
+        let Some((dir, reason)) = pruner.pruned_at(path) else {
+            continue;
+        };
+        if let Some(file) = store.get_file_by_path(path)? {
+            pruned_files.push((file, reason));
+        }
+        if let Some(reason) = reason {
+            pruned_dirs.insert(dir, reason);
+        }
+        indexed.insert(path.clone());
+        *filter.by_source.entry("pruned".into()).or_default() += 1;
+    }
     let mut nodes = BTreeSet::new();
     let mut node_labels = BTreeSet::new();
     for (id, label) in &stored.unanchored_nodes {
@@ -619,7 +643,11 @@ fn apply_local_policy_to_snapshot(
     // The exporter's quality notes name the removed files' paths and chunks, and the names in
     // them; which notes those are is decided against the chunks removed and the ones left.
     let mut removed_chunk_ids = std::collections::HashSet::new();
-    for (file, _) in &excluded_files {
+    for file in excluded_files
+        .iter()
+        .map(|(file, _)| file)
+        .chain(pruned_files.iter().map(|(file, _)| file))
+    {
         for chunk in store.chunks_for_file(&file.id)? {
             removed_chunk_ids.insert(chunk.id);
         }
@@ -689,6 +717,11 @@ fn apply_local_policy_to_snapshot(
             *exclusion,
         );
     }
+    open_kioku_ingest::path_policy::record_pruned_indexed_files(
+        &mut manifest.quality,
+        &pruned_files,
+        &pruned_dirs,
+    );
     let redacted_skips =
         open_kioku_ingest::path_policy::redact_recorded_skips(&mut manifest.quality, &config);
     filter.manifest_redacted |= redacted_skips > 0;

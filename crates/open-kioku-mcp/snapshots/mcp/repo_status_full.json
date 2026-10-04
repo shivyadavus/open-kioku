@@ -22,22 +22,22 @@
           "rust": "tier1-parser-semantics-v19",
           "typescript": "tier1-parser-semantics-v19"
         },
-        "project_resolver_version": "project-resolver-v1",
+        "project_resolver_version": "project-resolver-v2",
         "proof_policy_version": "ri3-proof-policy-v1",
         "relationship_resolver_version": "ri3-relationship-resolver-v44",
         "stable_identity_version": "stable-identity-v2",
         "version": 1
       },
-      "fingerprint": "bb3e9cfa9912b9658151b9bf9a90bacae9c457d4d64b5005455a011b4fcdf0c0"
+      "fingerprint": "e3b956679542858a7863688b473481b34b0e1a4bfbfad8e84565054d5e86ba44"
     },
     "analysis_semantics_status": {
       "affected_components": [],
       "affected_languages": [],
-      "current_fingerprint": "bb3e9cfa9912b9658151b9bf9a90bacae9c457d4d64b5005455a011b4fcdf0c0",
+      "current_fingerprint": "e3b956679542858a7863688b473481b34b0e1a4bfbfad8e84565054d5e86ba44",
       "reasons": [],
       "recommended_action": "none",
       "status": "compatible",
-      "stored_fingerprint": "bb3e9cfa9912b9658151b9bf9a90bacae9c457d4d64b5005455a011b4fcdf0c0"
+      "stored_fingerprint": "e3b956679542858a7863688b473481b34b0e1a4bfbfad8e84565054d5e86ba44"
     },
     "chunk_count": 1,
     "coverage": null,

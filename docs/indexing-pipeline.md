@@ -35,8 +35,11 @@ can never drop files silently. `IndexQuality.coverage` (JSON: `quality.coverage`
   (`build_output`, `undeclared_build_dir`, `dependencies`, `virtual_env`) and, in a Git
   work tree, `tracked_source_files`, the git-tracked programming-language files under it
   (absent outside Git, where it is unknown). Undeclared build directories holding tracked
-  source come first, then the rest by path, at most 50; `pruned_unlisted` counts the others, and a
-  secret-like directory is counted there and never named. Both are absent on a manifest
+  source come first, then those holding any tracked source, then the rest by path. The
+  manifest stores every one, since plans forbid edits under each; a status summary
+  (`ok --json status`, MCP `repo_status`) shows the first 50 and counts the rest in
+  `pruned_unlisted`, and `--full` / `detail: "full"` shows all. A secret-like directory is
+  counted in `pruned_unlisted` and never named. Both are absent on a manifest
   written before paths were recorded, which reads as `N directories pruned by name`;
 - `policy_excluded_by_source` and `policy_excluded_dirs`: the files a policy excluded,
   by the rule that excluded them (`hidden_policy`, `git_ignore`, `ok_ignore`,
@@ -118,8 +121,11 @@ and `.okignore` exclusions never warn; they are this tool's own settings. With t
 `[security] allow_hidden_files = false`, the hidden rule is checked before the git ignore
 rules, so a git-ignored worktree under `.claude/` counts as `hidden` and does not trigger
 the warning; with `allow_hidden_files = true` the same worktree counts as git-ignored and
-can. Pruned directories (the first three by path, and how many more) and walk errors
-are appended to the summary line whenever nonzero; pruned directories alone do not
+can. Pruned directories and walk errors are appended to the summary line whenever
+nonzero. The pruned directories are named three at a time with how many more, those
+holding git-tracked source first, each with its count
+(`2 directories pruned as build output or dependencies: dist/ (30 tracked source files), target/`),
+so a source directory pruned by mistake shows at a glance; pruned directories alone do not
 force a warning, since `target/` and `node_modules/` are pruned on nearly every
 repository. Git-tracked source under an undeclared build directory warns at any
 count, like a walk error, and the summary line and the doctor's next step name the
@@ -175,9 +181,13 @@ walked; a `.venv` without a marker is walked and its files skipped by the hidden
 Only directories are pruned: a file named `build` is discovered like any other.
 
 Every walk applies the same rule: discovery, the `.gitignore`/`.okignore` file walk, the
-Git ignore candidate walk, the snapshot import's changed-file count, and `ok watch`'s
-event filter, so an edit to a declared `src/build/` module triggers a re-index and a
-`cargo build` writing `target/` does not. Each pruned directory is recorded in
+Git ignore candidate walk, the project model's and import resolver's manifest walks, the
+snapshot import's changed-file count, `ok watch`'s event filter and `ok doctor`'s language
+sampling. So an edit to a declared `src/build/` module triggers a re-index and a
+`cargo build` writing `target/` does not, and a workspace member in a directory named
+`target` is a crate while Cargo's packaged copies under the real `target/package/` are not
+(`PROJECT_RESOLVER_SEMANTICS_VERSION` v2; earlier indexes report `RebuildRequired`). Each
+pruned directory is recorded in
 `skipped_paths` with reason `pruned` and source `detector`, and in coverage as above. When
 it pruned anything in a Git work tree, discovery runs `git ls-files` once to count the
 tracked files beneath; nothing else is read under a pruned directory.
@@ -189,4 +199,52 @@ repository keeps excluding a `src/build/` module, now as a visible `config_exclu
 until they are removed. They are no longer written by `ok init` or added on load, and
 `ok doctor` names any of them an `ok.toml` still lists, with a next step to remove them
 unless the exclusion is intended.
+
+### Keeping a build directory
+
+When the rule is wrong for a repository, `[index] keep_dirs` lists `build` and `dist`
+directories to walk whatever the evidence says, a cache tag or a manifest beside them
+included:
+
+```toml
+[index]
+keep_dirs = ["tools/dist", "build"]
+```
+
+Each entry is one repository-relative directory written with `/` (a trailing `/` is
+accepted), and `OkConfig::load_from_repo` rejects anything else: an absolute path, a glob,
+an empty, `.` or `..` segment, or a directory not named `build` or `dist`. `target`, Python
+environments and `node_modules` cannot be listed: discovery prunes the first two only on
+markers their tools write, and installed packages are never source. Keeping a directory
+only lets discovery reach its files; each one is still judged by the security policy (a
+secret-like path is skipped as `secret_policy` with its path withheld, `[paths] deny`
+applies), the hidden-file rule, `[index] exclude` and the ignore files, like any other.
+Only the listed directory is kept, not a sibling of the same name, and an entry under a
+pruned directory (`target/pkg/dist`) keeps nothing; `ok doctor` names such an entry, and
+one with no directory behind it, in the config check. `ok init` does not write the key.
+The doctor's next step for committed source under an undeclared build directory names it,
+spelled for the first such directory.
+
+### What pruning means downstream
+
+Two consumers once repeated the pruning by name and now follow the record instead:
+
+- **Plans.** A plan forbids edits under each directory the coverage record names as pruned
+  (`<path>/**`, at any depth, citing `coverage:pruned:<path>`): build output is changed
+  through its source or generator, and installed packages and environments through their
+  manifests. The default forbidden rules no longer list a root `target/**`, `build/**` or
+  `dist/**`, which forbade a declared `build/` package and missed a nested `web/dist/`
+  bundle. An undeclared build directory holding committed source gets no rule, since the
+  directory is only a guess and the coverage record already counts its files as missing;
+  neither does a directory the record does not name (secret-like, or an index written before
+  paths were recorded; one written by 4.0 releases after #477 named at most 50). Nor does a
+  root `target/`, `build/` or `dist/` that did not exist when the repository was indexed, as
+  in a fresh clone before its first build: an edit there was a `forbidden_boundary`
+  violation and is now `out_of_boundary`. Any such edit is still outside `allowed_files` and
+  needs expansion evidence, so the loop stays closed, but evidence can now admit it; no
+  rule is forbidden by name alone.
+- **The semantic corpus** embeds the files the index holds, less vendored, generated, lock and
+  secret-like files. It no longer drops every path containing `/target/`: discovery already
+  pruned Cargo's and Maven's output on evidence, and the name rule dropped a Java
+  `com.acme.target` package and a Rust `src/target/` module that the lexical index holds.
 

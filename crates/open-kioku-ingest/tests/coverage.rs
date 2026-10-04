@@ -1,5 +1,5 @@
 use open_kioku_config::OkConfig;
-use open_kioku_core::{PruneReason, PrunedDir, SkipReason, SkipSource};
+use open_kioku_core::{Confidence, GraphEdgeType, PruneReason, PrunedDir, SkipReason, SkipSource};
 use open_kioku_ingest::Indexer;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -70,9 +70,9 @@ fn coverage_attributes_every_source_file_to_indexed_or_a_skip_reason() {
         }]
     );
     assert_eq!(coverage.walk_errors, 0);
-    assert!(coverage.summary_line().ends_with(
-        "1 directory pruned as build output or dependencies (contents not counted): build/"
-    ));
+    assert!(coverage
+        .summary_line()
+        .ends_with("1 directory pruned as build output or dependencies: build/"));
     // Document-corpus files are in the index and count as indexed.
     assert_eq!(coverage.by_language["markdown"].indexed, 1);
     assert!(!coverage.by_language.contains_key("unknown"));
@@ -452,18 +452,22 @@ fn build_output_and_dependency_directories_stay_pruned_and_are_named() {
         reason,
         tracked_source_files: Some(tracked),
     };
+    // The one holding a committed file first, then by path.
     assert_eq!(
         coverage.pruned,
         vec![
+            pruned("node_modules", PruneReason::Dependencies, 1),
             pruned(".venv", PruneReason::VirtualEnv, 0),
             pruned("build", PruneReason::BuildOutput, 0),
             pruned("crates/tool/target", PruneReason::BuildOutput, 0),
             pruned("dist", PruneReason::BuildOutput, 0),
-            pruned("node_modules", PruneReason::Dependencies, 1),
             pruned("target", PruneReason::BuildOutput, 0),
             pruned("tools/build", PruneReason::UndeclaredBuildDir, 0),
         ]
     );
+    assert!(coverage.summary_line().ends_with(
+        "7 directories pruned as build output or dependencies: node_modules/ (1 tracked source file), .venv/, build/ and 4 more"
+    ), "{}", coverage.summary_line());
     assert_eq!(coverage.pruned_dirs, 7);
     assert_eq!(coverage.pruned_unlisted, 0);
     assert_eq!(coverage.pruned_source_files(), 0);
@@ -565,6 +569,14 @@ fn a_committed_bundle_beside_its_manifest_is_listed_but_not_missing_source() {
     assert_eq!(coverage.programming_percent(), Some(100.0));
     assert!(!coverage.below_warn_threshold());
     assert!(coverage.gaps().is_empty(), "{:?}", coverage.gaps());
+    // `ok status` and `ok doctor` print the count the scan knows (#661).
+    assert!(
+        coverage.summary_line().ends_with(
+            "1 directory pruned as build output or dependencies: dist/ (60 tracked source files)"
+        ),
+        "{}",
+        coverage.summary_line()
+    );
     // The directory is a named skip; no file under it is.
     assert!(snapshot
         .skipped_paths
@@ -606,6 +618,219 @@ fn a_secret_like_pruned_directory_is_counted_without_its_path() {
         .iter()
         .any(|skipped| { skipped.path == Path::new("[redacted]") && !skipped.safe_to_show }));
     assert!(!format!("{:?}", snapshot.skipped_paths).contains(".ssh"));
+}
+
+/// A workspace member whose directory is named `target` is a crate: discovery walks it (no
+/// manifest or cache tag accounts for it as output), and the project model now reads its
+/// manifest too, so its `crate::` paths resolve. Manifest discovery skipped every `target` by
+/// name, leaving the member's files outside every package's module tree.
+#[test]
+fn a_crate_directory_named_target_resolves_its_crate_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/target\"]\n",
+    );
+    write(
+        root,
+        "crates/target/Cargo.toml",
+        "[package]\nname = \"ledger\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(
+        root,
+        "crates/target/src/lib.rs",
+        "pub mod post;\n\npub fn settle() {\n    crate::post::record_entry();\n}\n",
+    );
+    write(
+        root,
+        "crates/target/src/post.rs",
+        "pub fn record_entry() {}\n",
+    );
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let id = |name: &str| {
+        snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .unwrap_or_else(|| panic!("a symbol named {name}"))
+            .id
+            .clone()
+    };
+    let (settle, record_entry) = (id("settle"), id("record_entry"));
+    assert!(
+        snapshot.resolved_relationships.iter().any(|edge| {
+            edge.edge_type == GraphEdgeType::Calls
+                && edge.from == settle
+                && edge.to == record_entry
+                && edge.confidence == Confidence::Exact
+        }),
+        "{:?}",
+        snapshot.resolved_relationships
+    );
+}
+
+/// A secret-like pruned directory holding committed source is still counted without its path,
+/// and its tracked count is never printed beside another directory's name.
+#[test]
+fn a_secret_like_pruned_directory_with_tracked_source_stays_unnamed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "--quiet"]);
+    write(root, "src/lib.rs", "pub fn live() {}\n");
+    write(root, ".ssh/build/keys.py", "def keys():\n    pass\n");
+    write(root, ".ssh/build/more.py", "def more():\n    pass\n");
+    write(root, "dist/app.js", "export function app() {}\n");
+    git(root, &["add", "."]);
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let coverage = snapshot.manifest.quality.coverage.as_ref().unwrap();
+    assert_eq!(coverage.pruned_dirs, 2);
+    assert_eq!(coverage.pruned_unlisted, 1);
+    let summary = coverage.summary_line();
+    assert!(
+        summary.ends_with("2 directories pruned as build output or dependencies: dist/ (1 tracked source file) and 1 more"),
+        "{summary}"
+    );
+    assert!(!summary.contains(".ssh"), "{summary}");
+    assert!(!summary.contains("2 tracked"), "{summary}");
+}
+
+/// `[index] keep_dirs` walks a `build` or `dist` directory the rule would prune, on a guess or
+/// beside a manifest, and nothing else: its files are indexed like any other.
+#[test]
+fn kept_build_and_dist_directories_are_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "--quiet"]);
+    write(root, "package.json", "{\"name\":\"ledger\"}\n");
+    write(root, "src/index.js", "export function entry() {}\n");
+    // Release scripts beside the manifest: pruned as build output by default.
+    write(root, "build/release.js", "export function release() {}\n");
+    // A generator package nothing declares: pruned on the weak rule by default.
+    write(root, "tools/dist/emit.py", "def emit_bundle():\n    pass\n");
+    write(root, "web/dist/bundle.js", "export function bundled() {}\n");
+    write(root, "web/package.json", "{\"name\":\"web\"}\n");
+    git(root, &["add", "."]);
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let indexed = |config: &OkConfig| {
+        let snapshot = Indexer::default().index_repo(root, config).unwrap();
+        let files = snapshot
+            .files
+            .iter()
+            .map(|file| file.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let pruned = snapshot
+            .manifest
+            .quality
+            .coverage
+            .as_ref()
+            .unwrap()
+            .pruned
+            .iter()
+            .map(|dir| dir.path.clone())
+            .collect::<Vec<_>>();
+        let symbols = snapshot
+            .symbols
+            .iter()
+            .map(|symbol| symbol.name.clone())
+            .collect::<Vec<_>>();
+        (files, pruned, symbols)
+    };
+
+    let (files, pruned, _) = indexed(&config);
+    assert!(!files.iter().any(|path| path.starts_with("build/")));
+    assert!(!files.iter().any(|path| path.starts_with("tools/dist/")));
+    // The undeclared directory holding committed source first.
+    assert_eq!(pruned, vec!["tools/dist", "build", "web/dist"]);
+
+    config.index.keep_dirs = vec!["build".into(), "tools/dist".into()];
+    let (files, pruned, symbols) = indexed(&config);
+    assert!(files.contains(&"build/release.js".to_string()), "{files:?}");
+    assert!(
+        files.contains(&"tools/dist/emit.py".to_string()),
+        "{files:?}"
+    );
+    assert!(symbols.contains(&"release".to_string()));
+    assert!(symbols.contains(&"emit_bundle".to_string()));
+    // A directory the key does not list keeps its verdict.
+    assert_eq!(pruned, vec!["web/dist"]);
+    assert!(!files.iter().any(|path| path.starts_with("web/dist/")));
+}
+
+/// A kept directory is walked, never trusted: key material under it is still skipped by the
+/// secret-path rule with its path withheld, and `[paths] deny` still applies.
+#[test]
+fn a_kept_directory_does_not_bypass_the_secret_path_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "--quiet"]);
+    write(root, "src/lib.rs", "pub fn live() {}\n");
+    write(root, "deploy/dist/app.py", "def deploy():\n    pass\n");
+    write(root, "deploy/dist/server.key", "PRIVATE KEY MATERIAL\n");
+    write(root, "deploy/dist/.env", "TOKEN=abc123\n");
+    write(root, "deploy/dist/id_rsa.py", "def leaked():\n    pass\n");
+    write(root, ".ssh/build/keys.py", "def keys():\n    pass\n");
+    write(root, "secrets/dist/token.py", "def token():\n    pass\n");
+    git(root, &["add", "."]);
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    config.index.keep_dirs = vec![
+        "deploy/dist".into(),
+        ".ssh/build".into(),
+        "secrets/dist".into(),
+    ];
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let files = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    // The kept directory was walked: its ordinary source is indexed.
+    assert!(
+        files.contains(&"deploy/dist/app.py".to_string()),
+        "{files:?}"
+    );
+    for blocked in [
+        "deploy/dist/server.key",
+        "deploy/dist/.env",
+        "deploy/dist/id_rsa.py",
+        ".ssh/build/keys.py",
+        "secrets/dist/token.py",
+    ] {
+        assert!(!files.contains(&blocked.to_string()), "{blocked} indexed");
+    }
+    let skipped = &snapshot.skipped_paths;
+    let shown = format!("{skipped:?}");
+    for withheld in ["server.key", "id_rsa", ".env", ".ssh"] {
+        assert!(!shown.contains(withheld), "{withheld} named: {shown}");
+    }
+    assert!(skipped.iter().any(|skip| {
+        skip.reason == SkipReason::SecretPolicy
+            && skip.path == Path::new("[redacted]")
+            && !skip.safe_to_show
+    }));
+    assert!(skipped.iter().any(|skip| {
+        skip.reason == SkipReason::Denied && skip.path == Path::new("secrets/dist/token.py")
+    }));
+    // Nothing reached a chunk either.
+    assert!(!snapshot
+        .chunks
+        .iter()
+        .any(|chunk| chunk.text.contains("PRIVATE KEY") || chunk.text.contains("abc123")));
 }
 
 fn git(root: &Path, args: &[&str]) {

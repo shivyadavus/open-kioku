@@ -518,11 +518,8 @@
         "**/secrets/**",
         ".git/**",
         ".ok/**",
-        "build/**",
-        "dist/**",
         "generated/**",
         "node_modules/**",
-        "target/**",
         "third_party/**",
         "vendor/**"
       ],
@@ -566,20 +563,6 @@
           "evidence_refs": [
             "boundary:default-forbidden"
           ],
-          "pattern": "build/**",
-          "reason": "build output is generated state"
-        },
-        {
-          "evidence_refs": [
-            "boundary:default-forbidden"
-          ],
-          "pattern": "dist/**",
-          "reason": "distribution output is generated state"
-        },
-        {
-          "evidence_refs": [
-            "boundary:default-forbidden"
-          ],
           "pattern": "generated/**",
           "reason": "generated sources should be changed through their source generator"
         },
@@ -589,13 +572,6 @@
           ],
           "pattern": "node_modules/**",
           "reason": "vendored package dependencies are out of scope"
-        },
-        {
-          "evidence_refs": [
-            "boundary:default-forbidden"
-          ],
-          "pattern": "target/**",
-          "reason": "Rust build output is generated state"
         },
         {
           "evidence_refs": [

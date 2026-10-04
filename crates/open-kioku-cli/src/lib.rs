@@ -32,6 +32,7 @@ use open_kioku_core::{
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::{ImpactAnswer, ImpactEngine, ImpactRequest};
+use open_kioku_ingest::path_policy::DiscoveryPruner;
 use open_kioku_ingest::{IndexProgress, Indexer};
 use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::{
@@ -452,6 +453,34 @@ mod tests {
         );
     }
 
+    /// A `keep_dirs` entry discovery never reaches is named; one it walks is not.
+    #[test]
+    fn doctor_names_keep_dirs_entries_discovery_never_reaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        for rel in ["tools/dist/emit.py", "Cargo.toml", "target/pkg/dist/x.js"] {
+            let path = repo.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let mut config = OkConfig::default();
+        assert!(ineffective_keep_dirs_step(repo, &config).is_none());
+        config.index.keep_dirs = vec!["tools/dist".into()];
+        assert!(ineffective_keep_dirs_step(repo, &config).is_none());
+        config.index.keep_dirs = vec![
+            "tools/dist".into(),
+            "missing/build".into(),
+            "target/pkg/dist".into(),
+        ];
+        let step = ineffective_keep_dirs_step(repo, &config).expect("unreached entries");
+        assert!(
+            step.contains(
+                "lists `missing/build`, `target/pkg/dist`, which discovery never reaches"
+            ),
+            "{step}"
+        );
+    }
+
     /// Pruned build output and installed packages are named and never warn; a pruned
     /// build-output directory holding committed source warns at any count and is named,
     /// because 99.9% of what was walked says nothing about the package that was not (#477).
@@ -491,7 +520,7 @@ mod tests {
         );
         assert!(
             check.message.ends_with(
-                "2 directories pruned as build output or dependencies (contents not counted): dist/, web/node_modules/"
+                "2 directories pruned as build output or dependencies: dist/ (60 tracked source files), web/node_modules/ (40 tracked source files)"
             ),
             "{}",
             check.message
@@ -524,16 +553,23 @@ mod tests {
             "{}",
             check.message
         );
-        // The directory holding source is listed first.
+        // The directory holding missing source is listed first, then any holding committed
+        // files, each with its count.
         assert!(
             check
                 .message
-                .ends_with("3 directories pruned as build output or dependencies (contents not counted): tools/build/, target/, web/node_modules/"),
+                .ends_with("3 directories pruned as build output or dependencies: tools/build/ (1 tracked source file), web/node_modules/ (40 tracked source files), target/"),
             "{}",
             check.message
         );
         let step = step.expect("pruned source carries a next step");
         assert!(step.contains("discovery pruned `tools/build/`"), "{step}");
+        // The key that governs it, spelled for the directory at hand.
+        assert!(
+            step.contains("`[index] keep_dirs` governs that")
+                && step.contains("`keep_dirs = [\"tools/build\"]`"),
+            "{step}"
+        );
     }
 
     #[test]

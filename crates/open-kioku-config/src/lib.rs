@@ -66,6 +66,7 @@ impl Default for OkConfig {
                     "bun.lockb".into(),
                     "**/bun.lockb".into(),
                 ],
+                keep_dirs: Vec::new(),
                 resolution_mode: ResolutionMode::Shadow,
             },
             documents: DocumentsConfig::default(),
@@ -184,8 +185,60 @@ pub struct IndexConfig {
     pub incremental: bool,
     pub max_file_size: String,
     pub exclude: Vec<String>,
+    /// `build` and `dist` directories discovery walks although it would prune them as build
+    /// output, by repository-relative path (`tools/dist`). Read through [`IndexConfig::kept_dirs`],
+    /// which validates each entry. Not written by `ok init`: an empty list is omitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep_dirs: Vec<String>,
     #[serde(default)]
     pub resolution_mode: ResolutionMode,
+}
+
+/// The directory names `[index] keep_dirs` may list: the ones discovery prunes on a guess from
+/// what sits beside them. `target` and Python environments are pruned only on markers their
+/// tools write, and `node_modules` always, so keeping one is never needed to index source.
+pub const KEEPABLE_DIR_NAMES: [&str; 2] = ["build", "dist"];
+
+impl IndexConfig {
+    /// `keep_dirs` as repository-relative paths, or the first entry that is not one directory
+    /// named `build` or `dist` below the root, spelled without globs, `.` or `..`. A trailing
+    /// `/` is accepted.
+    pub fn kept_dirs(&self) -> Result<Vec<PathBuf>> {
+        self.keep_dirs.iter().map(|entry| kept_dir(entry)).collect()
+    }
+}
+
+fn kept_dir(entry: &str) -> Result<PathBuf> {
+    let invalid = |why: String| OkError::Config(format!("index.keep_dirs entry `{entry}` {why}"));
+    let path = entry.strip_suffix('/').unwrap_or(entry);
+    if path.is_empty() {
+        return Err(invalid("is empty".into()));
+    }
+    if path.starts_with('/') || path.contains('\\') || Path::new(path).is_absolute() {
+        return Err(invalid(
+            "must be a repository-relative path written with `/`".into(),
+        ));
+    }
+    if path.contains(['*', '?', '[', ']', '{', '}']) {
+        return Err(invalid("is a glob; list each directory by its path".into()));
+    }
+    let segments = path.split('/').collect::<Vec<_>>();
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
+        return Err(invalid(
+            "must name a directory below the repository root, without empty, `.` or `..` segments"
+                .into(),
+        ));
+    }
+    let name = segments.last().copied().unwrap_or_default();
+    if !KEEPABLE_DIR_NAMES.contains(&name) {
+        return Err(invalid(format!(
+            "names a `{name}` directory; only `build` and `dist` directories can be kept, because discovery prunes `target` and Python environments only on markers their tools write, and `node_modules` always"
+        )));
+    }
+    Ok(PathBuf::from(path))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -509,6 +562,7 @@ impl OkConfig {
                 "semantic.ann_min_rows must be greater than zero".into(),
             ));
         }
+        self.index.kept_dirs()?;
         Ok(())
     }
 
@@ -744,6 +798,60 @@ paths = ["crates/api/**"]
         let policy = load_architecture_policy(dir.path()).unwrap().unwrap();
         assert_eq!(policy.source, PolicySource::Compatibility);
         assert_eq!(policy.layers.len(), 1);
+    }
+
+    #[test]
+    fn keep_dirs_is_not_written_by_default_and_round_trips() {
+        let raw = OkConfig::default_toml().unwrap();
+        assert!(!raw.contains("keep_dirs"), "{raw}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.toml");
+        let with_keep = raw.replacen(
+            "[index]\n",
+            "[index]\nkeep_dirs = [\"tools/dist\", \"build/\"]\n",
+            1,
+        );
+        std::fs::write(&path, with_keep).unwrap();
+        let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
+        assert_eq!(
+            loaded.index.kept_dirs().unwrap(),
+            vec![
+                std::path::PathBuf::from("tools/dist"),
+                std::path::PathBuf::from("build")
+            ]
+        );
+    }
+
+    #[test]
+    fn keep_dirs_rejects_anything_but_a_relative_build_or_dist_directory() {
+        for (entry, why) in [
+            ("", "is empty"),
+            ("/abs/dist", "repository-relative"),
+            ("tools\\dist", "repository-relative"),
+            ("**/dist", "is a glob"),
+            ("packages/*/build", "is a glob"),
+            ("../sibling/dist", "without empty"),
+            ("./dist", "without empty"),
+            ("tools//dist", "without empty"),
+            ("target", "names a `target` directory"),
+            ("web/node_modules", "names a `node_modules` directory"),
+            ("tools/dist/lib", "names a `lib` directory"),
+        ] {
+            let mut config = OkConfig::default();
+            config.index.keep_dirs = vec![entry.into()];
+            let err = config.validate().expect_err(entry).to_string();
+            assert!(err.contains("index.keep_dirs"), "{entry}: {err}");
+            assert!(err.contains(why), "{entry}: {err}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let raw = OkConfig::default_toml().unwrap().replacen(
+            "[index]\n",
+            "[index]\nkeep_dirs = [\"target\"]\n",
+            1,
+        );
+        std::fs::write(dir.path().join("ok.toml"), raw).unwrap();
+        assert!(OkConfig::load_from_repo(dir.path()).is_err());
     }
 
     #[test]

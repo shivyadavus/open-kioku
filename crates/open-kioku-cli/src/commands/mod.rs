@@ -259,9 +259,15 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     object.insert("analysis_semantics_status".into(), serde_json::to_value(compatibility)?);
                     // Mirrors the MCP `repo_status` tool: null when the manifest predates
                     // coverage recording, so a reader cannot mistake absence for 100%.
+                    let coverage = manifest.quality.coverage.as_ref();
                     object.insert(
                         "coverage".into(),
-                        serde_json::to_value(manifest.quality.coverage.as_ref())?,
+                        match detail {
+                            StatusDetail::Full => serde_json::to_value(coverage)?,
+                            StatusDetail::Summary => serde_json::to_value(
+                                coverage.map(open_kioku_core::IndexCoverage::status_view),
+                            )?,
+                        },
                     );
                     // The coverage verdict context packs and plans price, mirrored by MCP
                     // `repo_status`. Absent with `coverage`, so a missing record never reads

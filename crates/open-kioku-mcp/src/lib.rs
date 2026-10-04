@@ -684,7 +684,15 @@ async fn dispatch(
                 // Same numbers as `ok --json status`: null when the manifest predates
                 // coverage recording, so absence is never mistaken for 100%.
                 let coverage = manifest.quality.coverage.as_ref();
-                object.insert("coverage".into(), serde_json::to_value(coverage)?);
+                object.insert(
+                    "coverage".into(),
+                    match detail {
+                        StatusDetail::Full => serde_json::to_value(coverage)?,
+                        StatusDetail::Summary => serde_json::to_value(
+                            coverage.map(open_kioku_core::IndexCoverage::status_view),
+                        )?,
+                    },
+                );
                 // The coverage verdict context packs and plans price, mirrored by `ok --json
                 // status`. Absent with `coverage`, so a missing record never reads as a
                 // repository without gaps.
