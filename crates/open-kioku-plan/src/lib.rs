@@ -749,7 +749,8 @@ pub struct ValidationSelection {
 }
 
 /// The paths of the files `tests` live in, keyed for [`select_validation_targets`]. A file the
-/// store does not know is left out, and its targets then tie on ids alone.
+/// store does not know is left out, and its targets then tie on ids alone. `ok verify` reads
+/// the paths its test findings report from the same map, so a left-out file reports none.
 pub fn validation_target_paths(
     store: &dyn MetadataStore,
     tests: &[TestTarget],

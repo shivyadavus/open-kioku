@@ -141,6 +141,48 @@ mod tests {
         assert!(!is_invalid_input_error(&other));
     }
 
+    /// An endpoint's boundary line names its file by path, never by the file id, which is a
+    /// hash; an endpoint in a file the index does not list is named alone.
+    #[test]
+    fn route_service_boundaries_name_endpoint_files_by_path() {
+        let file = open_kioku_core::File {
+            id: open_kioku_core::FileId::new("9f8e7d6c"),
+            repository_id: open_kioku_core::RepositoryId::new("repo"),
+            path: PathBuf::from("src/routes/ledger.ts"),
+            language: open_kioku_core::Language::TypeScript,
+            size_bytes: 10,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let endpoint = |name: &str, file_id: &str| Symbol {
+            id: open_kioku_core::SymbolId::new(format!("symbol-{name}")),
+            name: name.into(),
+            qualified_name: format!("ledger::{name}"),
+            kind: open_kioku_core::SymbolKind::Endpoint,
+            file_id: open_kioku_core::FileId::new(file_id),
+            range: None,
+            language: open_kioku_core::Language::TypeScript,
+            confidence: open_kioku_core::Confidence::High,
+            provenance: open_kioku_core::EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
+        };
+        let symbols = [
+            endpoint("settle", "9f8e7d6c"),
+            endpoint("orphan", "0a1b2c3d"),
+        ];
+
+        assert_eq!(
+            route_service_boundaries(&[file], &symbols),
+            ["ledger::settle in src/routes/ledger.ts", "ledger::orphan"]
+        );
+    }
+
     #[test]
     fn resolve_repo_prefers_command_path_over_global_default() {
         assert_eq!(

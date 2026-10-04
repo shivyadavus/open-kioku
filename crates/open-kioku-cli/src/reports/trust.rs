@@ -131,12 +131,7 @@ fn build_architecture_trust_report(
         })
         .collect::<Vec<_>>();
 
-    let route_service_boundaries = symbols
-        .iter()
-        .filter(|symbol| matches!(symbol.kind, open_kioku_core::SymbolKind::Endpoint))
-        .map(|symbol| format!("{} in {}", symbol.qualified_name, symbol.file_id.0))
-        .take(50)
-        .collect::<Vec<_>>();
+    let route_service_boundaries = route_service_boundaries(&files, &symbols);
 
     let missing_tests = if tests_readable {
         missing_test_files(&files, &tests)
@@ -345,6 +340,24 @@ fn push_string_list(out: &mut String, title: &str, values: &[String]) {
         out.push_str(&format!("- `{}`\n", value));
     }
     out.push('\n');
+}
+
+/// Endpoints and the file each is declared in, by repository path. An endpoint whose file the
+/// index does not list is named alone: its file id is a hash and would read as a location.
+fn route_service_boundaries(files: &[open_kioku_core::File], symbols: &[Symbol]) -> Vec<String> {
+    let paths = files
+        .iter()
+        .map(|file| (&file.id, normalize_path_string(&file.path)))
+        .collect::<BTreeMap<_, _>>();
+    symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.kind, open_kioku_core::SymbolKind::Endpoint))
+        .map(|symbol| match paths.get(&symbol.file_id) {
+            Some(path) => format!("{} in {path}", symbol.qualified_name),
+            None => symbol.qualified_name.clone(),
+        })
+        .take(50)
+        .collect()
 }
 
 fn missing_test_files(files: &[open_kioku_core::File], tests: &[TestTarget]) -> Vec<String> {
