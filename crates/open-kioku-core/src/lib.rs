@@ -2104,6 +2104,10 @@ pub struct Binding {
     pub scope_id: ScopeId,
     pub name: String,
     pub declared_type: Option<String>,
+    /// What the binding's initializer says of its type. A Rust initializer is recorded as the
+    /// type of a struct literal (`Entry`), a call through a path or a name (`Entry::new()`,
+    /// `Entry()`), or a path's value (`=Marker`); a call or a value proves a type only as
+    /// resolution reads it.
     pub inferred_type: Option<String>,
     pub range: SourceRange,
 }
@@ -2247,6 +2251,31 @@ pub struct RustEnumVariants {
     pub variants: Vec<String>,
 }
 
+/// A Rust `type` alias, the symbol `alias_symbol_id`, and the type it is written to stand for,
+/// as written: `Disk` of `type Store = Disk;` and `Arc<Inner>` of `type Shared = Arc<Inner>;`
+/// (#639). Not recorded when that type is a type parameter of the alias, directly or inside
+/// `Box`, `Rc` or `Arc` (`type Own<T> = Box<T>;`), so the alias names no declared type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RustTypeAlias {
+    pub alias_symbol_id: SymbolId,
+    pub target: String,
+}
+
+/// A Rust `impl` block, by the scope of the block, which is the scope its methods are declared
+/// in (#639).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RustImplBlock {
+    pub scope_id: ScopeId,
+    /// The trait written after `impl`, `None` for an inherent `impl`.
+    pub trait_name: Option<String>,
+    /// The block applies to every instantiation of its type: each generic argument the type is
+    /// written with is a distinct type or const parameter of the `impl`, or a lifetime, and no
+    /// type parameter carries a bound other than `?Sized` and no `where` clause is written.
+    /// `impl Store`, `impl<'a> Store<'a>` and `impl<T: ?Sized> Store<T>` do; `impl Store<u8>`
+    /// and `impl<T: Clone> Store<T>` do not.
+    pub covers_every_instantiation: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SyntaxFacts {
     pub symbols: Vec<Symbol>,
@@ -2280,6 +2309,16 @@ pub struct SyntaxFacts {
     /// The variants of each Rust `enum` the file declares.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rust_enum_variants: Vec<RustEnumVariants>,
+    /// The Rust unit structs the file declares (`struct Marker;`): the value of the name is an
+    /// instance of the struct, where a tuple struct's is its constructor function (#654).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rust_unit_structs: Vec<SymbolId>,
+    /// The Rust `type` aliases the file declares, with the type each stands for (#639).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rust_type_aliases: Vec<RustTypeAlias>,
+    /// The Rust `impl` blocks the file writes (#639).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rust_impl_blocks: Vec<RustImplBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

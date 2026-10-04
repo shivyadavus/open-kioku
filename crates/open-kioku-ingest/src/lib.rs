@@ -666,6 +666,10 @@ impl Indexer {
         // Rust type items that are not also values, and enum variants (#641, #643).
         let mut rust_type_only_items = Vec::new();
         let mut rust_enum_variants = Vec::new();
+        // Rust unit structs, type aliases and impl blocks (#639, #654).
+        let mut rust_unit_structs = Vec::new();
+        let mut rust_type_aliases = Vec::new();
+        let mut rust_impl_blocks = Vec::new();
         for (file, outcome) in files.into_iter().zip(outcomes) {
             match outcome {
                 Ok((parsed_file, redacted)) => {
@@ -674,6 +678,9 @@ impl Indexer {
                         .extend(parsed_file.syntax.rust_type_only_items.iter().cloned());
                     rust_enum_variants
                         .extend(parsed_file.syntax.rust_enum_variants.iter().cloned());
+                    rust_unit_structs.extend(parsed_file.syntax.rust_unit_structs.iter().cloned());
+                    rust_type_aliases.extend(parsed_file.syntax.rust_type_aliases.iter().cloned());
+                    rust_impl_blocks.extend(parsed_file.syntax.rust_impl_blocks.iter().cloned());
                     if parsed_file.syntax.invokes_item_macro {
                         rust_module_macros.insert(file.id.clone());
                     }
@@ -811,6 +818,7 @@ impl Indexer {
         let mut scope_index = open_kioku_resolution::ScopeIndex::build(scopes.clone());
         scope_index.record_module_declarations(&module_declarations);
         scope_index.record_rust_type_items(rust_type_only_items, rust_enum_variants);
+        scope_index.record_rust_type_shapes(rust_unit_structs, rust_type_aliases, rust_impl_blocks);
         let rust_modules = imports::RustModuleTree::new(
             &files,
             &project_model,
@@ -911,6 +919,15 @@ impl Indexer {
         let mut semantic_repo = open_kioku_semantic_model::SemanticRepository::new();
         semantic_repo.project = project_model;
         semantic_repo.imports = import_registry.index;
+        // Where a trait the index does not know may be in scope, which a method call through a
+        // smart pointer must rule out (#639).
+        scope_index.record_rust_open_trait_scopes(
+            open_kioku_resolution::rust_open_trait_scope_files(
+                &semantic_repo,
+                &scope_index,
+                &rust_file_ids,
+            ),
+        );
         for exp in &export_sites {
             let mod_id = open_kioku_core::ModuleId::new(format!("{}:module", exp.file_id.0));
             semantic_repo.exports.insert(
@@ -4357,6 +4374,234 @@ class Util {
         edges
     }
 
+    /// The `CALLS` edges of a Rust crate made of `files`, each as its caller (`file::name`), its
+    /// target (`file:line`) and whether it is authoritative.
+    fn rust_call_targets(files: &[(&str, &str)]) -> Vec<(String, String, bool)> {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        for (path, source) in files {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, source).unwrap();
+        }
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.history.enabled = false;
+        let snapshot = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Full)
+            .unwrap();
+        let symbol = |id: &SymbolId| snapshot.symbols.iter().find(|symbol| symbol.id == *id);
+        let file_of = |symbol: &Symbol| {
+            snapshot
+                .files
+                .iter()
+                .find(|file| file.id == symbol.file_id)
+                .map(|file| file.path.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default()
+        };
+        let mut edges = snapshot
+            .resolved_relationships
+            .iter()
+            .filter(|edge| edge.edge_type == open_kioku_core::GraphEdgeType::Calls)
+            .filter_map(|edge| {
+                let (from, to) = (symbol(&edge.from)?, symbol(&edge.to)?);
+                Some((
+                    format!("{}::{}", file_of(from), from.name),
+                    format!("{}:{}", file_of(to), to.range.as_ref()?.start),
+                    open_kioku_core::relationship_authority(&edge.edge_type, &edge.proofs)
+                        == open_kioku_core::RelationshipAuthority::Authoritative,
+                ))
+            })
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges.dedup();
+        edges
+    }
+
+    #[test]
+    fn a_method_call_through_an_aliased_or_dereferenced_field_reaches_the_type_it_names() {
+        // `Disk` in `src/model.rs`, with an alias of it and one of an `Arc` of it. `persist`
+        // is inherent and a `Saver` method, `take_it` inherent by reference and a `Taker`
+        // method by value, and `clone`, `strong_count` and `lock` share their names with
+        // methods of `Rc`, `Arc` and `Mutex` (#639).
+        let model = "use std::sync::Arc;\n\
+            pub struct Disk;\n\
+            impl Disk {\n\
+            \x20   pub fn save(&self) {}\n\
+            \x20   pub fn persist(&self) {}\n\
+            \x20   pub fn take_it(&self) {}\n\
+            \x20   pub fn clone(&self) -> u8 {\n        0\n    }\n\
+            \x20   pub fn strong_count(&self) -> u8 {\n        0\n    }\n\
+            \x20   pub fn lock(&self) -> u8 {\n        0\n    }\n\
+            }\n\
+            pub type Store = Disk;\n\
+            pub type Shared = Arc<Disk>;\n\
+            pub trait Saver {\n    fn persist(&self);\n}\n\
+            impl Saver for Disk {\n    fn persist(&self) {}\n}\n\
+            pub trait Taker {\n    fn take_it(self);\n}\n\
+            impl Taker for Disk {\n    fn take_it(self) {}\n}\n";
+        let app = "use crate::model::{Disk, Shared, Store};\n\
+            use std::rc::Rc;\n\
+            use std::sync::{Arc, Mutex};\n\
+            pub struct App {\n\
+            \x20   s: Store,\n    h: Shared,\n    d: Disk,\n    shared: &'static Disk,\n\
+            \x20   r: Rc<Disk>,\n    a: Arc<Disk>,\n    b: Box<Disk>,\n    n: Arc<Box<Disk>>,\n\
+            \x20   m: Mutex<Disk>,\n\
+            }\n\
+            impl App {\n\
+            \x20   pub fn aliased(&self) {\n        self.s.save();\n    }\n\
+            \x20   pub fn aliased_arc(&self) {\n        self.h.save();\n    }\n\
+            \x20   pub fn inherent(&self) {\n        self.d.persist();\n    }\n\
+            \x20   pub fn inherent_shared(&self) {\n        self.shared.persist();\n    }\n\
+            \x20   pub fn by_value_trait(&self) {\n        self.d.take_it();\n    }\n\
+            \x20   pub fn rc(&self) {\n        self.r.save();\n    }\n\
+            \x20   pub fn arc(&self) {\n        self.a.save();\n    }\n\
+            \x20   pub fn boxed(&self) {\n        self.b.save();\n    }\n\
+            \x20   pub fn nested(&self) {\n        self.n.save();\n    }\n\
+            \x20   pub fn pointer_methods(&self) {\n\
+            \x20       let _ = self.r.clone();\n        let _ = Rc::clone(&self.r);\n\
+            \x20       let _ = self.a.strong_count();\n        let _ = Arc::strong_count(&self.a);\n\
+            \x20       let _ = self.a.persist();\n\
+            \x20   }\n\
+            \x20   pub fn mutex(&self) {\n        let _ = self.m.lock();\n        self.m.lock().unwrap().save();\n    }\n\
+            }\n";
+        // A trait the index does not know may be in scope here, and the `Box` is this file's.
+        let open = "use crate::model::Disk;\n\
+            use outside::Helper;\n\
+            use std::sync::Arc;\n\
+            pub struct Open {\n    a: Arc<Disk>,\n}\n\
+            impl Open {\n    pub fn opened(&self) {\n        let _ = Helper;\n        self.a.save();\n    }\n}\n";
+        let other_box = "use crate::model::Disk;\n\
+            pub struct Box<T>(T);\n\
+            pub struct Other {\n    b: Box<Disk>,\n}\n\
+            impl Other {\n    pub fn foreign(&self) {\n        self.b.save();\n    }\n}\n";
+        let files = [
+            (
+                "src/lib.rs",
+                "mod app;\nmod model;\nmod open;\nmod other_box;\n",
+            ),
+            ("src/model.rs", model),
+            ("src/app.rs", app),
+            ("src/open.rs", open),
+            ("src/other_box.rs", other_box),
+        ];
+        let calls = rust_call_targets(&files)
+            .into_iter()
+            .filter(|(from, _, authoritative)| *authoritative && !from.starts_with("src/model.rs"))
+            .collect::<Vec<_>>();
+        let edge = |from: &str, line: u32| {
+            (
+                format!("src/app.rs::{from}"),
+                format!("src/model.rs:{line}"),
+                true,
+            )
+        };
+        // `save` is on line 4 and the inherent `persist` on line 5. `take_it` by value through
+        // `Taker` comes first in the probe, `persist` through a pointer is a method `Saver`
+        // declares, and a pointer's own method names reach nothing.
+        assert_eq!(
+            calls,
+            vec![
+                edge("aliased", 4),
+                edge("aliased_arc", 4),
+                edge("arc", 4),
+                edge("boxed", 4),
+                edge("inherent", 5),
+                edge("inherent_shared", 5),
+                edge("nested", 4),
+                edge("rc", 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_local_built_by_a_struct_constructor_and_a_path_through_an_enum_alias_reach_the_type() {
+        // `P` is a tuple struct and `U` a unit struct of `src/a.rs`, each with `m` on line 3 and
+        // 7; `make` is a function, and `Shape` an enum aliased as `Alias` with `k` on line 16
+        // (#654).
+        let a = "pub struct P(pub u8);\nimpl P {\n    pub fn m(&self) {}\n}\npub struct U;\nimpl U {\n    pub fn m(&self) {}\n}\npub fn make(_: u8) -> P {\n    P(0)\n}\npub enum Shape {\n    Circle(u8),\n}\nimpl Shape {\n    pub fn k() {}\n}\npub type Alias = Shape;\n";
+        let lib = "mod a;\nuse crate::a::{make, Alias, P, U};\n\
+            pub fn tuple() {\n    let p = P(1);\n    p.m();\n}\n\
+            pub fn unit() {\n    let u = U;\n    u.m();\n}\n\
+            pub fn unit_path() {\n    let u = crate::a::U;\n    u.m();\n}\n\
+            pub fn tuple_path() {\n    let p = crate::a::P(1);\n    p.m();\n}\n\
+            pub fn function() {\n    let p = make(1);\n    p.m();\n}\n\
+            pub fn constructor_value() {\n    let p = P;\n    let _ = p(2);\n}\n\
+            pub fn through_alias() {\n    Alias::k();\n}\n";
+        let calls = rust_call_targets(&[("src/lib.rs", lib), ("src/a.rs", a)])
+            .into_iter()
+            .filter(|(_, to, authoritative)| *authoritative && to.starts_with("src/a.rs"))
+            .collect::<Vec<_>>();
+        let edge = |from: &str, line: u32| {
+            (
+                format!("src/lib.rs::{from}"),
+                format!("src/a.rs:{line}"),
+                true,
+            )
+        };
+        // A function's result is not read as a `P`, and `P` as a value is its constructor. The
+        // calls to `make` and, through a path, to `P`'s constructor are edges of their own.
+        assert_eq!(
+            calls,
+            vec![
+                edge("function", 9),
+                edge("through_alias", 16),
+                edge("tuple", 3),
+                edge("tuple_path", 1),
+                edge("tuple_path", 3),
+                edge("unit", 7),
+                edge("unit_path", 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn globs_bringing_in_one_name_in_different_namespaces_settle_each_namespace() {
+        // `c` globs `a`, which holds a module `f`, and `b`, which holds a function `f`: the value
+        // `c::f` is `b::f`, and the module `c::f` is `a::f` (#654). `d` globs `a` and `e`, both
+        // holding a module `f`, so `d::f` names neither. `g` globs `h`, whose `f` is a module
+        // file, and `b`.
+        let files = [
+            (
+                "src/lib.rs",
+                "mod a;\nmod b;\nmod c;\nmod d;\nmod e;\nmod g;\nmod h;\n\
+                 pub fn value() {\n    crate::c::f();\n}\n\
+                 pub fn module() {\n    crate::c::f::h();\n}\n\
+                 pub fn clash() {\n    crate::d::f::h();\n}\n\
+                 pub fn module_file() {\n    crate::g::f::h();\n}\n",
+            ),
+            ("src/a.rs", "pub mod f {\n    pub fn h() {}\n}\n"),
+            ("src/b.rs", "pub fn f() {}\n"),
+            ("src/c.rs", "pub use crate::a::*;\npub use crate::b::*;\n"),
+            ("src/d.rs", "pub use crate::a::*;\npub use crate::e::*;\n"),
+            ("src/e.rs", "pub mod f {\n    pub fn h() {}\n}\n"),
+            ("src/g.rs", "pub use crate::b::*;\npub use crate::h::*;\n"),
+            ("src/h.rs", "pub mod f;\n"),
+            ("src/h/f.rs", "pub fn h() {}\n"),
+        ];
+        let calls = rust_call_targets(&files)
+            .into_iter()
+            .filter(|(from, ..)| from.starts_with("src/lib.rs"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![
+                ("src/lib.rs::module".into(), "src/a.rs:2".into(), true),
+                (
+                    "src/lib.rs::module_file".into(),
+                    "src/h/f.rs:1".into(),
+                    true
+                ),
+                ("src/lib.rs::value".into(), "src/b.rs:1".into(), true),
+            ]
+        );
+    }
+
     #[test]
     fn a_path_or_import_written_inside_one_alternative_reaches_that_alternative_alone() {
         // Each alternative of `imp` declares `util` and calls its `g` through a path (`h`) and
@@ -4712,11 +4957,12 @@ class Util {
             .collect::<Vec<_>>();
         let edge = |from: &str| (from.to_string(), "src/store.rs".to_string(), true, 0usize);
         // The field's type is read where the struct is declared: `other.rs`'s own `Store` is
-        // not the field's. A boxed, generic, `#[cfg]`-duplicated or unresolved field reaches
-        // nothing.
+        // not the field's. A generic, `#[cfg]`-duplicated or unresolved field reaches nothing;
+        // a boxed one reaches what the `Box` holds (#639).
         assert_eq!(
             calls,
             vec![
+                edge("src/app.rs::boxed"),
                 edge("src/app.rs::chained"),
                 edge("src/app.rs::direct"),
                 edge("src/app.rs::nested"),

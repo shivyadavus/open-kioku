@@ -704,6 +704,25 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
     const CFG_ATTR_ENGINE: &str =
         "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n";
     const ROOT_REEXPORT: &str = "pub mod api;\npub mod tokens;\n\npub use tokens::target_fn;\n";
+    // A crate root holding the `Engine` of `src/engine.rs` in a field of type `$ty`, after
+    // `$imports`, and calling `target_fn` through it (#639).
+    macro_rules! holder {
+        ($imports:literal, $ty:literal) => {
+            concat!(
+                "mod engine;\n",
+                $imports,
+                "use crate::engine::Engine;\n\npub struct Holder {\n    engine: ",
+                $ty,
+                ",\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n"
+            )
+        };
+    }
+    /// `Engine` with `target_fn`, and aliases of it and of an `Arc` of it (#639).
+    const ALIASED_ENGINE: &str = "use std::sync::Arc;\n\npub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n\npub type Store = Engine;\npub type Shared = Arc<Engine>;\n";
+    /// `Engine` with `target_fn` and methods named as `Rc`'s, `Arc`'s and `Mutex`'s (#639).
+    const POINTER_NAMED_ENGINE: &str = "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n    pub fn clone(&self) -> u8 {\n        0\n    }\n    pub fn strong_count(&self) -> u8 {\n        0\n    }\n    pub fn lock(&self) -> u8 {\n        0\n    }\n}\n";
+    /// `src/c.rs` of the glob namespace cases (#654).
+    const GLOBS_OF_A_AND_B: &str = "pub use crate::a::*;\npub use crate::b::*;\n";
     const STRUCT_FIELD_HOLDER: &str = "mod engine;\nuse crate::engine::Engine;\n\npub struct Holder {\n    engine: Engine,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
         "cross_module_item_import" => (
@@ -2526,15 +2545,238 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
-        // `Box<Engine>` is a `Box` to the receiver logic, as for a local (#630).
+        // A method call sees through `Box<Engine>` to the `Engine` it holds (#639).
         "struct_field_of_boxed_type" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", holder!("", "Box<Engine>")),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+            ],
+            true,
+        ),
+        // A field typed by an alias of `Engine` (#639).
+        "struct_field_of_aliased_type" => (
             vec![
                 ("Cargo.toml", PACKAGE),
                 (
                     "src/lib.rs",
-                    "mod engine;\nuse crate::engine::Engine;\n\npub struct Holder {\n    engine: Box<Engine>,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n",
+                    "mod engine;\nuse crate::engine::Store;\n\npub struct Holder {\n    engine: Store,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n",
+                ),
+                ("src/engine.rs", ALIASED_ENGINE),
+            ],
+            true,
+        ),
+        // A field typed by an alias of `Arc<Engine>`, read where the alias is declared (#639).
+        "struct_field_of_alias_to_arc" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::Shared;\n\npub struct Holder {\n    engine: Shared,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n",
+                ),
+                ("src/engine.rs", ALIASED_ENGINE),
+            ],
+            true,
+        ),
+        // `Rc<Engine>` and `Arc<Engine>` fields (#639).
+        "struct_field_of_rc_type" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", holder!("use std::rc::Rc;\n", "Rc<Engine>")),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+            ],
+            true,
+        ),
+        "struct_field_of_arc_type" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", holder!("use std::sync::Arc;\n", "Arc<Engine>")),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+            ],
+            true,
+        ),
+        // `clone` is `Rc`'s, by method call and by path, though `Engine` declares one (#639).
+        "struct_field_rc_clone_is_the_pointers" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::Engine;\nuse std::rc::Rc;\n\npub struct Holder {\n    engine: Rc<Engine>,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        let _ = Rc::clone(&self.engine);\n        let _ = self.engine.clone();\n    }\n}\n",
+                ),
+                ("src/engine.rs", POINTER_NAMED_ENGINE),
+            ],
+            false,
+        ),
+        // So is `strong_count`, which is `Arc`'s associated function (#639).
+        "struct_field_arc_strong_count_is_the_pointers" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::Engine;\nuse std::sync::Arc;\n\npub struct Holder {\n    engine: Arc<Engine>,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        let _ = Arc::strong_count(&self.engine);\n        let _ = self.engine.strong_count();\n    }\n}\n",
+                ),
+                ("src/engine.rs", POINTER_NAMED_ENGINE),
+            ],
+            false,
+        ),
+        // A `Mutex` is not seen through: `lock` is the mutex's, and the guard it returns is
+        // nothing the index reads (#639).
+        "struct_field_mutex_lock_is_not_unwrapped" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::Engine;\nuse std::sync::Mutex;\n\npub struct Holder {\n    engine: Mutex<Engine>,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        let _ = self.engine.lock();\n        self.engine.lock().unwrap().target_fn();\n    }\n}\n",
+                ),
+                ("src/engine.rs", POINTER_NAMED_ENGINE),
+            ],
+            false,
+        ),
+        // A trait the index does not know may be in scope, and implemented for `Arc` (#639).
+        "struct_field_arc_with_unknown_trait_in_scope" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    holder!("use outside::EngineExt;\nuse std::sync::Arc;\n", "Arc<Engine>"),
                 ),
                 ("src/engine.rs", CFG_ATTR_ENGINE),
+            ],
+            false,
+        ),
+        // A blanket `impl` of a trait in scope gives `Arc<Engine>` a `target_fn` before
+        // `Engine`'s (#639).
+        "struct_field_arc_blanket_trait_method" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    holder!(
+                        "mod ext;\nuse crate::ext::Ext;\nuse std::sync::Arc;\n",
+                        "Arc<Engine>"
+                    ),
+                ),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+                (
+                    "src/ext.rs",
+                    "pub trait Ext {\n    fn target_fn(&self);\n}\n\nimpl<T> Ext for T {\n    fn target_fn(&self) {}\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `Run::target_fn` takes `self` by value, which rustc tries before the inherent method
+        // taking `&self`, and `Run` is in scope (#639).
+        "struct_field_by_value_trait_method_first" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::{Engine, Run};\n\npub struct Holder {\n    engine: Engine,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n",
+                ),
+                (
+                    "src/engine.rs",
+                    "#[derive(Clone, Copy)]\npub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n\npub trait Run {\n    fn target_fn(self);\n}\n\nimpl Run for Engine {\n    fn target_fn(self) {}\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // A local built by a tuple struct's constructor, and one bound to a unit struct (#654).
+        "tuple_struct_constructor_local" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::Engine;\n\npub fn caller_fn() {\n    let engine = Engine(1);\n    engine.target_fn();\n}\n",
+                ),
+                (
+                    "src/engine.rs",
+                    "pub struct Engine(pub u8);\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n",
+                ),
+            ],
+            true,
+        ),
+        "unit_struct_value_local" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::Engine;\n\npub fn caller_fn() {\n    let engine = Engine;\n    engine.target_fn();\n}\n",
+                ),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+            ],
+            true,
+        ),
+        // A tuple struct's name, as a value, is its constructor, not an instance (#654).
+        "tuple_struct_constructor_value_is_not_an_instance" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::Engine;\n\npub fn caller_fn() {\n    let engine = Engine;\n    engine.target_fn();\n}\n",
+                ),
+                (
+                    "src/engine.rs",
+                    "pub struct Engine(pub u8);\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // An associated function through an alias of an enum (#654).
+        "enum_alias_associated_function_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod shapes;\nuse crate::shapes::Alias;\n\npub fn caller_fn() {\n    Alias::target_fn();\n}\n",
+                ),
+                (
+                    "src/shapes.rs",
+                    "pub enum Shape {\n    Circle(u8),\n}\n\nimpl Shape {\n    pub fn target_fn() {}\n}\n\npub type Alias = Shape;\n",
+                ),
+            ],
+            true,
+        ),
+        // Two globs bring in `target_fn`, a module through `a` and a function through `b`: the
+        // call names the value (#654).
+        "glob_namespaces_value_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod a;\nmod b;\nmod c;\n\npub fn caller_fn() {\n    crate::c::target_fn();\n}\n",
+                ),
+                ("src/a.rs", "pub mod target_fn {\n    pub fn inner() {}\n}\n"),
+                ("src/b.rs", "pub fn target_fn() {}\n"),
+                ("src/c.rs", GLOBS_OF_A_AND_B),
+            ],
+            true,
+        ),
+        // The same globs bring in `f`, a module through `a` and a function through `b`: a path
+        // through `f` names the module (#654).
+        "glob_namespaces_module_path" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod a;\nmod b;\nmod c;\n\npub fn caller_fn() {\n    crate::c::f::target_fn();\n}\n",
+                ),
+                ("src/a.rs", "pub mod f {\n    pub fn target_fn() {}\n}\n"),
+                ("src/b.rs", "pub fn f() {}\n"),
+                ("src/c.rs", GLOBS_OF_A_AND_B),
+            ],
+            true,
+        ),
+        // Both globs bring in a module `f`: the path names neither (#654).
+        "glob_namespaces_module_clash" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod a;\nmod b;\nmod c;\n\npub fn caller_fn() {\n    crate::c::f::target_fn();\n}\n",
+                ),
+                ("src/a.rs", "pub mod f {\n    pub fn target_fn() {}\n}\n"),
+                ("src/b.rs", "pub mod f {\n    pub fn target_fn() {}\n}\n"),
+                ("src/c.rs", GLOBS_OF_A_AND_B),
             ],
             false,
         ),

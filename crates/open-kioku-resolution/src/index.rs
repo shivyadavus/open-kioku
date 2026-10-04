@@ -1,6 +1,6 @@
 use open_kioku_core::{
-    Binding, FileId, ModuleDeclarationSite, ModuleId, RustEnumVariants, Scope, ScopeId, ScopeKind,
-    SourceRange, Symbol, SymbolId, SymbolKind,
+    Binding, FileId, ModuleDeclarationSite, ModuleId, RustEnumVariants, RustImplBlock,
+    RustTypeAlias, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId, SymbolKind,
 };
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -158,6 +158,15 @@ pub struct ScopeIndex {
     rust_type_only_items: HashSet<SymbolId>,
     /// The variants of each Rust `enum`, by its symbol (#641).
     rust_enum_variants: HashMap<SymbolId, Vec<String>>,
+    /// The Rust unit structs, whose name's value is an instance of the struct (#654).
+    rust_unit_structs: HashSet<SymbolId>,
+    /// The type each Rust `type` alias is written to stand for, by the alias's symbol (#639).
+    rust_type_aliases: HashMap<SymbolId, String>,
+    /// Each Rust `impl` block, by the scope its methods are declared in (#639).
+    rust_impl_blocks: HashMap<ScopeId, RustImplBlock>,
+    /// The Rust files where a trait the index does not know may be in scope (#639): see
+    /// [`ScopeIndex::rust_trait_scope_is_open`].
+    rust_open_trait_scopes: HashSet<FileId>,
 }
 
 /// What a name a Rust module brings in with `use` names, for a path through the module:
@@ -720,6 +729,56 @@ impl ScopeIndex {
     /// The variants of the Rust `enum` `item`, `None` for any other item.
     pub fn rust_enum_variants(&self, item: &SymbolId) -> Option<&[String]> {
         self.rust_enum_variants.get(item).map(Vec::as_slice)
+    }
+
+    /// Records the Rust unit structs, `type` aliases and `impl` blocks the parser read (#639,
+    /// #654).
+    pub fn record_rust_type_shapes(
+        &mut self,
+        unit_structs: impl IntoIterator<Item = SymbolId>,
+        aliases: impl IntoIterator<Item = RustTypeAlias>,
+        impl_blocks: impl IntoIterator<Item = RustImplBlock>,
+    ) {
+        self.rust_unit_structs.extend(unit_structs);
+        self.rust_type_aliases.extend(
+            aliases
+                .into_iter()
+                .map(|alias| (alias.alias_symbol_id, alias.target)),
+        );
+        self.rust_impl_blocks.extend(
+            impl_blocks
+                .into_iter()
+                .map(|block| (block.scope_id.clone(), block)),
+        );
+    }
+
+    /// Whether the Rust struct `item` is a unit struct.
+    pub fn rust_is_unit_struct(&self, item: &SymbolId) -> bool {
+        self.rust_unit_structs.contains(item)
+    }
+
+    /// The type the Rust `type` alias `alias` is written to stand for, `None` for any other
+    /// symbol and for an alias of a type parameter.
+    pub fn rust_alias_target(&self, alias: &SymbolId) -> Option<&str> {
+        self.rust_type_aliases.get(alias).map(String::as_str)
+    }
+
+    /// The Rust `impl` block whose methods are declared in `scope`.
+    pub fn rust_impl_block(&self, scope: &ScopeId) -> Option<&RustImplBlock> {
+        self.rust_impl_blocks.get(scope)
+    }
+
+    /// Records the Rust files where a trait the index does not know may be in scope.
+    pub fn record_rust_open_trait_scopes(&mut self, files: impl IntoIterator<Item = FileId>) {
+        self.rust_open_trait_scopes.extend(files);
+    }
+
+    /// Whether a trait whose methods the index does not know may be in scope in the Rust file
+    /// `file` (#639): one an import from outside the repository and the standard library may
+    /// bring in, or a glob that may bring one in. Such a trait implemented for `Rc<S>` or
+    /// `Box<S>` may answer a method call on one before `S` does.
+    pub fn rust_trait_scope_is_open(&self, file: &FileId) -> bool {
+        self.rust_open_trait_scopes.contains(file)
     }
 
     /// The block scope of the inline `mod name { .. }` item `module`, `None` for a `mod name;`
