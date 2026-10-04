@@ -292,13 +292,56 @@ source and id, so the line an edge shows is its earliest call site among the str
 evidence and does not move when node identity changes. `call_sites`, `reference_sites` and
 relationship proofs are unions of every write and the evidence message a sorted union of
 their lines. The representative's own properties and provenance fields are kept; a field it
-leaves unset takes the smallest value any write gave, as for nodes.
+leaves unset takes the smallest value any write gave, as for nodes. A symbol-registry name match
+is not folded into a proven or corroborated edge between the same two nodes (see below).
 
 All of these fields are backward-compatible serde defaults on the wire: an MCP or
 `--json` consumer that has not seen a field still deserializes, and the serialized shape of
 a `GraphEdge` is unchanged by the 4.0 storage work.
 
 The graph builder creates file-to-symbol `DEFINES` edges from extracted symbols and `REFERENCES` edges from persisted exact symbol occurrences. Heuristic reference expansion is intentionally avoided for common repeated names; richer reference coverage should come from configured SCIP indexes or future language-specific resolvers. SQLite persists `graph_nodes` and `graph_edges`, and `open-kioku-storage::GraphStore` exposes neighborhood and shortest-path traversal to CLI and MCP callers.
+
+A symbol-registry fact names the indexed symbol it resolved to (`AnalysisFact::target_symbol_id`),
+and its `CALLS` or `REFERENCES` edge ends at that symbol's node, which every symbol-keyed read
+(impact, callers and callees, the context pack's graph stream) looks up. Until
+`ri3-graph-emission-v4` it ended at an `analysis:<Kind>:<hash>` node made from the symbol's
+label, beside the symbol's own node, so none of those reads reached it and `ok impact` did not
+list the dependent even as a possibility (#475). Reaching the symbol does not make the match any
+stronger. The edge carries no relationship proof, so its authority is `heuristic` wherever it is
+read:
+
+- `ok impact` and MCP `impact_analysis` list the dependent under `possible_impact`, never
+  `proven_impact`, with a reason that names the pass that inferred it
+  (`no structural proof; inferred by open-kioku-symbol-registry/<strategy>`). A dependent
+  `proven_impact` already lists (same path and symbol, through any changed symbol and edge type)
+  is not repeated there. Connecting these edges made possibilities far more numerous than
+  proofs, so the 25-entry cap on `possible_impact` keeps dependent files apart: each other
+  file's first entry, then each one's second, and so on, in path order, with the changed
+  file's own symbols last, and `possible_impact_omitted` counts what it cut (a lower bound: impact
+  reads at most 16 of the changed file's symbols and 40 inbound edges of each type per symbol
+  before the cap, and `relationship_impact_caveats` says when a read stopped at either limit;
+  `ok plan` names the count, or the truncation, in its confidence summary). Cut by path alone,
+  one busy file or the changed file's own symbols filled the list and dropped whole dependent
+  files.
+- The context pack's graph stream gives a neighbour `corroborating` retrieval authority only
+  when a proven or corroborated edge, or parsed containment, joins it to the anchor; a
+  neighbour reached only by heuristic edges is `heuristic`. The stream ranks and cuts its
+  candidates by that authority first and path second, so heuristic neighbours never take ranks
+  or slots ahead of evidenced ones, and only an evidenced graph neighbour gets the graph's
+  priority in budget selection.
+- MCP `get_references` callers and callees, `dependency_path` and each `explain_flow` flow return
+  `edge_authority`, each returned edge's authority keyed by edge id, since a serialized edge
+  carries its proofs but not the authority they amount to; `ok path` prints it after each hop.
+  `explain_flow` ends a flow at its first hop no proof establishes. The graph query language
+  (`ok graph query`) has no authority field yet, so a multi-hop pattern can cross these edges
+  without saying so.
+
+Where a proven or corroborated edge already joins the same two nodes with the same type, the
+registry edge is not written: folded in, its line would join the stronger edge's call sites,
+which that edge's proofs do not establish. Beside a heuristic edge of the same pair it is folded
+in as any other write, and the result stays heuristic. A registry edge from a symbol to itself is
+not written. A fact that names no symbol of this index still ends at a node made from its label,
+as do similarity facts (`SIMILAR_TO`), which name no symbol.
 
 Symbol-registry name matches are read from code only: a word inside a comment or a string literal
 is not a use of anything. The registry finds them with a lexical pass per language, not a parse.
@@ -478,7 +521,7 @@ Callers that ask a typed question read by type rather than filtering an untyped 
 reads each seed's inbound dependency edges type by type, because a file's own `DEFINES` edges
 rank with proven edges and would otherwise fill its window ahead of the heuristic inbound edges
 `possible_impact` is made of; MCP `get_references` callers and callees read `CALLS` by direction;
-`explain_flow` follows each hop's first outgoing `CALLS` edge in window order; and a typed
+`explain_flow` follows each hop's first outgoing `CALLS` edge in window order, up to the first heuristic one; and a typed
 multi-hop graph query reads that type at each hop.
 `edges_by_type` is a whole-graph scan paged by edge id, not a window; a caller that stops early
 must report the scan as truncated, as `query_relationship_edges` does with `scan_truncated`.

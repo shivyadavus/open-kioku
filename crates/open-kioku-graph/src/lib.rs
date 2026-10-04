@@ -428,23 +428,58 @@ impl InMemoryGraph {
                 })
                 .unwrap_or_else(|| identity::file_node_id(&file.path));
 
-            let target_node = GraphNode {
-                id: analysis_node_id(fact.target_kind.clone(), &fact.target),
-                node_type: fact.target_kind.clone(),
-                label: fact.target.clone(),
-                file_id: None,
-                symbol_id: None,
-                properties: analysis_node_properties(fact),
-                source_pass: Some(fact.source.to_string()),
-                ambiguity: analysis_fact_ambiguity(fact),
-                ..Default::default()
+            // A fact that resolved to an indexed symbol ends at that symbol's node, which every
+            // symbol-keyed read (impact, callers) looks up. A node made from the label instead
+            // stood beside the symbol's, reached by nothing that reads the symbol (#475). The
+            // symbol node is left as its own write made it: the fact names where its edge ends,
+            // and lends the node none of its properties.
+            let target_symbol_node = fact
+                .target_symbol_id
+                .as_ref()
+                .and_then(|symbol_id| symbols_by_id.get(symbol_id.0.as_str()))
+                .map(|symbol| identity::symbol_node_id(symbol));
+            let target_node_id = match target_symbol_node {
+                Some(node_id) => {
+                    // Every proof-bearing write that can end at a symbol node (a resolved
+                    // relationship, an exact occurrence) is already in the buffer. Folding this
+                    // proof-less fact into such an edge would union its line into the edge's
+                    // sites, which the edge's proofs do not establish; the stronger edge already
+                    // says what this one would.
+                    // A symbol's use of itself is no dependency, and a label node kept the two
+                    // apart only by accident.
+                    if node_id == source_node
+                        || buffer.holds_edge_above_heuristic(
+                            &source_node,
+                            &node_id,
+                            &fact.edge_type,
+                        )
+                    {
+                        continue;
+                    }
+                    node_id
+                }
+                None => {
+                    let target_node = GraphNode {
+                        id: analysis_node_id(fact.target_kind.clone(), &fact.target),
+                        node_type: fact.target_kind.clone(),
+                        label: fact.target.clone(),
+                        file_id: None,
+                        symbol_id: None,
+                        properties: analysis_node_properties(fact),
+                        source_pass: Some(fact.source.to_string()),
+                        ambiguity: analysis_fact_ambiguity(fact),
+                        ..Default::default()
+                    };
+                    let node_id = target_node.id.clone();
+                    buffer.upsert_node(target_node);
+                    node_id
+                }
             };
-            buffer.upsert_node(target_node.clone());
 
             let edge_id = identity::edge_id(
                 fact.edge_type.clone(),
                 &source_node,
-                &target_node.id,
+                &target_node_id,
                 Some(&fact.id),
             );
 
@@ -453,7 +488,7 @@ impl InMemoryGraph {
             let mut edge = GraphEdge {
                 id: edge_id.clone(),
                 from: source_node,
-                to: target_node.id,
+                to: target_node_id,
                 edge_type: fact.edge_type.clone(),
                 properties: analysis_edge_properties(fact),
                 source_pass: Some(fact.source.to_string()),
@@ -987,6 +1022,7 @@ mod tests {
             symbol_id: Some(symbol.id.clone()),
             target: "GET /orders".into(),
             target_kind: GraphNodeType::Endpoint,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::ExposesEndpoint,
             range: Some(LineRange::single(3)),
             confidence: Confidence::Medium,
@@ -1058,6 +1094,7 @@ mod tests {
             symbol_id: None,
             target: target.into(),
             target_kind: GraphNodeType::File,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::DerivedFrom,
             range: Some(LineRange::single(2)),
             confidence,
@@ -1443,6 +1480,7 @@ mod tests {
             symbol_id: None,
             target: "foo".into(),
             target_kind: GraphNodeType::Function,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::Calls,
             range: None,
             confidence: Confidence::High,
@@ -1480,6 +1518,7 @@ mod tests {
                 symbol_id: None,
                 target: target.into(),
                 target_kind: kind,
+                target_symbol_id: None,
                 edge_type,
                 range: None,
                 confidence: Confidence::High,
@@ -1644,6 +1683,7 @@ mod tests {
             symbol_id: None,
             target: "GET /api".into(),
             target_kind: GraphNodeType::Endpoint,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::ExposesEndpoint,
             range: None,
             confidence: Confidence::High,
@@ -1693,6 +1733,194 @@ mod tests {
             .nodes
             .values()
             .any(|n| n.node_type == GraphNodeType::Endpoint));
+    }
+    /// A symbol-registry fact from `caller` (in `a.rs`) that resolved a name on `line` to
+    /// `callee`, as `fact_for_resolution` writes one.
+    fn registry_fact(caller: &Symbol, callee: &Symbol, line: u32) -> AnalysisFact {
+        AnalysisFact {
+            id: format!("registry-{}-{line}", callee.id.0),
+            file_id: caller.file_id.clone(),
+            symbol_id: Some(caller.id.clone()),
+            target: callee.qualified_name.clone(),
+            target_kind: GraphNodeType::Function,
+            target_symbol_id: Some(callee.id.clone()),
+            edge_type: GraphEdgeType::Calls,
+            range: Some(LineRange::single(line)),
+            confidence: Confidence::High,
+            source: "open-kioku-symbol-registry/unique-project-name".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "symbol registry resolved `settle` to `ledger::settle`".into(),
+        }
+    }
+
+    fn registry_pair() -> (Vec<File>, Symbol, Symbol) {
+        let mut callee = make_symbol("s-settle", "b", "settle");
+        callee.qualified_name = "ledger::settle".into();
+        let mut caller = make_symbol("s-close", "a", "close");
+        caller.qualified_name = "books::close".into();
+        (vec![make_file("a"), make_file("b")], caller, callee)
+    }
+
+    fn calls_between<'a>(graph: &'a InMemoryGraph, from: &str, to: &str) -> Vec<&'a GraphEdge> {
+        graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.edge_type == GraphEdgeType::Calls && edge.from.0 == from && edge.to.0 == to
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_registry_fact_for_an_indexed_symbol_ends_at_the_symbol_node() {
+        let (files, caller, callee) = registry_pair();
+        let fact = registry_fact(&caller, &callee, 7);
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &files,
+            &[caller, callee],
+            &[],
+            &[],
+            &[],
+            &[fact],
+        );
+        let calls = calls_between(&graph, "symbol:s-close", "symbol:s-settle");
+        assert_eq!(calls.len(), 1, "{:#?}", graph.edges);
+        // Reaching the symbol does not make the guess any stronger.
+        assert_eq!(
+            calls[0].relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
+        assert!(calls[0].relationship_proofs().is_empty());
+        assert_eq!(
+            calls[0].evidence.source.as_str(),
+            "open-kioku-symbol-registry/unique-project-name"
+        );
+        assert!(
+            graph.nodes.keys().all(|id| !id.starts_with("analysis:")),
+            "no label node beside the symbol's: {:?}",
+            graph.nodes.keys().collect::<Vec<_>>()
+        );
+        // The symbol node is its own write's, not the fact's.
+        let node = &graph.nodes["symbol:s-settle"];
+        assert_eq!(node.symbol_id, Some(SymbolId::new("s-settle")));
+        assert_eq!(node.source_pass, None);
+    }
+
+    #[test]
+    fn a_fact_naming_no_indexed_symbol_keeps_its_label_node() {
+        let (files, caller, callee) = registry_pair();
+        let mut unnamed = registry_fact(&caller, &callee, 7);
+        unnamed.target_symbol_id = None;
+        let mut unindexed = registry_fact(&caller, &callee, 9);
+        unindexed.target = "ledger::reopen".into();
+        unindexed.target_symbol_id = Some(SymbolId::new("s-missing"));
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &files,
+            &[caller, callee],
+            &[],
+            &[],
+            &[],
+            &[unnamed, unindexed],
+        );
+        for label in ["ledger::settle", "ledger::reopen"] {
+            let id = identity::legacy_analysis_node_id(GraphNodeType::Function, label);
+            assert!(graph.nodes.contains_key(&id.0), "{label}");
+            assert_eq!(calls_between(&graph, "symbol:s-close", &id.0).len(), 1);
+        }
+        assert!(calls_between(&graph, "symbol:s-close", "symbol:s-settle").is_empty());
+    }
+
+    #[test]
+    fn a_registry_fact_does_not_fold_into_a_proven_edge_between_the_same_symbols() {
+        let (files, caller, callee) = registry_pair();
+        let proven = ResolvedRelationship {
+            from: caller.id.clone(),
+            to: callee.id.clone(),
+            edge_type: GraphEdgeType::Calls,
+            confidence: Confidence::Exact,
+            call_site: Some(SourceRange {
+                start_line: 10,
+                start_column: 5,
+                end_line: 10,
+                end_column: 11,
+            }),
+            evidence: Vec::new(),
+            proofs: call_relationship_proofs(&caller.id, &callee.id, 10),
+        };
+        // The registry read a second line the resolver did not prove.
+        let fact = registry_fact(&caller, &callee, 20);
+        let graph = InMemoryGraph::from_index_with_resolved_relationships(
+            &files,
+            &[caller, callee],
+            &[],
+            &[],
+            &[],
+            &[fact],
+            &[proven],
+        );
+        let calls = calls_between(&graph, "symbol:s-close", "symbol:s-settle");
+        assert_eq!(calls.len(), 1, "{:#?}", graph.edges);
+        let edge = calls[0];
+        assert_eq!(
+            edge.relationship_authority(),
+            RelationshipAuthority::Authoritative
+        );
+        assert_eq!(edge.evidence.source.as_str(), "open-kioku-resolution");
+        assert!(
+            !edge.evidence.message.contains("symbol registry"),
+            "{}",
+            edge.evidence.message
+        );
+        let lines = edge.properties["call_sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|site| site["start_line"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            vec![10],
+            "the unproven line joined the proven edge's sites"
+        );
+    }
+
+    #[test]
+    fn a_registry_fact_merges_with_a_proof_less_edge_and_stays_heuristic() {
+        let (files, caller, callee) = registry_pair();
+        let unproven = ResolvedRelationship {
+            from: caller.id.clone(),
+            to: callee.id.clone(),
+            edge_type: GraphEdgeType::Calls,
+            confidence: Confidence::Medium,
+            call_site: None,
+            evidence: Vec::new(),
+            proofs: Vec::new(),
+        };
+        let fact = registry_fact(&caller, &callee, 20);
+        let graph = InMemoryGraph::from_index_with_resolved_relationships(
+            &files,
+            &[caller, callee],
+            &[],
+            &[],
+            &[],
+            &[fact],
+            &[unproven],
+        );
+        let calls = calls_between(&graph, "symbol:s-close", "symbol:s-settle");
+        assert_eq!(calls.len(), 1, "{:#?}", graph.edges);
+        assert_eq!(
+            calls[0].relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
+    }
+
+    #[test]
+    fn a_registry_fact_resolving_to_its_own_symbol_draws_no_edge() {
+        let (files, caller, _) = registry_pair();
+        let fact = registry_fact(&caller, &caller, 3);
+        let graph =
+            InMemoryGraph::from_index_with_analysis(&files, &[caller], &[], &[], &[], &[fact]);
+        assert!(calls_between(&graph, "symbol:s-close", "symbol:s-close").is_empty());
     }
 }
 
@@ -1768,6 +1996,7 @@ mod ri3_static_import_authority_tests {
             symbol_id: None,
             target: "crates/engine/Cargo.toml".into(),
             target_kind: open_kioku_core::GraphNodeType::File,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::DependsOn,
             range: None,
             confidence,
@@ -1824,6 +2053,7 @@ mod ri3_import_resolution_authority_tests {
             symbol_id: None,
             target: target.path.to_string_lossy().into_owned(),
             target_kind: GraphNodeType::File,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::Imports,
             range: Some(LineRange::single(1)),
             confidence: Confidence::High,
@@ -1912,6 +2142,7 @@ mod ri3_import_resolution_authority_tests {
             symbol_id: None,
             target: target.into(),
             target_kind,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::Imports,
             range: Some(LineRange::single(1)),
             confidence,

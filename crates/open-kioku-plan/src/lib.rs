@@ -590,8 +590,20 @@ impl<'a> PlanEngine<'a> {
         // RI3.7: the plan states its relationship claims with their authority split rather
         // than presenting heuristic dependents as certainty.
         if !impact.proven_impact.is_empty() || !impact.possible_impact.is_empty() {
+            // The possible list is capped; a count of the shown entries alone read as all of them.
+            let possible_unlisted = if impact.possible_impact_omitted > 0 {
+                format!(
+                    " (at least {} more not listed)",
+                    impact.possible_impact_omitted
+                )
+            } else if !impact.relationship_impact_caveats.is_empty() {
+                // Reads stopped at their limits: what they left unread was never counted.
+                " (possibly more: the relationship reads were truncated)".to_string()
+            } else {
+                String::new()
+            };
             confidence_summary = format!(
-                "{confidence_summary} Relationship evidence: {} structurally proven dependent(s), {} possible (heuristic) dependent(s) retained without certainty.",
+                "{confidence_summary} Relationship evidence: {} structurally proven dependent(s), {} possible (heuristic) dependent(s){possible_unlisted} retained without certainty.",
                 impact.proven_impact.len(),
                 impact.possible_impact.len()
             );
@@ -651,6 +663,8 @@ impl<'a> PlanEngine<'a> {
                 indirect_impacts_omitted: 0,
                 proven_impact: Vec::new(),
                 possible_impact: Vec::new(),
+                possible_impact_omitted: 0,
+                relationship_impact_caveats: Vec::new(),
                 target: impact_target
                     .map(|target| target.path.display().to_string())
                     .unwrap_or_else(|| task.into()),
@@ -679,6 +693,8 @@ impl<'a> PlanEngine<'a> {
                 indirect_impacts_omitted: 0,
                 proven_impact: Vec::new(),
                 possible_impact: Vec::new(),
+                possible_impact_omitted: 0,
+                relationship_impact_caveats: Vec::new(),
                 target: task.into(),
                 direct_impacts: Vec::new(),
                 indirect_impacts: Vec::new(),
@@ -3394,6 +3410,8 @@ mod tests {
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            relationship_impact_caveats: Vec::new(),
             target: "tests/auth_flow.rs".into(),
             direct_impacts: Vec::new(),
             indirect_impacts: Vec::new(),
@@ -3615,6 +3633,7 @@ mod tests {
             symbol_id: None,
             target: "crate::payment".into(),
             target_kind: GraphNodeType::Module,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::Imports,
             range: None,
             confidence: Confidence::Low,
@@ -3644,6 +3663,7 @@ mod tests {
             symbol_id: None,
             target: "POST /login".into(),
             target_kind: GraphNodeType::Endpoint,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::ExposesEndpoint,
             range: Some(LineRange { start: 3, end: 5 }),
             confidence: Confidence::High,
@@ -3738,6 +3758,8 @@ mod tests {
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            relationship_impact_caveats: Vec::new(),
             target: "src/auth.rs".into(),
             direct_impacts,
             indirect_impacts: indirect
@@ -3810,6 +3832,8 @@ mod tests {
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            relationship_impact_caveats: Vec::new(),
             target: "src/auth.rs".into(),
             direct_impacts: vec![impact_result],
             indirect_impacts: Vec::new(),
@@ -3859,6 +3883,8 @@ mod tests {
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            relationship_impact_caveats: Vec::new(),
             target: "src/primary_00.rs".into(),
             direct_impacts: vec![wide, narrow.clone()],
             indirect_impacts: Vec::new(),
@@ -3980,6 +4006,8 @@ mod tests {
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            relationship_impact_caveats: Vec::new(),
             target: "src/limits.rs".into(),
             direct_impacts: vec![exact],
             indirect_impacts: Vec::new(),
@@ -4065,6 +4093,8 @@ mod tests {
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            relationship_impact_caveats: Vec::new(),
             target: "src/auth.rs".into(),
             direct_impacts: starts
                 .iter()
@@ -4634,6 +4664,8 @@ mod tests {
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
             possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            relationship_impact_caveats: Vec::new(),
             target: "src/status_setup_doctor.rs".into(),
             direct_impacts: vec![impact_hit],
             indirect_impacts: Vec::new(),
@@ -4671,6 +4703,8 @@ mod tests {
                 proven("src/session.rs", GraphEdgeType::Calls),
             ],
             possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            relationship_impact_caveats: Vec::new(),
             target: "src/auth.rs".into(),
             direct_impacts: Vec::new(),
             indirect_impacts: Vec::new(),
@@ -4718,6 +4752,8 @@ mod tests {
                 reason: "fixture".into(),
             }],
             possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            relationship_impact_caveats: Vec::new(),
             target: "src/lib.rs".into(),
             direct_impacts: Vec::new(),
             indirect_impacts: Vec::new(),

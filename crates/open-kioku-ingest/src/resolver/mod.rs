@@ -333,6 +333,7 @@ fn analysis_fact_for_resolution(
         symbol_id: resolution.target_symbol.clone(),
         target,
         target_kind,
+        target_symbol_id: None,
         edge_type,
         range: resolution.import.range.clone(),
         confidence: resolution.confidence,

@@ -675,6 +675,7 @@ mod tests {
             symbol_id: None,
             target: "src/other.rs".into(),
             target_kind: open_kioku_core::GraphNodeType::File,
+            target_symbol_id: None,
             edge_type: open_kioku_core::GraphEdgeType::ChangedBy,
             range: None,
             confidence: open_kioku_core::Confidence::Medium,

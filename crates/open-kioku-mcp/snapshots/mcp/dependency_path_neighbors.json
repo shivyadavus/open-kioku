@@ -2,6 +2,7 @@
   "id": "dependency-neighbors",
   "jsonrpc": "2.0",
   "result": {
+    "edge_authority": {},
     "edges": [],
     "evidence_source": "sqlite_graph_store",
     "node": "file:src/billing.rs",

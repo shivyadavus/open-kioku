@@ -988,8 +988,16 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 if path.is_empty() {
                     println!("No dependency path found.");
                 } else {
+                    // Each hop's authority, as MCP `dependency_path` reports it: a route through a
+                    // name match the symbol registry made is a possible route, not a traced one.
                     for edge in &path {
-                        println!("{} -> {} {:?}", edge.from, edge.to, edge.edge_type);
+                        println!(
+                            "{} -> {} {:?} [{:?}]",
+                            edge.from,
+                            edge.to,
+                            edge.edge_type,
+                            edge.relationship_authority()
+                        );
                     }
                 }
             })?;

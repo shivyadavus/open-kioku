@@ -2,9 +2,9 @@ use super::{compare_result_position, CandidateRequest, CandidateStream, StreamCa
 use crate::evidence_pairs::{merge_evidence, push_evidence};
 use crate::{search_candidates, TaskSearchIntent};
 use open_kioku_core::{
-    identity::symbol_node_id, AnalysisFact, CodeChunk, DocumentSection, EvidenceSourceType, File,
-    GraphEdge, IndexMode, LineRange, NodeId, RetrievalAuthority, RetrievalSourceKind, SearchResult,
-    Symbol, TestTarget,
+    graph_edge_window_tier, identity::symbol_node_id, AnalysisFact, CodeChunk, DocumentSection,
+    EvidenceSourceType, File, GraphEdge, IndexMode, LineRange, NodeId, RetrievalAuthority,
+    RetrievalSourceKind, SearchResult, Symbol, TestTarget,
 };
 use open_kioku_ranking::rerank_baseline;
 use open_kioku_storage::{HistoryStore, OkStore};
@@ -431,14 +431,30 @@ impl<'a> BuiltinCandidateContext<'a> {
                             0.9,
                         );
                         let key = normalized_path(&file.path);
-                        let mut candidate = StreamCandidate::from_result(
-                            result,
-                            RetrievalAuthority::Corroborating,
-                            "evidence-graph neighbor backed by a direct edge from an exact symbol",
-                        );
+                        let mut candidate = if neighbor_authority(&node_id, &node.id, &edges)
+                            == RetrievalAuthority::Corroborating
+                        {
+                            StreamCandidate::from_result(
+                                result,
+                                RetrievalAuthority::Corroborating,
+                                "evidence-graph neighbor backed by a direct edge from an exact symbol",
+                            )
+                        } else {
+                            StreamCandidate::from_result(
+                                result,
+                                RetrievalAuthority::Heuristic,
+                                "evidence-graph neighbor reached from an exact symbol only by heuristic edges",
+                            )
+                        };
                         candidate.evidence_refs = edge_ids;
                         if let Some(existing) = by_path.get_mut(&key) {
                             merge_evidence(&mut existing.result, &candidate.result);
+                            // A file several neighbours share is as strong as its strongest
+                            // edge, whichever neighbour was read first.
+                            if candidate.authority > existing.authority {
+                                existing.authority = candidate.authority;
+                                existing.rationale = candidate.rationale;
+                            }
                             existing.evidence_refs.extend(candidate.evidence_refs);
                             existing.evidence_refs.sort();
                             existing.evidence_refs.dedup();
@@ -460,7 +476,7 @@ impl<'a> BuiltinCandidateContext<'a> {
             }
         }
         let mut candidates = by_path.into_values().collect::<Vec<_>>();
-        candidates.sort_by(|left, right| left.result.path.cmp(&right.result.path));
+        sort_graph_candidates(&mut candidates);
         candidates.truncate(request.limit);
         CandidateStream {
             source: RetrievalSourceKind::Graph,
@@ -946,6 +962,42 @@ fn indexed_document_stream(
             .take(request.limit)
             .collect(),
     )
+}
+
+/// Graph candidates in the order the limit cuts them and fusion ranks them: neighbours an edge of
+/// evidence reaches first, then by path. Sorted by path alone, the heuristic neighbours a
+/// symbol-registry name match reaches took the stream's first ranks whenever their paths sorted
+/// first, and past the limit cut the proven neighbours entirely (#475).
+fn sort_graph_candidates(candidates: &mut [StreamCandidate]) {
+    candidates.sort_by(|left, right| {
+        right
+            .authority
+            .cmp(&left.authority)
+            .then_with(|| left.result.path.cmp(&right.result.path))
+    });
+}
+
+/// How far a graph neighbour of an exact anchor can be trusted: as far as the strongest edge
+/// joining the two, in the evidence tiers windows are cut by (`graph_edge_window_tier`). The
+/// anchor is exact; the neighbour is only as good as the edge that reaches it. A proven or
+/// corroborated relationship, or containment a parser extracted, is evidence; an edge in the
+/// heuristic tier (a symbol-registry name match, an occurrence no exact index confirmed) says
+/// the two may be related, however confident its resolver was.
+fn neighbor_authority(
+    anchor: &NodeId,
+    neighbor: &NodeId,
+    edges: &[GraphEdge],
+) -> RetrievalAuthority {
+    let proven = edges.iter().any(|edge| {
+        ((&edge.from == anchor && &edge.to == neighbor)
+            || (&edge.from == neighbor && &edge.to == anchor))
+            && graph_edge_window_tier(edge) > 0
+    });
+    if proven {
+        RetrievalAuthority::Corroborating
+    } else {
+        RetrievalAuthority::Heuristic
+    }
 }
 
 pub(super) fn incident_edge_ids(
@@ -1717,6 +1769,84 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn graph_candidates_rank_evidenced_neighbors_before_heuristic_ones() {
+        let mut candidates = vec![
+            candidate(
+                "src/z_ledger.rs",
+                1,
+                RetrievalAuthority::Corroborating,
+                None,
+            ),
+            candidate("src/a_audit.rs", 1, RetrievalAuthority::Heuristic, None),
+            candidate("src/b_books.rs", 1, RetrievalAuthority::Heuristic, None),
+            candidate("src/y_store.rs", 1, RetrievalAuthority::Corroborating, None),
+        ];
+        sort_graph_candidates(&mut candidates);
+        let paths = positions(&candidates)
+            .into_iter()
+            .map(|(path, _, _)| path)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                "src/y_store.rs",
+                "src/z_ledger.rs",
+                "src/a_audit.rs",
+                "src/b_books.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_graph_neighbor_is_corroborating_only_through_a_proven_edge() {
+        use open_kioku_core::{RelationshipProof, RelationshipProofKind};
+        let (anchor, neighbor) = (NodeId::new("symbol:a"), NodeId::new("symbol:b"));
+        let edge = |id: &str, from: &NodeId, to: &NodeId| GraphEdge {
+            id: open_kioku_core::EdgeId::new(id),
+            from: from.clone(),
+            to: to.clone(),
+            edge_type: open_kioku_core::GraphEdgeType::Calls,
+            ..Default::default()
+        };
+        // A confident symbol-registry name match: no proof, however high its confidence.
+        let mut guess = edge("edge:guess", &neighbor, &anchor);
+        guess.evidence.confidence = Confidence::High;
+        guess.evidence.source_type = EvidenceSourceType::StaticAnalysis;
+        assert_eq!(
+            neighbor_authority(&anchor, &neighbor, std::slice::from_ref(&guess)),
+            RetrievalAuthority::Heuristic
+        );
+
+        let mut proven = edge("edge:proven", &anchor, &neighbor);
+        proven
+            .set_relationship_proofs(vec![RelationshipProof::new(
+                RelationshipProofKind::ExactReference,
+                "fixture",
+                1,
+            )])
+            .unwrap();
+        assert_eq!(
+            neighbor_authority(&anchor, &neighbor, &[guess.clone(), proven.clone()]),
+            RetrievalAuthority::Corroborating
+        );
+        // A proven edge elsewhere in the window lends this neighbour nothing.
+        let elsewhere = NodeId::new("symbol:c");
+        assert_eq!(
+            neighbor_authority(&anchor, &elsewhere, &[guess, proven]),
+            RetrievalAuthority::Heuristic
+        );
+        // Containment a parser extracted is a fact about where the anchor lives.
+        let file = NodeId::new("file:src/ledger.rs");
+        let mut defines = edge("edge:defines", &file, &anchor);
+        defines.edge_type = open_kioku_core::GraphEdgeType::Defines;
+        defines.evidence.source_type = EvidenceSourceType::TreeSitter;
+        assert_eq!(
+            neighbor_authority(&anchor, &file, &[defines]),
+            RetrievalAuthority::Corroborating
+        );
     }
 
     #[test]

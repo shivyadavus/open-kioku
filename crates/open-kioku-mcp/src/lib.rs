@@ -959,6 +959,7 @@ async fn dispatch(
                 let mut response = json!({
                     "node": from,
                     "nodes": window.nodes,
+                    "edge_authority": edge_authority(&window.edges),
                     "edges": window.edges,
                     "evidence_source": "sqlite_graph_store"
                 });
@@ -968,10 +969,12 @@ async fn dispatch(
                 return Ok(response);
             };
             let to = open_kioku_graph::resolve_graph_node(store, to)?;
+            let edges = store.shortest_path(&from, &to, 12)?;
             Ok(json!({
                 "from": from,
                 "to": to,
-                "edges": store.shortest_path(&from, &to, 12)?,
+                "edge_authority": edge_authority(&edges),
+                "edges": edges,
                 "evidence_source": "sqlite_graph_store"
             }))
         }
@@ -1989,7 +1992,11 @@ where
             None => Vec::new(),
         };
         if !call_path.is_empty() {
-            flow_candidates.push(json!({"entrypoint": endpoint, "call_path": call_path}));
+            flow_candidates.push(json!({
+                "entrypoint": endpoint,
+                "edge_authority": edge_authority(&call_path),
+                "call_path": call_path
+            }));
         }
     }
     let endpoint_limit = limit(params);
@@ -2012,7 +2019,7 @@ where
             "caveats".into(),
             json!([
                 "flows are derived only from persisted endpoint nodes and directed CALLS graph edges",
-                "each flow includes up to four directed call hops; repositories without endpoint or call evidence return no flow entries"
+                "each flow includes up to four directed call hops, and ends at the first hop no relationship proof establishes; repositories without endpoint or call evidence return no flow entries"
             ]),
         );
     }
@@ -2039,10 +2046,28 @@ where
         else {
             break;
         };
+        // A hop no proof establishes (a symbol-registry name match) may be where the flow goes,
+        // and is reported as the flow's last hop; walking on from it would chain guesses into
+        // what reads as a traced path.
+        let heuristic =
+            edge.relationship_authority() == open_kioku_core::RelationshipAuthority::Heuristic;
         current = edge.to.0.clone();
         call_path.push(edge);
+        if heuristic {
+            break;
+        }
     }
     Ok(call_path)
+}
+
+/// Each edge's authority, recomputed from its proofs and keyed by edge id. A serialized edge
+/// carries its proofs but not the authority they amount to, so a proof-less edge read alone
+/// shows only its resolver's confidence, which says nothing about whether it is established.
+fn edge_authority(edges: &[open_kioku_core::GraphEdge]) -> Value {
+    json!(edges
+        .iter()
+        .map(|edge| (edge.id.0.clone(), edge.relationship_authority()))
+        .collect::<std::collections::BTreeMap<_, _>>())
 }
 
 fn continuation_handle(method: &str, params: &Value) -> String {
@@ -3033,12 +3058,14 @@ where
         "evidence_source": "sqlite_graph_store",
         "direction": if inbound { "inbound" } else { "outbound" },
         "nodes": nodes,
+        "edge_authority": edge_authority(&edges),
         "edges": edges,
         "returned": edges.len(),
         "limit": limit,
         "has_more": has_more,
         "caveats": [
-            "call edges are persisted CALLS graph edges; a repository without call evidence returns none rather than an inferred path"
+            "call edges are persisted CALLS graph edges; a repository without call evidence returns none rather than an inferred path",
+            "an edge whose edge_authority is heuristic carries no relationship proof (a symbol-registry name match, for one): a possible call, not an established one"
         ],
     }))
 }
@@ -4813,6 +4840,7 @@ mod tests {
                 symbol_id: Some(implementation_symbol.id.clone()),
                 target: "InvoicePublisher".into(),
                 target_kind: GraphNodeType::Interface,
+                target_symbol_id: None,
                 edge_type: GraphEdgeType::Implements,
                 range: Some(LineRange::single(15)),
                 confidence: Confidence::High,

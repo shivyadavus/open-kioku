@@ -2446,6 +2446,12 @@ pub struct AnalysisFact {
     pub symbol_id: Option<SymbolId>,
     pub target: String,
     pub target_kind: GraphNodeType,
+    /// The indexed symbol `target` names, when the fact resolved to one. The graph draws the
+    /// fact's edge to that symbol's node rather than to a node made from the label, which no
+    /// symbol-keyed read (impact, callers) reaches. Naming the symbol says where the edge ends,
+    /// not how sure the fact is: authority still comes from the edge's proofs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_symbol_id: Option<SymbolId>,
     pub edge_type: GraphEdgeType,
     pub range: Option<LineRange>,
     pub confidence: Confidence,
@@ -5622,6 +5628,18 @@ pub struct ImpactReport {
     /// possibilities, never as structural facts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub possible_impact: Vec<RelationshipImpact>,
+    /// Possible dependents read but cut by the cap on `possible_impact`, which keeps dependents
+    /// in other files ahead of the changed file's own. Counted, not listed, so a capped list is
+    /// not read as every possibility. A lower bound: impact reads a bounded number of the changed
+    /// file's symbols and of each one's inbound edges per type before this cap applies.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub possible_impact_omitted: usize,
+    /// What the relationship reads behind `proven_impact` and `possible_impact` left unread: a
+    /// changed file with more symbols than impact reads, an edge type whose inbound read stopped
+    /// at its limit, a proven list cut by its cap. Empty when nothing was cut, so an empty
+    /// `possible_impact_omitted` beside a caveat here is not read as nothing omitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relationship_impact_caveats: Vec<String>,
 }
 
 impl ImpactReport {

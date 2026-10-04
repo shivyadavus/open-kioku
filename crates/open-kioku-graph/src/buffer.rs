@@ -1,6 +1,6 @@
 use open_kioku_core::{
     identity, EdgeId, Evidence, EvidenceSourceType, GraphEdge, GraphEdgeType, GraphNode, NodeId,
-    RELATIONSHIP_PROOFS_PROPERTY,
+    RelationshipAuthority, RELATIONSHIP_PROOFS_PROPERTY,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -462,6 +462,23 @@ impl GraphBuffer {
             self.edges.push(incoming);
             id
         }
+    }
+
+    /// Whether an edge already held for `(from, to, edge_type)` carries more than heuristic
+    /// authority. A heuristic write folded into such an edge would add its sites and message to
+    /// a relationship its proofs establish only at their own sites, so a writer of heuristic
+    /// edges asks this first and leaves the stronger edge alone.
+    pub fn holds_edge_above_heuristic(
+        &self,
+        from: &NodeId,
+        to: &NodeId,
+        edge_type: &GraphEdgeType,
+    ) -> bool {
+        self.edges_by_key
+            .get(&(from.clone(), to.clone(), edge_type.clone()))
+            .is_some_and(|&index| {
+                self.edges[index].edge.relationship_authority() > RelationshipAuthority::Heuristic
+            })
     }
 
     pub fn merge(&mut self, other: GraphBuffer) -> GraphBufferMergeReport {

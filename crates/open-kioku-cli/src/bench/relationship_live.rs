@@ -2620,6 +2620,21 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // A call inside a macro's token tree is not parsed as a call, so only the
+        // symbol-registry pass links it to the imported `target_fn`. That edge ends at the
+        // function's node, and reaching the real symbol must not make it any stronger (#475).
+        "macro_token_tree_call_heuristic" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod clock;\npub mod worker;\n"),
+                ("src/clock.rs", "pub fn target_fn() -> u8 {\n    1\n}\n"),
+                (
+                    "src/worker.rs",
+                    "use crate::clock::target_fn;\n\npub fn caller_fn() -> String {\n    format!(\"{}\", target_fn())\n}\n",
+                ),
+            ],
+            false,
+        ),
         // An item of a sibling `mod` block is not in scope by its bare name, so neither the
         // resolver nor the symbol-registry pass may link the call to it (#526).
         "sibling_mod_item_heuristic" => (

@@ -2624,7 +2624,7 @@
   "metamorphic_equivalence": 1.0,
   "metamorphic_equivalent_groups": 42,
   "metamorphic_groups": 42,
-  "observation_digest": "808d5a26c3588873c4fc822e54892fac7dbb3fd9124c9290555304925507e86f",
+  "observation_digest": "b33163b4a59c7be765542ced0c3115bfd60eefeace36160d0423fc55ad7e9130",
   "observed_proof_kind_counts": {
     "exact_call_site": 12,
     "exact_occurrence": 30,

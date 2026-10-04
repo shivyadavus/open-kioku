@@ -4,9 +4,13 @@
   "result": {
     "callers": {
       "caveats": [
-        "call edges are persisted CALLS graph edges; a repository without call evidence returns none rather than an inferred path"
+        "call edges are persisted CALLS graph edges; a repository without call evidence returns none rather than an inferred path",
+        "an edge whose edge_authority is heuristic carries no relationship proof (a symbol-registry name match, for one): a possible call, not an established one"
       ],
       "direction": "inbound",
+      "edge_authority": {
+        "edge-publish-calls-archive": "heuristic"
+      },
       "edges": [
         {
           "edge_type": "CALLS",
