@@ -3965,9 +3965,10 @@ pub const INDEX_COVERAGE_LANGUAGE_FLOOR: usize = 50;
 /// percentage: 25 of 10,012 Java files is 99.75% and still a dropped package.
 pub const INDEX_COVERAGE_MISSING_FILES_WARN: usize = 20;
 
-/// At most this many pruned directories are named in [`IndexCoverage::pruned`]; the rest are
-/// counted in `pruned_unlisted`. A monorepo with a `node_modules` per package would otherwise
-/// put thousands of entries into every `repo_status` answer.
+/// At most this many pruned directories are named in a status summary of
+/// [`IndexCoverage::pruned`] ([`IndexCoverage::status_view`]); the rest are counted in
+/// `pruned_unlisted`. A monorepo with a `node_modules` per package would otherwise put
+/// thousands of entries into every `repo_status` answer.
 pub const PRUNED_DIRS_LISTED: usize = 50;
 
 /// Why discovery cut a directory from the walk.
@@ -4067,14 +4068,16 @@ pub struct IndexCoverage {
     /// Directories pruned before discovery as build output or dependencies, listed or not.
     #[serde(default)]
     pub pruned_dirs: usize,
-    /// The pruned directories by path: undeclared build directories holding tracked source first,
-    /// then by
-    /// path, at most [`PRUNED_DIRS_LISTED`]. Empty on a manifest written before paths were recorded,
-    /// where `pruned_dirs` alone says something was pruned.
+    /// The pruned directories by path: undeclared build directories holding tracked source
+    /// first, then those holding any tracked source, then by path. The manifest stores every
+    /// one, since plans forbid edits under each; status summaries show the first
+    /// [`PRUNED_DIRS_LISTED`] ([`IndexCoverage::status_view`]). A manifest written by 4.0
+    /// releases after #477 stored at most that many. Empty on a manifest written before paths
+    /// were recorded, where `pruned_dirs` alone says something was pruned.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pruned: Vec<PrunedDir>,
-    /// Pruned directories counted in `pruned_dirs` but not in `pruned`: past the cap, or a
-    /// secret-like path that is not shown.
+    /// Pruned directories counted in `pruned_dirs` but not in `pruned`: secret-like paths that
+    /// are not shown, and in a status summary those past the cap.
     #[serde(default, skip_serializing_if = "is_zero_count")]
     pub pruned_unlisted: usize,
     /// Directory reads that failed (`skip_counts.error`); their files are unknown.
@@ -4194,9 +4197,40 @@ impl IndexCoverage {
                 .then_with(|| a.path.cmp(&b.path))
         });
         self.pruned_dirs = listed.len() + unlisted;
-        listed.truncate(PRUNED_DIRS_LISTED);
-        self.pruned_unlisted = self.pruned_dirs - listed.len();
+        self.pruned_unlisted = unlisted;
         self.pruned = listed;
+    }
+
+    /// This record as a status summary shows it: at most [`PRUNED_DIRS_LISTED`] pruned
+    /// directories, the rest counted in `pruned_unlisted`. A monorepo with a `node_modules` per
+    /// package would otherwise put thousands of entries into every `repo_status` answer; the
+    /// stored record, and `--full` / `detail: "full"`, keep them all.
+    pub fn status_view(&self) -> IndexCoverage {
+        let mut view = self.clone();
+        if view.pruned.len() > PRUNED_DIRS_LISTED {
+            view.pruned_unlisted += view.pruned.len() - PRUNED_DIRS_LISTED;
+            view.pruned.truncate(PRUNED_DIRS_LISTED);
+        }
+        view
+    }
+
+    /// An indexed file discovery would never have discovered: one an imported index holds
+    /// under a directory this repository prunes on strong evidence, where discovery counts no
+    /// file. Removed from `indexed` and `discovered` alike, so the ratio reads as `ok index`
+    /// here would leave it.
+    pub fn record_indexed_undiscovered(&mut self, language: &Language, generated: bool) {
+        self.discovered = self.discovered.saturating_sub(1);
+        self.indexed = self.indexed.saturating_sub(1);
+        if generated {
+            self.generated = self.generated.saturating_sub(1);
+        }
+        if let Some(entry) = self.by_language.get_mut(language.key()) {
+            entry.discovered = entry.discovered.saturating_sub(1);
+            entry.indexed = entry.indexed.saturating_sub(1);
+            if generated {
+                entry.generated = entry.generated.saturating_sub(1);
+            }
+        }
     }
 
     /// Git-tracked programming-language files the index does not hold because a directory
@@ -4917,6 +4951,12 @@ impl IndexManifest {
                 "skipped_paths".into(),
                 serde_json::to_value(self.quality.skipped_paths_summary(STATUS_SAMPLE_LIMIT))?,
             );
+            if let Some(coverage) = &self.quality.coverage {
+                quality.insert(
+                    "coverage".into(),
+                    serde_json::to_value(coverage.status_view())?,
+                );
+            }
         }
         Ok(value)
     }
@@ -6163,11 +6203,11 @@ mod tests {
         GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
         GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, IndexCoverage,
         IndexManifest, IndexMode, IndexQuality, Language, LineRange, NegativeEvidence, NodeId,
-        Owner, PathInterner, QualityNote, QualityNoteKind, Repository, RepositoryId, ScopeId,
-        ScoreComponent, SearchResult, SharedPath, SharedStr, SkipReason, SkipSource, SkippedPath,
-        SourceRange, StatusDetail, StringInterner, Symbol, SymbolId, Visibility,
-        COVERAGE_SELECTED_LANGUAGE_SIGNAL, HISTORY_SCHEMA_VERSION, STATUS_SAMPLE_LIMIT,
-        UNREADABLE_COVERAGE_CAVEAT, UNRECORDED_COVERAGE_CAVEAT,
+        Owner, PathInterner, PruneReason, PrunedDir, QualityNote, QualityNoteKind, Repository,
+        RepositoryId, ScopeId, ScoreComponent, SearchResult, SharedPath, SharedStr, SkipReason,
+        SkipSource, SkippedPath, SourceRange, StatusDetail, StringInterner, Symbol, SymbolId,
+        Visibility, COVERAGE_SELECTED_LANGUAGE_SIGNAL, HISTORY_SCHEMA_VERSION, PRUNED_DIRS_LISTED,
+        STATUS_SAMPLE_LIMIT, UNREADABLE_COVERAGE_CAVEAT, UNRECORDED_COVERAGE_CAVEAT,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
@@ -6449,6 +6489,38 @@ mod tests {
             full["quality"]["skip_counts"],
             summary["quality"]["skip_counts"]
         );
+
+        // Pruned directories: every one in the stored record and the full payload, the
+        // first fifty in a summary with the rest counted.
+        let mut manifest = manifest;
+        let mut coverage = IndexCoverage::default();
+        coverage.record_pruned_dirs(
+            (0..PRUNED_DIRS_LISTED + 10)
+                .map(|index| PrunedDir {
+                    path: format!("p{index:03}/dist"),
+                    reason: PruneReason::BuildOutput,
+                    tracked_source_files: Some(0),
+                })
+                .collect(),
+            0,
+        );
+        manifest.quality.coverage = Some(coverage);
+        let summary = manifest.status_value(StatusDetail::Summary).unwrap();
+        let summary_coverage = &summary["quality"]["coverage"];
+        assert_eq!(
+            summary_coverage["pruned"].as_array().unwrap().len(),
+            PRUNED_DIRS_LISTED
+        );
+        assert_eq!(summary_coverage["pruned_unlisted"], 10);
+        let full = manifest.status_value(StatusDetail::Full).unwrap();
+        assert_eq!(
+            full["quality"]["coverage"]["pruned"]
+                .as_array()
+                .unwrap()
+                .len(),
+            PRUNED_DIRS_LISTED + 10
+        );
+        assert!(full["quality"]["coverage"].get("pruned_unlisted").is_none());
     }
 
     #[test]
@@ -7906,8 +7978,15 @@ mod index_coverage_tests {
             .collect::<Vec<_>>();
         coverage.record_pruned_dirs(dirs, 2);
         assert_eq!(coverage.pruned_dirs, PRUNED_DIRS_LISTED + 7);
-        assert_eq!(coverage.pruned.len(), PRUNED_DIRS_LISTED);
-        assert_eq!(coverage.pruned_unlisted, 7);
+        // The record keeps every directory a plan must forbid; only the two secret-like
+        // ones go unnamed. A status summary shows the first fifty.
+        assert_eq!(coverage.pruned.len(), PRUNED_DIRS_LISTED + 5);
+        assert_eq!(coverage.pruned_unlisted, 2);
+        let view = coverage.status_view();
+        assert_eq!(view.pruned.len(), PRUNED_DIRS_LISTED);
+        assert_eq!(view.pruned_unlisted, 7);
+        assert_eq!(view.pruned_dirs, PRUNED_DIRS_LISTED + 7);
+        assert_eq!(view.pruned[..], coverage.pruned[..PRUNED_DIRS_LISTED]);
         assert_eq!(coverage.pruned_source_files(), 0);
         assert!(coverage.summary_line().ends_with(
             "57 directories pruned as build output or dependencies: svc000/node_modules/, svc001/node_modules/, svc002/node_modules/ and 54 more"

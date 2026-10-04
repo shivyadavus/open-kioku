@@ -35,8 +35,11 @@ can never drop files silently. `IndexQuality.coverage` (JSON: `quality.coverage`
   (`build_output`, `undeclared_build_dir`, `dependencies`, `virtual_env`) and, in a Git
   work tree, `tracked_source_files`, the git-tracked programming-language files under it
   (absent outside Git, where it is unknown). Undeclared build directories holding tracked
-  source come first, then the rest by path, at most 50; `pruned_unlisted` counts the others, and a
-  secret-like directory is counted there and never named. Both are absent on a manifest
+  source come first, then those holding any tracked source, then the rest by path. The
+  manifest stores every one, since plans forbid edits under each; a status summary
+  (`ok --json status`, MCP `repo_status`) shows the first 50 and counts the rest in
+  `pruned_unlisted`, and `--full` / `detail: "full"` shows all. A secret-like directory is
+  counted in `pruned_unlisted` and never named. Both are absent on a manifest
   written before paths were recorded, which reads as `N directories pruned by name`;
 - `policy_excluded_by_source` and `policy_excluded_dirs`: the files a policy excluded,
   by the rule that excluded them (`hidden_policy`, `git_ignore`, `ok_ignore`,
@@ -233,9 +236,13 @@ Two consumers once repeated the pruning by name and now follow the record instea
   `dist/**`, which forbade a declared `build/` package and missed a nested `web/dist/`
   bundle. An undeclared build directory holding committed source gets no rule, since the
   directory is only a guess and the coverage record already counts its files as missing;
-  neither does a directory the record does not name (past its cap, secret-like, or an index
-  written before paths were recorded). An edit there is still outside `allowed_files` and
-  needs expansion evidence, so the loop stays closed.
+  neither does a directory the record does not name (secret-like, or an index written before
+  paths were recorded; one written by 4.0 releases after #477 named at most 50). Nor does a
+  root `target/`, `build/` or `dist/` that did not exist when the repository was indexed, as
+  in a fresh clone before its first build: an edit there was a `forbidden_boundary`
+  violation and is now `out_of_boundary`. Any such edit is still outside `allowed_files` and
+  needs expansion evidence, so the loop stays closed, but evidence can now admit it; no
+  rule is forbidden by name alone.
 - **The semantic corpus** embeds the files the index holds, less vendored, generated, lock and
   secret-like files. It no longer drops every path containing `/target/`: discovery already
   pruned Cargo's and Maven's output on evidence, and the name rule dropped a Java

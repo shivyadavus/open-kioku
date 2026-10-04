@@ -170,6 +170,13 @@ impl DiscoveryPruner {
     /// Whether `rel` (relative to the root) lies under a directory discovery prunes, tooling
     /// included: the files `ok index` never reaches.
     pub fn is_pruned(&self, rel: &Path) -> bool {
+        self.pruned_at(rel).is_some()
+    }
+
+    /// The outermost directory on the way to `rel` that discovery prunes, relative to the
+    /// root, with its reason; `None` for the reason when it is `.git` or `.ok`, which are
+    /// never reported. `None` when discovery reaches `rel`.
+    pub fn pruned_at(&self, rel: &Path) -> Option<(PathBuf, Option<PruneReason>)> {
         let mut dir = self.root.clone();
         let mut components = rel.components().peekable();
         while let Some(component) = components.next() {
@@ -179,11 +186,15 @@ impl DiscoveryPruner {
             dir.push(part);
             // The last component is the path itself; only `.git`/`.ok` prune a file.
             let is_dir = components.peek().is_some() || dir.is_dir();
-            if self.classify(&dir, is_dir) != DirVerdict::Walk {
-                return true;
-            }
+            let reason = match self.classify(&dir, is_dir) {
+                DirVerdict::Walk => continue,
+                DirVerdict::Tooling => None,
+                DirVerdict::Prune(reason) => Some(reason),
+            };
+            let rel_dir = dir.strip_prefix(&self.root).unwrap_or(&dir).to_path_buf();
+            return Some((rel_dir, reason));
         }
-        false
+        None
     }
 
     /// Whether `[index] keep_dirs` lists the directory at `path`.
@@ -406,6 +417,16 @@ mod tests {
         assert!(is_under_pruned_dir(root, Path::new("target/debug/gen.rs")));
         assert!(is_under_pruned_dir(root, Path::new(".ok/index.sqlite")));
         assert!(is_under_pruned_dir(root, Path::new("node_modules/x/y.js")));
+        let pruner = DiscoveryPruner::evidence_only(root);
+        assert_eq!(
+            pruner.pruned_at(Path::new("target/debug/gen.rs")),
+            Some((PathBuf::from("target"), Some(PruneReason::BuildOutput)))
+        );
+        assert_eq!(
+            pruner.pruned_at(Path::new(".ok/index.sqlite")),
+            Some((PathBuf::from(".ok"), None))
+        );
+        assert_eq!(pruner.pruned_at(Path::new("src/build/mod.rs")), None);
         assert!(!is_under_pruned_dir(root, Path::new("src/build/mod.rs")));
         assert!(!is_under_pruned_dir(root, Path::new("src/build.rs")));
         // A deleted file under a declared module is judged by what is on disk now.

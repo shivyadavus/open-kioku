@@ -4085,6 +4085,33 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(patterns(&boundary), sorted);
+
+        // A 60-package monorepo: every bundle is forbidden, not only the fifty a status
+        // summary names.
+        let mut monorepo = IndexCoverage::default();
+        monorepo.record_pruned_dirs(
+            (1..=60)
+                .map(|index| {
+                    dir(
+                        &format!("packages/p{index}/dist"),
+                        PruneReason::BuildOutput,
+                        Some(0),
+                    )
+                })
+                .collect(),
+            0,
+        );
+        let boundary = change_boundary(
+            &[test_search_result("src/auth.rs")],
+            &[],
+            &impact,
+            &ChangeBoundary::default(),
+            Some(&monorepo),
+        );
+        for index in 1..=60 {
+            let pattern = format!("packages/p{index}/dist/**");
+            assert!(patterns(&boundary).contains(&pattern), "{pattern}");
+        }
     }
 
     #[test]
