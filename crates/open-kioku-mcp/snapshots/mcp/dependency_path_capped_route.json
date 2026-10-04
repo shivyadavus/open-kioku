@@ -1,0 +1,64 @@
+{
+  "id": "dependency-capped-route",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [
+      "this route descends through CONTAINS or DEFINES after a relationship hop; containment is not transitive across a relationship (a file importing the file that defines X does not establish a relation to X), so hop_route_authority caps that hop at corroborating and route_authority reflects it, while edge_authority still reports what each edge establishes on its own"
+    ],
+    "edge_authority": {
+      "edge-audit-defines-seal": "authoritative",
+      "edge-ledger-imports-audit": "authoritative"
+    },
+    "edges": [
+      {
+        "edge_type": "IMPORTS",
+        "evidence": {
+          "confidence": "low",
+          "file_range": null,
+          "id": "",
+          "indexed_at": "<indexed_at>",
+          "message": "",
+          "source": "",
+          "source_type": "lexical",
+          "symbol_id": null
+        },
+        "from": "file:file-ledger",
+        "id": "edge-ledger-imports-audit",
+        "properties": {
+          "relationship_proofs": [
+            {
+              "authority": "corroborating",
+              "candidate_count": 1,
+              "kind": "import_binding",
+              "resolver_strategy": "fixture"
+            }
+          ]
+        },
+        "to": "file:file-audit"
+      },
+      {
+        "edge_type": "DEFINES",
+        "evidence": {
+          "confidence": "exact",
+          "file_range": null,
+          "id": "",
+          "indexed_at": "<indexed_at>",
+          "message": "",
+          "source": "open-kioku-graph",
+          "source_type": "tree_sitter",
+          "symbol_id": null
+        },
+        "from": "file:file-audit",
+        "id": "edge-audit-defines-seal",
+        "to": "symbol:symbol-seal"
+      }
+    ],
+    "evidence_source": "sqlite_graph_store",
+    "from": "file:file-ledger",
+    "hop_route_authority": {
+      "edge-audit-defines-seal": "corroborating"
+    },
+    "route_authority": "corroborating",
+    "to": "symbol:symbol-seal"
+  }
+}

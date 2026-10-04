@@ -455,6 +455,117 @@ pub fn graph_route_authorities(edges: &[GraphEdge]) -> Vec<RelationshipAuthority
         .collect()
 }
 
+/// A route [`strongest_shortest_route`] keeps to one node: the lowest contribution any of its
+/// hops makes ([`graph_route_hop_authority`]), the order it was first kept in, and its edges.
+struct KeptRoute {
+    weakest: RelationshipAuthority,
+    found: usize,
+    edges: Vec<GraphEdge>,
+}
+
+/// The shortest forward route from `from` to `to` of at most `max_hops` hops whose weakest hop
+/// contributes the most, or no edges when there is none (or `from == to`).
+///
+/// A route is only as established as its weakest hop, so among routes of equal length a caller
+/// that reports [`graph_route_authorities`] must not be handed one through a heuristic or capped
+/// hop while an equally short established one exists. Length still comes first: a longer route
+/// is never returned for being stronger, because "the nearest connection" is what a path answers.
+///
+/// The walk is breadth first, one depth at a time. `outgoing` returns a node's outgoing edges in
+/// the order ties are broken in (stores pass [`sort_graph_edges_for_window`] order). Each node is
+/// settled at the first depth it is reached, since any prefix of a shortest route is a shortest
+/// route to where it ends. At that depth the walk keeps, per node, the route with the strongest
+/// weakest hop, and of equals the first one found. What a route's next hop contributes depends
+/// on whether it has crossed a relationship yet (containment after one is capped), so a node
+/// keeps one route for each of those two states, and a route that needed no relationship is
+/// never displaced by a stronger-so-far one that a later containment hop would cap. Keeping the
+/// best per node and state is exact: the weakest hop of a whole route is the lower of its
+/// prefix's and its suffix's, and the suffix's depends only on the node and the state.
+///
+/// With no stronger route anywhere, this returns the route the plain breadth-first walk did:
+/// nodes are expanded in the order they were first reached and edges in `outgoing` order.
+pub fn strongest_shortest_route<E>(
+    from: &str,
+    to: &str,
+    max_hops: usize,
+    mut outgoing: impl FnMut(&str) -> Result<Vec<GraphEdge>, E>,
+) -> Result<Vec<GraphEdge>, E> {
+    use std::collections::{HashMap, HashSet};
+
+    if from == to {
+        return Ok(Vec::new());
+    }
+    // Index 0 is a route that has crossed no relationship hop, index 1 one that has.
+    type States = [Option<KeptRoute>; 2];
+    let mut settled = HashSet::from([from.to_string()]);
+    let mut layer: Vec<(String, States)> = vec![(
+        from.to_string(),
+        [
+            Some(KeptRoute {
+                weakest: RelationshipAuthority::Authoritative,
+                found: 0,
+                edges: Vec::new(),
+            }),
+            None,
+        ],
+    )];
+    let mut found = 0;
+    for _ in 0..max_hops {
+        let mut next: Vec<(String, States)> = Vec::new();
+        let mut slots: HashMap<String, usize> = HashMap::new();
+        for (node, states) in &layer {
+            for edge in outgoing(node)? {
+                let target = edge.to.0.as_str();
+                if settled.contains(target) {
+                    continue;
+                }
+                for (crossed, kept) in states.iter().enumerate() {
+                    let Some(kept) = kept else {
+                        continue;
+                    };
+                    let after_relationship = crossed == 1;
+                    let weakest = kept
+                        .weakest
+                        .min(graph_route_hop_authority(&edge, after_relationship));
+                    let crosses = after_relationship || !is_containment_edge_type(&edge.edge_type);
+                    let slot = *slots.entry(target.to_string()).or_insert_with(|| {
+                        next.push((target.to_string(), [None, None]));
+                        next.len() - 1
+                    });
+                    let entry = &mut next[slot].1[usize::from(crosses)];
+                    if entry.as_ref().is_none_or(|best| weakest > best.weakest) {
+                        let mut edges = Vec::with_capacity(kept.edges.len() + 1);
+                        edges.extend_from_slice(&kept.edges);
+                        edges.push(edge.clone());
+                        found += 1;
+                        let first = entry.as_ref().map_or(found, |best| best.found);
+                        *entry = Some(KeptRoute {
+                            weakest,
+                            found: first,
+                            edges,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(&slot) = slots.get(to) {
+            let [plain, crossed] = std::mem::take(&mut next[slot].1);
+            let best = [plain, crossed].into_iter().flatten().max_by(|a, b| {
+                a.weakest
+                    .cmp(&b.weakest)
+                    .then_with(|| b.found.cmp(&a.found))
+            });
+            return Ok(best.map(|route| route.edges).unwrap_or_default());
+        }
+        if next.is_empty() {
+            break;
+        }
+        settled.extend(slots.into_keys());
+        layer = next;
+    }
+    Ok(Vec::new())
+}
+
 /// Rank of an evidence confidence for window ordering: higher is stronger. `Confidence` has no
 /// derived order, and its declaration order is the reverse of what a window keeps first.
 fn confidence_rank(confidence: Confidence) -> u8 {
@@ -1041,6 +1152,125 @@ mod tests {
             graph_route_hop_authority(&regex, true),
             RelationshipAuthority::Heuristic
         );
+    }
+
+    /// A route hop for [`strongest_shortest_route`]: a proven or proofless `IMPORTS`, or parsed
+    /// containment.
+    fn route_hop(id: &str, from: &str, to: &str, kind: &str) -> GraphEdge {
+        let (edge_type, proofs) = match kind {
+            "proven" => (
+                GraphEdgeType::Imports,
+                vec![proof(RelationshipProofKind::ImportBinding, 1)],
+            ),
+            "heuristic" => (GraphEdgeType::Imports, Vec::new()),
+            "defines" => (GraphEdgeType::Defines, Vec::new()),
+            "contains" => (GraphEdgeType::Contains, Vec::new()),
+            other => panic!("unknown hop kind {other}"),
+        };
+        let mut hop = edge(edge_type, proofs);
+        hop.id = EdgeId::new(id);
+        hop.from = NodeId::new(from);
+        hop.to = NodeId::new(to);
+        hop.evidence.source_type = EvidenceSourceType::TreeSitter;
+        hop
+    }
+
+    /// The route's edge ids, with each node's outgoing edges given in window order as a store
+    /// gives them.
+    fn route_ids(edges: &[GraphEdge], from: &str, to: &str, max_hops: usize) -> Vec<String> {
+        let route = strongest_shortest_route(from, to, max_hops, |node| {
+            let mut out = edges
+                .iter()
+                .filter(|edge| edge.from.0 == node)
+                .cloned()
+                .collect::<Vec<_>>();
+            sort_graph_edges_for_window(&mut out);
+            Ok::<_, ()>(out)
+        })
+        .unwrap();
+        route.into_iter().map(|edge| edge.id.0).collect()
+    }
+
+    /// Two routes of two hops: the one tried first (`a-b` sorts before `a-c`) has a heuristic
+    /// second hop. A breadth-first walk that returns the first route found takes it.
+    #[test]
+    fn of_equally_short_routes_the_one_with_the_strongest_weakest_hop_is_returned() {
+        let edges = [
+            route_hop("a-b", "a", "b", "proven"),
+            route_hop("a-c", "a", "c", "proven"),
+            route_hop("b-d", "b", "d", "heuristic"),
+            route_hop("c-d", "c", "d", "proven"),
+        ];
+        assert_eq!(route_ids(&edges, "a", "d", 12), ["a-c", "c-d"]);
+        // Equally strong routes keep the first one found, as the plain walk did.
+        let tied = [
+            route_hop("a-b", "a", "b", "proven"),
+            route_hop("a-c", "a", "c", "proven"),
+            route_hop("b-d", "b", "d", "proven"),
+            route_hop("c-d", "c", "d", "proven"),
+        ];
+        assert_eq!(route_ids(&tied, "a", "d", 12), ["a-b", "b-d"]);
+    }
+
+    /// `ledger.rs` imports `audit.rs`, which defines `record`, and ledger.rs's own `post` calls
+    /// `record`. The import is tried first (a proven relationship ranks above containment in the
+    /// window) but its DEFINES hop is capped; the route through `post` establishes the relation.
+    #[test]
+    fn an_equally_short_route_without_a_capped_hop_is_preferred() {
+        let edges = [
+            route_hop("imports", "ledger", "audit", "proven"),
+            route_hop("audit-defines-record", "audit", "record", "defines"),
+            route_hop("ledger-defines-post", "ledger", "post", "defines"),
+            route_hop("post-uses-record", "post", "record", "proven"),
+        ];
+        let ids = route_ids(&edges, "ledger", "record", 12);
+        assert_eq!(ids, ["ledger-defines-post", "post-uses-record"]);
+        let route = edges
+            .iter()
+            .filter(|edge| ids.contains(&edge.id.0))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            graph_route_authorities(&route).into_iter().min(),
+            Some(RelationshipAuthority::Authoritative)
+        );
+    }
+
+    /// `m` is reached at one depth through a proven import and through containment, both
+    /// authoritative so far. Only the containment route keeps the next DEFINES hop
+    /// authoritative, so a walk that keeps one route per node (the import, found first) reports
+    /// corroborating where an authoritative route exists.
+    #[test]
+    fn a_route_that_crossed_no_relationship_is_kept_beside_one_that_did() {
+        let edges = [
+            route_hop("f-imports-m", "f", "m", "proven"),
+            route_hop("f-contains-m", "f", "m", "contains"),
+            route_hop("m-defines-x", "m", "x", "defines"),
+        ];
+        assert_eq!(
+            route_ids(&edges, "f", "x", 12),
+            ["f-contains-m", "m-defines-x"]
+        );
+    }
+
+    /// Length comes first: a longer proven route never replaces a shorter heuristic one, and a
+    /// route longer than `max_hops` is not found.
+    #[test]
+    fn a_stronger_route_is_never_returned_over_a_shorter_one() {
+        let edges = [
+            route_hop("a-d", "a", "d", "heuristic"),
+            route_hop("a-b", "a", "b", "proven"),
+            route_hop("b-d", "b", "d", "proven"),
+        ];
+        assert_eq!(route_ids(&edges, "a", "d", 12), ["a-d"]);
+        let chain = [
+            route_hop("a-b", "a", "b", "proven"),
+            route_hop("b-c", "b", "c", "proven"),
+        ];
+        assert_eq!(route_ids(&chain, "a", "c", 2), ["a-b", "b-c"]);
+        assert!(route_ids(&chain, "a", "c", 1).is_empty());
+        assert!(route_ids(&chain, "a", "a", 12).is_empty());
+        assert!(route_ids(&chain, "c", "a", 12).is_empty());
     }
 
     /// Parsed containment reports as the fact it is and regex containment as the guess it is;

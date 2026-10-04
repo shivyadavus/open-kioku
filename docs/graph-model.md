@@ -365,7 +365,8 @@ read:
   priority in budget selection.
 - MCP `get_references` callers and callees, `dependency_path` and each `explain_flow` flow return
   `edge_authority`, each returned edge's authority keyed by edge id, since a serialized edge
-  carries its proofs but not the authority they amount to; `ok path` prints it after each hop.
+  carries its proofs but not the authority they amount to; `ok path` prints it after each hop,
+  and `ok --json path` returns it as `dependency_path` does.
   `explain_flow` ends a flow at its first hop no proof establishes.
 - `ok graph query` and MCP `query_evidence_graph` return `paths` beside `rows`, one per row:
   the edges the row was matched through, each with its authority, and `weakest_authority`. A
@@ -534,9 +535,9 @@ No confidence lifts an edge into a higher tier. `neighbors`, `edges_by_type_for_
 weakest edges and never a proven edge in favour of a heuristic one. A window used to be the
 lowest edge ids, and edge ids are content hashes, so which edges survived had nothing to do with
 their evidence: on this repository's own index a heuristic symbol-registry `CALLS` edge displaced
-an authoritative resolver edge from a 20-edge window. `shortest_path` enqueues each node's hops in
-the same order, so where two equally short routes first diverge the stronger hop is tried first;
-it does not compare whole routes.
+an authoritative resolver edge from a 20-edge window. `shortest_path` reads each node's hops in
+the same order, which breaks ties between routes equally short and equally strong; see
+[Graph query authority](#graph-query-authority) for how it weighs whole routes.
 
 The order is one integer per edge plus the edge id:
 `open_kioku_core::graph_edge_window_rank` folds the tier and the confidence into a rank from 0
@@ -594,9 +595,22 @@ route climbs from a symbol to its file and across the file's relationship ("this
 imports X" is not "this symbol depends on X"): that needs a containment edge walked backwards,
 and `shortest_path`, the query walk and `explain_flow` follow only outgoing edges, while a reverse
 hop range does not parse. Tests pin it; a surface that starts walking edges backwards has to cap
-that ascent too. MCP `dependency_path`
-returns `route_authority` and, for a capped hop, `hop_route_authority` and a caveat; `ok path`
-prints the hop's contribution beside its class and the route's authority.
+that ascent too. MCP `dependency_path` and `ok --json path` return the same report
+(`open_kioku_graph::DependencyRoute`): `edge_authority`, `route_authority` and, for a capped hop,
+`hop_route_authority` and a caveat; `ok path` without `--json` prints the hop's contribution
+beside its class, the route's authority and the caveat.
+
+`shortest_path` returns the shortest route, and of equally short routes the one whose weakest
+hop contributes most (`open_kioku_core::strongest_shortest_route`), so `route_authority` is the
+strongest any shortest route supports. From `src/ledger.rs`, which imports `src/audit.rs` and
+defines `post`, which calls `record` in `src/audit.rs`, there are two two-hop routes to
+`record`: the import then the capped `DEFINES` (`corroborating`), and ledger.rs's own `DEFINES`
+then the proven call (`authoritative`). The second is returned. Length still comes first: a
+longer route is never returned for being stronger. The walk is breadth first and settles each
+node at the first depth it is reached; at that depth it keeps, per node and route state (whether
+the route has crossed a relationship), the route whose weakest hop is strongest, and the first
+one found among equals, with hops read in window order. The SQLite and in-memory stores share
+the walk, so they return the same route.
 
 `ok graph query` and MCP `query_evidence_graph` match every edge whatever its authority, and
 return `paths` beside `rows`, one entry per row:

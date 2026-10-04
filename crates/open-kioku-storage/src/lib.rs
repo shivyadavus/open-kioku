@@ -729,6 +729,10 @@ pub trait GraphStore: Send + Sync {
         Ok(NeighborWindow::new(nodes, edges, total_edges))
     }
 
+    /// The shortest forward route from `from` to `to`, of at most `max_depth` hops, or no edges.
+    /// Among equally short routes, the one whose weakest hop contributes most to the route
+    /// ([`open_kioku_core::strongest_shortest_route`]), so the route authority a surface reports
+    /// is the strongest any shortest route supports.
     fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>>;
 
     fn node_type_stats(&self) -> Result<std::collections::HashMap<String, TypeStats>> {

@@ -4656,8 +4656,6 @@ impl GraphStore for SqliteStore {
 
     fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>> {
         require_authoritative_relationship_semantics(self)?;
-        use std::collections::{HashSet, VecDeque};
-
         let conn = self
             .connection
             .lock()
@@ -4676,32 +4674,16 @@ impl GraphStore for SqliteStore {
             ))
             .map_err(storage_err)?;
 
-        let mut queue = VecDeque::from([(from.to_string(), Vec::<GraphEdge>::new())]);
-        let mut seen = HashSet::new();
-        while let Some((node, path)) = queue.pop_front() {
-            if node == to {
-                return Ok(path);
-            }
-            if path.len() >= max_depth || !seen.insert(node.clone()) {
-                continue;
-            }
-            let Some(node_sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, &node)? else {
-                continue;
+        // Of equally short routes, the one whose weakest hop is strongest is returned
+        // (`strongest_shortest_route`); hops are read in window order so that, among routes
+        // equal on that too, the answer does not depend on row insertion order.
+        open_kioku_core::strongest_shortest_route(from, to, max_depth, |node| {
+            let Some(node_sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, node)? else {
+                return Ok(Vec::new());
             };
             let mut rows = edge_stmt.query(params![node_sid]).map_err(storage_err)?;
-            // Of two shortest paths, the one whose hops were enqueued first is returned, so hops
-            // are enqueued in window order: where equally short routes first diverge, the
-            // stronger hop is tried first, and the answer no longer depends on row insertion
-            // order. Routes are not compared whole: a proven first hop followed by a heuristic
-            // one still wins over a route that is weaker only at its first hop.
-            let edges = all_edges_in_window_order(&mut rows)?;
-            for edge in edges {
-                let mut next_path = path.clone();
-                next_path.push(edge.clone());
-                queue.push_back((edge.to.0.clone(), next_path));
-            }
-        }
-        Ok(Vec::new())
+            all_edges_in_window_order(&mut rows)
+        })
     }
     fn nodes_by_type(
         &self,
@@ -6503,10 +6485,10 @@ mod tests {
         EvidenceSourceType, File, FileId, FileRange, GitChangeKind, GitCochangeEdge, GitCommitId,
         GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
         GraphNodeType, HistoryRecordId, HistorySignalQuery, HistorySnapshot, IndexManifest,
-        IndexQuality, Language, LineRange, NodeId, Owner, RelationshipProof, RelationshipProofKind,
-        Repository, RepositoryId, ReviewerEvidence, ReviewerRole, SimilarChangeQuery,
-        SimilarityEvidenceSource, Symbol, SymbolId, SymbolKind, SymbolOccurrence,
-        HISTORY_SCHEMA_VERSION,
+        IndexQuality, Language, LineRange, NodeId, Owner, RelationshipAuthority, RelationshipProof,
+        RelationshipProofKind, Repository, RepositoryId, ReviewerEvidence, ReviewerRole,
+        SimilarChangeQuery, SimilarityEvidenceSource, Symbol, SymbolId, SymbolKind,
+        SymbolOccurrence, HISTORY_SCHEMA_VERSION,
     };
     use open_kioku_storage::{
         GraphStore, HistoryStore, IndexData, MetadataStore, PartialIndexUpdate,
@@ -11250,6 +11232,75 @@ mod tests {
             .map(|edge| edge.id.0.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, ["z-proven", "c-to-d"]);
+    }
+
+    /// `ledger.rs` imports `audit.rs`, which defines `record`; ledger.rs also defines `post`,
+    /// which imports `record` by a proven binding. Window order tries the import first, and its
+    /// route descends through DEFINES after a relationship hop, which caps it at corroborating.
+    /// The equally short route through `post` is authoritative throughout, so it is returned.
+    #[test]
+    fn shortest_path_prefers_the_route_whose_weakest_hop_is_strongest() {
+        let store = make_current_store();
+        let node = |id: &str, node_type: GraphNodeType| GraphNode {
+            id: NodeId::new(id),
+            node_type,
+            label: id.into(),
+            ..Default::default()
+        };
+        let parsed = |id: &str, from: &str, to: &str| GraphEdge {
+            id: EdgeId::new(id),
+            from: NodeId::new(from),
+            to: NodeId::new(to),
+            edge_type: GraphEdgeType::Defines,
+            evidence: Evidence {
+                source_type: EvidenceSourceType::TreeSitter,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let proven = |id: &str, from: &str, to: &str| {
+            let mut edge = GraphEdge {
+                id: EdgeId::new(id),
+                from: NodeId::new(from),
+                to: NodeId::new(to),
+                edge_type: GraphEdgeType::Imports,
+                ..Default::default()
+            };
+            edge.set_relationship_proofs(vec![RelationshipProof::new(
+                RelationshipProofKind::ImportBinding,
+                "test",
+                1,
+            )])
+            .unwrap();
+            edge
+        };
+        let nodes = [
+            node("file:ledger.rs", GraphNodeType::File),
+            node("file:audit.rs", GraphNodeType::File),
+            node("symbol:post", GraphNodeType::Function),
+            node("symbol:record", GraphNodeType::Function),
+        ];
+        let edges = [
+            proven("a-imports", "file:ledger.rs", "file:audit.rs"),
+            parsed("b-defines-record", "file:audit.rs", "symbol:record"),
+            parsed("c-defines-post", "file:ledger.rs", "symbol:post"),
+            proven("d-post-record", "symbol:post", "symbol:record"),
+        ];
+        store.replace_graph(&nodes, &edges).unwrap();
+        let path = store
+            .shortest_path("file:ledger.rs", "symbol:record", 12)
+            .unwrap();
+        let ids = path
+            .iter()
+            .map(|edge| edge.id.0.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["c-defines-post", "d-post-record"]);
+        assert_eq!(
+            open_kioku_core::graph_route_authorities(&path)
+                .into_iter()
+                .min(),
+            Some(RelationshipAuthority::Authoritative)
+        );
     }
 
     #[test]

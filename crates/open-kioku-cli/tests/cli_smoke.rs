@@ -7693,12 +7693,24 @@ fn path_and_dependency_path_resolve_the_same_nodes() {
             "dependency_path",
             serde_json::json!({"from": from, "to": to}),
         );
-        let mcp = &response["result"]["structuredContent"];
+        let mut mcp = response["result"]["structuredContent"].clone();
         assert!(
             mcp["from"].as_str().unwrap().starts_with(from_kind),
             "{response}"
         );
-        assert_eq!(mcp["edges"], cli, "{from} -> {to}: {response}");
+        // One report on both surfaces, authority included (#660); only where MCP read it from
+        // is MCP's own.
+        assert_eq!(
+            mcp.as_object_mut().unwrap().remove("evidence_source"),
+            Some(serde_json::json!("sqlite_graph_store"))
+        );
+        assert_eq!(mcp, cli, "{from} -> {to}: {response}");
+        let routed = !cli["edges"].as_array().unwrap().is_empty();
+        if from_kind == "file:" {
+            assert!(routed, "{cli}");
+        }
+        assert_eq!(cli.get("route_authority").is_some(), routed, "{cli}");
+        assert!(cli["edge_authority"].is_object(), "{cli}");
     }
 
     // An endpoint the index does not hold is a repository lookup that found nothing, as an
@@ -7811,6 +7823,59 @@ fn a_route_into_an_imported_file_s_other_symbols_is_not_authoritative() {
     assert_eq!(route["hop_route_authority"][defines], "corroborating");
     assert_eq!(route["route_authority"], "corroborating", "{response}");
     assert_eq!(route["caveats"].as_array().unwrap().len(), 1);
+
+    // `ok --json path` carries the same capped hop, route authority and caveat (#660).
+    let cli: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "--json",
+            "path",
+            "src/ledger.rs",
+            "src::audit::archive",
+        ]);
+        command
+    }))
+    .unwrap();
+    assert_eq!(
+        cli["hop_route_authority"][defines], "corroborating",
+        "{cli}"
+    );
+    assert_eq!(cli["route_authority"], "corroborating", "{cli}");
+    assert_eq!(cli["caveats"], route["caveats"], "{cli}");
+    assert_eq!(cli["edges"], route["edges"], "{cli}");
+
+    // To `record` there are two routes of two hops: the import and the capped DEFINES, tried
+    // first because a proven import ranks above containment, and ledger.rs's own `settle`,
+    // which calls `record`. The second is authoritative throughout, so both surfaces return it
+    // (#660).
+    let response = mcp_tool_call(
+        repo,
+        "dependency_path",
+        serde_json::json!({"from": "src/ledger.rs", "to": "src::audit::record"}),
+    );
+    let route = &response["result"]["structuredContent"];
+    let hops = route["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| edge["edge_type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(hops, ["DEFINES", "CALLS"], "{response}");
+    assert_eq!(route["route_authority"], "authoritative", "{response}");
+    assert!(route.get("caveats").is_none(), "{response}");
+    let cli: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "--json",
+            "path",
+            "src/ledger.rs",
+            "src::audit::record",
+        ]);
+        command
+    }))
+    .unwrap();
+    assert_eq!(cli["edges"], route["edges"], "{cli}");
+    assert_eq!(cli["route_authority"], "authoritative", "{cli}");
 
     // `ok path` prints both classes for the hop and the route's.
     let text = run({
