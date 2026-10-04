@@ -415,17 +415,13 @@ fn assess_snapshot_revision(
         .unwrap_or_else(|| "unknown".into());
     // Paths discovery never reaches (`.ok` itself, `.git`, build and dependency directories)
     // do not make the index differ from the checkout.
+    let config = OkConfig::load_from_repo(repo)
+        .with_context(|| format!("loading the index policy of {}", repo.display()))?;
+    let pruner = open_kioku_ingest::path_policy::DiscoveryPruner::new(repo, &config)?;
     let changed_files = |commit: &str| {
         open_kioku_git::changed_paths_since_commit(repo, commit)
             .ok()
-            .map(|paths| {
-                paths
-                    .iter()
-                    .filter(|path| {
-                        !open_kioku_ingest::path_policy::is_pruned_by_discovery(repo, path)
-                    })
-                    .count()
-            })
+            .map(|paths| paths.iter().filter(|path| !pruner.is_pruned(path)).count())
     };
     let refusal = match (artifact_commit, &comparison) {
         (None, _) => "the snapshot does not record the commit it was built from".to_string(),

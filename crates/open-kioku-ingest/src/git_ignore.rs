@@ -1,4 +1,4 @@
-use crate::prune::DirVerdict;
+use crate::prune::{DirVerdict, DiscoveryPruner};
 use ignore::WalkBuilder;
 use open_kioku_errors::{OkError, Result};
 use std::collections::{HashMap, HashSet};
@@ -20,11 +20,12 @@ use std::thread;
 /// semantics without spawning a process per file. We intentionally do not pass
 /// `--no-index`, so tracked files are never reported as ignored merely because
 /// an exclude pattern also matches them.
-pub(crate) fn ignored_paths(root: &Path) -> Result<Option<HashSet<PathBuf>>> {
+pub(crate) fn ignored_paths(pruner: &DiscoveryPruner) -> Result<Option<HashSet<PathBuf>>> {
+    let root = pruner.root();
     if !inside_work_tree(root)? {
         return Ok(None);
     }
-    let candidates = filesystem_candidates(root);
+    let candidates = filesystem_candidates(pruner);
     check_ignored_candidates(root, &candidates).map(Some)
 }
 
@@ -160,7 +161,8 @@ fn check_ignored_candidates(root: &Path, candidates: &[PathBuf]) -> Result<HashS
     Ok(ignored)
 }
 
-fn filesystem_candidates(root: &Path) -> Vec<PathBuf> {
+fn filesystem_candidates(pruner: &DiscoveryPruner) -> Vec<PathBuf> {
+    let root = pruner.root();
     WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
@@ -169,10 +171,10 @@ fn filesystem_candidates(root: &Path) -> Vec<PathBuf> {
         .ignore(false)
         .follow_links(false)
         .filter_entry({
-            let root = root.to_path_buf();
+            let pruner = pruner.clone();
             move |entry| {
                 let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-                crate::prune::classify(&root, entry.path(), is_dir) == DirVerdict::Walk
+                pruner.classify(entry.path(), is_dir) == DirVerdict::Walk
             }
         })
         .build()
@@ -199,10 +201,16 @@ fn has_git_marker(root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_ignored_candidates, ignored_paths};
+    use super::check_ignored_candidates;
+    use crate::prune::DiscoveryPruner;
+    use std::collections::HashSet;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    fn ignored_paths(root: &Path) -> open_kioku_errors::Result<Option<HashSet<PathBuf>>> {
+        super::ignored_paths(&DiscoveryPruner::evidence_only(root))
+    }
 
     #[test]
     fn git_is_authoritative_for_nested_scope_and_tracked_files() {

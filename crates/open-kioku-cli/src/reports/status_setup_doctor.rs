@@ -1159,19 +1159,23 @@ fn relevant_lsp_servers(repo: &Path) -> LspProviderInventory {
     LspProviderInventory { present, missing }
 }
 
+/// The rule discovery walks this repository by, so a language counted here is one `ok index`
+/// can see: build output and installed packages never are. An `ok.toml` that does not load
+/// leaves the rule without `[index] keep_dirs`; the config check reports the error.
+fn discovery_pruner(repo: &Path) -> DiscoveryPruner {
+    OkConfig::load_from_repo(repo)
+        .ok()
+        .and_then(|config| DiscoveryPruner::new(repo, &config).ok())
+        .unwrap_or_else(|| DiscoveryPruner::evidence_only(repo))
+}
+
 fn sample_lsp_languages(repo: &Path) -> Vec<String> {
+    let pruner = discovery_pruner(repo);
     let mut languages = Vec::new();
     for entry in walkdir::WalkDir::new(repo)
         .max_depth(6)
         .into_iter()
-        .filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            name != ".git"
-                && name != ".ok"
-                && name != "build"
-                && name != "target"
-                && name != "node_modules"
-        })
+        .filter_entry(|entry| pruner.walks(entry.path(), entry.file_type().is_dir()))
         .filter_map(|entry| entry.ok())
         .take(5000)
     {
@@ -1528,6 +1532,10 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                     message.push_str("; `[index] exclude` still lists build-directory globs an earlier `ok init` wrote");
                     next_steps.push(step);
                 }
+                if let Some(step) = ineffective_keep_dirs_step(&repo, &config) {
+                    message.push_str("; `[index] keep_dirs` lists a directory discovery never reaches");
+                    next_steps.push(step);
+                }
                 checks.push(DoctorCheck {
                     name: "config",
                     status: CheckStatus::Pass,
@@ -1554,10 +1562,10 @@ fn doctor_report(repo: &Path) -> DoctorReport {
 
     // 5. Tree-sitter grammars
     let mut detected_languages = Vec::new();
-    let walker = walkdir::WalkDir::new(&repo).into_iter().filter_entry(|e| {
-        let name = e.file_name().to_string_lossy();
-        name != ".ok" && name != "node_modules" && name != "target"
-    });
+    let pruner = discovery_pruner(&repo);
+    let walker = walkdir::WalkDir::new(&repo)
+        .into_iter()
+        .filter_entry(|e| pruner.walks(e.path(), e.file_type().is_dir()));
     for entry in walker.filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let path = entry.path();
@@ -1942,6 +1950,28 @@ fn stale_build_dir_excludes_step(config: &OkConfig) -> Option<String> {
     })
 }
 
+/// The next step when `[index] keep_dirs` lists a path that keeps nothing: no directory is
+/// there, or one above it is pruned (a `dist` inside Cargo's `target/`), so discovery never
+/// reaches it. `None` when every entry names a directory discovery can walk. Not a warning:
+/// the directory may simply not be built yet.
+fn ineffective_keep_dirs_step(repo: &Path, config: &OkConfig) -> Option<String> {
+    let kept = config.index.kept_dirs().ok()?;
+    let pruner = DiscoveryPruner::new(repo, config).ok()?;
+    let unreached = kept
+        .iter()
+        .filter(|dir| {
+            !repo.join(dir).is_dir() || dir.parent().is_some_and(|parent| pruner.is_pruned(parent))
+        })
+        .map(|dir| format!("`{}`", dir.display()))
+        .collect::<Vec<_>>();
+    (!unreached.is_empty()).then(|| {
+        format!(
+            "Config: ok.toml `[index] keep_dirs` lists {}, which discovery never reaches: no directory is there, or one above it is pruned. Correct the path, or remove the entry if it is not needed.",
+            unreached.join(", ")
+        )
+    })
+}
+
 /// A language git ignore rules mostly set aside: the ratio over what remains can read 100%
 /// while most of that language's source is absent from the index. `git check-ignore`
 /// applies every rule file git reads, so the step cannot name one file.
@@ -1991,8 +2021,13 @@ fn coverage_next_step(coverage: &IndexCoverage) -> String {
             .take(3)
             .map(|dir| format!("`{}/`", dir.path))
             .collect::<Vec<_>>();
+        let example = coverage
+            .pruned_source_dirs()
+            .first()
+            .map_or("tools/build", |dir| dir.path.as_str())
+            .to_owned();
         return format!(
-            "Coverage: {} git-tracked source file(s) are not indexed because discovery pruned {} as build output that nothing declares; no ok.toml key governs that. Discovery walks a `build` or `dist` directory that a module or package declares (a `mod.rs`, a `<name>.rs` beside it, an `__init__.py`, Go files, or a place under `src/` with no build manifest beside it); if these files are source, declare the directory that way, otherwise an absence among them is not evidence. The files are listed in `ok --json status --full` `quality.skipped_paths` with reason `pruned`.",
+            "Coverage: {} git-tracked source file(s) are not indexed because discovery pruned {} as build output that nothing declares; ok.toml `[index] keep_dirs` governs that. If these files are source, list each directory there (`keep_dirs = [\"{example}\"]`) or declare it as a module or package (a `mod.rs`, a `<name>.rs` beside it, an `__init__.py`, Go files, or a place under `src/` with no build manifest beside it), then run `ok index .`; otherwise an absence among them is not evidence. The files are listed in `ok --json status --full` `quality.skipped_paths` with reason `pruned`.",
             group_thousands(coverage.pruned_source_files()),
             if dirs.is_empty() {
                 "their directories".to_owned()

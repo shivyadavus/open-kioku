@@ -3,6 +3,7 @@ use open_kioku_config::OkConfig;
 use open_kioku_core::GraphNode;
 use open_kioku_errors::{OkError, Result};
 use open_kioku_graph::InMemoryGraph;
+use open_kioku_ingest::path_policy::DiscoveryPruner;
 use open_kioku_ingest::Indexer;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index_with_graph};
 use open_kioku_semantic::SemanticIndexManager;
@@ -64,16 +65,28 @@ pub fn watch_repo_with_debounce(root: impl AsRef<Path>, debounce: Duration) -> R
         .watch(&root, RecursiveMode::Recursive)
         .map_err(watch_err)?;
 
+    let mut pruner = DiscoveryPruner::new(&root, &OkConfig::load_from_repo(&root)?)?;
+    let config_path = root.join("ok.toml");
     let mut pending_paths = BTreeSet::<PathBuf>::new();
     loop {
         match rx.recv_timeout(debounce) {
             Ok(Ok(event)) => {
-                if is_relevant_event(&root, &event) {
+                // An edit to `[index] keep_dirs` changes which directories are watched; the
+                // re-index it triggers reads the new file too. A file that does not load
+                // leaves the last rule in place, and the re-index reports the error.
+                if event.paths.contains(&config_path) {
+                    if let Ok(next) = OkConfig::load_from_repo(&root)
+                        .and_then(|config| DiscoveryPruner::new(&root, &config))
+                    {
+                        pruner = next;
+                    }
+                }
+                if is_relevant_event(&pruner, &event) {
                     pending_paths.extend(
                         event
                             .paths
                             .iter()
-                            .filter(|path| is_relevant_path(&root, path))
+                            .filter(|path| is_relevant_path(&pruner, path))
                             .cloned(),
                     );
                 }
@@ -616,19 +629,23 @@ fn graph_from_snapshot(snapshot: &open_kioku_ingest::IndexSnapshot) -> InMemoryG
     )
 }
 
-fn is_relevant_event(root: &Path, event: &Event) -> bool {
+fn is_relevant_event(pruner: &DiscoveryPruner, event: &Event) -> bool {
     matches!(
         event.kind,
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    ) && event.paths.iter().any(|path| is_relevant_path(root, path))
+    ) && event
+        .paths
+        .iter()
+        .any(|path| is_relevant_path(pruner, path))
 }
 
 /// A change discovery would see: not under `.git`, `.ok`, or a directory it prunes as build
 /// output or installed packages. The same rule as the walk, so an edit to a `src/build/`
-/// module triggers a re-index and a `cargo build` writing `target/` does not.
-fn is_relevant_path(root: &Path, path: &Path) -> bool {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    !open_kioku_ingest::path_policy::is_pruned_by_discovery(root, rel)
+/// module or a directory `[index] keep_dirs` lists triggers a re-index and a `cargo build`
+/// writing `target/` does not.
+fn is_relevant_path(pruner: &DiscoveryPruner, path: &Path) -> bool {
+    let rel = path.strip_prefix(pruner.root()).unwrap_or(path);
+    !pruner.is_pruned(rel)
 }
 
 fn watch_err(err: notify::Error) -> OkError {
@@ -649,16 +666,24 @@ mod tests {
         fs::create_dir_all(root.join("src/build")).unwrap();
         fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
         fs::write(root.join("src/build/mod.rs"), "").unwrap();
-        assert!(!is_relevant_path(root, &root.join(".ok/index.sqlite")));
-        assert!(!is_relevant_path(root, &root.join(".git/index")));
-        assert!(!is_relevant_path(root, &root.join("target/debug/app")));
+        fs::create_dir_all(root.join("tools/dist")).unwrap();
+        let mut config = OkConfig::default();
+        let pruner = DiscoveryPruner::new(root, &config).unwrap();
+        assert!(!is_relevant_path(&pruner, &root.join(".ok/index.sqlite")));
+        assert!(!is_relevant_path(&pruner, &root.join(".git/index")));
+        assert!(!is_relevant_path(&pruner, &root.join("target/debug/app")));
         assert!(!is_relevant_path(
-            root,
+            &pruner,
             &root.join("node_modules/x/index.js")
         ));
-        assert!(is_relevant_path(root, &root.join("src/lib.rs")));
+        assert!(!is_relevant_path(&pruner, &root.join("tools/dist/emit.py")));
+        assert!(is_relevant_path(&pruner, &root.join("src/lib.rs")));
         // A source module named like build output is watched like any other.
-        assert!(is_relevant_path(root, &root.join("src/build/mod.rs")));
+        assert!(is_relevant_path(&pruner, &root.join("src/build/mod.rs")));
+        // So is a directory `[index] keep_dirs` lists.
+        config.index.keep_dirs = vec!["tools/dist".into()];
+        let pruner = DiscoveryPruner::new(root, &config).unwrap();
+        assert!(is_relevant_path(&pruner, &root.join("tools/dist/emit.py")));
     }
 
     #[test]

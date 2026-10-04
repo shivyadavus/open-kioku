@@ -4021,6 +4021,22 @@ pub struct PrunedDir {
     pub tracked_source_files: Option<usize>,
 }
 
+impl PrunedDir {
+    /// `dist/ (30 tracked source files)`, or `target/` when it holds none or Git cannot say:
+    /// a source directory pruned by mistake shows its committed files at a glance.
+    pub fn label(&self) -> String {
+        match self.tracked_source_files {
+            Some(count) if count > 0 => format!(
+                "{}/ ({} tracked source {})",
+                self.path,
+                group_thousands(count),
+                if count == 1 { "file" } else { "files" }
+            ),
+            _ => format!("{}/", self.path),
+        }
+    }
+}
+
 /// What discovery found versus what the index holds, for every recognised language.
 ///
 /// `discovered` counts only files the walker visited, plus git-tracked programming-language
@@ -4159,7 +4175,9 @@ impl IndexCoverage {
 
     /// Record every directory discovery pruned: `listed` by path, `unlisted` (secret-like
     /// paths) by count. Undeclared build directories holding tracked source sort first, most
-    /// files first, so the cap never hides the ones that matter; the rest follow by path.
+    /// files first, so the cap never hides the ones that matter; then any other directory
+    /// holding tracked source, most first, so a summary that names three shows them; the rest
+    /// follow by path.
     pub fn record_pruned_dirs(&mut self, mut listed: Vec<PrunedDir>, unlisted: usize) {
         let missing_source = |dir: &PrunedDir| {
             if dir.reason.counts_tracked_source() {
@@ -4168,9 +4186,11 @@ impl IndexCoverage {
                 0
             }
         };
+        let tracked = |dir: &PrunedDir| dir.tracked_source_files.unwrap_or(0);
         listed.sort_by(|a, b| {
             missing_source(b)
                 .cmp(&missing_source(a))
+                .then_with(|| tracked(b).cmp(&tracked(a)))
                 .then_with(|| a.path.cmp(&b.path))
         });
         self.pruned_dirs = listed.len() + unlisted;
@@ -4581,12 +4601,9 @@ impl IndexCoverage {
                 ));
             } else {
                 caveats.push(format!(
-                    "{} {noun} pruned as build output or dependencies (contents not counted): {}",
+                    "{} {noun} pruned as build output or dependencies: {}",
                     group_thousands(self.pruned_dirs),
-                    name_some(
-                        self.pruned.iter().map(|dir| format!("{}/", dir.path)),
-                        self.pruned_dirs
-                    )
+                    name_some(self.pruned.iter().map(PrunedDir::label), self.pruned_dirs)
                 ));
             }
         }
@@ -7893,7 +7910,7 @@ mod index_coverage_tests {
         assert_eq!(coverage.pruned_unlisted, 7);
         assert_eq!(coverage.pruned_source_files(), 0);
         assert!(coverage.summary_line().ends_with(
-            "57 directories pruned as build output or dependencies (contents not counted): svc000/node_modules/, svc001/node_modules/, svc002/node_modules/ and 54 more"
+            "57 directories pruned as build output or dependencies: svc000/node_modules/, svc001/node_modules/, svc002/node_modules/ and 54 more"
         ));
 
         let mut encoded = serde_json::to_value(&coverage).unwrap();
@@ -7905,6 +7922,53 @@ mod index_coverage_tests {
         assert!(legacy
             .summary_line()
             .ends_with("57 directories pruned by name (contents not counted)"));
+    }
+
+    /// A pruned directory's tracked source count is shown beside its name wherever it is
+    /// non-zero, and directories holding committed files sort ahead of empty ones, so a summary
+    /// naming three shows them even past the alphabet.
+    #[test]
+    fn pruned_directories_show_their_tracked_source_counts() {
+        let mut coverage = IndexCoverage::default();
+        coverage.record_discovered(&Language::Go);
+        coverage.record_indexed(&Language::Go, false);
+        let dir = |path: &str, reason, tracked| PrunedDir {
+            path: path.into(),
+            reason,
+            tracked_source_files: tracked,
+        };
+        coverage.record_pruned_dirs(
+            vec![
+                dir("aaa/node_modules", PruneReason::Dependencies, Some(0)),
+                dir("abc/build", PruneReason::BuildOutput, None),
+                dir("web/dist", PruneReason::BuildOutput, Some(1)),
+                dir("zz/dist", PruneReason::BuildOutput, Some(1_200)),
+                dir("tools/build", PruneReason::UndeclaredBuildDir, Some(2)),
+            ],
+            1,
+        );
+        assert_eq!(
+            coverage
+                .pruned
+                .iter()
+                .map(|dir| dir.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "tools/build",
+                "zz/dist",
+                "web/dist",
+                "aaa/node_modules",
+                "abc/build"
+            ]
+        );
+        assert!(coverage.summary_line().ends_with(
+            "6 directories pruned as build output or dependencies: tools/build/ (2 tracked source files), zz/dist/ (1,200 tracked source files), web/dist/ (1 tracked source file) and 3 more"
+        ), "{}", coverage.summary_line());
+        assert!(!coverage.summary_line().contains("contents not counted"));
+        // No count, or a count of zero, is a bare name; the secret-like directory stays unnamed.
+        assert_eq!(coverage.pruned[3].label(), "aaa/node_modules/");
+        assert_eq!(coverage.pruned[4].label(), "abc/build/");
+        assert_eq!(coverage.pruned_unlisted, 1);
     }
 
     /// The motivating shape of a real repository: every source file indexed, while

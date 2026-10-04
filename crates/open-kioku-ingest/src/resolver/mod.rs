@@ -1,4 +1,5 @@
 use crate::imports::RustImportEdgeTargets;
+use crate::prune::{DirVerdict, DiscoveryPruner};
 use open_kioku_core::{
     identity, AnalysisFact, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType,
     GraphNodeType, Import, ImportResolution, Language, QualityNote, QualityNoteKind,
@@ -55,15 +56,17 @@ struct Candidate {
     caveats: Vec<String>,
 }
 
+/// Resolve `imports` against `files` and the manifests found under `pruner`'s root, in the
+/// directories discovery walks.
 pub fn resolve_imports(
-    root: &Path,
+    pruner: &DiscoveryPruner,
     files: &[File],
     symbols: &[Symbol],
     imports: &[Import],
     rust_targets: &RustImportEdgeTargets,
 ) -> Result<ResolverReport> {
     let file_index = FileIndex::new(files, symbols)?;
-    let manifests = ManifestIndex::discover(root)?;
+    let manifests = ManifestIndex::discover(pruner)?;
     let mut report = ResolverReport {
         quality_notes: manifests.quality_notes.clone(),
         ..Default::default()
@@ -425,21 +428,21 @@ impl FileIndex {
 }
 
 impl ManifestIndex {
-    fn discover(root: &Path) -> Result<Self> {
+    fn discover(pruner: &DiscoveryPruner) -> Result<Self> {
+        let root = pruner.root();
         let mut index = ManifestIndex::default();
         let mut config_count = 0usize;
         let mut alias_count = 0usize;
         // Sorted so the manifests and aliases kept under the caps below are the same on every
-        // copy of the tree, whatever order its filesystem lists entries in.
+        // copy of the tree, whatever order its filesystem lists entries in. A manifest under a
+        // directory discovery prunes describes build output or installed packages, not the
+        // indexed source; one in a `target` package discovery walks describes that source.
         for entry in WalkDir::new(root)
             .sort_by_file_name()
             .into_iter()
             .filter_entry(|entry| {
-                let name = entry.file_name().to_string_lossy();
-                !matches!(
-                    name.as_ref(),
-                    ".git" | ".ok" | "target" | "node_modules" | "vendor"
-                )
+                entry.file_name() != "vendor"
+                    && pruner.classify(entry.path(), entry.file_type().is_dir()) == DirVerdict::Walk
             })
         {
             let entry = entry.map_err(|err| OkError::Index(err.to_string()))?;
@@ -905,7 +908,7 @@ mod tests {
         imports: &[Import],
     ) -> Result<ResolverReport> {
         super::resolve_imports(
-            root,
+            &DiscoveryPruner::evidence_only(root),
             files,
             symbols,
             imports,
@@ -1093,7 +1096,7 @@ mod tests {
             }),
         );
         let report = super::resolve_imports(
-            tmp.path(),
+            &DiscoveryPruner::evidence_only(tmp.path()),
             &files,
             &[],
             &[import("lib", "crate::utils")],
@@ -1135,7 +1138,14 @@ mod tests {
         for row in &imports {
             targets.record(row.file_id.clone(), &row.imported, None);
         }
-        let report = super::resolve_imports(tmp.path(), &files, &[], &imports, &targets).unwrap();
+        let report = super::resolve_imports(
+            &DiscoveryPruner::evidence_only(tmp.path()),
+            &files,
+            &[],
+            &imports,
+            &targets,
+        )
+        .unwrap();
 
         for resolution in &report.resolutions {
             assert_eq!(

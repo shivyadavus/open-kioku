@@ -76,7 +76,8 @@ pub struct IndexPathPolicy {
 impl IndexPathPolicy {
     /// The policy discovery applies, with Git asked about every file present under `root`.
     pub(crate) fn for_scan(root: &Path, config: &OkConfig) -> Result<Self> {
-        let git_ignored = git_ignore::ignored_paths(root)?;
+        let pruner = DiscoveryPruner::new(root, config)?;
+        let git_ignored = git_ignore::ignored_paths(&pruner)?;
         Self::build(root, config, git_ignored)
     }
 
@@ -92,8 +93,9 @@ impl IndexPathPolicy {
         config: &OkConfig,
         git_ignored: Option<HashSet<PathBuf>>,
     ) -> Result<Self> {
+        let pruner = DiscoveryPruner::new(root, config)?;
         let git_ignores = if git_ignored.is_none() {
-            Some(build_ignore_matcher(root, ".gitignore")?)
+            Some(build_ignore_matcher(&pruner, ".gitignore")?)
         } else {
             None
         };
@@ -104,7 +106,7 @@ impl IndexPathPolicy {
             allow_hidden_files: config.security.allow_hidden_files,
             git_ignored,
             git_ignores,
-            ok_ignores: build_ignore_matcher(root, ".okignore")?,
+            ok_ignores: build_ignore_matcher(&pruner, ".okignore")?,
         })
     }
 
@@ -152,12 +154,11 @@ impl IndexPathPolicy {
     }
 }
 
-/// Whether discovery never reaches `rel` (relative to `root`) because a directory on its way is
-/// pruned: `.git`, `.ok`, or build output and installed packages as `crate::prune` judges them
-/// from what is on disk under `root` now.
-pub fn is_pruned_by_discovery(root: &Path, rel: &Path) -> bool {
-    crate::prune::is_under_pruned_dir(root, rel)
-}
+/// Which directories discovery cuts from the walk: `.git`, `.ok`, and build output and
+/// installed packages as judged from what is on disk now, less the `build` and `dist`
+/// directories `[index] keep_dirs` lists. [`DiscoveryPruner::is_pruned`] answers whether
+/// discovery never reaches a path.
+pub use crate::prune::DiscoveryPruner;
 
 /// Record in `quality` that `file`, which an index counted as indexed, is excluded by
 /// `exclusion` after all: moved from `indexed` to the skip reason in the coverage record and
@@ -378,13 +379,11 @@ mod tests {
         fs::create_dir_all(root.join("web/node_modules/x")).unwrap();
         fs::create_dir_all(root.join("src/build")).unwrap();
         fs::write(root.join("src/build/mod.rs"), "").unwrap();
-        assert!(is_pruned_by_discovery(root, Path::new(".ok/index.sqlite")));
-        assert!(is_pruned_by_discovery(
-            root,
-            Path::new("web/node_modules/x/index.js")
-        ));
-        assert!(!is_pruned_by_discovery(root, Path::new("src/build.rs")));
-        assert!(!is_pruned_by_discovery(root, Path::new("src/build/mod.rs")));
+        let pruner = DiscoveryPruner::new(root, &OkConfig::default()).unwrap();
+        assert!(pruner.is_pruned(Path::new(".ok/index.sqlite")));
+        assert!(pruner.is_pruned(Path::new("web/node_modules/x/index.js")));
+        assert!(!pruner.is_pruned(Path::new("src/build.rs")));
+        assert!(!pruner.is_pruned(Path::new("src/build/mod.rs")));
     }
 
     #[test]

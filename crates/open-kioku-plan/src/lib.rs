@@ -529,6 +529,9 @@ impl<'a> PlanEngine<'a> {
             &located_symbols,
             &impact,
             &context.recommended_change_boundary,
+            manifest
+                .as_ref()
+                .and_then(|manifest| manifest.quality.coverage.as_ref()),
         );
         let recommended_next_steps = next_steps(
             &primary_context,
@@ -1578,12 +1581,14 @@ const MAX_RULE_EVIDENCE_REFS: usize = 10;
 const MAX_RULE_FALLBACK_EVIDENCE_REFS: usize = 3;
 
 /// `relevant_symbols` pairs each of the plan's relevant symbols with the store path of the file
-/// that declares it.
+/// that declares it. `coverage` is the index's record, whose pruned directories become
+/// forbidden rules (see [`pruned_dir_forbidden_rules`]).
 fn change_boundary(
     primary_context: &[SearchResult],
     relevant_symbols: &[(&Path, &Symbol)],
     impact: &ImpactReport,
     context_boundary: &ChangeBoundary,
+    coverage: Option<&open_kioku_core::IndexCoverage>,
 ) -> ChangeBoundary {
     let mut allowed = BTreeSet::new();
     for result in primary_context {
@@ -1633,6 +1638,7 @@ fn change_boundary(
         });
     }
     forbidden_rules.extend(default_forbidden_boundary_rules());
+    forbidden_rules.extend(pruned_dir_forbidden_rules(coverage));
     forbidden_rules.sort_by(|left, right| left.pattern.cmp(&right.pattern));
     forbidden_rules.dedup_by(|left, right| left.pattern == right.pattern);
     let forbidden_files = forbidden_rules
@@ -1946,6 +1952,9 @@ fn capped_upstream_rule(rule: &BoundaryFileRule, exact: &BTreeSet<String>) -> Bo
     }
 }
 
+/// Rules that hold in every repository. Build output is not among them: a root `build/` or
+/// `dist/` may be a declared package, and discovery decides which directories are output (see
+/// [`pruned_dir_forbidden_rules`]). `node_modules` is pruned by discovery wherever it is.
 fn default_forbidden_boundary_rules() -> Vec<BoundaryForbiddenRule> {
     [
         (".git/**", "git internals are never part of product edits"),
@@ -1953,9 +1962,6 @@ fn default_forbidden_boundary_rules() -> Vec<BoundaryForbiddenRule> {
             ".ok/**",
             "Open Kioku local index artifacts are generated state",
         ),
-        ("target/**", "Rust build output is generated state"),
-        ("build/**", "build output is generated state"),
-        ("dist/**", "distribution output is generated state"),
         (
             "node_modules/**",
             "vendored package dependencies are out of scope",
@@ -1992,6 +1998,56 @@ fn default_forbidden_boundary_rules() -> Vec<BoundaryForbiddenRule> {
         evidence_refs: vec!["boundary:default-forbidden".into()],
     })
     .collect()
+}
+
+/// One forbidden rule per directory the index records as pruned, at any depth, citing that
+/// record (`coverage:pruned:<path>`): build output is changed through its source or generator,
+/// and installed packages and environments through their manifests. This replaced root
+/// `target/**`, `build/**` and `dist/**` rules that forbade a declared `build/` package and
+/// missed a nested `web/dist/` bundle (#661).
+///
+/// An undeclared `build`/`dist` holding git-tracked source gets no rule: discovery only guessed
+/// it was output, the coverage record already reports the files as missing, and forbidding them
+/// would turn that guess into a boundary. A directory the record does not name (past its cap of
+/// 50, secret-like, or an index written before paths were recorded) gets no rule either; an
+/// edit there is still outside `allowed_files` and needs expansion evidence.
+fn pruned_dir_forbidden_rules(
+    coverage: Option<&open_kioku_core::IndexCoverage>,
+) -> Vec<BoundaryForbiddenRule> {
+    use open_kioku_core::PruneReason;
+    let Some(coverage) = coverage else {
+        return Vec::new();
+    };
+    coverage
+        .pruned
+        .iter()
+        .filter_map(|dir| {
+            let reason = match dir.reason {
+                PruneReason::BuildOutput => {
+                    "discovery pruned this directory as build output (a cache tag or a build manifest beside it); change its source or generator instead"
+                }
+                PruneReason::UndeclaredBuildDir
+                    if dir.tracked_source_files.is_some_and(|count| count > 0) =>
+                {
+                    return None;
+                }
+                PruneReason::UndeclaredBuildDir => {
+                    "discovery pruned this build directory as output: no module, package or `[index] keep_dirs` entry declares it source"
+                }
+                PruneReason::Dependencies => {
+                    "discovery pruned installed packages; dependencies change through their manifest"
+                }
+                PruneReason::VirtualEnv => {
+                    "discovery pruned a Python environment; it is generated state"
+                }
+            };
+            Some(BoundaryForbiddenRule {
+                pattern: format!("{}/**", dir.path),
+                reason: reason.into(),
+                evidence_refs: vec![format!("coverage:pruned:{}", dir.path)],
+            })
+        })
+        .collect()
 }
 
 fn boundary_evidence_refs(
@@ -3832,6 +3888,7 @@ mod tests {
             &[],
             &impact,
             &ChangeBoundary::default(),
+            None,
         );
 
         assert_eq!(boundary.caution_files.len(), MAX_LEXICAL_CAUTION_FILES + 1);
@@ -3861,6 +3918,7 @@ mod tests {
             &[],
             &impact_with(direct_impacts, &indirect),
             &ChangeBoundary::default(),
+            None,
         );
         assert_eq!(boundary.caution_files.len(), MAX_LEXICAL_CAUTION_FILES);
         assert!(boundary
@@ -3901,7 +3959,7 @@ mod tests {
             score_breakdown: Vec::new(),
         };
 
-        let boundary = change_boundary(&[primary], &[], &impact, &ChangeBoundary::default());
+        let boundary = change_boundary(&[primary], &[], &impact, &ChangeBoundary::default(), None);
 
         assert!(boundary
             .allowed_rules
@@ -3920,6 +3978,113 @@ mod tests {
             .iter()
             .any(|rule| rule.pattern == "vendor/**" && !rule.reason.is_empty()));
         assert!(!boundary.expansion_requirements.is_empty());
+    }
+
+    /// Build output is forbidden where discovery pruned it, by the coverage record and at any
+    /// depth, not by a root name: a root `build/` package the index walked is editable, a nested
+    /// `web/dist/` bundle is not, and an undeclared directory holding committed source (a guess
+    /// the coverage record already reports) is left out (#661).
+    #[test]
+    fn forbidden_build_output_follows_the_pruned_directories_the_index_recorded() {
+        use open_kioku_core::{IndexCoverage, PruneReason, PrunedDir};
+        let impact = ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
+            proven_impact: Vec::new(),
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
+            possible_impact: Vec::new(),
+            possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
+            relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
+            target: "src/auth.rs".into(),
+            direct_impacts: Vec::new(),
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        let patterns = |boundary: &ChangeBoundary| {
+            boundary
+                .forbidden_rules
+                .iter()
+                .map(|rule| rule.pattern.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // No coverage record, or one with nothing pruned: no build-output rule at all.
+        let boundary = change_boundary(
+            &[test_search_result("build/plan.go")],
+            &[],
+            &impact,
+            &ChangeBoundary::default(),
+            Some(&IndexCoverage::default()),
+        );
+        for name_rule in ["build/**", "dist/**", "target/**"] {
+            assert!(!patterns(&boundary).contains(&name_rule.to_string()));
+        }
+        assert!(boundary
+            .allowed_files
+            .contains(&PathBuf::from("build/plan.go")));
+        assert!(patterns(&boundary).contains(&"node_modules/**".to_string()));
+
+        let mut coverage = IndexCoverage::default();
+        let dir = |path: &str, reason, tracked| PrunedDir {
+            path: path.into(),
+            reason,
+            tracked_source_files: tracked,
+        };
+        coverage.record_pruned_dirs(
+            vec![
+                dir("target", PruneReason::BuildOutput, Some(0)),
+                dir("web/dist", PruneReason::BuildOutput, Some(60)),
+                dir("gen/build", PruneReason::UndeclaredBuildDir, None),
+                dir("tools/build", PruneReason::UndeclaredBuildDir, Some(3)),
+                dir("svc/node_modules", PruneReason::Dependencies, Some(0)),
+                dir("py/.venv", PruneReason::VirtualEnv, Some(0)),
+            ],
+            0,
+        );
+        let boundary = change_boundary(
+            &[test_search_result("src/auth.rs")],
+            &[],
+            &impact,
+            &ChangeBoundary::default(),
+            Some(&coverage),
+        );
+        let rules = &boundary.forbidden_rules;
+        for (pattern, evidence) in [
+            ("target/**", "coverage:pruned:target"),
+            ("web/dist/**", "coverage:pruned:web/dist"),
+            ("gen/build/**", "coverage:pruned:gen/build"),
+            ("svc/node_modules/**", "coverage:pruned:svc/node_modules"),
+            ("py/.venv/**", "coverage:pruned:py/.venv"),
+        ] {
+            let rule = rules
+                .iter()
+                .find(|rule| rule.pattern == pattern)
+                .unwrap_or_else(|| panic!("{pattern} is forbidden: {rules:?}"));
+            assert_eq!(rule.evidence_refs, vec![evidence.to_string()]);
+            assert!(
+                rule.reason.starts_with("discovery pruned"),
+                "{}",
+                rule.reason
+            );
+            assert!(boundary.forbidden_files.contains(&PathBuf::from(pattern)));
+        }
+        assert!(!patterns(&boundary).contains(&"tools/build/**".to_string()));
+        assert!(!patterns(&boundary).contains(&"build/**".to_string()));
+        // The patterns stay sorted and unique.
+        let mut sorted = patterns(&boundary);
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(patterns(&boundary), sorted);
     }
 
     #[test]
@@ -3965,7 +4130,7 @@ mod tests {
             ..Default::default()
         };
 
-        let boundary = change_boundary(&primary, &[], &impact, &context_boundary);
+        let boundary = change_boundary(&primary, &[], &impact, &context_boundary, None);
         let sections = evidence_by_section(&primary, &impact, &[], &boundary, &[], &[]);
         let boundary_section = sections["boundary"].iter().collect::<BTreeSet<_>>();
 
@@ -4083,7 +4248,7 @@ mod tests {
             score_breakdown: Vec::new(),
         };
 
-        let boundary = change_boundary(&primary, &[], &impact, &ChangeBoundary::default());
+        let boundary = change_boundary(&primary, &[], &impact, &ChangeBoundary::default(), None);
 
         let rule = boundary
             .allowed_rules
@@ -4189,6 +4354,7 @@ mod tests {
                 &[],
                 &impact_at(starts),
                 &ChangeBoundary::default(),
+                None,
             )
             .caution_rules
             .into_iter()
@@ -4251,7 +4417,7 @@ mod tests {
             ..Default::default()
         };
         let no_impact = impact_at(&[]);
-        let boundary = change_boundary(&primary, &[], &no_impact, &context_boundary);
+        let boundary = change_boundary(&primary, &[], &no_impact, &context_boundary, None);
         let first_lines = |count: u32| {
             (1..=count)
                 .map(|line| format!("search:src/big.rs:{line}-{line}:0"))

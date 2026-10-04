@@ -40,6 +40,10 @@ Default posture:
   same way. No file under a pruned directory is opened: deciding to prune checks only
   whether marker files exist, and counting committed source asks Git, locally, for its
   tracked paths
+- a `build` or `dist` directory `[index] keep_dirs` lists is walked, not trusted: every file
+  under it passes the same secret-path rule, `[paths] deny`, hidden-file rule and ignore
+  files as any other, so key material in a kept directory is skipped as `secret_policy` with
+  its path withheld
 - redact-capable output boundary
 - source edits occur in the user's normal editor
 

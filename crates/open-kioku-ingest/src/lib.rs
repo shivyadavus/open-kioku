@@ -773,7 +773,9 @@ impl Indexer {
         );
 
         use crate::project_model::ProjectModelDiscovery;
-        let project_model = open_kioku_semantic_model::ProjectModel::discover(&root);
+        // The manifest walks skip what discovery skips, `[index] keep_dirs` included.
+        let pruner = prune::DiscoveryPruner::new(&root, config)?;
+        let project_model = open_kioku_semantic_model::ProjectModel::discover_in(&pruner);
         analysis_facts.extend(cargo_facts::cargo_manifest_facts(&project_model, &files));
         let mut import_registry = imports::ImportRegistry::default();
         let mut file_map: imports::FileMap = HashMap::new();
@@ -913,7 +915,7 @@ impl Indexer {
             &rust_modules,
         );
         let resolver_report =
-            resolver::resolve_imports(&root, &files, &symbols, &imports, &rust_import_targets)?;
+            resolver::resolve_imports(&pruner, &files, &symbols, &imports, &rust_import_targets)?;
         let binding_index = open_kioku_resolution::BindingIndex::build(bindings.clone());
         let mut inheritance_index =
             open_kioku_resolution::InheritanceIndex::build(inheritance_sites.clone());
@@ -1525,10 +1527,10 @@ impl Indexer {
         let pruned = Arc::new(Mutex::new(Vec::<(PathBuf, PruneReason)>::new()));
         builder.filter_entry({
             let pruned = Arc::clone(&pruned);
-            let root = root.to_path_buf();
+            let pruner = prune::DiscoveryPruner::new(root, config)?;
             move |entry| {
                 let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-                match prune::classify(&root, entry.path(), is_dir) {
+                match pruner.classify(entry.path(), is_dir) {
                     prune::DirVerdict::Walk => true,
                     prune::DirVerdict::Tooling => false,
                     prune::DirVerdict::Prune(reason) => {
@@ -3354,7 +3356,11 @@ impl ScopedIgnoreMatcher {
     }
 }
 
-fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<ScopedIgnoreMatcher> {
+fn build_ignore_matcher(
+    pruner: &prune::DiscoveryPruner,
+    file_name: &str,
+) -> Result<ScopedIgnoreMatcher> {
+    let root = pruner.root();
     let mut ignore_files = Vec::new();
     for entry in WalkBuilder::new(root)
         .hidden(false)
@@ -3364,10 +3370,10 @@ fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<ScopedIgnoreMatc
         .ignore(false)
         .follow_links(false)
         .filter_entry({
-            let root = root.to_path_buf();
+            let pruner = pruner.clone();
             move |entry| {
                 let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-                prune::classify(&root, entry.path(), is_dir) == prune::DirVerdict::Walk
+                pruner.classify(entry.path(), is_dir) == prune::DirVerdict::Walk
             }
         })
         .build()
