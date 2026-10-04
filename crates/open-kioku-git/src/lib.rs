@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use unified_diff::{file_header_name, DiffLine, HunkScanner, MalformedDiff};
+use unified_diff::{file_header_name, git_header_paths, DiffLine, HunkScanner, MalformedDiff};
 
 const COMMIT_RECORD_SEPARATOR: u8 = 0x1e;
 const GIT_COMMIT_FORMAT: &str =
@@ -79,6 +79,11 @@ pub struct DiffFile {
     pub new_path: Option<PathBuf>,
     pub status: GitChangeKind,
     pub rename_score: Option<u8>,
+    /// Git compared the file as binary: it has no hunks, however much of it changed, so the
+    /// whole file is the change. An entry with no hunks that is not binary changed no line (a
+    /// mode change, an empty file added or deleted, a rename or copy without edits).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
     pub hunks: Vec<DiffHunk>,
 }
 
@@ -494,6 +499,9 @@ fn run_diff_unified_zero(root: impl AsRef<Path>, revision: Option<&str>) -> Resu
             // `color.diff=always` would wrap every line in escape codes the parser cannot read.
             "--no-color",
             "--find-renames",
+            // `diff.submodule=log` would write a changed submodule with no `diff --git` entry,
+            // and `diff` would write the files inside it as paths of this repository.
+            "--submodule=short",
             // Pinned so `diff.noprefix`, `diff.mnemonicPrefix` or `diff.srcPrefix` cannot make
             // one path read as two, which the parser would take for a rename.
             "--src-prefix=a/",
@@ -809,6 +817,7 @@ fn parse_diff_name_status(raw: &str) -> Result<Vec<DiffFile>> {
                         new_path: Some(parse_patch_path(fields[2], None)?),
                         status: kind,
                         rename_score,
+                        binary: false,
                         hunks: Vec::new(),
                     })
                 }
@@ -817,6 +826,7 @@ fn parse_diff_name_status(raw: &str) -> Result<Vec<DiffFile>> {
                     new_path: None,
                     status: kind,
                     rename_score,
+                    binary: false,
                     hunks: Vec::new(),
                 }),
                 _ => Ok(DiffFile {
@@ -824,6 +834,7 @@ fn parse_diff_name_status(raw: &str) -> Result<Vec<DiffFile>> {
                     new_path: Some(parse_patch_path(fields[1], None)?),
                     status: kind,
                     rename_score,
+                    binary: false,
                     hunks: Vec::new(),
                 }),
             }
@@ -834,19 +845,49 @@ fn parse_diff_name_status(raw: &str) -> Result<Vec<DiffFile>> {
 fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
     #[derive(Default)]
     struct PendingDiff {
+        /// A `diff --git` line opened this entry.
+        git_entry: bool,
+        /// The paths its `diff --git` line names, when it can be split with certainty.
+        header_paths: Option<(PathBuf, PathBuf)>,
         old_path: Option<PathBuf>,
         new_path: Option<PathBuf>,
         status: Option<GitChangeKind>,
         rename_score: Option<u8>,
+        binary: bool,
         hunks: Vec<DiffHunk>,
     }
 
-    fn finish(files: &mut Vec<DiffFile>, pending: &mut PendingDiff) {
+    fn finish(files: &mut Vec<DiffFile>, pending: &mut PendingDiff) -> Result<()> {
+        let header_paths = pending.header_paths.take();
+        let git_entry = std::mem::take(&mut pending.git_entry);
         if pending.old_path.is_none() && pending.new_path.is_none() {
-            pending.hunks.clear();
-            pending.status = None;
-            pending.rename_score = None;
-            return;
+            // Git writes no `---`/`+++` lines for an empty file added or deleted, a binary
+            // change or a mode change, so the `diff --git` line is the only one naming it.
+            match (header_paths, pending.status) {
+                (Some((_, new)), Some(GitChangeKind::Added)) => pending.new_path = Some(new),
+                (Some((old, _)), Some(GitChangeKind::Deleted)) => pending.old_path = Some(old),
+                (Some((old, new)), _) => {
+                    pending.old_path = Some(old);
+                    pending.new_path = Some(new);
+                }
+                // An entry git wrote that cannot be named is not a change to skip: every
+                // count read from this diff would leave it out.
+                (None, _) if git_entry => {
+                    return Err(OkError::Repository(
+                        "git diff output names an entry written without `---`/`+++` lines on a \
+                         `diff --git` line whose paths cannot be read: a quoted name that is \
+                         not UTF-8, or a line git does not write"
+                            .into(),
+                    ))
+                }
+                (None, _) => {
+                    pending.hunks.clear();
+                    pending.status = None;
+                    pending.rename_score = None;
+                    pending.binary = false;
+                    return Ok(());
+                }
+            }
         }
         let status = pending.status.take().unwrap_or_else(|| {
             if pending.old_path.is_none() {
@@ -864,8 +905,10 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
             new_path: pending.new_path.take(),
             status,
             rename_score: pending.rename_score.take(),
+            binary: std::mem::take(&mut pending.binary),
             hunks: std::mem::take(&mut pending.hunks),
         });
+        Ok(())
     }
 
     let mut files = Vec::new();
@@ -883,8 +926,13 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
             DiffLine::Content => {}
             DiffLine::HunkHeader(_) => pending.hunks.push(parse_diff_hunk(line)?),
             DiffLine::Header => {
-                if line.starts_with("diff --git ") {
-                    finish(&mut files, &mut pending);
+                if let Some(rest) = line.strip_prefix("diff --git ") {
+                    finish(&mut files, &mut pending)?;
+                    pending.git_entry = true;
+                    pending.header_paths = git_header_paths(rest)
+                        .map(|(old, new)| (PathBuf::from(old), PathBuf::from(new)));
+                } else if line.starts_with("Binary files ") || line == "GIT binary patch" {
+                    pending.binary = true;
                 } else if line.starts_with("new file mode ") {
                     pending.status = Some(GitChangeKind::Added);
                 } else if line.starts_with("deleted file mode ") {
@@ -920,7 +968,7 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
         let path = pending.new_path.as_deref().or(pending.old_path.as_deref());
         return Err(malformed_patch(path, &malformed));
     }
-    finish(&mut files, &mut pending);
+    finish(&mut files, &mut pending)?;
     Ok(files)
 }
 
@@ -1795,6 +1843,284 @@ mod tests {
         assert_eq!(patches.len(), 1);
         assert_eq!(patches[0].files.len(), 1);
         assert_eq!(patches[0].files[0].path, Path::new("a.rs"));
+    }
+
+    /// `(status, old, new, binary, hunks)` of each parsed entry, for comparing with a table.
+    type Entry = (GitChangeKind, Option<String>, Option<String>, bool, usize);
+
+    fn entries(files: &[super::DiffFile]) -> Vec<Entry> {
+        let shown = |path: &Option<std::path::PathBuf>| {
+            path.as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+        };
+        files
+            .iter()
+            .map(|file| {
+                (
+                    file.status,
+                    shown(&file.old_path),
+                    shown(&file.new_path),
+                    file.binary,
+                    file.hunks.len(),
+                )
+            })
+            .collect()
+    }
+
+    fn entry(
+        status: GitChangeKind,
+        old: Option<&str>,
+        new: Option<&str>,
+        binary: bool,
+        hunks: usize,
+    ) -> Entry {
+        (
+            status,
+            old.map(str::to_string),
+            new.map(str::to_string),
+            binary,
+            hunks,
+        )
+    }
+
+    /// Git writes these entries with no `---`/`+++` lines, as `git diff --unified=0` printed
+    /// them; each was dropped while paths were read only from those lines.
+    #[test]
+    fn entries_written_without_file_headers_are_named_from_their_diff_git_line() {
+        let files = parse_unified_zero_diff(
+            "diff --git a/assets/logo.png b/assets/logo.png\n\
+             index b3f5733..55098df 100644\n\
+             Binary files a/assets/logo.png and b/assets/logo.png differ\n\
+             diff --git \"a/caf\\303\\251 menu b/icon.png\" \"b/caf\\303\\251 menu b/icon.png\"\n\
+             index f57e65f..ed2d13a 100644\n\
+             Binary files \"a/caf\\303\\251 menu b/icon.png\" and \"b/caf\\303\\251 menu b/icon.png\" differ\n\
+             diff --git a/fonts/old.woff b/fonts/old.woff\n\
+             deleted file mode 100644\n\
+             index bec97a1..0000000\n\
+             Binary files a/fonts/old.woff and /dev/null differ\n\
+             diff --git a/src/empty.rs b/src/empty.rs\n\
+             deleted file mode 100644\n\
+             index e69de29..0000000\n\
+             diff --git a/src/placeholder.rs b/src/placeholder.rs\n\
+             new file mode 100644\n\
+             index 0000000..e69de29\n\
+             diff --git a/fonts/new.woff b/fonts/new.woff\n\
+             new file mode 100644\n\
+             index 0000000..f608302\n\
+             Binary files /dev/null and b/fonts/new.woff differ\n\
+             diff --git a/scripts/run.sh b/scripts/run.sh\n\
+             old mode 100644\n\
+             new mode 100755\n\
+             diff --git a/blob store.bin b/moved b/blob.bin\n\
+             similarity index 99%\n\
+             rename from blob store.bin\n\
+             rename to moved b/blob.bin\n\
+             index 3c5cfd9..9d11442 100644\n\
+             Binary files a/blob store.bin and b/moved b/blob.bin differ\n\
+             diff --git a/src/lib.rs b/src/lib.rs\n\
+             index 1111111..2222222 100644\n\
+             --- a/src/lib.rs\n\
+             +++ b/src/lib.rs\n\
+             @@ -1 +1 @@\n\
+             -old();\n\
+             +new();\n",
+        )
+        .unwrap();
+
+        use GitChangeKind::{Added, Deleted, Modified, Renamed};
+        let both = |path| (Some(path), Some(path));
+        let rows = [
+            (Modified, both("assets/logo.png"), true, 0),
+            (Modified, both("café menu b/icon.png"), true, 0),
+            (Deleted, (Some("fonts/old.woff"), None), true, 0),
+            (Deleted, (Some("src/empty.rs"), None), false, 0),
+            (Added, (None, Some("src/placeholder.rs")), false, 0),
+            (Added, (None, Some("fonts/new.woff")), true, 0),
+            (Modified, both("scripts/run.sh"), false, 0),
+            (
+                Renamed,
+                (Some("blob store.bin"), Some("moved b/blob.bin")),
+                true,
+                0,
+            ),
+            (Modified, both("src/lib.rs"), false, 1),
+        ];
+        assert_eq!(
+            entries(&files),
+            rows.into_iter()
+                .map(|(status, (old, new), binary, hunks)| entry(status, old, new, binary, hunks))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(files[7].rename_score, Some(99));
+        assert_eq!(
+            files[7].changed_paths(),
+            vec![
+                std::path::PathBuf::from("moved b/blob.bin"),
+                std::path::PathBuf::from("blob store.bin")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_no_prefix_entry_without_file_headers_keeps_its_whole_path() {
+        let files = parse_unified_zero_diff(
+            "diff --git assets/logo.png assets/logo.png\n\
+             index b3f5733..55098df 100644\n\
+             Binary files assets/logo.png and assets/logo.png differ\n\
+             diff --git a/run.sh a/run.sh\n\
+             old mode 100644\n\
+             new mode 100755\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            entries(&files),
+            vec![
+                entry(
+                    GitChangeKind::Modified,
+                    Some("assets/logo.png"),
+                    Some("assets/logo.png"),
+                    true,
+                    0
+                ),
+                entry(
+                    GitChangeKind::Modified,
+                    Some("a/run.sh"),
+                    Some("a/run.sh"),
+                    false,
+                    0
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_entry_named_only_by_an_unreadable_diff_git_line_is_malformed() {
+        let err = parse_unified_zero_diff(
+            "diff --git a/x b/y b/z\n\
+             old mode 100644\n\
+             new mode 100755\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cannot be read"), "{err}");
+        assert!(!err.contains("b/y"), "the unread line is not echoed: {err}");
+    }
+
+    /// Every path `git diff --name-status` names is a changed path of the parsed diff, header-only
+    /// entries included: a deleted empty file, a binary added, modified, deleted and renamed, and
+    /// a mode change.
+    #[cfg(unix)]
+    #[test]
+    fn every_path_git_reports_is_parsed_from_the_unified_diff() {
+        let dir = initialized_repo();
+        write(dir.path(), "src/lib.rs", "fn one() {}\n");
+        write(dir.path(), "src/empty.rs", "");
+        write(dir.path(), "scripts/run.sh", "#!/bin/sh\n");
+        write(dir.path(), "assets/logo.png", "png\0one\u{1}");
+        write(dir.path(), "fonts/old.woff", "woff\0old\u{2}");
+        write(dir.path(), "café menu b/icon.png", "icon\0\u{3}");
+        let blob = format!("\0{}", "q".repeat(4000));
+        write(dir.path(), "blob store.bin", &blob);
+        commit_all(dir.path(), "one");
+
+        write(dir.path(), "src/lib.rs", "fn one() {}\nfn two() {}\n");
+        run(
+            dir.path(),
+            &["rm", "--quiet", "src/empty.rs", "fonts/old.woff"],
+        );
+        write(dir.path(), "assets/logo.png", "png\0two\u{1}");
+        write(dir.path(), "café menu b/icon.png", "icon\0\u{4}");
+        write(dir.path(), "fonts/new.woff", "woff\0new\u{5}");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = dir.path().join("scripts/run.sh");
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::create_dir_all(dir.path().join("moved b")).unwrap();
+        run(dir.path(), &["mv", "blob store.bin", "moved b/blob.bin"]);
+        write(dir.path(), "moved b/blob.bin", &format!("{blob}Z"));
+        run(dir.path(), &["add", "--all"]);
+
+        let parsed = diff_unified_zero_since(dir.path(), "HEAD").unwrap();
+        let mut parsed_paths = parsed
+            .iter()
+            .flat_map(super::DiffFile::changed_paths)
+            .collect::<Vec<_>>();
+        parsed_paths.sort();
+        let mut reported = diff_name_status_since(dir.path(), "HEAD")
+            .unwrap()
+            .iter()
+            .flat_map(super::DiffFile::changed_paths)
+            .collect::<Vec<_>>();
+        reported.sort();
+
+        assert_eq!(parsed_paths, reported, "{parsed:#?}");
+        for path in [
+            "assets/logo.png",
+            "blob store.bin",
+            "café menu b/icon.png",
+            "fonts/new.woff",
+            "fonts/old.woff",
+            "moved b/blob.bin",
+            "scripts/run.sh",
+            "src/empty.rs",
+            "src/lib.rs",
+        ] {
+            assert!(
+                parsed_paths.contains(&std::path::PathBuf::from(path)),
+                "{path} missing from {parsed_paths:?}"
+            );
+        }
+        assert_eq!(parsed_paths.len(), 9, "{parsed_paths:?}");
+        let renamed = parsed
+            .iter()
+            .find(|file| file.status == GitChangeKind::Renamed)
+            .expect("the binary rename is detected");
+        assert!(renamed.binary, "{renamed:?}");
+    }
+
+    /// `diff.submodule=log` writes a changed submodule with no `diff --git` entry, and `diff`
+    /// writes the files inside it as if they were this repository's; either way the parsed
+    /// paths would disagree with `--name-status`, which names the submodule once.
+    #[test]
+    fn a_changed_submodule_is_one_path_whatever_diff_submodule_says() {
+        let dir = initialized_repo();
+        let sub = dir.path().join("vendor/ledger");
+        fs::create_dir_all(&sub).unwrap();
+        run(&sub, &["init", "--quiet"]);
+        run(&sub, &["config", "user.email", "test@example.com"]);
+        run(&sub, &["config", "user.name", "Test User"]);
+        run(&sub, &["config", "commit.gpgsign", "false"]);
+        write(&sub, "entry.rs", "fn one() {}\n");
+        commit_all(&sub, "one");
+        write(dir.path(), "src/lib.rs", "fn one() {}\n");
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "src/lib.rs", "vendor/ledger"])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        run(dir.path(), &["commit", "--quiet", "-m", "one"]);
+        write(&sub, "entry.rs", "fn one() {}\nfn two() {}\n");
+        commit_all(&sub, "two");
+
+        let reported = diff_name_status_since(dir.path(), "HEAD")
+            .unwrap()
+            .iter()
+            .flat_map(super::DiffFile::changed_paths)
+            .collect::<Vec<_>>();
+        assert_eq!(reported, vec![std::path::PathBuf::from("vendor/ledger")]);
+        for format in ["log", "diff", "short"] {
+            run(dir.path(), &["config", "diff.submodule", format]);
+            let parsed = diff_unified_zero_since(dir.path(), "HEAD")
+                .unwrap()
+                .iter()
+                .flat_map(super::DiffFile::changed_paths)
+                .collect::<Vec<_>>();
+            assert_eq!(parsed, reported, "diff.submodule={format}");
+        }
     }
 
     fn initialized_repo() -> tempfile::TempDir {

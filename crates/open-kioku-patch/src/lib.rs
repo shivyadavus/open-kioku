@@ -2627,49 +2627,12 @@ fn diff_scoped_paths(pairs: &[DiffPair]) -> BTreeSet<PathBuf> {
     paths
 }
 
-/// The `a/` and `b/` paths of a `diff --git a/<old> b/<new>` line. An unquoted path may hold
-/// spaces, so a line naming one path twice is split at its midpoint, as git does; any other
-/// line is split into two path tokens.
+/// The old and new paths of a `diff --git <old> <new>` line, read as `ok impact --since` reads
+/// them ([`open_kioku_git::unified_diff::git_header_paths`]), so an entry git writes with no
+/// `---`/`+++` lines (a binary or empty file, a mode change) is named on both.
 fn git_header_paths(rest: &str) -> (Option<String>, Option<String>) {
-    let (old, new) = match same_path_header(rest) {
-        Some(path) => (format!("a/{path}"), format!("b/{path}")),
-        None => {
-            let Some((old, remainder)) = take_path_token(rest) else {
-                return (None, None);
-            };
-            let new = take_path_token(remainder)
-                .map(|(new, _)| new)
-                .unwrap_or_default();
-            (old, new)
-        }
-    };
-    (
-        old.strip_prefix("a/").map(str::to_string),
-        new.strip_prefix("b/").map(str::to_string),
-    )
-}
-
-fn same_path_header(rest: &str) -> Option<&str> {
-    if rest.starts_with('"') || rest.len() % 2 == 0 {
-        return None;
-    }
-    let half = rest.len() / 2;
-    let old = rest.get(..half)?.strip_prefix("a/")?;
-    let new = rest.get(half..)?.strip_prefix(" b/")?;
-    (old == new).then_some(old)
-}
-
-/// One path token: a git-quoted path, or the text up to the next whitespace.
-fn take_path_token(raw: &str) -> Option<(String, &str)> {
-    let raw = raw.trim_start();
-    if raw.is_empty() {
-        return None;
-    }
-    if let Some(quoted) = unquote_diff_path(raw) {
-        return Some(quoted);
-    }
-    let end = raw.find(char::is_whitespace).unwrap_or(raw.len());
-    Some((raw[..end].to_string(), &raw[end..]))
+    open_kioku_git::unified_diff::git_header_paths(rest)
+        .map_or((None, None), |(old, new)| (Some(old), Some(new)))
 }
 
 /// The path of a `rename from`/`rename to`/`copy from`/`copy to` line, which is the whole rest
@@ -4524,6 +4487,31 @@ rename to src/menu.rs
             vec![PathBuf::from("src/lib.rs")]
         );
         assert!(previous_paths_from_unified_diff(plain).is_empty());
+    }
+
+    /// An entry git writes with no `---`/`+++` lines is named by its `diff --git` line alone,
+    /// with or without the `a/`/`b/` prefixes, and whatever spaces or ` b/` its path holds.
+    #[test]
+    fn entries_without_file_headers_are_changed_files_with_or_without_prefixes() {
+        let prefixed = "diff --git a/assets/sp ace b/logo.png b/assets/sp ace b/logo.png\n\
+                        index b3f5733..55098df 100644\n\
+                        Binary files a/assets/sp ace b/logo.png and b/assets/sp ace b/logo.png differ\n\
+                        diff --git a/scripts/run.sh b/scripts/run.sh\n\
+                        old mode 100644\n\
+                        new mode 100755\n";
+        let unprefixed = "diff --git assets/sp ace b/logo.png assets/sp ace b/logo.png\n\
+                          index b3f5733..55098df 100644\n\
+                          Binary files assets/sp ace b/logo.png and assets/sp ace b/logo.png differ\n\
+                          diff --git scripts/run.sh scripts/run.sh\n\
+                          old mode 100644\n\
+                          new mode 100755\n";
+        for diff in [prefixed, unprefixed] {
+            assert_eq!(
+                changed_files_from_unified_diff(diff),
+                ["assets/sp ace b/logo.png", "scripts/run.sh"].map(PathBuf::from),
+                "{diff}"
+            );
+        }
     }
 
     #[test]

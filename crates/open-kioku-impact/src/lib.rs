@@ -630,7 +630,9 @@ impl<'a> ImpactEngine<'a> {
     /// held for it, the file and every symbol it defined touched: its dependents are the ones most certain to
     /// break. When the index does not hold it there are none to read, and it is listed in
     /// [`DiffImpact::removed_paths_not_indexed`] instead. A rename is a removal of its previous
-    /// path beside a change to its new one, each a changed path of its own.
+    /// path beside a change to its new one, each a changed path of its own. A binary change has
+    /// no lines, so its whole file is the change. A change naming a secret-like path is only
+    /// counted, in [`DiffImpact::changed_paths_withheld`].
     pub fn answer(&self, repo_root: &Path, request: ImpactRequest<'_>) -> Result<ImpactAnswer> {
         let target = match (request.path, request.symbol) {
             (Some(path), _) => Some(path.to_path_buf()),
@@ -689,6 +691,9 @@ impl<'a> ImpactEngine<'a> {
                 "impact needs a file path, a symbol, or a git revision to diff against".into(),
             ));
         };
+        // A secret-like path is never indexed and never named: it is counted, not reported.
+        let (kept, changed_paths_withheld) = withhold_secret_like_paths(diff);
+        let diff = kept.as_slice();
         // Every path the diff leaves in place, and every path it removes: a deleted file, or the
         // previous path of a rename, which counts as a removal beside the addition of its new
         // path. A removed path the index still holds is reported from the dependents it last
@@ -776,7 +781,7 @@ impl<'a> ImpactEngine<'a> {
             caveats.push(format!(
                 "impact reports cover {} of the {changed_paths} changed paths{}, those whose \
                  touched symbols have the most proven dependents first; {reports_omitted} {}; \
-                 every changed path is in `changed_files`, and `path` gives any one of them its \
+                 every changed path{} is in `changed_files`, and `path` gives any one of them its \
                  own report",
                 reports.len(),
                 if renames > 0 {
@@ -788,6 +793,11 @@ impl<'a> ImpactEngine<'a> {
                     "were not started within the time this request allows".to_string()
                 } else {
                     format!("were left out, as at most {DIFF_REPORT_LIMIT} are reported")
+                },
+                if changed_paths_withheld > 0 {
+                    " that is not secret-like"
+                } else {
+                    ""
                 }
             ));
         }
@@ -807,10 +817,19 @@ impl<'a> ImpactEngine<'a> {
                  and follow the ranked ones in diff order"
             ));
         }
+        if changed_paths_withheld > 0 {
+            caveats.push(format!(
+                "{changed_paths_withheld} changed path(s) are secret-like (key material or \
+                 environment files), which the secret-path policy never indexes or names: they \
+                 are counted in `changed_paths_withheld`, and are not in `changed_files` or any \
+                 report"
+            ));
+        }
         Ok(ImpactAnswer::Diff(DiffImpact {
             reports,
             reports_omitted,
             removed_paths_not_indexed,
+            changed_paths_withheld,
             caveats,
         }))
     }
@@ -945,6 +964,38 @@ impl<'a> ImpactEngine<'a> {
             });
         };
         let indexed = self.store.get_file_by_path(path)?;
+        // Git states no lines of a binary file, however much of it changed, so the whole file
+        // is the change: no line number is read, and the index's copy need not match the disk's.
+        if change.binary {
+            let symbols = match &indexed {
+                Some(file) => self
+                    .store
+                    .symbols_for_file(&file.id)?
+                    .into_iter()
+                    .filter(|symbol| symbol.file_id == file.id)
+                    .map(|symbol| symbol.id)
+                    .collect(),
+                None => Vec::new(),
+            };
+            return Ok(ChangeFocus {
+                symbols,
+                whole_file: true,
+                caveats: vec![format!(
+                    "git compares `{shown}` as a binary file and states none of its changed \
+                     lines, so the whole file is taken as changed"
+                )],
+                ..ChangeFocus::default()
+            });
+        }
+        if change.hunks.is_empty() {
+            // A mode change, an empty file added, or a rename or copy without edits.
+            return Ok(ChangeFocus {
+                caveats: vec![format!(
+                    "the diff changes no line of `{shown}`, so no symbol of it was read first"
+                )],
+                ..ChangeFocus::default()
+            });
+        }
         let on_disk = std::fs::read(repo_root.join(path))
             .ok()
             .map(|bytes| format!("{:x}", Sha256::digest(&bytes)));
@@ -1077,14 +1128,69 @@ pub struct DiffImpact {
     /// change, or never indexed, as a secret-like path is not), so no dependents of theirs can be
     /// read; counted apart from `reports_omitted`.
     pub removed_paths_not_indexed: Vec<PathBuf>,
+    /// Changed paths [`withhold_secret_like_paths`] withholds: counted, never named, so with the
+    /// reports, `reports_omitted` and `removed_paths_not_indexed` they account for every path
+    /// the diff changes.
+    pub changed_paths_withheld: usize,
     /// Why paths were left out, when they were.
     pub caveats: Vec<String>,
 }
 
+/// `diff` without a secret-like path ([`open_kioku_core::is_secret_like_path`]) on either side
+/// of any change, and how many changed paths that withheld. The index never holds such a path,
+/// so it is counted rather than named. A rename or copy between a secret-like path and another
+/// keeps the other side, unlinked: a rename's new path or a copy's destination as an addition,
+/// a rename's previous path as a deletion.
+pub fn withhold_secret_like_paths(diff: &[DiffFile]) -> (Vec<DiffFile>, usize) {
+    let secret = |path: &Option<PathBuf>| {
+        path.as_deref()
+            .is_some_and(open_kioku_core::is_secret_like_path)
+    };
+    let mut kept = Vec::with_capacity(diff.len());
+    let mut withheld = 0;
+    for change in diff {
+        let (old_secret, new_secret) = (secret(&change.old_path), secret(&change.new_path));
+        if !old_secret && !new_secret {
+            kept.push(change.clone());
+            continue;
+        }
+        let changed = change.changed_paths();
+        withheld += changed
+            .iter()
+            .filter(|path| open_kioku_core::is_secret_like_path(path))
+            .count();
+        let unlinked = |old_path, new_path, status, hunks| DiffFile {
+            old_path,
+            new_path,
+            status,
+            rename_score: None,
+            binary: change.binary,
+            hunks,
+        };
+        match (&change.old_path, &change.new_path) {
+            (_, Some(new)) if !new_secret => kept.push(unlinked(
+                None,
+                Some(new.clone()),
+                GitChangeKind::Added,
+                change.hunks.clone(),
+            )),
+            (Some(old), _) if !old_secret && changed.contains(old) => kept.push(unlinked(
+                Some(old.clone()),
+                None,
+                GitChangeKind::Deleted,
+                Vec::new(),
+            )),
+            _ => {}
+        }
+    }
+    (kept, withheld)
+}
+
 impl DiffImpact {
     /// The shape `ok impact --since --json` prints and MCP `impact_analysis` returns for
-    /// `since` alone.
+    /// `since` alone. `changed_files` is the diff as [`withhold_secret_like_paths`] leaves it.
     pub fn to_json(&self, since: &str, changed_files: &[DiffFile]) -> serde_json::Value {
+        let (changed_files, _) = withhold_secret_like_paths(changed_files);
         let mut value = serde_json::json!({
             "since": since,
             "changed_files": changed_files,
@@ -1095,6 +1201,9 @@ impl DiffImpact {
         }
         if !self.removed_paths_not_indexed.is_empty() {
             value["removed_paths_not_indexed"] = serde_json::json!(self.removed_paths_not_indexed);
+        }
+        if self.changed_paths_withheld > 0 {
+            value["changed_paths_withheld"] = serde_json::json!(self.changed_paths_withheld);
         }
         if !self.caveats.is_empty() {
             value["caveats"] = serde_json::json!(self.caveats);
@@ -1628,9 +1737,10 @@ pub struct ChangeFocus {
     pub lines: Vec<LineRange>,
     /// Symbols the caller names as changed.
     pub symbols: Vec<SymbolId>,
-    /// Whether the change removes the file itself, as deleting it or renaming it away does. The
-    /// file's own node is then touched too, so what imports the file by path is a dependent of
-    /// the change, as a caller of one of its symbols is. A change to some of its lines is not.
+    /// Whether the change removes or replaces the file itself, as deleting it, renaming it away
+    /// or changing it as a binary file (whose diff has no lines) does. The file's own node is
+    /// then touched too, so what imports the file by path is a dependent of the change, as a
+    /// caller of one of its symbols is. A change to some of its lines is not.
     pub whole_file: bool,
     /// Why the focus is narrower than the change, such as lines that could not be matched to
     /// the indexed symbols. A report carries them where the focus decided something.
@@ -1751,9 +1861,9 @@ struct RelationshipImpacts {
 struct Seed {
     node_id: NodeId,
     label: String,
-    /// Whether the change touches it. The file node is only when the change removes the file
-    /// ([`ChangeFocus::whole_file`]): a change to some of its lines is not a change to everything
-    /// that imports it.
+    /// Whether the change touches it. The file node is only when the change removes or replaces
+    /// the file ([`ChangeFocus::whole_file`]): a change to some of its lines is not a change to
+    /// everything that imports it.
     touched: bool,
     /// The symbol's position in the file's symbol list (the file node is 0, symbols from 1): the
     /// tie-break that keeps one entry per dependent the same whatever order seeds are read in.
@@ -6424,6 +6534,7 @@ mod tests {
             new_path: Some(PathBuf::from(path)),
             status: GitChangeKind::Modified,
             rename_score: None,
+            binary: false,
             hunks: vec![open_kioku_git::DiffHunk {
                 old_range: lines.clone(),
                 new_range: lines,
@@ -6704,12 +6815,149 @@ mod tests {
         );
     }
 
+    /// Git states no lines of a binary change, so its whole file is the change: every symbol the
+    /// index holds for it is touched, whether or not the disk copy still matches the index. An
+    /// entry with no hunks that is not binary (a mode change) changed no line.
+    #[test]
+    fn a_binary_change_touches_its_whole_file_and_a_mode_change_no_line() {
+        let (mut graph, _) = ledger_with_an_unread_symbol();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/ledger.rs"), "pub fn reopen() {}\n").unwrap();
+        graph.files[0].content_hash = format!("{:x}", Sha256::digest(b"pub fn reopen() {}\n"));
+        let path = Path::new("src/ledger.rs");
+        let touched = |report: &ImpactReport| {
+            report
+                .relationship_impact_reads
+                .as_ref()
+                .map(|reads| reads.symbols_touched)
+        };
+        let every_symbol = Some(RELATIONSHIP_IMPACT_SYMBOL_SEEDS + 1);
+        let header_only = |binary: bool| open_kioku_git::DiffFile {
+            binary,
+            hunks: Vec::new(),
+            ..diff_changing("src/ledger.rs", None)
+        };
+        let report = |diff: &[open_kioku_git::DiffFile]| {
+            one_report(
+                graph
+                    .answer(
+                        root.path(),
+                        ImpactRequest {
+                            path: Some(path),
+                            diff: Some(diff),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
+            )
+        };
+        let caveats = |report: &ImpactReport| report.relationship_impact_caveats.join("\n");
+
+        let binary = report(&[header_only(true)]);
+        assert_eq!(touched(&binary), every_symbol);
+        assert!(
+            caveats(&binary).contains("as a binary file and states none"),
+            "{}",
+            caveats(&binary)
+        );
+        std::fs::write(root.path().join("src/ledger.rs"), "\0replaced\u{1}").unwrap();
+        let replaced = report(&[header_only(true)]);
+        assert_eq!(touched(&replaced), every_symbol);
+
+        std::fs::write(root.path().join("src/ledger.rs"), "pub fn reopen() {}\n").unwrap();
+        let mode_only = report(&[header_only(false)]);
+        assert_eq!(touched(&mode_only), Some(0));
+        assert!(
+            caveats(&mode_only).contains("the diff changes no line of `src/ledger.rs`"),
+            "{}",
+            caveats(&mode_only)
+        );
+    }
+
+    /// A secret-like path is never indexed, so it is never named either: a change to one is
+    /// counted beside the reports, and the counts still add up to every changed path. A rename
+    /// between a secret-like path and another keeps the other side, unlinked.
+    #[test]
+    fn secret_like_paths_are_counted_and_never_named() {
+        let (graph, edited) = ledger_with_an_unread_symbol();
+        let root = tempfile::tempdir().unwrap();
+        let line = LineRange::single(edited.range.clone().unwrap().start + 1);
+        let diff = [
+            diff_changing("src/ledger.rs", Some(line)),
+            diff_changing("config/.env.local", None),
+            diff_deleting("keys/signing.p12"),
+            diff_renaming("certs/old.pem", "src/fixture.txt"),
+            diff_renaming("docs/example.txt", ".env.example"),
+        ];
+
+        let answer = diff_answer(&graph, root.path(), &diff);
+
+        assert_eq!(answer.changed_paths_withheld, 4);
+        let reported = answer.reports.len() + answer.reports_omitted;
+        assert_eq!(
+            reported + answer.removed_paths_not_indexed.len() + answer.changed_paths_withheld,
+            diff.iter()
+                .map(|change| change.changed_paths().len())
+                .sum::<usize>()
+        );
+        assert!(answer
+            .caveats
+            .iter()
+            .any(|caveat| caveat.starts_with("4 changed path(s) are secret-like")));
+        let shape = answer.to_json("HEAD", &diff);
+        assert_eq!(shape["changed_paths_withheld"], 4, "{shape:#}");
+        let kept = shape["changed_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|change| {
+                (
+                    change["status"].clone(),
+                    change["old_path"].clone(),
+                    change["new_path"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let status = |kind: GitChangeKind| serde_json::json!(kind);
+        assert_eq!(
+            kept,
+            vec![
+                (
+                    status(GitChangeKind::Modified),
+                    serde_json::json!("src/ledger.rs"),
+                    serde_json::json!("src/ledger.rs")
+                ),
+                (
+                    status(GitChangeKind::Added),
+                    serde_json::Value::Null,
+                    serde_json::json!("src/fixture.txt")
+                ),
+                (
+                    status(GitChangeKind::Deleted),
+                    serde_json::json!("docs/example.txt"),
+                    serde_json::Value::Null
+                ),
+            ],
+            "{shape:#}"
+        );
+        assert!(
+            shape["changed_files"][1]["rename_score"].is_null(),
+            "{shape:#}"
+        );
+        let text = shape.to_string();
+        for secret in [".env", "signing.p12", "old.pem"] {
+            assert!(!text.contains(secret), "{secret} is named: {shape:#}");
+        }
+    }
+
     fn diff_deleting(path: &str) -> open_kioku_git::DiffFile {
         open_kioku_git::DiffFile {
             old_path: Some(PathBuf::from(path)),
             new_path: None,
             status: GitChangeKind::Deleted,
             rename_score: None,
+            binary: false,
             hunks: vec![open_kioku_git::DiffHunk {
                 old_range: Some(LineRange { start: 1, end: 40 }),
                 new_range: None,
@@ -6723,6 +6971,7 @@ mod tests {
             new_path: Some(PathBuf::from(new)),
             status: GitChangeKind::Renamed,
             rename_score: Some(100),
+            binary: false,
             hunks: Vec::new(),
         }
     }
