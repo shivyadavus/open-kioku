@@ -196,7 +196,7 @@ supply the name must agree. A path from the module's own crate follows any of it
 declarations, a private `use` included, since only code below the module can name what one brings
 in; a path from another crate (a crate name the package declares) follows `pub use` alone. Left
 unresolved: two re-exports of one name that disagree, a glob the index cannot follow (another
-crate outside the repository, an enum), a cycle, a chain longer than eight steps, and a name only
+crate outside the repository), a cycle, a chain longer than eight steps, and a name only
 a glob brings into a module whose file invokes a macro at its top level, which may expand to an
 item or a named `use` the parser does not see that shadows the glob. Macros that declare no name
 (`compile_error!`, the `assert!` and `const_assert!` families, `include_str!`, `include_bytes!`,
@@ -208,6 +208,38 @@ candidates (strategies `rust_reexport_ambiguous_module` and `rust_reexport_ambig
 gets no edge. A re-export through a module whose file configuration selects (`pub use imp::f;`
 beside `#[cfg_attr(windows, path = "win.rs")] mod imp;`) keeps one unproven edge per file, as a
 path into the module does.
+
+A Rust name is read in the namespace its path uses it in (#643). Types (modules, structs, enums,
+unions, traits, type aliases) and values (functions, constants, statics, and the constructors of
+tuple and unit structs) are separate: a call path such as `m::S()` names a value, and a path to a
+type, or through one to its associated function (`m::S::new()`), names a type. The parser records
+which structs, enums, unions and type aliases are types alone: a braced `struct S { .. }` is,
+while a tuple or unit struct is also the value its constructor is. A call path never reaches a
+type alone, and an item a module defines shadows what a glob beside it brings in only in the
+namespaces the item occupies, as rustc reads it: beside a braced `struct S` and
+`pub use crate::a::*;`, `m::S()` is `a`'s `fn S`, and beside a `fn S`, `m::S::new()` is `new` of
+`a`'s `struct S`. Macros live in a namespace of their own, which no edge resolves in: a
+`macro_rules!` is no item the index records and a macro invocation no call. A `use` brings in a
+name's item of every namespace and binds the one item it reads as before; a bare call through an
+import still needs the bound item to be a function. The re-export table the resolver reads holds
+each name's type and value apart.
+
+A Rust path is also followed through three more kinds of `use` (#641). A glob of an enum
+(`pub use Shape::*;`, or `crate::shapes::Shape::*`) brings in the enum's variants and nothing else,
+so another glob beside it can settle a name; a path to a variant (`use crate::shapes::Shape::Circle;`
+or `use crate::shapes::Circle;` through the glob) gets a file-level `IMPORTS` edge to the file
+declaring the enum, but binds no item and gives a call no edge, since a variant is not an item the
+index records. A module a `use` brings in under a name (`pub use inner as facade;`, or a
+one-segment `use inner;`) is followed: `crate::facade::f()` and `use crate::facade::f;` continue in
+`inner`, one step longer, within the same crate. And the named `use` declarations written directly
+in an inline `mod n { .. }` block are followed for paths through the block (`crate::n::g()` after
+`pub use super::m::g;` inside it, and `engine::n::g()` from another crate when the `use` is `pub`),
+with `self` and `super` read from the block; an item the block defines shadows them as at a file's
+top level. Not followed: a glob written in an inline block, whose macros the parser does not
+record, a renamed module in another crate, and a path through a renamed module or an inline block
+into a module whose file configuration selects. A call path reaches a renamed module one segment
+deep (`crate::facade::f()`, not `crate::facade::sub::f()`); an import path is read to any depth,
+and also reaches the items an inline block defines.
 
 A method call through a field of a Rust struct (`self.store.save()`, `entry.store.save()`,
 `self.a.b.m()`) is read through the type the field declares (#630). Each named field of a `struct`

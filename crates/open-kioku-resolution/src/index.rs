@@ -1,6 +1,6 @@
 use open_kioku_core::{
-    Binding, FileId, ModuleDeclarationSite, ModuleId, Scope, ScopeId, ScopeKind, SourceRange,
-    Symbol, SymbolId,
+    Binding, FileId, ModuleDeclarationSite, ModuleId, RustEnumVariants, Scope, ScopeId, ScopeKind,
+    SourceRange, Symbol, SymbolId, SymbolKind,
 };
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -153,6 +153,11 @@ pub struct ScopeIndex {
     /// qualified name tree-sitter would give an item of that name in the module's file
     /// (`src::lib::issue_token` for `pub use auth::issue_token;` in `src/lib.rs`, #476).
     rust_reexports: HashMap<String, RustReexport>,
+    /// The Rust structs, enums, unions and type aliases that are types alone (#643): a braced
+    /// struct, not a tuple or unit one, whose name is also its constructor's.
+    rust_type_only_items: HashSet<SymbolId>,
+    /// The variants of each Rust `enum`, by its symbol (#641).
+    rust_enum_variants: HashMap<SymbolId, Vec<String>>,
 }
 
 /// What a name a Rust module brings in with `use` names, for a path through the module:
@@ -165,9 +170,48 @@ pub struct RustReexport {
     pub file: FileId,
     /// What a path written in the file's own crate names, through any of its module-level `use`
     /// declarations.
-    pub in_crate: Option<RustReexported>,
+    pub in_crate: RustReexportNamespaces,
     /// What a path written in another crate names, through `pub use` declarations alone.
-    pub from_other_crates: Option<RustReexported>,
+    pub from_other_crates: RustReexportNamespaces,
+}
+
+/// What a re-exported Rust name names in each namespace (#643). A module may define a braced
+/// `struct S` and bring in a `fn S` with a glob: a call path `m::S()` names the function, the
+/// value, and a type path `m::S::new()` the struct.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RustReexportNamespaces {
+    /// What a path naming a type reaches.
+    pub types: Option<RustReexported>,
+    /// What a call path reaches.
+    pub values: Option<RustReexported>,
+}
+
+impl RustReexportNamespaces {
+    /// What the name is in `namespace`.
+    pub fn get(&self, namespace: RustNamespace) -> Option<&RustReexported> {
+        match namespace {
+            RustNamespace::Type => self.types.as_ref(),
+            RustNamespace::Value => self.values.as_ref(),
+        }
+    }
+
+    /// Whether the name is recorded in neither namespace.
+    pub fn is_empty(&self) -> bool {
+        self.types.is_none() && self.values.is_none()
+    }
+}
+
+/// A Rust namespace a path reads a name in (#643). A type and a value of one name are separate
+/// items: a call names a value, and a path to a type, or through one to its associated function,
+/// names a type. Macros live in a namespace of their own, which no path the index reads
+/// resolves in: a `macro_rules!` is not an item it records, and a macro invocation is not a
+/// call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RustNamespace {
+    /// Modules, structs, enums, unions, traits and type aliases.
+    Type,
+    /// Functions, constants, statics, and the constructors of tuple and unit structs.
+    Value,
 }
 
 /// What a re-exported Rust name names.
@@ -632,6 +676,59 @@ impl ScopeIndex {
     /// the module holding it, when that module brings the name in.
     pub(crate) fn rust_reexport(&self, qualified: &str) -> Option<&RustReexport> {
         self.rust_reexports.get(qualified)
+    }
+
+    /// Records the Rust type items that are not also values, and the variants of each enum, as
+    /// the parser read them (#641, #643).
+    pub fn record_rust_type_items(
+        &mut self,
+        type_only: impl IntoIterator<Item = SymbolId>,
+        enum_variants: impl IntoIterator<Item = RustEnumVariants>,
+    ) {
+        self.rust_type_only_items.extend(type_only);
+        self.rust_enum_variants.extend(
+            enum_variants
+                .into_iter()
+                .map(|found| (found.enum_symbol_id, found.variants)),
+        );
+    }
+
+    /// Whether the Rust item `symbol` lives in `namespace` (#643). A struct, enum, union or
+    /// type alias is a type, and a tuple or unit struct also a value: any of them the parser
+    /// did not read as a type alone counts as both, as does a symbol of a kind no Rust item has.
+    pub fn rust_in_namespace(&self, symbol: &Symbol, namespace: RustNamespace) -> bool {
+        match symbol.kind {
+            SymbolKind::Module
+            | SymbolKind::Package
+            | SymbolKind::Trait
+            | SymbolKind::Interface => namespace == RustNamespace::Type,
+            SymbolKind::Class => {
+                namespace == RustNamespace::Type || !self.rust_type_only_items.contains(&symbol.id)
+            }
+            SymbolKind::Function
+            | SymbolKind::Method
+            | SymbolKind::Constant
+            | SymbolKind::Variable
+            | SymbolKind::Field => namespace == RustNamespace::Value,
+            SymbolKind::Test
+            | SymbolKind::Endpoint
+            | SymbolKind::DatabaseTable
+            | SymbolKind::Unknown => true,
+        }
+    }
+
+    /// The variants of the Rust `enum` `item`, `None` for any other item.
+    pub fn rust_enum_variants(&self, item: &SymbolId) -> Option<&[String]> {
+        self.rust_enum_variants.get(item).map(Vec::as_slice)
+    }
+
+    /// The block scope of the inline `mod name { .. }` item `module`, `None` for a `mod name;`
+    /// or one the index cannot tell.
+    pub fn inline_module_body(&self, module: &SymbolId) -> Option<&Scope> {
+        match self.module_body(module) {
+            ModuleBody::Inline(body) => Some(body),
+            ModuleBody::OutOfLine | ModuleBody::Unknown => None,
+        }
     }
 
     pub fn get(&self, id: &ScopeId) -> Option<&Scope> {

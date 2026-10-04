@@ -2239,6 +2239,14 @@ pub struct PackageDeclarationSite {
     pub name: String,
 }
 
+/// The variants a Rust `enum`, the symbol `enum_symbol_id`, declares by name: what a glob `use`
+/// of the enum (`pub use Shape::*;`) brings in, and no item the index records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RustEnumVariants {
+    pub enum_symbol_id: SymbolId,
+    pub variants: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SyntaxFacts {
     pub symbols: Vec<Symbol>,
@@ -2264,6 +2272,14 @@ pub struct SyntaxFacts {
     /// the file's module.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub item_macro_names: Vec<String>,
+    /// The Rust type items that are not also values: a braced `struct`, an `enum`, a `union`
+    /// and a `type` alias live in the type namespace alone, while a tuple or unit struct is also
+    /// the value its constructor is. A call names a value and never one of these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rust_type_only_items: Vec<SymbolId>,
+    /// The variants of each Rust `enum` the file declares.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rust_enum_variants: Vec<RustEnumVariants>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

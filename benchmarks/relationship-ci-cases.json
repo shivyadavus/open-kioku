@@ -3286,6 +3286,238 @@
       "notes": "Regression case (#476): the sibling of case 13. A block `use crate::b::target_fn;` resolves through `b`'s `pub use crate::c::target_fn;` and shadows the file-level `use crate::a::target_fn;`, so the call is proven to `c::target_fn`."
     },
     {
+      "id": "ci-rust-calls-159-braced_struct_beside_glob_function_call",
+      "fixture_id": "ci/ri3/rust/calls/braced_struct_beside_glob_function_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:braced_struct_beside_glob_function_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "braced_struct_beside_glob_function_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::ledger::target_fn",
+        "identity": "symbol:rust:calls:braced_struct_beside_glob_function_call:target"
+      },
+      "notes": "Regression case (#643): `tokens` defines a braced `struct target_fn`, a type alone, and its glob `pub use crate::ledger::*;` brings in `ledger`'s `fn target_fn`, so the call `crate::tokens::target_fn()` names the function. The struct was proven before namespaces were told apart."
+    },
+    {
+      "id": "ci-rust-calls-160-tuple_struct_beside_glob_function_call",
+      "fixture_id": "ci/ri3/rust/calls/tuple_struct_beside_glob_function_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:tuple_struct_beside_glob_function_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "tuple_struct_beside_glob_function_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:tuple_struct_beside_glob_function_call:target"
+      },
+      "notes": "Regression case (#643): a tuple struct is also a value, its constructor, so `tokens`' own `struct target_fn(u8)` shadows the function its glob brings in."
+    },
+    {
+      "id": "ci-rust-calls-161-glob_struct_beside_local_function_type_path_call",
+      "fixture_id": "ci/ri3/rust/calls/glob_struct_beside_local_function_type_path_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:glob_struct_beside_local_function_type_path_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "glob_struct_beside_local_function_type_path_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::ledger::target_fn",
+        "identity": "symbol:rust:calls:glob_struct_beside_local_function_type_path_call:target"
+      },
+      "notes": "Regression case (#643): `tokens` defines a `fn Engine`, a value alone, and its glob brings in `ledger`'s `struct Engine`, so the type path `crate::tokens::Engine::target_fn()` reaches the struct's associated function."
+    },
+    {
+      "id": "ci-rust-calls-162-braced_struct_beside_unread_glob_call",
+      "fixture_id": "ci/ri3/rust/calls/braced_struct_beside_unread_glob_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:braced_struct_beside_unread_glob_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "braced_struct_beside_unread_glob_call",
+      "notes": "Regression case (#643): the value `crate::tokens::target_fn()` calls comes from a glob of a crate the index does not hold; the braced struct beside it is a type alone and is not proven."
+    },
+    {
+      "id": "ci-rust-calls-163-enum_variant_glob_beside_glob_reexport_call",
+      "fixture_id": "ci/ri3/rust/calls/enum_variant_glob_beside_glob_reexport_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:enum_variant_glob_beside_glob_reexport_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "enum_variant_glob_beside_glob_reexport_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:enum_variant_glob_beside_glob_reexport_call:target"
+      },
+      "notes": "Regression case (#641): `pub use Shape::*;` brings in `Shape`'s variants alone, so `shapes`' other glob, of `tokens`, settles `target_fn`."
+    },
+    {
+      "id": "ci-rust-calls-164-enum_variant_glob_variant_call",
+      "fixture_id": "ci/ri3/rust/calls/enum_variant_glob_variant_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:enum_variant_glob_variant_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "enum_variant_glob_variant_call",
+      "notes": "Regression case (#641): `target_fn` is a variant `pub use Shape::*;` brings in, no item the index records, so `tokens::target_fn` is not proven."
+    },
+    {
+      "id": "ci-rust-calls-165-renamed_module_reexport_path_call",
+      "fixture_id": "ci/ri3/rust/calls/renamed_module_reexport_path_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:renamed_module_reexport_path_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "renamed_module_reexport_path_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:renamed_module_reexport_path_call:target"
+      },
+      "notes": "Regression case (#641): `pub use tokens as facade;` in the crate root renames a module, so `crate::facade::target_fn()` continues in `tokens`."
+    },
+    {
+      "id": "ci-rust-calls-166-renamed_module_reexport_bare_call",
+      "fixture_id": "ci/ri3/rust/calls/renamed_module_reexport_bare_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:renamed_module_reexport_bare_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "renamed_module_reexport_bare_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:renamed_module_reexport_bare_call:target"
+      },
+      "notes": "Regression case (#641): `use crate::facade::target_fn;` reaches the item through the renamed module as the call path does."
+    },
+    {
+      "id": "ci-rust-calls-167-renamed_outside_crate_path_call",
+      "fixture_id": "ci/ri3/rust/calls/renamed_outside_crate_path_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:renamed_outside_crate_path_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "renamed_outside_crate_path_call",
+      "notes": "Regression case (#641): `pub use outside as facade;` renames a crate the index does not hold, so `crate::facade::target_fn()` does not reach `tokens::target_fn`."
+    },
+    {
+      "id": "ci-rust-calls-168-inline_module_reexport_path_call",
+      "fixture_id": "ci/ri3/rust/calls/inline_module_reexport_path_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:inline_module_reexport_path_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "inline_module_reexport_path_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:inline_module_reexport_path_call:target"
+      },
+      "notes": "Regression case (#641): `pub use super::tokens::target_fn;` written inside the inline `pub mod facade { .. }` is followed for `crate::facade::target_fn()`."
+    },
+    {
+      "id": "ci-rust-calls-169-workspace_dependency_inline_reexport_path_call",
+      "fixture_id": "ci/ri3/rust/calls/workspace_dependency_inline_reexport_path_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:workspace_dependency_inline_reexport_path_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "workspace_dependency_inline_reexport_path_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "crates::engine::src::inner::target_fn",
+        "identity": "symbol:rust:calls:workspace_dependency_inline_reexport_path_call:target"
+      },
+      "notes": "Regression case (#641): the dependency's inline `pub mod n` re-exports `inner::target_fn` with `pub use`, so `engine::n::target_fn()` from another crate reaches it."
+    },
+    {
+      "id": "ci-rust-calls-170-workspace_dependency_inline_private_use_path_call",
+      "fixture_id": "ci/ri3/rust/calls/workspace_dependency_inline_private_use_path_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:workspace_dependency_inline_private_use_path_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "workspace_dependency_inline_private_use_path_call",
+      "notes": "Regression case (#641): a private `use` inside the dependency's inline `pub mod n` brings nothing in for another crate."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
@@ -3762,6 +3994,54 @@
         "import_binding"
       ],
       "notes": "Regression case (#632): in a package of the 2015 edition, `use auth::issue_token;` in `src/session.rs`, which declares its own `mod auth;`, imports from the crate root's `src/auth.rs`."
+    },
+    {
+      "id": "ci-rust-imports-09-enum_variant_path_import",
+      "fixture_id": "ci/ri3/rust/imports/enum_variant_path_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/session.rs",
+        "identity": "file:rust:imports:enum_variant_path_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "enum_variant_path_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/shapes.rs",
+        "identity": "file:rust:imports:enum_variant_path_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#641): `use crate::shapes::Shape::Circle;` names a variant of the enum `shapes` declares, and reaches `src/shapes.rs`."
+    },
+    {
+      "id": "ci-rust-imports-10-enum_variant_glob_reexport_import",
+      "fixture_id": "ci/ri3/rust/imports/enum_variant_glob_reexport_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/session.rs",
+        "identity": "file:rust:imports:enum_variant_glob_reexport_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "enum_variant_glob_reexport_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/shapes.rs",
+        "identity": "file:rust:imports:enum_variant_glob_reexport_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#641): `use crate::shapes::Circle;` reaches the variant through `shapes`' `pub use Shape::*;`, and `src/shapes.rs`."
     },
     {
       "id": "ci-rust-depends_on-01-metamorphic_a",

@@ -1,6 +1,8 @@
 use crate::context::{ResolutionContext, RustRelativeModule, ScopedImport};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
-use crate::index::{RustConfiguredRead, RustModuleFiles, RustModulePlacement, RustReexported};
+use crate::index::{
+    RustConfiguredRead, RustModuleFiles, RustModulePlacement, RustNamespace, RustReexported,
+};
 use crate::pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
 };
@@ -401,11 +403,13 @@ fn resolve_rust_qualified_module_outcome(
     receiver: &str,
 ) -> Option<ResolutionOutcome> {
     let receiver = receiver.trim();
-    if let Some((targets, strategy)) =
-        rust_module_path_items(&call.scope_id, ctx, receiver, &call.callee_name, |symbol| {
-            !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package)
-        })
-    {
+    if let Some((targets, strategy)) = rust_module_path_items(
+        &call.scope_id,
+        ctx,
+        receiver,
+        (&call.callee_name, RustNamespace::Value),
+        &|symbol| !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package),
+    ) {
         return Some(rust_module_path_outcome(call, ctx, targets, strategy));
     }
     let (module_path, type_name) = receiver.rsplit_once("::")?;
@@ -417,8 +421,8 @@ fn resolve_rust_qualified_module_outcome(
         &call.scope_id,
         ctx,
         module_path.trim(),
-        type_name,
-        |symbol| {
+        (type_name, RustNamespace::Type),
+        &|symbol| {
             matches!(
                 symbol.kind,
                 SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface
@@ -448,17 +452,22 @@ fn rust_module_path_items(
     scope_id: &ScopeId,
     ctx: &ResolutionContext<'_>,
     path: &str,
-    name: &str,
-    accept: impl Fn(&Symbol) -> bool,
+    (name, namespace): (&str, RustNamespace),
+    accept: &dyn Fn(&Symbol) -> bool,
 ) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
-    if let Some(found) = rust_crate_name_items(scope_id, ctx, path, name, &accept) {
+    // Only an item of the namespace the path reads the name in is the name (#643): a braced
+    // `struct S` beside a glob that brings in a `fn S` does not answer the call `m::S()`.
+    let in_namespace =
+        |symbol: &Symbol| accept(symbol) && ctx.scopes.rust_in_namespace(symbol, namespace);
+    let admitted = &in_namespace;
+    if let Some(found) = rust_crate_name_items(scope_id, ctx, path, (name, namespace), admitted) {
         return Some(found);
     }
     let own = ctx.scopes.rust_module_placement(ctx.file_id);
     // A file another crate may compile too is read against no one crate.
     let mut placement = own.filter(|placement| !placement.in_other_crates);
     if let Some((import_scope, imported)) = rust_imported_module_path(scope_id, ctx, path) {
-        return rust_module_path_items(import_scope, ctx, &imported, name, accept);
+        return rust_module_path_items(import_scope, ctx, &imported, (name, namespace), accept);
     }
     // A path starting at a module in scope that is also a crate name: the module is kept as a
     // candidate that proves nothing.
@@ -479,7 +488,7 @@ fn rust_module_path_items(
         };
         match crate::context::rust_relative_module(ctx, start, depth, &segments)? {
             RustRelativeModule::InFile(module) => {
-                let mut targets = crate::context::rust_module_items(ctx, module, name, &accept);
+                let mut targets = crate::context::rust_module_items(ctx, module, name, admitted);
                 normalize_symbol_ids(&mut targets);
                 let strategy = match crate_named {
                     Some(name) => RustModulePathStrategy::ModuleOrCrate(name),
@@ -509,7 +518,7 @@ fn rust_module_path_items(
     };
     let placement = placement?;
     let names = rust_module_member_names(placement, &module, name);
-    let mut targets = rust_qualified_targets(ctx, &names, &accept);
+    let mut targets = rust_qualified_targets(ctx, &names, admitted);
     // A file the module tree does not place where its path says, such as the default location
     // of a `#[path]` module, or one of another crate, is not the module the path spells.
     targets.retain(|target| {
@@ -521,8 +530,15 @@ fn rust_module_path_items(
         .scopes
         .rust_configured_module(placement, Some(ctx.file_id), &module)
     {
-        Some(configured) => rust_configured_items(ctx, configured, targets, name, &accept),
-        None => match rust_reexported_items(ctx, placement, &names, &targets, false, &accept) {
+        Some(configured) => rust_configured_items(ctx, configured, targets, name, admitted),
+        None => match rust_reexported_items(
+            ctx,
+            placement,
+            (&names, namespace),
+            &targets,
+            false,
+            admitted,
+        ) {
             Some(found) => (!found.0.is_empty()).then_some(found),
             None => {
                 normalize_symbol_ids(&mut targets);
@@ -651,8 +667,8 @@ pub(crate) fn rust_unbound_item_import_outcome(
         &binding.scope_id,
         ctx,
         module_path.trim(),
-        &binding.imported_name,
-        |symbol| symbol.kind == SymbolKind::Function,
+        (&binding.imported_name, RustNamespace::Value),
+        &|symbol| symbol.kind == SymbolKind::Function,
     )?;
     Some(rust_module_path_outcome(call, ctx, targets, strategy))
 }
@@ -1102,7 +1118,7 @@ fn rust_crate_name_items(
     scope_id: &ScopeId,
     ctx: &ResolutionContext<'_>,
     path: &str,
-    name: &str,
+    (name, namespace): (&str, RustNamespace),
     accept: impl Fn(&Symbol) -> bool,
 ) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
     let (module, crate_placement) = rust_crate_name_module(scope_id, ctx, path.trim())?;
@@ -1121,9 +1137,14 @@ fn rust_crate_name_items(
     {
         return rust_configured_items(ctx, configured, targets, name, &accept);
     }
-    if let Some(found) =
-        rust_reexported_items(ctx, crate_placement, &names, &targets, true, &accept)
-    {
+    if let Some(found) = rust_reexported_items(
+        ctx,
+        crate_placement,
+        (&names, namespace),
+        &targets,
+        true,
+        &accept,
+    ) {
         return (!found.0.is_empty()).then_some(found);
     }
     normalize_symbol_ids(&mut targets);
@@ -1134,13 +1155,14 @@ fn rust_crate_name_items(
 /// from the qualified names `names` it spells there: when the module defines no item of the name
 /// (`defined` is empty), what a `use` of the module brings in, and when it defines one that a
 /// `use` beside it may stand for instead, that item and the other as candidates proving nothing.
-/// A path written in another crate reaches only what `pub use` declarations bring in.
+/// A path written in another crate reaches only what `pub use` declarations bring in. The name
+/// is read in `namespace` (#643): `defined` holds the module's own items there alone.
 /// `None` leaves the path to `defined`. The candidates may be empty: a module whose name stays
 /// ambiguous names no item `accept` admits, and its own item is not proven either.
 fn rust_reexported_items(
     ctx: &ResolutionContext<'_>,
     placement: &RustModulePlacement,
-    names: &[String],
+    (names, namespace): (&[String], RustNamespace),
     defined: &[SymbolId],
     from_other_crates: bool,
     accept: impl Fn(&Symbol) -> bool,
@@ -1162,7 +1184,7 @@ fn rust_reexported_items(
         } else {
             &reexport.in_crate
         };
-        match reexported {
+        match reexported.get(namespace) {
             None => {}
             Some(RustReexported::Item(item)) => items.push(item.clone()),
             Some(RustReexported::Alternatives {
@@ -1953,9 +1975,13 @@ fn rust_path_type_candidates(
             crate::context::rust_module_in_scope(ctx, scope_id, first)?;
         }
     }
-    let (targets, strategy) = rust_module_path_items(scope_id, ctx, module_path, name, |symbol| {
-        symbol.kind != SymbolKind::Module && is_type_symbol(&symbol.kind)
-    })?;
+    let (targets, strategy) = rust_module_path_items(
+        scope_id,
+        ctx,
+        module_path,
+        (name, RustNamespace::Type),
+        &|symbol| symbol.kind != SymbolKind::Module && is_type_symbol(&symbol.kind),
+    )?;
     let (targets, configured) = match strategy {
         RustModulePathStrategy::ModuleOrCrate(_) | RustModulePathStrategy::ReexportAmbiguous => {
             (Vec::new(), None)
@@ -2987,14 +3013,26 @@ mod tests {
             .into(),
         );
         // An item written `path (mod)` is a module symbol of that qualified name, `path (type)`
-        // a struct, and `path @Type` a method of the struct whose id is `Type`, with the qualified
-        // name tree-sitter gives an `impl` member: the file's path and the member's name.
+        // a struct, `path (type only)` a braced struct, a type alone, and `path @Type` a method
+        // of the struct whose id is `Type`, with the qualified name tree-sitter gives an `impl`
+        // member: the file's path and the member's name.
+        scopes.record_rust_type_items(
+            items
+                .iter()
+                .filter_map(|(item, _)| item.strip_suffix(" (type only)"))
+                .map(SymbolId::new)
+                .collect::<Vec<_>>(),
+            Vec::new(),
+        );
         let symbols = items
             .iter()
             .map(|(item, file)| {
                 let (qualified, kind, parent) = if let Some(module) = item.strip_suffix(" (mod)") {
                     (module, SymbolKind::Module, None)
-                } else if let Some(ty) = item.strip_suffix(" (type)") {
+                } else if let Some(ty) = item
+                    .strip_suffix(" (type)")
+                    .or_else(|| item.strip_suffix(" (type only)"))
+                {
                     (ty, SymbolKind::Class, None)
                 } else if let Some((member, owner)) = item.split_once(" @") {
                     (member, SymbolKind::Method, Some(owner))
@@ -4133,10 +4171,15 @@ mod tests {
             ("src/ghost.rs", placement("src", &["src::lib"], None)),
         ];
         let item = |id: &str| Some(RustReexported::Item(SymbolId::new(id)));
+        // These names are the same item in both namespaces.
+        let both = |found: Option<RustReexported>| crate::index::RustReexportNamespaces {
+            types: found.clone(),
+            values: found,
+        };
         let reexport = |file: &str, in_crate, from_other_crates| crate::index::RustReexport {
             file: FileId::new(format!("file:{file}")),
-            in_crate,
-            from_other_crates,
+            in_crate: both(in_crate),
+            from_other_crates: both(from_other_crates),
         };
         let reexports = HashMap::from([
             (
@@ -4278,6 +4321,67 @@ mod tests {
                     ),
                     None,
                     "a `use` the library's own crate alone reaches through"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn rust_paths_read_what_a_module_brings_in_in_the_namespace_of_the_path() {
+        // `src/b.rs` defines a braced `S` and a `fn U`, and a glob of `a` brings in `a`'s
+        // `fn S` and `struct U` (#643).
+        let at = |module: &[&str]| placement("src", &["src::lib"], Some(module));
+        let items = vec![
+            ("src::a::S", "src/a.rs"),
+            ("src::a::U (type)", "src/a.rs"),
+            ("src::a::new @src::a::U", "src/a.rs"),
+            ("src::b::S (type only)", "src/b.rs"),
+            ("src::b::U", "src/b.rs"),
+        ];
+        let placements = vec![
+            ("src/lib.rs", at(&[])),
+            ("src/a.rs", at(&["a"])),
+            ("src/b.rs", at(&["b"])),
+        ];
+        let reexport = |types: Option<&str>, values: Option<&str>| {
+            let item = |id: Option<&str>| id.map(|id| RustReexported::Item(SymbolId::new(id)));
+            crate::index::RustReexport {
+                file: FileId::new("file:src/b.rs"),
+                in_crate: crate::index::RustReexportNamespaces {
+                    types: item(types),
+                    values: item(values),
+                },
+                from_other_crates: crate::index::RustReexportNamespaces::default(),
+            }
+        };
+        let reexports = HashMap::from([
+            ("src::b::S".to_string(), reexport(None, Some("src::a::S"))),
+            ("src::b::U".to_string(), reexport(Some("src::a::U"), None)),
+        ]);
+        with_rust_reexports(
+            "src/lib.rs",
+            &items,
+            (placements, Vec::new()),
+            HashMap::new(),
+            reexports,
+            |ctx| {
+                assert_eq!(
+                    proven_target(ctx, &module_path_call("scope:worker", "crate::b", "S"))
+                        .as_deref(),
+                    Some("src::a::S"),
+                    "a call names the value the glob brings in, not the braced struct"
+                );
+                assert_eq!(
+                    proven_target(ctx, &module_path_call("scope:worker", "crate::b::U", "new"))
+                        .as_deref(),
+                    Some("src::a::U.new"),
+                    "a type path names the type the glob brings in, not the function"
+                );
+                assert_eq!(
+                    proven_target(ctx, &module_path_call("scope:worker", "crate::b", "U"))
+                        .as_deref(),
+                    Some("src::b::U"),
+                    "the module's own function is the value"
                 );
             },
         );

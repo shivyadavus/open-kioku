@@ -168,7 +168,13 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// a path from another crate follows `pub use` alone, also for a call path. A name a module
 /// defines while a `use` beside it brings in another is ambiguous. v39 indexes hold no edge for
 /// a path through an in-crate re-export.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v40";
+/// v42: a Rust name is read in the namespace its path reads it in: a call path names a value
+/// and a type path a type, so a braced `struct S` beside a glob that brings in a `fn S` no
+/// longer answers `m::S()`, and a call path names no braced struct, enum, union, trait or type
+/// alias. A path is followed through an enum's variants (`pub use Shape::*;`), a module a `use`
+/// renames (`pub use inner as facade;`) and the named `use` declarations of an inline `mod`
+/// block. v40 indexes hold the old edges. v41 is taken by an open change.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v42";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -224,7 +230,9 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// type unless that names a type parameter of the struct; a v15 index records no field.
 /// v17: a Rust file records whether its top level invokes a macro, which may expand to items and
 /// `use` declarations; a v16 index does not.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v17";
+/// v18: a Rust file records which of its structs, enums, unions and type aliases are types
+/// alone, not also values, and the variants of each enum; a v17 index records neither.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v18";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 
