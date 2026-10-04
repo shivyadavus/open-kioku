@@ -5,8 +5,9 @@ use crate::schema::{
     EDGE_FILTER_FIELDS, EDGE_TYPES, NODE_TYPES,
 };
 use open_kioku_core::{
-    graph_edge_authority, Confidence, EvidenceSourceType, FileId, GraphEdge, GraphEdgeType,
-    GraphNode, GraphNodeType, RelationshipAuthority,
+    graph_edge_authority, graph_route_hop_authority, is_containment_edge_type, Confidence,
+    EvidenceSourceType, FileId, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
+    RelationshipAuthority,
 };
 use open_kioku_errors::OkError;
 use std::borrow::Cow;
@@ -49,10 +50,14 @@ pub struct GraphQueryResult {
 /// is strongest, the first one found among equals.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GraphQueryPath {
-    /// The lowest authority among `hops`. A route is only as established as its weakest hop: one
-    /// heuristic hop makes the whole connection a possibility, however strong the rest are.
+    /// The lowest authority any hop contributes to the route (each hop's `route_authority`, or
+    /// its `authority` where that is absent). A route is only as established as its weakest hop:
+    /// one heuristic hop makes the whole connection a possibility, however strong the rest are.
     pub weakest_authority: RelationshipAuthority,
     pub hops: Vec<GraphQueryHop>,
+    /// Why `weakest_authority` is below every hop's own `authority`, when it is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caveats: Vec<String>,
 }
 
 /// One edge of a row's path, as stored: `from` and `to` are the edge's own endpoints, so a hop
@@ -63,36 +68,60 @@ pub struct GraphQueryHop {
     pub edge_type: GraphEdgeType,
     pub from: String,
     pub to: String,
-    /// `open_kioku_core::graph_edge_authority`, recomputed from the edge's proofs on every read.
+    /// `open_kioku_core::graph_edge_authority`, recomputed from the edge's proofs on every read:
+    /// what the edge itself establishes.
     pub authority: RelationshipAuthority,
+    /// What the hop contributes to this route, when that is less than `authority`
+    /// (`open_kioku_core::graph_route_hop_authority`): a CONTAINS or DEFINES hop after a
+    /// relationship hop descends into what the route reached, and containment is not transitive
+    /// across a relationship, so it contributes at most `corroborating`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_authority: Option<RelationshipAuthority>,
 }
 
 impl GraphQueryHop {
-    fn of(edge: &GraphEdge) -> Self {
+    /// The hop `edge` makes in a forward route, after a relationship hop or not.
+    fn of(edge: &GraphEdge, after_relationship: bool) -> Self {
+        let authority = graph_edge_authority(edge);
+        let route_authority = graph_route_hop_authority(edge, after_relationship);
         Self {
             edge_id: edge.id.0.clone(),
             edge_type: edge.edge_type.clone(),
             from: edge.from.0.clone(),
             to: edge.to.0.clone(),
-            authority: graph_edge_authority(edge),
+            authority,
+            route_authority: (route_authority != authority).then_some(route_authority),
         }
+    }
+
+    /// What this hop contributes to its route.
+    fn contribution(&self) -> RelationshipAuthority {
+        self.route_authority.unwrap_or(self.authority)
     }
 }
 
 impl GraphQueryPath {
     fn new(hops: Vec<GraphQueryHop>) -> Self {
+        let caveats = if hops.iter().any(|hop| hop.route_authority.is_some()) {
+            vec![CONTAINMENT_DESCENT_CAVEAT.to_string()]
+        } else {
+            Vec::new()
+        };
         Self {
             weakest_authority: weakest_authority(&hops),
             hops,
+            caveats,
         }
     }
 }
 
-/// The weakest authority among `hops`; an empty route is vacuously authoritative, and a row
+const CONTAINMENT_DESCENT_CAVEAT: &str = "this route descends through CONTAINS or DEFINES after a relationship hop; containment is not transitive across a relationship (a file importing the file that defines X does not establish a relation to X), so that hop counts at most corroborating, however established the edge itself is";
+
+/// The weakest contribution among `hops`; an empty route is vacuously authoritative, and a row
 /// always has at least one hop.
 fn weakest_authority(hops: &[GraphQueryHop]) -> RelationshipAuthority {
     hops.iter()
-        .map(|hop| hop.authority)
+        .map(GraphQueryHop::contribution)
         .min()
         .unwrap_or(RelationshipAuthority::Authoritative)
 }
@@ -686,7 +715,7 @@ pub fn execute_graph_query(
 
                     let mut row = Row {
                         bindings: HashMap::new(),
-                        hops: vec![GraphQueryHop::of(&e)],
+                        hops: vec![GraphQueryHop::of(&e, false)],
                     };
                     if let Some(v) = &source.variable {
                         row.bindings.insert(v.clone(), Bound::Node(actual_source));
@@ -767,23 +796,44 @@ pub fn execute_graph_query(
                     // Rows from one start node are staged the same way as a one-hop edge batch.
                     let mut staged = Vec::new();
 
-                    // The walk goes one depth at a time, holding each node reached at that depth
-                    // once, in the order it was first reached, with the strongest route to it:
-                    // the route whose weakest hop is strongest. A node reached again at the same
-                    // depth through a stronger route keeps its place and takes that route, so a
-                    // row reads as heuristic only when every route the walk found to it at that
+                    // The walk goes one depth at a time. At each depth it holds every node it
+                    // reached once per route state, in the order first reached, with the strongest
+                    // route to it in that state: the route whose weakest hop is strongest. The
+                    // state is whether the route has taken a relationship hop, since a CONTAINS
+                    // or DEFINES hop after one counts at most corroborating
+                    // (`graph_route_hop_authority`): a weaker route that has not yet crossed a
+                    // relationship can lead to a stronger one, so neither state is dropped for the
+                    // other. A node reached again at the same depth and state through a stronger
+                    // route keeps its place and takes that route. Each node is emitted once per
+                    // depth, at its first place, with its strongest route of either state, so a
+                    // row reads heuristic only when every route the walk found to it at that
                     // depth crosses a heuristic hop. A whole depth is expanded before any node of
                     // the next is emitted or expanded, so each is emitted with its final route.
                     let mut layer = vec![Reached {
                         node: start_node.clone(),
                         hops: Vec::new(),
                         weakest: RelationshipAuthority::Authoritative,
+                        after_relationship: false,
                     }];
                     let mut depth = 0;
                     'walk: while !layer.is_empty() {
+                        // Per node: its first place in the layer, and its strongest entry.
+                        let mut emit_from: HashMap<&str, (usize, usize)> = HashMap::new();
+                        for (index, reached) in layer.iter().enumerate() {
+                            emit_from
+                                .entry(reached.node.id.0.as_str())
+                                .and_modify(|(_, best)| {
+                                    if reached.weakest > layer[*best].weakest {
+                                        *best = index;
+                                    }
+                                })
+                                .or_insert((index, index));
+                        }
+                        let emit_at = emit_from.into_values().collect::<HashMap<usize, usize>>();
+
                         let mut next_layer: Vec<Reached> = Vec::new();
-                        let mut next_index: HashMap<String, usize> = HashMap::new();
-                        for reached in layer {
+                        let mut next_index: HashMap<(String, bool), usize> = HashMap::new();
+                        for (index, reached) in layer.iter().enumerate() {
                             if rows.len() >= target_rows {
                                 break 'walk;
                             }
@@ -832,15 +882,19 @@ pub fn execute_graph_query(
                                             continue;
                                         }
                                     }
+                                    let hop = GraphQueryHop::of(&edge, reached.after_relationship);
                                     // A filter on the range's edge variable holds for every hop,
-                                    // so a hop that fails it is never walked.
-                                    if !filters.hop_matches(&edge) {
+                                    // so a hop that fails it is never walked. `authority` there is
+                                    // what the hop contributes to this route.
+                                    if !filters.hop_matches(&edge, hop.contribution()) {
                                         continue;
                                     }
-                                    let hop = GraphQueryHop::of(&edge);
-                                    let weakest = reached.weakest.min(hop.authority);
-                                    if let Some(&index) = next_index.get(&edge.to.0) {
-                                        let known = &mut next_layer[index];
+                                    let weakest = reached.weakest.min(hop.contribution());
+                                    let after_relationship = reached.after_relationship
+                                        || !is_containment_edge_type(&edge.edge_type);
+                                    let key = (edge.to.0.clone(), after_relationship);
+                                    if let Some(&known) = next_index.get(&key) {
+                                        let known = &mut next_layer[known];
                                         if weakest > known.weakest {
                                             known.hops = reached.hops.clone();
                                             known.hops.push(hop);
@@ -851,32 +905,37 @@ pub fn execute_graph_query(
                                     if let Some(next) = store.node_by_id(&edge.to.0)? {
                                         let mut hops = reached.hops.clone();
                                         hops.push(hop);
-                                        next_index.insert(edge.to.0.clone(), next_layer.len());
+                                        next_index.insert(key, next_layer.len());
                                         next_layer.push(Reached {
                                             node: next,
                                             hops,
                                             weakest,
+                                            after_relationship,
                                         });
                                     }
                                 }
                             }
 
-                            if depth >= edge_range.min_hops && check_node(&reached.node, target) {
-                                let mut row = Row {
-                                    bindings: HashMap::new(),
-                                    hops: reached.hops,
-                                };
-                                if let Some(v) = &source.variable {
-                                    row.bindings
-                                        .insert(v.clone(), Bound::Node(start_node.clone()));
-                                }
-                                if let Some(v) = &target.variable {
-                                    row.bindings.insert(v.clone(), Bound::Node(reached.node));
-                                }
-                                if filters.stages_rows() {
-                                    staged.push(row);
-                                } else if filters.matches(&row, None)? {
-                                    rows.push(row);
+                            if let Some(&best) = emit_at.get(&index) {
+                                if depth >= edge_range.min_hops && check_node(&reached.node, target)
+                                {
+                                    let mut row = Row {
+                                        bindings: HashMap::new(),
+                                        hops: layer[best].hops.clone(),
+                                    };
+                                    if let Some(v) = &source.variable {
+                                        row.bindings
+                                            .insert(v.clone(), Bound::Node(start_node.clone()));
+                                    }
+                                    if let Some(v) = &target.variable {
+                                        row.bindings
+                                            .insert(v.clone(), Bound::Node(reached.node.clone()));
+                                    }
+                                    if filters.stages_rows() {
+                                        staged.push(row);
+                                    } else if filters.matches(&row, None)? {
+                                        rows.push(row);
+                                    }
                                 }
                             }
 
@@ -983,6 +1042,8 @@ struct Reached {
     node: GraphNode,
     hops: Vec<GraphQueryHop>,
     weakest: RelationshipAuthority,
+    /// Whether the route has taken a relationship (non-containment) hop.
+    after_relationship: bool,
 }
 
 /// A MATCH variable's value in one row. Rows hold the typed node or edge so WHERE reads the field it
@@ -1048,14 +1109,16 @@ impl<'a> FilterEvaluator<'a> {
     }
 
     /// Whether one hop of a range satisfies every filter on the range's edge variable.
-    fn hop_matches(&self, edge: &GraphEdge) -> bool {
+    /// `authority` is what the hop contributes to the route being walked, so a filter on it agrees
+    /// with the `weakest_authority` the row reports.
+    fn hop_matches(&self, edge: &GraphEdge, authority: RelationshipAuthority) -> bool {
         let Some(variable) = self.hop_variable else {
             return true;
         };
         self.filters
             .iter()
             .filter(|filter| filter.variable == variable)
-            .all(|filter| edge_matches(edge, filter))
+            .all(|filter| edge_field_matches(edge, filter, authority))
     }
 
     /// Reads the DEFINES edges of every uncached symbol node that a file_path filter reads in
@@ -1266,6 +1329,16 @@ fn text_matches(filter: &FilterExpr, value: &str) -> bool {
 /// Graph nodes carry no evidence, so evidence_source, evidence_source_type and confidence come
 /// from a bound edge.
 fn edge_matches(edge: &GraphEdge, filter: &FilterExpr) -> bool {
+    edge_field_matches(edge, filter, graph_edge_authority(edge))
+}
+
+/// `edge_matches` with the authority to compare given: a one-hop edge's own, or what a hop
+/// contributes to a route.
+fn edge_field_matches(
+    edge: &GraphEdge,
+    filter: &FilterExpr,
+    authority: RelationshipAuthority,
+) -> bool {
     let evidence = &edge.evidence;
     match filter.field.as_str() {
         "evidence_source" => text_matches(filter, evidence.source.as_str()),
@@ -1275,7 +1348,7 @@ fn edge_matches(edge: &GraphEdge, filter: &FilterExpr) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|name| text_matches(filter, name)),
         "confidence" => confidence_matches(evidence.confidence, filter),
-        "authority" => authority_matches(graph_edge_authority(edge), filter),
+        "authority" => authority_matches(authority, filter),
         _ => false,
     }
 }
@@ -4145,6 +4218,193 @@ mod tests {
             "Parse error: Unknown filter field: b.authority; Function nodes filter on label, id, \
              file_path, qualified_name; authority is read from an edge's proofs: bind the edge as \
              -[e:TYPE]-> or -[e:TYPE *min..max]-> and filter e.authority"
+        );
+    }
+
+    /// A node of the containment fixtures; the walk does not read node types past the source.
+    fn insert_function(store: &mut MockGraphStore, id: &str) {
+        store
+            .nodes
+            .insert(id.into(), test_node(id, id, GraphNodeType::Function));
+    }
+
+    /// A containment edge a parser extracted, which is authoritative on its own.
+    fn parsed_containment(id: &str, from: &str, to: &str, edge_type: GraphEdgeType) -> GraphEdge {
+        evidence_edge(
+            id,
+            from,
+            to,
+            edge_type,
+            "open-kioku-graph",
+            EvidenceSourceType::TreeSitter,
+            Confidence::Exact,
+        )
+    }
+
+    /// `src/ledger.rs` imports `src/audit.rs` (proven), and audit.rs defines `archive` (parsed).
+    /// Both edges are established, but the route does not establish that ledger.rs relates to
+    /// archive: containment does not carry across a relationship hop.
+    #[test]
+    fn containment_after_a_relationship_hop_does_not_read_as_authoritative() {
+        use RelationshipAuthority::{Authoritative, Corroborating};
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        for (id, path) in [
+            ("file:ledger", "src/ledger.rs"),
+            ("file:audit", "src/audit.rs"),
+        ] {
+            store.nodes.insert(id.into(), file_node(id, path));
+        }
+        for id in ["fn:post", "fn:archive"] {
+            insert_function(&mut store, id);
+        }
+        let mut imports = test_edge(
+            "i-ledger-audit",
+            "file:ledger",
+            "file:audit",
+            GraphEdgeType::Imports,
+        );
+        imports
+            .set_relationship_proofs(vec![open_kioku_core::RelationshipProof::new(
+                open_kioku_core::RelationshipProofKind::ImportBinding,
+                "test",
+                1,
+            )])
+            .unwrap();
+        assert_eq!(graph_edge_authority(&imports), Authoritative);
+        store.edges.push(imports);
+        store.edges.push(parsed_containment(
+            "d-ledger-post",
+            "file:ledger",
+            "fn:post",
+            GraphEdgeType::Defines,
+        ));
+        store.edges.push(parsed_containment(
+            "d-audit-archive",
+            "file:audit",
+            "fn:archive",
+            GraphEdgeType::Defines,
+        ));
+
+        let from_ledger = "MATCH (a:File)-[c *1..3]->(b:Function) WHERE a.label = 'src/ledger.rs'";
+        let all = run(&store, &format!("{from_ledger} RETURN b"));
+        let mut reached = all
+            .rows
+            .iter()
+            .zip(&all.paths)
+            .map(|(row, path)| {
+                (
+                    row[0]["id"].as_str().unwrap().to_string(),
+                    path.weakest_authority,
+                    path.hops
+                        .iter()
+                        .map(|hop| (hop.authority, hop.route_authority))
+                        .collect::<Vec<_>>(),
+                    path.caveats.len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        reached.sort();
+        assert_eq!(
+            reached,
+            vec![
+                // The DEFINES edge keeps its own class; what it adds to this route is capped.
+                (
+                    "fn:archive".to_string(),
+                    Corroborating,
+                    vec![(Authoritative, None), (Authoritative, Some(Corroborating))],
+                    1,
+                ),
+                // ledger.rs's own symbol: containment before any relationship hop.
+                (
+                    "fn:post".to_string(),
+                    Authoritative,
+                    vec![(Authoritative, None)],
+                    0,
+                ),
+            ]
+        );
+
+        // The filter reads what each hop contributes, so it agrees with weakest_authority.
+        assert_eq!(
+            column_ids(
+                &run(
+                    &store,
+                    &format!("{from_ledger} AND c.authority = 'authoritative' RETURN b")
+                ),
+                0
+            ),
+            ["fn:post"]
+        );
+        assert_eq!(
+            column_ids(
+                &run(
+                    &store,
+                    &format!("{from_ledger} AND c.authority >= 'corroborating' RETURN b")
+                ),
+                0
+            ),
+            ["fn:archive", "fn:post"]
+        );
+        // One hop has no route before it: the DEFINES edge alone is authoritative.
+        assert_eq!(
+            column_ids(
+                &run(
+                    &store,
+                    "MATCH (f:File)-[d:DEFINES]->(s:Function) WHERE d.authority = 'authoritative' RETURN s"
+                ),
+                0
+            ),
+            ["fn:archive", "fn:post"]
+        );
+    }
+
+    /// `x` is reached at depth 1 both through a relationship (found first) and through
+    /// containment, equally strong. Kept as one route, the first would cap the DEFINES hop from
+    /// `x` to `z`; the walk keeps both, so `z` is reached through containment alone.
+    #[test]
+    fn a_route_that_has_not_crossed_a_relationship_is_kept_beside_one_that_has() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        for id in ["s", "x", "z"] {
+            insert_function(&mut store, id);
+        }
+        let mut calls = test_edge("a-s-x-calls", "s", "x", GraphEdgeType::Calls);
+        prove(&mut calls, RelationshipAuthority::Authoritative);
+        store.edges.push(calls);
+        store.edges.push(parsed_containment(
+            "b-s-x-contains",
+            "s",
+            "x",
+            GraphEdgeType::Contains,
+        ));
+        store.edges.push(parsed_containment(
+            "c-x-z-defines",
+            "x",
+            "z",
+            GraphEdgeType::Defines,
+        ));
+
+        let result = run(
+            &store,
+            "MATCH (a:Function)-[c *2..2]->(b:Function) WHERE a.label = 's' AND c.authority = 'authoritative' RETURN b",
+        );
+        assert_eq!(column_ids(&result, 0), ["z"]);
+        assert_eq!(
+            result.paths[0]
+                .hops
+                .iter()
+                .map(|hop| hop.edge_id.as_str())
+                .collect::<Vec<_>>(),
+            ["b-s-x-contains", "c-x-z-defines"]
+        );
+        assert_eq!(
+            result.paths[0].weakest_authority,
+            RelationshipAuthority::Authoritative
         );
     }
 }

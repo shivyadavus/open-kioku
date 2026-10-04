@@ -567,8 +567,8 @@ must report the scan as truncated, as `query_relationship_edges` does with `scan
 
 Every surface that returns an edge reports one authority for it,
 `open_kioku_core::graph_edge_authority`: `edge_authority` on MCP `get_references`,
-`dependency_path` and `explain_flow`, the class `ok path` prints after each hop, and each hop of a
-graph query row. It is recomputed from the edge's proofs on every read, never stored:
+`dependency_path` and `explain_flow`, the class `ok path` prints after each hop, and each hop's
+`authority` in a graph query row. It is recomputed from the edge's proofs on every read, never stored:
 
 - a relationship edge has its effective relationship authority (`heuristic`, `corroborating` or
   `authoritative`), which no confidence or evidence source raises;
@@ -580,6 +580,18 @@ graph query row. It is recomputed from the edge's proofs on every read, never st
 This is the class an edge is reported under. What impact, plan, test selection and verify accept
 as proven is decided by the edge's relationship authority and `RelationshipProofFilter`, which
 this does not change.
+
+A route is weighed by what each hop contributes to it, which is not always what the edge
+establishes on its own. Containment does not carry across a relationship: `src/ledger.rs`
+importing `src/audit.rs`, then `src/audit.rs` defining `archive`, is two established edges and
+no relation between ledger.rs and `archive`. So a `CONTAINS` or `DEFINES` hop taken after a
+relationship hop contributes at most `corroborating`
+(`open_kioku_core::graph_route_hop_authority`, and `graph_route_authorities` for a whole route).
+Containment before any relationship hop is not capped: a file's own symbol, then that symbol's
+call, is the file's call. Every route the graph returns is followed forward, so a containment hop
+after a relationship hop is always a descent into what the route reached. MCP `dependency_path`
+returns `route_authority` and, for a capped hop, `hop_route_authority` and a caveat; `ok path`
+prints the hop's contribution beside its class and the route's authority.
 
 `ok graph query` and MCP `query_evidence_graph` match every edge whatever its authority, and
 return `paths` beside `rows`, one entry per row:
@@ -594,14 +606,22 @@ return `paths` beside `rows`, one entry per row:
 }
 ```
 
+`weakest_authority` is the weakest contribution among the hops. A hop whose contribution is below
+its own `authority` carries `route_authority`, and its path a `caveats` entry.
+
 A one-hop row has its one edge. A multi-hop walk goes one depth at a time and holds each node
-reached at a depth once, with the route to it whose weakest hop is strongest (the first one found
-among equals), so a row reads `heuristic` only when every route the walk found to that node at
-that depth crosses a heuristic hop. When any returned row does, a caveat counts them.
+reached at a depth once per route state (whether the route has taken a relationship hop yet),
+with the route to it in that state whose weakest hop is strongest (the first one found among
+equals). Both states are kept because a weaker route that has not crossed a relationship can lead
+through containment to a stronger one. Each node is emitted once per depth, with its strongest
+route of either state, so a row reads `heuristic` only when every route the walk found to that
+node at that depth crosses a heuristic hop. When any returned row does, a caveat counts them.
 
 `authority` is a filter field on a bound edge. It takes `=`, `<`, `<=`, `>` and `>=` with a quoted
-class, ordered `heuristic` < `corroborating` < `authoritative`. A hop range binds a variable too,
-and a filter on it must hold for every hop, so a hop that fails it is never walked:
+class, ordered `heuristic` < `corroborating` < `authoritative`. On a one-hop edge it compares the
+edge's own class. A hop range binds a variable too, and a filter on it must hold for every hop,
+comparing what the hop contributes to the route, so it agrees with `weakest_authority`; a hop that
+fails it is never walked:
 
 ```text
 MATCH (a:Function)-[c:CALLS *1..3]->(b:Function) WHERE c.authority >= 'corroborating' RETURN a, b

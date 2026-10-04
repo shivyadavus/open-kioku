@@ -970,13 +970,33 @@ async fn dispatch(
             };
             let to = open_kioku_graph::resolve_graph_node(store, to)?;
             let edges = store.shortest_path(&from, &to, 12)?;
-            Ok(json!({
+            let mut response = json!({
                 "from": from,
                 "to": to,
                 "edge_authority": edge_authority(&edges),
                 "edges": edges,
                 "evidence_source": "sqlite_graph_store"
-            }))
+            });
+            // `edge_authority` is what each edge establishes on its own; the route is only as
+            // established as the weakest hop's contribution to it, and containment does not carry
+            // across a relationship hop (`graph_route_hop_authority`).
+            let route = open_kioku_core::graph_route_authorities(&edges);
+            if let Some(weakest) = route.iter().min() {
+                response["route_authority"] = json!(weakest);
+                let capped = edges
+                    .iter()
+                    .zip(&route)
+                    .filter(|(edge, contribution)| {
+                        **contribution != open_kioku_core::graph_edge_authority(edge)
+                    })
+                    .map(|(edge, contribution)| (edge.id.0.clone(), *contribution))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                if !capped.is_empty() {
+                    response["hop_route_authority"] = json!(capped);
+                    response["caveats"] = json!([ROUTE_CONTAINMENT_DESCENT_CAVEAT]);
+                }
+            }
+            Ok(response)
         }
         "explain_flow" => explain_flow_tool(store, &params),
         "verify_change" => {
@@ -2059,6 +2079,8 @@ where
     }
     Ok(call_path)
 }
+
+const ROUTE_CONTAINMENT_DESCENT_CAVEAT: &str = "this route descends through CONTAINS or DEFINES after a relationship hop; containment is not transitive across a relationship (a file importing the file that defines X does not establish a relation to X), so hop_route_authority caps that hop at corroborating and route_authority reflects it, while edge_authority still reports what each edge establishes on its own";
 
 /// Each edge's authority, recomputed from its proofs and keyed by edge id. A serialized edge
 /// carries its proofs but not the authority they amount to, so a proof-less edge read alone
@@ -3564,6 +3586,15 @@ mod tests {
                 "get_references_callers.json",
                 r#"{"jsonrpc":"2.0","id":"get-references-callers","method":"get_references","params":{"query":"archive_invoice_event","kind":"callers","limit":1}}"#,
             ),
+            // A parsed DEFINES edge reads authoritative in edge_authority and in a graph query.
+            (
+                "dependency_path_route.json",
+                r#"{"jsonrpc":"2.0","id":"dependency-route","method":"dependency_path","params":{"from":"file:file-billing","to":"symbol:symbol-publish"}}"#,
+            ),
+            (
+                "query_evidence_graph_authority.json",
+                r#"{"jsonrpc":"2.0","id":"query-evidence-graph-authority","method":"query_evidence_graph","params":{"query":"MATCH (f:File)-[d:DEFINES]->(s:Function) WHERE d.authority = 'authoritative' RETURN f, s"}}"#,
+            ),
             (
                 "dependency_path_neighbors.json",
                 r#"{"jsonrpc":"2.0","id":"dependency-neighbors","method":"dependency_path","params":{"from":"src/billing.rs","limit":5}}"#,
@@ -4928,11 +4959,19 @@ mod tests {
                 endpoint_node,
             ];
             let graph_edges = vec![
+                // Parsed containment, which edge_authority and graph query hops report as
+                // authoritative; the archive DEFINES edge keeps default (lexical) evidence.
                 GraphEdge {
                     id: EdgeId::new("edge-file-defines-symbol"),
                     from: file_node.id.clone(),
                     to: NodeId::new("symbol:symbol-publish"),
                     edge_type: GraphEdgeType::Defines,
+                    evidence: open_kioku_core::Evidence {
+                        source: "open-kioku-graph".into(),
+                        source_type: EvidenceSourceType::TreeSitter,
+                        confidence: Confidence::Exact,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 GraphEdge {
