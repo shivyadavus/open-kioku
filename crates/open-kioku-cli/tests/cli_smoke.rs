@@ -1892,6 +1892,89 @@ fn impact_reports_a_symbol_registry_caller_as_possible_only() {
         entries("possible_impact", "src::books::close").is_empty(),
         "a proven caller is not repeated as a possibility: {report:#}"
     );
+    // The registry placed this one through the file's import, so it is not a guess.
+    assert_eq!(possible[0]["ambiguous"], false, "{report:#}");
+}
+
+/// A registry match made by name alone (the only `settle` in the repository, with no import
+/// naming it) may name another item of that name. The registry records that on its fact, and
+/// impact lists the caller as an ambiguous possibility, where it used to read as unambiguous.
+/// `--since` compares against git history. Outside a git work tree it used to answer as an empty
+/// diff, which read as a repository where nothing changed; it is a usage error, as MCP's is.
+#[test]
+fn impact_since_outside_a_git_repository_is_invalid_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn settle() {}\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    for args in [
+        &["impact", "--since", "HEAD"][..],
+        &["impact", "--file", "src/lib.rs", "--since", "HEAD"][..],
+    ] {
+        let (_, stderr) = run_failure({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).args(args);
+            command
+        });
+        assert!(stderr.contains("not a git repository"), "{stderr}");
+    }
+}
+
+#[test]
+fn impact_reports_a_name_only_registry_caller_as_ambiguous() {
+    let temp = snapshot_fixture_repo_with(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"books\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("src/lib.rs", "pub mod audit;\npub mod ledger;\n"),
+        (
+            "src/ledger.rs",
+            "pub fn settle(amount: u64) -> u64 {\n    amount\n}\n",
+        ),
+        (
+            "src/audit.rs",
+            "pub fn trace(amount: u64) -> String {\n    format!(\"traced {}\", settle(amount))\n}\n",
+        ),
+    ]);
+    let output = run({
+        let mut command = ok();
+        command.arg("--repo").arg(temp.path()).args([
+            "--json",
+            "impact",
+            "--file",
+            "src/ledger.rs",
+        ]);
+        command
+    });
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let trace = report["possible_impact"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry["path"] == "src/audit.rs")
+        .collect::<Vec<_>>();
+    assert_eq!(trace.len(), 1, "{report:#}");
+    assert_eq!(trace[0]["authority"], "heuristic");
+    assert!(
+        trace[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("open-kioku-symbol-registry/unique-project-name"),
+        "{report:#}"
+    );
+    assert_eq!(trace[0]["ambiguous"], true, "{report:#}");
 }
 
 /// Commit everything in `repo` except Open Kioku's local state, creating the repository on
@@ -4153,6 +4236,76 @@ fn impact_and_plan_accept_since_changed_ranges() {
     assert_eq!(
         impact["changed_files"][0]["hunks"][0]["new_range"]["start"],
         2
+    );
+    // The index holds the file as it was before the edit, so the changed lines are not matched
+    // to whichever symbols the index has on them. Every symbol was read and nothing was cut, so
+    // the missing focus changed nothing and no caveat is raised for it.
+    let report = &impact["impact_reports"][0];
+    assert_eq!(report["relationship_impact_reads"]["symbols_touched"], 0);
+    assert!(
+        report["relationship_impact_caveats"].is_null(),
+        "{report:#}"
+    );
+    // Indexed as it is on disk, the edited line touches `token`.
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let impact = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("impact")
+            .arg("--since")
+            .arg("HEAD");
+        command
+    });
+    let impact: serde_json::Value = serde_json::from_str(&impact).unwrap();
+    let report = &impact["impact_reports"][0];
+    assert_eq!(
+        report["relationship_impact_reads"]["symbols_touched"], 1,
+        "{report:#}"
+    );
+    assert!(
+        report["relationship_impact_caveats"].is_null(),
+        "{report:#}"
+    );
+    // With a file, `--since` focuses that one report on the lines it changed in the file, as
+    // MCP `impact_analysis` does with `path` and `since`.
+    let focused = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "--json",
+            "impact",
+            "--file",
+            "src/lib.rs",
+            "--since",
+            "HEAD",
+        ]);
+        command
+    });
+    let focused: serde_json::Value = serde_json::from_str(&focused).unwrap();
+    assert_eq!(focused["target"], "src/lib.rs", "{focused:#}");
+    assert_eq!(
+        focused["relationship_impact_reads"]["symbols_touched"], 1,
+        "{focused:#}"
+    );
+    // The text output summarizes the relationship evidence.
+    let text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["impact", "--file", "src/lib.rs", "--since", "HEAD"]);
+        command
+    });
+    assert!(text.contains("Relationship impact: "), "{text}");
+    assert!(
+        text.contains("symbols: 1 in the file, 1 touched by the change, 0 with dependents read"),
+        "{text}"
     );
 
     let plan = run({

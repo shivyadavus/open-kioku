@@ -1861,6 +1861,15 @@ fn fact_for_resolution(
         target_kind: graph_node_type(symbol),
         // The resolved symbol itself, so the edge ends at its node (#475).
         target_symbol_id: Some(symbol.id.clone()),
+        // A name-only strategy found one candidate in the repository, which does not rule out
+        // an item of that name outside it, or one the pass cannot see. Recorded on the fact, so
+        // its edge reads as ambiguous (in impact's `possible_impact` too), not only in `message`.
+        ambiguity: if resolution.speculative {
+            // Short and one per strategy: it is stored on every such edge.
+            vec![format!("name-only match via {}", resolution.strategy)]
+        } else {
+            Vec::new()
+        },
         edge_type,
         range: Some(open_kioku_core::LineRange::single(
             chunk
@@ -3464,6 +3473,46 @@ mod tests {
             .unwrap();
         assert_eq!(fact.confidence, Confidence::Medium);
         assert!(fact.message.contains("speculative=true"));
+        // Recorded where the graph reads it, so the edge is ambiguous, not only the message.
+        assert_eq!(fact.ambiguity.len(), 1, "{:?}", fact.ambiguity);
+        assert!(
+            fact.ambiguity[0].contains("unique-project-name"),
+            "{:?}",
+            fact.ambiguity
+        );
+    }
+
+    /// A match the use's own file or module settles is not a guess, and records no ambiguity.
+    #[test]
+    fn scoped_matches_record_no_ambiguity() {
+        let symbols = vec![
+            symbol("caller", "entry", "main", "app::main", SymbolKind::Function),
+            symbol(
+                "local",
+                "entry",
+                "local",
+                "app::local",
+                SymbolKind::Function,
+            ),
+        ];
+        let report = resolve_symbol_edges(
+            &[chunk("c1", "entry", Some("caller"), "local();")],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        let fact = report
+            .analysis_facts
+            .iter()
+            .find(|fact| fact.target == "app::local")
+            .unwrap();
+        assert!(
+            fact.message.contains("speculative=false"),
+            "{}",
+            fact.message
+        );
+        assert!(fact.ambiguity.is_empty(), "{:?}", fact.ambiguity);
     }
 
     #[test]

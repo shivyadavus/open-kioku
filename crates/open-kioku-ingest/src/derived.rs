@@ -117,6 +117,7 @@ fn fact_for(pair: DerivedPair<'_>) -> AnalysisFact {
         target: origin_path,
         target_kind: GraphNodeType::File,
         target_symbol_id: None,
+        ambiguity: Vec::new(),
         edge_type: GraphEdgeType::DerivedFrom,
         range: pair.range,
         confidence: pair.confidence,

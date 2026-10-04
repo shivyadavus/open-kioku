@@ -19,8 +19,8 @@ pub use relationship::{
     graph_route_authorities, graph_route_hop_authority, is_containment_edge_type,
     normalize_relationship_proofs, relationship_authority, sort_graph_edges_for_window,
     strongest_shortest_route, RelationshipAuthority, RelationshipProof, RelationshipProofFilter,
-    RelationshipProofKind, GRAPH_EDGE_WINDOW_RANK_VERSION, GRAPH_EDGE_WINDOW_TIER_MAX,
-    RELATIONSHIP_PROOFS_PROPERTY,
+    RelationshipProofKind, GRAPH_EDGE_WINDOW_RANKS_PER_TIER, GRAPH_EDGE_WINDOW_RANK_VERSION,
+    GRAPH_EDGE_WINDOW_TIER_MAX, RELATIONSHIP_PROOFS_PROPERTY,
 };
 
 macro_rules! id_type {
@@ -2499,6 +2499,13 @@ pub struct AnalysisFact {
     pub source: SharedStr,
     pub source_type: EvidenceSourceType,
     pub message: SharedStr,
+    /// Why the fact may name the wrong target, when the pass that wrote it knows: a symbol-registry
+    /// match made by name alone, which another item of that name (one outside the repository
+    /// included) could equally answer. The graph copies it onto the fact's edge, so every reader
+    /// that asks whether an edge is ambiguous gets the answer the pass recorded rather than one
+    /// parsed from `message`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambiguity: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -5826,22 +5833,78 @@ pub struct ImpactReport {
     /// proofs). A heuristic edge can never appear here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proven_impact: Vec<RelationshipImpact>,
+    /// Proven dependents read but cut by the cap on `proven_impact`. The cap never cuts a
+    /// dependent of a symbol the caller said the change touches; among the rest it keeps
+    /// dependents in other files ahead of the changed file's own. Counted, not listed, so a
+    /// capped list is not read as every proven dependent. A lower bound when
+    /// `relationship_impact_reads` says a read stopped short.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub proven_impact_omitted: usize,
+    /// Of the dependent files a `proven_impact_omitted` entry is in, those `proven_impact` does
+    /// not name at all: whole files a reader of the list would not know are proven dependents.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub proven_impact_omitted_files: usize,
     /// Dependents reached only through heuristic or corroborating relationships. Presented as
     /// possibilities, never as structural facts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub possible_impact: Vec<RelationshipImpact>,
     /// Possible dependents read but cut by the cap on `possible_impact`, which keeps dependents
-    /// in other files ahead of the changed file's own. Counted, not listed, so a capped list is
-    /// not read as every possibility. A lower bound: impact reads a bounded number of the changed
-    /// file's symbols and of each one's inbound edges per type before this cap applies.
+    /// of the symbols the change touches first and, among the rest, dependents in other files
+    /// ahead of the changed file's own. Counted, not listed, so a capped list is not read as every
+    /// possibility. A lower bound when `relationship_impact_reads` says a read stopped short.
     #[serde(default, skip_serializing_if = "is_zero_count")]
     pub possible_impact_omitted: usize,
-    /// What the relationship reads behind `proven_impact` and `possible_impact` left unread: a
-    /// changed file with more symbols than impact reads, an edge type whose inbound read stopped
-    /// at its limit, a proven list cut by its cap. Empty when nothing was cut, so an empty
-    /// `possible_impact_omitted` beside a caveat here is not read as nothing omitted.
+    /// Of the dependent files a `possible_impact_omitted` entry is in, those `possible_impact`
+    /// does not name at all.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub possible_impact_omitted_files: usize,
+    /// What the relationship reads behind `proven_impact` and `possible_impact` left unread, in
+    /// prose: changed symbols with dependents whose edges were not read, an inbound read that
+    /// stopped at its limit, a list cut by its cap. Empty when nothing was left out, so an empty
+    /// list beside zero omitted counts means every dependent read is listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relationship_impact_caveats: Vec<String>,
+    /// The same reads as numbers a consumer can act on. Absent when no relationship read ran (no
+    /// graph store, or a target the index does not hold).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_impact_reads: Option<RelationshipImpactReads>,
+}
+
+/// How far impact's relationship reads went for one changed file.
+///
+/// Impact reads the inbound edges of the changed file and of its symbols, most important first:
+/// the symbols the change touches, then public ones, then those with the most inbound edges. A
+/// symbol with no inbound edge that can carry impact needs no read. Each read takes a bounded
+/// window of one edge type into one node, strongest edges first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RelationshipImpactReads {
+    /// Symbols the changed file defines.
+    pub symbols_total: usize,
+    /// Of those, the symbols the caller said the change touches (by changed line or by name).
+    /// Zero when the caller named no change, and impact then ranks the file's symbols alone.
+    #[serde(default)]
+    pub symbols_touched: usize,
+    /// Symbols whose inbound edges impact read.
+    pub symbols_read: usize,
+    /// Symbols left unread that have at least one inbound edge that can carry impact, so their
+    /// dependents are missing from both lists. `None` when the graph store cannot count edges:
+    /// then any unread symbol may have dependents.
+    pub symbols_unread_with_dependents: Option<usize>,
+    /// Inbound edges that can carry impact and were not read: every edge of an unread symbol,
+    /// and those past the window of a read that stopped at its limit. `None` when the graph
+    /// store cannot count edges.
+    pub edges_unread: Option<usize>,
+    /// Of `edges_unread`, the proven ones: proven dependents missing from the report, past any
+    /// cap. `None` when the graph store cannot count edges or cannot tell which are proven.
+    #[serde(default)]
+    pub proven_edges_unread: Option<usize>,
+    /// Reads (one edge type into one node) that held more edges than their window.
+    pub windows_at_limit: usize,
+    /// Of those, reads whose first unread edge is proven, or that cannot tell. Windows keep
+    /// proven edges first, so when this is zero every edge such a read left out is heuristic:
+    /// every proven dependent of the nodes read was read, and is in `proven_impact` or counted in
+    /// `proven_impact_omitted`.
+    pub windows_cutting_proven: usize,
 }
 
 impl ImpactReport {

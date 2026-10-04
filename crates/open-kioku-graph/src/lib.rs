@@ -628,14 +628,20 @@ impl InMemoryGraph {
     }
 
     pub fn neighbors(&self, node: &str, limit: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
-        // Derived siblings are excluded from the untyped read; see the SQLite store. The window
-        // is cut in authority order, as every store's is, never in insertion order.
+        // Derived siblings and similarity are excluded from the untyped read; see the SQLite
+        // store. The window is cut in authority order, as every store's is, never in insertion
+        // order.
         let mut edges = self
             .edges
             .iter()
             .filter(|edge| {
                 (edge.from.0 == node || edge.to.0 == node)
-                    && edge.edge_type != GraphEdgeType::DerivedFrom
+                    && !matches!(
+                        edge.edge_type,
+                        GraphEdgeType::DerivedFrom
+                            | GraphEdgeType::SimilarTo
+                            | GraphEdgeType::SemanticallyRelated
+                    )
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -650,14 +656,23 @@ impl InMemoryGraph {
     }
 
     pub fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Vec<GraphEdge> {
-        // A derived sibling is not a dependency hop; see the SQLite store for the rationale.
+        // A derived sibling or a similar symbol is not a dependency hop; see the SQLite store
+        // for the rationale.
         // Hops are read in window order, as the SQLite store reads them, so both stores pick
         // the same route among equally short and equally strong ones.
         let route = open_kioku_core::strongest_shortest_route(from, to, max_depth, |node| {
             let mut hops = self
                 .edges
                 .iter()
-                .filter(|edge| edge.from.0 == node && edge.edge_type != GraphEdgeType::DerivedFrom)
+                .filter(|edge| {
+                    edge.from.0 == node
+                        && !matches!(
+                            edge.edge_type,
+                            GraphEdgeType::DerivedFrom
+                                | GraphEdgeType::SimilarTo
+                                | GraphEdgeType::SemanticallyRelated
+                        )
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             open_kioku_core::sort_graph_edges_for_window(&mut hops);
@@ -808,13 +823,16 @@ fn analysis_edge_properties(fact: &AnalysisFact) -> BTreeMap<String, serde_json:
 }
 
 fn analysis_fact_ambiguity(fact: &AnalysisFact) -> Vec<String> {
+    // What the pass recorded, such as a symbol-registry match by name alone, so the edge reads
+    // as ambiguous wherever it is consumed (impact's `possible_impact` included).
+    let mut ambiguity = fact.ambiguity.clone();
     if fact.target_kind == GraphNodeType::Endpoint {
         let endpoint = endpoint_descriptor(&fact.target);
         if endpoint.method.is_none() && endpoint.protocol == "http" {
-            return vec!["HTTP method was not statically resolved".into()];
+            ambiguity.push("HTTP method was not statically resolved".into());
         }
     }
-    Vec::new()
+    ambiguity
 }
 
 impl open_kioku_storage::GraphStore for InMemoryGraph {
@@ -1068,6 +1086,7 @@ mod tests {
             target: "GET /orders".into(),
             target_kind: GraphNodeType::Endpoint,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::ExposesEndpoint,
             range: Some(LineRange::single(3)),
             confidence: Confidence::Medium,
@@ -1140,6 +1159,7 @@ mod tests {
             target: target.into(),
             target_kind: GraphNodeType::File,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::DerivedFrom,
             range: Some(LineRange::single(2)),
             confidence,
@@ -1526,6 +1546,7 @@ mod tests {
             target: "foo".into(),
             target_kind: GraphNodeType::Function,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::Calls,
             range: None,
             confidence: Confidence::High,
@@ -1564,6 +1585,7 @@ mod tests {
                 target: target.into(),
                 target_kind: kind,
                 target_symbol_id: None,
+                ambiguity: Vec::new(),
                 edge_type,
                 range: None,
                 confidence: Confidence::High,
@@ -1729,6 +1751,7 @@ mod tests {
             target: "GET /api".into(),
             target_kind: GraphNodeType::Endpoint,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::ExposesEndpoint,
             range: None,
             confidence: Confidence::High,
@@ -1789,6 +1812,7 @@ mod tests {
             target: callee.qualified_name.clone(),
             target_kind: GraphNodeType::Function,
             target_symbol_id: Some(callee.id.clone()),
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::Calls,
             range: Some(LineRange::single(line)),
             confidence: Confidence::High,
@@ -1849,6 +1873,68 @@ mod tests {
         let node = &graph.nodes["symbol:s-settle"];
         assert_eq!(node.symbol_id, Some(SymbolId::new("s-settle")));
         assert_eq!(node.source_pass, None);
+    }
+
+    /// A name-only registry match records why it may be wrong; its edge carries that, so every
+    /// reader asking whether the edge is ambiguous (impact's `possible_impact` included) gets it.
+    #[test]
+    fn a_speculative_registry_fact_draws_an_ambiguous_edge() {
+        let (files, caller, callee) = registry_pair();
+        let mut fact = registry_fact(&caller, &callee, 7);
+        fact.ambiguity = vec!["matched by name alone".into()];
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &files,
+            &[caller, callee],
+            &[],
+            &[],
+            &[],
+            &[fact],
+        );
+        let calls = calls_between(&graph, "symbol:s-close", "symbol:s-settle");
+        assert_eq!(calls.len(), 1, "{:#?}", graph.edges);
+        assert_eq!(
+            calls[0].ambiguity,
+            vec!["matched by name alone".to_string()]
+        );
+    }
+
+    /// Similarity joins two symbols whose code looks alike; neither depends on the other, so a
+    /// path between them does not go through it, now that its edge reaches the symbol node.
+    #[test]
+    fn a_similarity_fact_ends_at_the_symbol_node_and_is_no_path_hop() {
+        let (files, caller, callee) = registry_pair();
+        let mut fact = registry_fact(&caller, &callee, 7);
+        fact.edge_type = GraphEdgeType::SimilarTo;
+        fact.source = "open-kioku-relationships:structural-shingles".into();
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &files,
+            &[caller, callee],
+            &[],
+            &[],
+            &[],
+            &[fact],
+        );
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.edge_type == GraphEdgeType::SimilarTo
+                    && edge.from.0 == "symbol:s-close"
+                    && edge.to.0 == "symbol:s-settle"),
+            "{:#?}",
+            graph.edges
+        );
+        assert!(graph.nodes.keys().all(|id| !id.starts_with("analysis:")));
+        assert!(graph
+            .shortest_path("symbol:s-close", "symbol:s-settle", 4)
+            .is_empty());
+        let (_, neighbours) = graph.neighbors("symbol:s-close", 10);
+        assert!(
+            neighbours
+                .iter()
+                .all(|edge| edge.edge_type != GraphEdgeType::SimilarTo),
+            "{neighbours:?}"
+        );
     }
 
     #[test]
@@ -2042,6 +2128,7 @@ mod ri3_static_import_authority_tests {
             target: "crates/engine/Cargo.toml".into(),
             target_kind: open_kioku_core::GraphNodeType::File,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::DependsOn,
             range: None,
             confidence,
@@ -2099,6 +2186,7 @@ mod ri3_import_resolution_authority_tests {
             target: target.path.to_string_lossy().into_owned(),
             target_kind: GraphNodeType::File,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::Imports,
             range: Some(LineRange::single(1)),
             confidence: Confidence::High,
@@ -2188,6 +2276,7 @@ mod ri3_import_resolution_authority_tests {
             target: target.into(),
             target_kind,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::Imports,
             range: Some(LineRange::single(1)),
             confidence,

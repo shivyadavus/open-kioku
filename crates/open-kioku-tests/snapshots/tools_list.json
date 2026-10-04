@@ -487,18 +487,23 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact). Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a full evidence-backed pre-edit plan (use plan_change). This is read-only and analyzes the local index only.",
+        "description": "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact). Give `symbol` or `since` to say which symbols the change touches, so their dependents are read first and the proven ones are never cut by the list cap. Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a full evidence-backed pre-edit plan (use plan_change). This is read-only and analyzes the local index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "path": {
-              "description": "The repository-relative path of the file to analyze for downstream impact (e.g., 'src/auth/handler.rs').",
+              "description": "The repository-relative path of the file to analyze for downstream impact (e.g., 'src/auth/handler.rs'). Give this, `symbol`, or `since`.",
+              "type": "string"
+            },
+            "since": {
+              "description": "Optional git revision or range compared with git diff --unified=0. With `path` or `symbol`, the symbols on the lines it changed in that file are read first; alone, the changed files are analyzed and the result is {since, changed_files, impact_reports}, as ok impact --since returns: at most 25 reports, files whose touched symbols have the most proven dependents first, none started after 10 s, with impact_reports_omitted and caveats saying what was left out. Outside a git repository it is an invalid-params error.",
+              "type": "string"
+            },
+            "symbol": {
+              "description": "Optional symbol the change touches. Its dependents are read and listed first and its proven dependents are never cut by the list cap. Without `path`, the file that defines it is analyzed.",
               "type": "string"
             }
           },
-          "required": [
-            "path"
-          ],
           "type": "object"
         },
         "maturity": "stable",

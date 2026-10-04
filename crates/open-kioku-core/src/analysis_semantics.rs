@@ -181,7 +181,10 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// is an instance of it; an associated function is found through an alias; and two globs that
 /// bring in one name in different namespaces settle each namespace, a path continuing through
 /// a module a glob brings in. v42 indexes hold no edge for any of these.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v43";
+/// v44: a symbol-registry fact made by a name-only strategy (unique project name, suffix import
+/// reachability, fuzzy) records why it may name the wrong target in `AnalysisFact::ambiguity`;
+/// v43 facts recorded it only in their message, so their edges did not read as ambiguous.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v44";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -193,7 +196,11 @@ pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// that symbol's node, and is dropped where a proven or corroborating edge already joins the same
 /// two nodes with the same type; v3 drew it to an `analysis:<Kind>:<hash>` node made from the
 /// symbol's label, which no symbol-keyed read reached, and v3 facts do not name the symbol.
-pub const GRAPH_EMISSION_SEMANTICS_VERSION: &str = "ri3-graph-emission-v4";
+/// v5: an analysis fact's recorded ambiguity is copied onto its edge, so a name-only
+/// symbol-registry edge is ambiguous; and a similarity fact (`SIMILAR_TO`,
+/// `SEMANTICALLY_RELATED`) ends at the similar symbol's node rather than at a node made from its
+/// label. v4 indexes hold unambiguous registry edges and similarity edges no symbol read reaches.
+pub const GRAPH_EMISSION_SEMANTICS_VERSION: &str = "ri3-graph-emission-v5";
 pub const EXACT_INDEX_INGESTION_SEMANTICS_VERSION: &str = "exact-occurrence-v1";
 pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1";
 /// v2: test targets are callables with a test annotation in the attribute stack above them,

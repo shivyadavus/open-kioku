@@ -1,26 +1,35 @@
 use chrono::Utc;
 use open_kioku_core::{
     identity, search_result_evidence_ids, AnalysisFact, ChurnSummary, CodeChunk, Confidence,
-    Evidence, EvidenceId, EvidenceSourceType, File, FileId, FileRange, GraphEdge, GraphEdgeType,
-    GraphNode, GraphNodeType, HistorySignalQuery, HistorySignalSummary, ImpactReport, NodeId,
-    RelationshipImpact, RiskReport, ScoreComponent, SearchResult, Symbol, SymbolOccurrence,
+    Evidence, EvidenceId, EvidenceSourceType, File, FileId, FileRange, GitChangeKind, GraphEdge,
+    GraphEdgeType, GraphNode, GraphNodeType, HistorySignalQuery, HistorySignalSummary,
+    ImpactReport, LineRange, NodeId, RelationshipImpact, RelationshipImpactReads, RiskReport,
+    ScoreComponent, SearchResult, Symbol, SymbolId, SymbolOccurrence,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_evidence::{RelationshipUseClass, RelationshipUsePolicy};
+use open_kioku_git::DiffFile;
 use open_kioku_search_regex::search_chunks;
-use open_kioku_storage::{GraphStore, HistoryStore, MetadataStore, SearchIndex};
+use open_kioku_storage::{EdgeCount, GraphStore, HistoryStore, MetadataStore, SearchIndex};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 mod cargo;
 use cargo::{CargoWorkspace, Membership, CRATE_IMPORT_SIGNAL, CRATE_IMPORT_USE_SIGNAL};
 
-/// Bounded number of changed-file symbols used to seed relationship-edge impact discovery.
-const RELATIONSHIP_IMPACT_SYMBOL_SEEDS: usize = 16;
-/// Bounded neighbor fan-out per seed node.
+/// Most changed-file symbols whose inbound edges one report reads, taken in importance order
+/// (see [`seed_order`]). Only symbols with an inbound edge that can carry impact are read at all.
+const RELATIONSHIP_IMPACT_SYMBOL_SEEDS: usize = 256;
+/// Inbound edges of one type read into one seed node.
 const RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT: usize = 40;
 /// Bounded size of each relationship impact list in the report.
 const RELATIONSHIP_IMPACT_LIMIT: usize = 25;
+/// Bound on the proven dependents of the symbols a change touches, which
+/// [`RELATIONSHIP_IMPACT_LIMIT`] does not cut: a bound for a diff that rewrites a large file, not
+/// a cap a focused change meets (the most measured on this repository's last twelve commits was
+/// 114, from one large file).
+const RELATIONSHIP_IMPACT_TOUCHED_LIMIT: usize = 200;
 /// Number of the changed file's names searched for lexical dependents; see [`impact_terms`].
 const MAX_IMPACT_TERMS: usize = 8;
 
@@ -58,7 +67,15 @@ impl<'a> ImpactEngine<'a> {
         self
     }
 
+    /// Impact of changing `path`, with nothing known about which part of it changed.
     pub fn for_file(&self, path: &Path) -> Result<ImpactReport> {
+        self.for_change(path, &ChangeFocus::default())
+    }
+
+    /// Impact of changing `path`, where `focus` says which part changed. The relationship reads
+    /// start from the symbols the change touches, so their dependents are read and listed first;
+    /// every other part of the report is as [`ImpactEngine::for_file`] makes it.
+    pub fn for_change(&self, path: &Path, focus: &ChangeFocus) -> Result<ImpactReport> {
         let file = self.store.get_file_by_path(path)?;
         let target_symbols = if let Some(file) = &file {
             self.store.symbols_for_file(&file.id)?
@@ -478,7 +495,7 @@ impl<'a> ImpactEngine<'a> {
             .unwrap_or_default();
         let relationships = match (self.graph_store, &file) {
             (Some(graph), Some(file)) => {
-                relationship_impacts(graph, self.store, file, &target_symbols)?
+                relationship_impacts(graph, self.store, file, &target_symbols, focus)?
             }
             _ => RelationshipImpacts::default(),
         };
@@ -489,9 +506,13 @@ impl<'a> ImpactEngine<'a> {
             direct_impacts_omitted: omitted_direct,
             indirect_impacts_omitted: omitted_indirect,
             proven_impact: relationships.proven,
+            proven_impact_omitted: relationships.proven_omitted,
+            proven_impact_omitted_files: relationships.proven_omitted_files,
             possible_impact: relationships.possible,
             possible_impact_omitted: relationships.possible_omitted,
+            possible_impact_omitted_files: relationships.possible_omitted_files,
             relationship_impact_caveats: relationships.caveats,
+            relationship_impact_reads: relationships.reads,
             risk_report: RiskReport {
                 // A target the index does not hold was not measured; a score of zero for it
                 // is absence, not low risk, and `level` is the field consumers branch on.
@@ -573,8 +594,321 @@ impl<'a> ImpactEngine<'a> {
             ));
         }
         report.reconcile_score_breakdown();
+        // Why the focus is narrower than the caller asked for matters only where it decided
+        // something: which symbols were read, or which proven dependents the cap kept.
+        if focus_mattered(&report) {
+            report
+                .relationship_impact_caveats
+                .extend(focus.caveats.iter().cloned());
+        }
         Ok(report)
     }
+
+    /// Answer an impact request. `ok impact` and MCP `impact_analysis` both answer through this,
+    /// so one request reads the same symbols first and keeps the same dependents on either.
+    ///
+    /// A path, or the file defining `symbol`, is one report, focused on the symbol and on the
+    /// lines `diff` changes in that file. With neither, the paths `diff` changes are reported one
+    /// by one, focused on their changed lines: at most [`DIFF_REPORT_LIMIT`] of them, those whose
+    /// touched symbols have the most proven dependents first, and none started after `deadline`.
+    /// A diff of an old revision can change hundreds of files, each a full impact read; the
+    /// paths left out are counted, and `changed_files` still lists every one.
+    pub fn answer(&self, repo_root: &Path, request: ImpactRequest<'_>) -> Result<ImpactAnswer> {
+        let target = match (request.path, request.symbol) {
+            (Some(path), _) => Some(path.to_path_buf()),
+            (None, Some(symbol)) => Some(
+                self.store
+                    .file_by_id(&symbol.file_id)?
+                    .map(|file| file.path)
+                    .unwrap_or_else(|| PathBuf::from(&symbol.qualified_name)),
+            ),
+            (None, None) => None,
+        };
+        if let Some(path) = target {
+            let mut focus = match request.diff {
+                Some(diff) => self.diff_focus(repo_root, &path, diff)?,
+                None => ChangeFocus::default(),
+            };
+            focus
+                .symbols
+                .extend(request.symbol.map(|symbol| symbol.id.clone()));
+            return Ok(ImpactAnswer::File(Box::new(
+                self.for_change(&path, &focus)?,
+            )));
+        }
+        let Some(diff) = request.diff else {
+            return Err(OkError::InvalidInput(
+                "impact needs a file path, a symbol, or a git revision to diff against".into(),
+            ));
+        };
+        let mut paths = Vec::new();
+        for change in diff {
+            paths.extend(change.new_path.iter());
+            // A rename removes its previous path, which the index may still describe.
+            if change.status == GitChangeKind::Renamed {
+                paths.extend(
+                    change
+                        .old_path
+                        .iter()
+                        .filter(|old| change.new_path.as_ref() != Some(*old)),
+                );
+            }
+        }
+        // Ranked before any is read, by counts alone, so the cap keeps the files whose change
+        // most certainly breaks something: proven dependents of touched symbols, then any
+        // dependents of them, then diff order.
+        let past_deadline = || {
+            request
+                .deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        };
+        let mut ranked = Vec::with_capacity(paths.len());
+        let mut unranked = 0usize;
+        for (position, path) in paths.into_iter().enumerate() {
+            let focus = self.diff_focus(repo_root, path, diff)?;
+            // Past the deadline the rest keep their diff order, behind every ranked path.
+            let (proven, total) = if past_deadline() {
+                unranked += 1;
+                (0, 0)
+            } else {
+                self.touched_inbound(path, &focus)?
+            };
+            ranked.push((
+                (
+                    std::cmp::Reverse(proven),
+                    std::cmp::Reverse(total),
+                    position,
+                ),
+                path,
+                focus,
+            ));
+        }
+        ranked.sort_by_key(|(key, _, _)| *key);
+        let changed_paths = ranked.len();
+        let mut reports = Vec::new();
+        let mut stopped_at_deadline = false;
+        for (_, path, focus) in ranked.into_iter().take(DIFF_REPORT_LIMIT) {
+            // One report can take as long as the whole budget on a large repository, so none is
+            // started past the deadline, the first included.
+            if past_deadline() {
+                stopped_at_deadline = true;
+                break;
+            }
+            reports.push(self.for_change(path, &focus)?);
+        }
+        let reports_omitted = changed_paths - reports.len();
+        let mut caveats = Vec::new();
+        if reports_omitted > 0 {
+            caveats.push(format!(
+                "impact reports cover {} of the {changed_paths} changed paths, those whose \
+                 touched symbols have the most proven dependents first; {}; every changed path \
+                 is in `changed_files`, and `path` gives any one of them its own report",
+                reports.len(),
+                if stopped_at_deadline {
+                    "the rest were not started within the time this request allows".to_string()
+                } else {
+                    format!("at most {DIFF_REPORT_LIMIT} are reported")
+                }
+            ));
+        }
+        if unranked > 0 {
+            caveats.push(format!(
+                "{unranked} changed path(s) were not ranked within the time this request allows \
+                 and follow the ranked ones in diff order"
+            ));
+        }
+        Ok(ImpactAnswer::Diff(DiffImpact {
+            reports,
+            reports_omitted,
+            caveats,
+        }))
+    }
+
+    /// Proven and all inbound impact edges of the symbols `focus` touches in `path`, counted
+    /// without reading them; zero where the index or the graph cannot say.
+    fn touched_inbound(&self, path: &Path, focus: &ChangeFocus) -> Result<(usize, usize)> {
+        let Some(graph) = self.graph_store else {
+            return Ok((0, 0));
+        };
+        let Some(file) = self.store.get_file_by_path(path)? else {
+            return Ok((0, 0));
+        };
+        let symbols = self.store.symbols_for_file(&file.id)?;
+        let own = symbols
+            .iter()
+            .filter(|symbol| symbol.file_id == file.id)
+            .collect::<Vec<_>>();
+        let nodes = own
+            .iter()
+            .zip(focus.touched(&own))
+            .filter(|(_, touched)| *touched)
+            .map(|(symbol, _)| identity::symbol_node_id(symbol).0)
+            .collect::<Vec<_>>();
+        if nodes.is_empty() {
+            return Ok((0, 0));
+        }
+        let ids = nodes.iter().map(String::as_str).collect::<Vec<_>>();
+        let counts = match graph.edge_counts_for_nodes(&IMPACT_EDGE_TYPES, &ids, false) {
+            Ok(counts) => counts,
+            Err(OkError::Unsupported(_)) => return Ok((0, 0)),
+            Err(err) => return Err(err),
+        };
+        Ok(counts
+            .values()
+            .flat_map(|by_type| by_type.values())
+            .fold((0, 0), |(proven, total), count| {
+                (proven + count.proven.unwrap_or(0), total + count.total)
+            }))
+    }
+
+    /// The diff of `since` against the working tree, for an [`ImpactRequest`]. `since` compares
+    /// against git history, so a directory that is not a git work tree is the caller's mistake,
+    /// not a repository with nothing changed.
+    pub fn changes_since(repo_root: &Path, since: &str) -> Result<Vec<DiffFile>> {
+        if !repo_root.join(".git").exists() {
+            return Err(OkError::InvalidInput(format!(
+                "`since` compares against git history, and `{}` is not a git repository",
+                repo_root.display()
+            )));
+        }
+        let changes = open_kioku_git::diff_unified_zero_since(repo_root, since)?;
+        Ok(changes
+            .into_iter()
+            .filter(|change| change.old_path.is_some() || change.new_path.is_some())
+            .collect())
+    }
+
+    /// The change focus `diff` gives `path`: the lines its diff adds or modifies, matched to the
+    /// file's symbols as the index holds them.
+    ///
+    /// Those line numbers are the working tree's, so they name the indexed symbols only while the
+    /// index holds the file as it is on disk. When it does not (the file changed since `ok index`,
+    /// or cannot be read), the lines are dropped rather than pointed at whichever symbols now sit
+    /// on them. A hunk that only removes lines has no line on the new side and touches no symbol.
+    /// A path the diff renames or removes is numbered as the revision had it, and one the diff
+    /// does not change has no lines at all. Each case leaves a caveat on the focus, reported where
+    /// it could have changed the answer.
+    pub fn diff_focus(
+        &self,
+        repo_root: &Path,
+        path: &Path,
+        diff: &[DiffFile],
+    ) -> Result<ChangeFocus> {
+        let shown = path.display();
+        let Some(change) = diff
+            .iter()
+            .find(|change| change.new_path.as_deref() == Some(path))
+        else {
+            let caveat = if diff
+                .iter()
+                .any(|change| change.old_path.as_deref() == Some(path))
+            {
+                format!(
+                    "the diff renames or removes `{shown}`, so its changed lines, numbered as the \
+                     revision had them, were not matched to its symbols"
+                )
+            } else {
+                format!("the diff changes no line of `{shown}`, so no symbol of it was read first")
+            };
+            return Ok(ChangeFocus {
+                caveats: vec![caveat],
+                ..ChangeFocus::default()
+            });
+        };
+        let indexed = self.store.get_file_by_path(path)?;
+        let on_disk = std::fs::read(repo_root.join(path))
+            .ok()
+            .map(|bytes| format!("{:x}", Sha256::digest(&bytes)));
+        if indexed.is_some() && indexed.as_ref().map(|file| &file.content_hash) != on_disk.as_ref()
+        {
+            return Ok(ChangeFocus {
+                caveats: vec![format!(
+                    "`{shown}` differs from the indexed copy, so the lines the diff changed were \
+                     not matched to its symbols; run `ok index` for the dependents of the changed \
+                     symbols to be read first"
+                )],
+                ..ChangeFocus::default()
+            });
+        }
+        let removals = change
+            .hunks
+            .iter()
+            .filter(|hunk| hunk.new_range.is_none())
+            .count();
+        let mut focus = ChangeFocus::lines(change.changed_line_ranges());
+        if removals > 0 {
+            focus.caveats.push(format!(
+                "{removals} hunk(s) of `{shown}` only remove lines, which touch no symbol, so the \
+                 symbols around them were not read first"
+            ));
+        }
+        Ok(focus)
+    }
+}
+
+/// Changed paths one `since`-only request reports on; see [`ImpactEngine::answer`].
+pub const DIFF_REPORT_LIMIT: usize = 25;
+
+/// What `ok impact` and MCP `impact_analysis` are asked; see [`ImpactEngine::answer`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImpactRequest<'r> {
+    /// The file to analyze.
+    pub path: Option<&'r Path>,
+    /// A symbol the change touches; its file is analyzed when no path is given.
+    pub symbol: Option<&'r Symbol>,
+    /// The diff of a revision (or range) against the working tree, from
+    /// [`ImpactEngine::changes_since`].
+    pub diff: Option<&'r [DiffFile]>,
+    /// When a diff's paths are reported one by one, none is started after this.
+    pub deadline: Option<std::time::Instant>,
+}
+
+/// The answer to an [`ImpactRequest`]: one file's report, or the reports of a diff's paths.
+#[derive(Debug, Clone)]
+pub enum ImpactAnswer {
+    File(Box<ImpactReport>),
+    Diff(DiffImpact),
+}
+
+/// The reports of the paths a diff changes, and how many it left out.
+#[derive(Debug, Clone, Default)]
+pub struct DiffImpact {
+    /// Reports, those whose touched symbols have the most proven dependents first.
+    pub reports: Vec<ImpactReport>,
+    /// Changed paths with no report: past [`DIFF_REPORT_LIMIT`], or not started by the deadline.
+    pub reports_omitted: usize,
+    /// Why paths were left out, when they were.
+    pub caveats: Vec<String>,
+}
+
+impl DiffImpact {
+    /// The shape `ok impact --since --json` prints and MCP `impact_analysis` returns for
+    /// `since` alone.
+    pub fn to_json(&self, since: &str, changed_files: &[DiffFile]) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "since": since,
+            "changed_files": changed_files,
+            "impact_reports": self.reports,
+        });
+        if self.reports_omitted > 0 {
+            value["impact_reports_omitted"] = serde_json::json!(self.reports_omitted);
+        }
+        if !self.caveats.is_empty() {
+            value["caveats"] = serde_json::json!(self.caveats);
+        }
+        value
+    }
+}
+
+/// Whether a change focus decided anything in `report`: it orders which symbols are read and
+/// which proven dependents the cap may not cut, so it matters only where a symbol with
+/// dependents went unread or the proven list was cut.
+fn focus_mattered(report: &ImpactReport) -> bool {
+    report.proven_impact_omitted > 0
+        || report
+            .relationship_impact_reads
+            .as_ref()
+            .is_some_and(|reads| reads.symbols_unread_with_dependents != Some(0))
 }
 
 fn runtime_facts_for_file(
@@ -1077,23 +1411,186 @@ fn is_dependency_edge_type(edge_type: &GraphEdgeType) -> bool {
     )
 }
 
-/// Classify inbound relationship edges around the changed file into proven versus possible
-/// impact. Authority is recomputed from typed proofs through the shared fail-closed policy, so a
-/// heuristic same-name edge can only ever surface as a possibility.
+/// What a caller knows about which part of a changed file the change touches.
+///
+/// Impact reads the dependents of a bounded number of the file's symbols. Without a focus it
+/// takes them by evidence, visibility and how many inbound edges each has; with one, the symbols
+/// the change touches come first, so their dependents are read and listed whatever else the file
+/// holds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChangeFocus {
+    /// Lines of the file, as the index holds it, that the change adds or modifies. A line touches
+    /// the innermost symbols around it: a class or `impl` block is touched only by a changed line
+    /// none of its members holds.
+    pub lines: Vec<LineRange>,
+    /// Symbols the caller names as changed.
+    pub symbols: Vec<SymbolId>,
+    /// Why the focus is narrower than the change, such as lines that could not be matched to
+    /// the indexed symbols. A report carries them where the focus decided something.
+    pub caveats: Vec<String>,
+}
+
+impl ChangeFocus {
+    /// A change to these lines of the file.
+    pub fn lines(lines: Vec<LineRange>) -> Self {
+        Self {
+            lines,
+            ..Self::default()
+        }
+    }
+
+    /// A change to these symbols.
+    pub fn symbols(symbols: Vec<SymbolId>) -> Self {
+        Self {
+            symbols,
+            ..Self::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty() && self.symbols.is_empty()
+    }
+
+    /// Which of `symbols` (one file's) the focus touches, in their order. A named symbol is
+    /// touched. A changed line touches a symbol only where none of the symbols nested in it holds
+    /// the line, so a one-line edit inside a method of a large class touches the method, not
+    /// every member of the class with it.
+    fn touched(&self, symbols: &[&Symbol]) -> Vec<bool> {
+        symbols
+            .iter()
+            .map(|symbol| {
+                if self.symbols.contains(&symbol.id) {
+                    return true;
+                }
+                let Some(range) = &symbol.range else {
+                    return false;
+                };
+                let mut nested = symbols
+                    .iter()
+                    .filter_map(|other| other.range.as_ref())
+                    .filter(|inner| {
+                        range.start <= inner.start
+                            && inner.end <= range.end
+                            && (inner.start, inner.end) != (range.start, range.end)
+                    })
+                    .map(|inner| (inner.start, inner.end))
+                    .collect::<Vec<_>>();
+                nested.sort_unstable();
+                self.lines.iter().any(|line| {
+                    let (start, end) = (line.start.max(range.start), line.end.min(range.end));
+                    start <= end && !lines_covered(start, end, &nested)
+                })
+            })
+            .collect()
+    }
+}
+
+/// Whether every line of `start..=end` lies in one of `ranges` (sorted by start).
+fn lines_covered(start: u32, end: u32, ranges: &[(u32, u32)]) -> bool {
+    let mut next = start;
+    for &(from, to) in ranges {
+        if from > next {
+            break;
+        }
+        if to >= next {
+            match to.checked_add(1) {
+                Some(after) => next = after,
+                None => return true,
+            }
+            if next > end {
+                return true;
+            }
+        }
+    }
+    next > end
+}
+
+/// Edge types whose source is affected when the changed file is edited, as read into a seed.
+const IMPACT_EDGE_TYPES: [GraphEdgeType; 8] = [
+    GraphEdgeType::Calls,
+    GraphEdgeType::References,
+    GraphEdgeType::UsesType,
+    GraphEdgeType::Implements,
+    GraphEdgeType::Extends,
+    GraphEdgeType::Imports,
+    GraphEdgeType::DependsOn,
+    GraphEdgeType::DerivedFrom,
+];
+
+/// The impact edge types read into `node_id`. Derived edges join two file nodes, so a symbol seed
+/// never has one, and one counted there would be an edge no read could reach.
+fn impact_edge_types_for(node_id: &NodeId) -> Vec<GraphEdgeType> {
+    let file = node_id.0.starts_with("file:");
+    IMPACT_EDGE_TYPES
+        .into_iter()
+        .filter(|edge_type| file || *edge_type != GraphEdgeType::DerivedFrom)
+        .collect()
+}
+
 /// What `relationship_impacts` found, and what its bounded reads left unread.
 #[derive(Default)]
 struct RelationshipImpacts {
     proven: Vec<RelationshipImpact>,
+    proven_omitted: usize,
+    proven_omitted_files: usize,
     possible: Vec<RelationshipImpact>,
     possible_omitted: usize,
+    possible_omitted_files: usize,
     caveats: Vec<String>,
+    reads: Option<RelationshipImpactReads>,
 }
 
+/// One node whose inbound edges impact reads: the changed file, or one of its symbols.
+struct Seed {
+    node_id: NodeId,
+    label: String,
+    /// Whether the change touches it. The file node never is: a change to some of its lines is
+    /// not a change to everything that imports it.
+    touched: bool,
+    /// The symbol's position in the file's symbol list (the file node is 0, symbols from 1): the
+    /// tie-break that keeps one entry per dependent the same whatever order seeds are read in.
+    position: usize,
+}
+
+/// A node's counted inbound impact edges: all of them, and the proven ones when the store can
+/// tell.
+#[derive(Debug, Clone, Copy, Default)]
+struct InboundCount {
+    total: usize,
+    proven: Option<usize>,
+}
+
+/// The order in which a changed file's symbols are read, most likely to have dependents that
+/// matter first: symbols the change touches; then symbols with a proven dependent, so a run of
+/// name matches never pushes a proof out of the read; then by visibility (public, then package-
+/// or crate-wide or unknown, then private); then by proven, then all, inbound edges, most first;
+/// then in file order.
+fn seed_order(touched: bool, symbol: &Symbol, inbound: InboundCount, position: usize) -> impl Ord {
+    let visibility = match symbol.visibility {
+        open_kioku_core::Visibility::Public => 0u8,
+        open_kioku_core::Visibility::Private => 2,
+        _ => 1,
+    };
+    let proven = inbound.proven.unwrap_or(0);
+    (
+        !touched,
+        proven == 0,
+        visibility,
+        std::cmp::Reverse(proven),
+        std::cmp::Reverse(inbound.total),
+        position,
+    )
+}
+
+/// Classify inbound relationship edges around the changed file into proven versus possible
+/// impact. Authority is recomputed from typed proofs through the shared fail-closed policy, so a
+/// heuristic same-name edge can only ever surface as a possibility.
 fn relationship_impacts(
     graph: &dyn GraphStore,
     store: &dyn MetadataStore,
     target_file: &File,
     symbols: &[Symbol],
+    focus: &ChangeFocus,
 ) -> Result<RelationshipImpacts> {
     let policy = RelationshipUsePolicy::proven_and_possible();
     let files_by_id = store
@@ -1112,95 +1609,233 @@ fn relationship_impacts(
         })
         .collect::<HashMap<String, FileId>>();
 
-    let mut caveats = Vec::new();
-    let mut seeds: Vec<(NodeId, String)> = Vec::new();
-    if let Ok(node_id) = identity::try_file_node_id(&target_file.path) {
-        seeds.push((node_id, target_file.path.display().to_string()));
-    }
-    let own_symbols = symbols
+    let file_seed = identity::try_file_node_id(&target_file.path)
+        .ok()
+        .map(|node_id| Seed {
+            node_id,
+            label: target_file.path.display().to_string(),
+            touched: false,
+            position: 0,
+        });
+    let own = symbols
         .iter()
         .filter(|symbol| symbol.file_id == target_file.id)
-        .count();
-    if own_symbols > RELATIONSHIP_IMPACT_SYMBOL_SEEDS {
-        caveats.push(format!(
-            "relationship impact read the dependents of {RELATIONSHIP_IMPACT_SYMBOL_SEEDS} of the \
-             changed file's {own_symbols} symbols; dependents of the other {} were not read",
-            own_symbols - RELATIONSHIP_IMPACT_SYMBOL_SEEDS
-        ));
-    }
-    for symbol in symbols
+        .collect::<Vec<_>>();
+    let touched = focus.touched(&own);
+    let own_symbols = own
         .iter()
-        .filter(|symbol| symbol.file_id == target_file.id)
-        .take(RELATIONSHIP_IMPACT_SYMBOL_SEEDS)
-    {
-        seeds.push((
-            identity::symbol_node_id(symbol),
-            symbol.qualified_name.clone(),
-        ));
-    }
+        .zip(touched)
+        .enumerate()
+        .map(|(index, (symbol, touched))| {
+            let seed = Seed {
+                node_id: identity::symbol_node_id(symbol),
+                label: symbol.qualified_name.clone(),
+                touched,
+                position: index + 1,
+            };
+            (seed, *symbol)
+        })
+        .collect::<Vec<_>>();
+    let symbols_total = own_symbols.len();
+    let symbols_touched = own_symbols.iter().filter(|(seed, _)| seed.touched).count();
 
+    // Counted, not read: which nodes have any inbound edge that can carry impact, how many, and
+    // how many of those are proven. A symbol with none needs no read, the rest are read most
+    // important first, and what the bounded reads leave out is a number rather than a guess. A
+    // store that cannot count leaves every symbol a candidate, in visibility and file order, and
+    // an unread one may have dependents.
+    let count_ids = file_seed
+        .iter()
+        .chain(own_symbols.iter().map(|(seed, _)| seed))
+        .map(|seed| seed.node_id.0.as_str())
+        .collect::<Vec<_>>();
+    let counts = match graph.edge_counts_for_nodes(&IMPACT_EDGE_TYPES, &count_ids, false) {
+        Ok(counts) => Some(counts),
+        Err(OkError::Unsupported(_)) => None,
+        Err(err) => return Err(err),
+    };
+    let inbound_counts = |node_id: &NodeId| -> Option<BTreeMap<GraphEdgeType, EdgeCount>> {
+        let counts = counts.as_ref()?;
+        let types = impact_edge_types_for(node_id);
+        Some(
+            counts
+                .get(&node_id.0)
+                .map(|by_type| {
+                    by_type
+                        .iter()
+                        .filter(|(edge_type, _)| types.contains(edge_type))
+                        .map(|(edge_type, count)| (edge_type.clone(), *count))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    };
+    let inbound = |node_id: &NodeId| -> Option<InboundCount> {
+        inbound_counts(node_id).map(|by_type| InboundCount {
+            total: by_type.values().map(|count| count.total).sum(),
+            proven: by_type
+                .values()
+                .map(|count| count.proven)
+                .sum::<Option<usize>>(),
+        })
+    };
+    let has_edges = |node_id: &NodeId| inbound(node_id).is_none_or(|count| count.total > 0);
+
+    let mut candidates = own_symbols
+        .into_iter()
+        .filter(|(seed, _)| has_edges(&seed.node_id))
+        .map(|(seed, symbol)| {
+            let count = inbound(&seed.node_id).unwrap_or_default();
+            (seed_order(seed.touched, symbol, count, seed.position), seed)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let unread = candidates
+        .split_off(RELATIONSHIP_IMPACT_SYMBOL_SEEDS.min(candidates.len()))
+        .into_iter()
+        .map(|(_, seed)| seed)
+        .collect::<Vec<_>>();
+    let symbols_read = candidates.len();
+    let seeds = file_seed
+        .into_iter()
+        .filter(|seed| has_edges(&seed.node_id))
+        .chain(candidates.into_iter().map(|(_, seed)| seed))
+        .collect::<Vec<_>>();
+
+    let unread_counts = unread
+        .iter()
+        .filter_map(|seed| inbound(&seed.node_id))
+        .collect::<Vec<_>>();
+    let unread_edges = counts
+        .as_ref()
+        .map(|_| unread_counts.iter().map(|count| count.total).sum::<usize>());
+    let unread_proven = counts.as_ref().and_then(|_| {
+        unread_counts
+            .iter()
+            .map(|count| count.proven)
+            .sum::<Option<usize>>()
+    });
+    let mut edges_unread = unread_edges;
+    let mut proven_edges_unread = unread_proven;
+    let symbols_unread_with_dependents = counts.as_ref().map(|_| unread.len());
+    let mut windows_at_limit = 0usize;
+    let mut windows_cutting_proven = 0usize;
     let mut proven = Vec::new();
     let mut possible = Vec::new();
-    let mut full_windows = 0usize;
-    for (node_id, source_label) in &seeds {
+    for seed in &seeds {
         // A store with no graph support has no relationship evidence to offer, and an empty
         // list is the documented answer for that. Every other failure — a graph awaiting
         // `ok index`, a stale analysis fingerprint, a read error — is not "no dependents", and
-        // `ImpactReport` has no caveat channel to say so, so the report is refused instead.
-        // Two surfaces (`ok impact`, MCP `impact_analysis`) answered `proven_impact: []` from
-        // an index whose edges had been discarded on open before this propagated.
-        let (nodes, edges) = match inbound_impact_edges(graph, node_id, &files_by_path) {
-            Ok(read) => {
-                full_windows += read.full_windows;
-                (read.nodes, read.edges)
-            }
+        // the report is refused instead. Two surfaces (`ok impact`, MCP `impact_analysis`)
+        // answered `proven_impact: []` from an index whose edges had been discarded on open
+        // before this propagated.
+        let read = match inbound_impact_edges(
+            graph,
+            &seed.node_id,
+            inbound_counts(&seed.node_id).as_ref(),
+            &files_by_path,
+            &policy,
+        ) {
+            Ok(read) => read,
             Err(OkError::Unsupported(_)) => continue,
             Err(err) => return Err(err),
         };
-        let nodes_by_id = nodes
+        windows_at_limit += read.windows_at_limit;
+        windows_cutting_proven += read.windows_cutting_proven;
+        // A read that could not count what it cut leaves the total unknown.
+        edges_unread = edges_unread
+            .zip(read.edges_cut)
+            .map(|(total, cut)| total + cut);
+        proven_edges_unread = proven_edges_unread
+            .zip(read.proven_edges_cut)
+            .map(|(total, cut)| total + cut);
+        let nodes_by_id = read
+            .nodes
             .iter()
             .map(|node| (node.id.clone(), node))
             .collect::<HashMap<NodeId, &GraphNode>>();
-        for edge in &edges {
-            if edge.to != *node_id || !is_impacted_by_edge_type(&edge.edge_type) {
+        for edge in &read.edges {
+            if edge.to != seed.node_id || !is_impacted_by_edge_type(&edge.edge_type) {
                 continue;
             }
             let Some(impact) =
-                relationship_impact_entry(edge, &nodes_by_id, &files_by_id, source_label)
+                relationship_impact_entry(edge, &nodes_by_id, &files_by_id, &seed.label)
             else {
                 continue;
             };
+            let entry = (impact, seed.touched, seed.position);
             match policy.classify(edge) {
-                RelationshipUseClass::Proven => proven.push(impact),
-                RelationshipUseClass::Possible => possible.push(impact),
+                RelationshipUseClass::Proven => proven.push(entry),
+                RelationshipUseClass::Possible => possible.push(entry),
                 RelationshipUseClass::Excluded => {}
             }
         }
     }
 
-    if full_windows > 0 {
-        caveats.push(format!(
-            "{full_windows} inbound edge read(s) stopped at the {RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT}-edge \
-             limit for one edge type of one changed symbol, so further dependents through them \
-             were not read"
-        ));
+    let mut caveats = Vec::new();
+    match symbols_unread_with_dependents {
+        Some(skipped) if skipped > 0 => caveats.push(format!(
+            "relationship impact read the dependents of {symbols_read} of the changed file's \
+             {} symbols that have any ({symbols_total} symbols in all), taking the symbols the \
+             change touches first, then those with a proven dependent, then public ones, then \
+             those with the most inbound edges; the {skipped} others have {} inbound edge(s){} \
+             that were not read",
+            symbols_read + skipped,
+            unread_edges.unwrap_or_default(),
+            match unread_proven {
+                Some(proven) => format!(", {proven} of them proven,"),
+                None => String::new(),
+            }
+        )),
+        None if !unread.is_empty() => caveats.push(format!(
+            "relationship impact read the dependents of {symbols_read} of the changed file's \
+             {symbols_total} symbols; this graph store cannot count edges, so the other {} may \
+             have dependents that were not read",
+            unread.len()
+        )),
+        _ => {}
     }
 
+    // One entry per dependent, edge type and list. Of two entries for the same dependent through
+    // different changed symbols, the one from a symbol the change touches is kept, then the one
+    // from the symbol earliest in the file, so the kept entry does not depend on read order.
     for list in [&mut proven, &mut possible] {
-        list.sort_by(|a, b| {
-            (&a.path, &a.symbol, &a.edge_type).cmp(&(&b.path, &b.symbol, &b.edge_type))
+        list.sort_by(|(a, a_touched, a_position), (b, b_touched, b_position)| {
+            (&a.path, &a.symbol, &a.edge_type, !a_touched, a_position).cmp(&(
+                &b.path,
+                &b.symbol,
+                &b.edge_type,
+                !b_touched,
+                b_position,
+            ))
         });
-        list.dedup_by(|a, b| {
+        list.dedup_by(|(a, _, _), (b, _, _)| {
             a.path == b.path && a.symbol == b.symbol && a.edge_type == b.edge_type
         });
     }
-    if proven.len() > RELATIONSHIP_IMPACT_LIMIT {
+    // Both lists are cut by one rule, and say how many they cut. Dependents of a symbol the
+    // change touches come first, and a proven one is cut only past a far higher bound: it is the
+    // dependent a change most certainly breaks, and no ordering of a capped list keeps every one
+    // a list cut by path kept before. Among the rest, a dependent file is what the blast radius
+    // is about: possibilities far outnumber proofs where name matches reach real symbols (cut by
+    // path, 502 of the 835 possible entries listed for 43 files of this repository were inside
+    // the changed file), and one dependent file can name the change from dozens of symbols. So
+    // each other file's first entry is kept before any file's second, in path order, and the
+    // changed file's own entries go last.
+    let capped = cap_relationship_impacts(proven, target_file, true);
+    let (mut proven, proven_omitted, proven_omitted_files) =
+        (capped.kept, capped.omitted, capped.omitted_files);
+    if capped.touched_omitted > 0 {
         caveats.push(format!(
-            "proven_impact lists {RELATIONSHIP_IMPACT_LIMIT} of {} proven dependents read",
-            proven.len()
+            "proven_impact lists {RELATIONSHIP_IMPACT_TOUCHED_LIMIT} of the {} proven \
+             dependents read of the symbols the change touches",
+            RELATIONSHIP_IMPACT_TOUCHED_LIMIT + capped.touched_omitted
         ));
     }
-    proven.truncate(RELATIONSHIP_IMPACT_LIMIT);
+    // Proven entries are listed by path, as they always were; the cut only chose which.
+    proven.sort_by(|a, b| {
+        (&a.path, &a.symbol, &a.edge_type).cmp(&(&b.path, &b.symbol, &b.edge_type))
+    });
     // A dependent the report lists as proven, through any changed symbol and any edge type, is
     // not also a possibility: the weaker entry would only repeat the dependent, and take a slot
     // in the capped list from one that is not proven at all. Compared after the cut, so an entry
@@ -1209,48 +1844,130 @@ fn relationship_impacts(
         .iter()
         .map(|impact| (&impact.path, &impact.symbol))
         .collect::<HashSet<_>>();
-    possible.retain(|impact| !proven_dependents.contains(&(&impact.path, &impact.symbol)));
-    // Possibilities are many more than proofs where name matches reach real symbols: a changed
-    // file's own symbols use each other (cut by path, 502 of the 835 entries listed for 43
-    // files of this repository were inside the changed file), and one dependent file can name
-    // the change from dozens of symbols. Cut by path alone, the cap filled with both and dropped
-    // whole dependent files, such as a test file named after the change. A dependent file is
-    // what the blast radius is about, so the cap keeps each other file's first entry, then each
-    // one's second, and so on, in path order, and the changed file's own last; and it says how
-    // many it cut, so a capped list is not read as the whole of it. The count is of what was
-    // read: the symbol seeds and per-type edge windows above cut first, so it is a lower bound,
-    // and the caveats say when they did.
-    let mut seen_per_path = HashMap::<PathBuf, usize>::new();
-    let spread = possible
-        .iter()
-        .map(|impact| {
-            let nth = seen_per_path.entry(impact.path.clone()).or_default();
-            *nth += 1;
-            (impact.path == target_file.path, *nth)
-        })
-        .collect::<Vec<_>>();
-    let mut keyed = spread.into_iter().zip(possible).collect::<Vec<_>>();
-    keyed.sort_by_key(|(key, _)| *key);
-    let mut possible = keyed
-        .into_iter()
-        .map(|(_, impact)| impact)
-        .collect::<Vec<_>>();
-    let possible_omitted = possible.len().saturating_sub(RELATIONSHIP_IMPACT_LIMIT);
-    possible.truncate(RELATIONSHIP_IMPACT_LIMIT);
+    possible.retain(|(impact, _, _)| !proven_dependents.contains(&(&impact.path, &impact.symbol)));
+    let capped = cap_relationship_impacts(possible, target_file, false);
+    let (possible, possible_omitted, possible_omitted_files) =
+        (capped.kept, capped.omitted, capped.omitted_files);
+    // A read that stopped before every proven edge left proven dependents out, which no count
+    // shows. One that stopped after them left out possibilities only: where `possible_impact`
+    // is already cut, its omitted count reads as "at least", and `edges_unread` says by how much,
+    // so a sentence here would only repeat them; where nothing was cut, the list would read as
+    // complete, so the caveat says it is not.
+    if windows_cutting_proven > 0 {
+        caveats.push(format!(
+            "{windows_at_limit} inbound edge read(s) stopped at the \
+             {RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT}-edge limit for one edge type of one node, \
+             {windows_cutting_proven} of them possibly before every proven edge was read{}, so \
+             proven dependents through them may be missing",
+            match proven_edges_unread {
+                Some(unread) => format!(" ({unread} proven edge(s) in all were not read)"),
+                None => String::new(),
+            }
+        ));
+    } else if windows_at_limit > 0 && possible_omitted == 0 {
+        caveats.push(format!(
+            "{windows_at_limit} inbound edge read(s) stopped at the \
+             {RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT}-edge limit for one edge type of one node \
+             after every proven edge, so further possible (heuristic) dependents through them \
+             were not read"
+        ));
+    }
     Ok(RelationshipImpacts {
         proven,
+        proven_omitted,
+        proven_omitted_files,
         possible,
         possible_omitted,
+        possible_omitted_files,
         caveats,
+        reads: Some(RelationshipImpactReads {
+            symbols_total,
+            symbols_touched,
+            symbols_read,
+            symbols_unread_with_dependents,
+            edges_unread,
+            proven_edges_unread,
+            windows_at_limit,
+            windows_cutting_proven,
+        }),
     })
 }
 
-/// One seed's inbound impact edges, with the nodes they come from, and how many of the per-type
-/// reads came back at their limit and so may have left edges unread.
+/// A relationship list after [`cap_relationship_impacts`].
+struct CappedImpacts {
+    kept: Vec<RelationshipImpact>,
+    /// Entries cut, of every kind.
+    omitted: usize,
+    /// Of those, entries from a seed the change touches.
+    touched_omitted: usize,
+    /// Dependent files an entry was cut from that the kept list does not name at all.
+    omitted_files: usize,
+}
+
+/// Cut a path-ordered relationship list at [`RELATIONSHIP_IMPACT_LIMIT`]: entries from a seed the
+/// change touches first, then each other file's first entry before any file's second, the changed
+/// file's own last. With `keep_touched`, entries from a touched seed are kept up to
+/// [`RELATIONSHIP_IMPACT_TOUCHED_LIMIT`], and [`RELATIONSHIP_IMPACT_LIMIT`] bounds the rest.
+fn cap_relationship_impacts(
+    entries: Vec<(RelationshipImpact, bool, usize)>,
+    target_file: &File,
+    keep_touched: bool,
+) -> CappedImpacts {
+    let mut seen_per_path = HashMap::<PathBuf, usize>::new();
+    let mut keyed = entries
+        .into_iter()
+        .map(|(impact, touched, _)| {
+            let nth = seen_per_path.entry(impact.path.clone()).or_default();
+            *nth += 1;
+            ((!touched, impact.path == target_file.path, *nth), impact)
+        })
+        .collect::<Vec<_>>();
+    keyed.sort_by_key(|(key, _)| *key);
+    let touched = keyed
+        .iter()
+        .filter(|((untouched, _, _), _)| !untouched)
+        .count();
+    let kept = if keep_touched {
+        touched.clamp(RELATIONSHIP_IMPACT_LIMIT, RELATIONSHIP_IMPACT_TOUCHED_LIMIT)
+    } else {
+        RELATIONSHIP_IMPACT_LIMIT
+    };
+    let omitted = keyed.len().saturating_sub(kept);
+    let touched_omitted = touched.saturating_sub(kept);
+    let cut = keyed.split_off(kept.min(keyed.len()));
+    let kept_files = keyed
+        .iter()
+        .map(|(_, impact)| &impact.path)
+        .collect::<HashSet<_>>();
+    let omitted_files = cut
+        .iter()
+        .map(|(_, impact)| &impact.path)
+        // The changed file is no dependent of itself: its own entries go last, and cutting them
+        // leaves no dependent file unnamed.
+        .filter(|path| !kept_files.contains(path) && **path != target_file.path)
+        .collect::<HashSet<_>>()
+        .len();
+    CappedImpacts {
+        kept: keyed.into_iter().map(|(_, impact)| impact).collect(),
+        omitted,
+        touched_omitted,
+        omitted_files,
+    }
+}
+
+/// One seed's inbound impact edges, with the nodes they come from, and what the per-type reads
+/// left unread.
 struct InboundImpactEdges {
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
-    full_windows: usize,
+    /// Reads that held more edges than their window.
+    windows_at_limit: usize,
+    /// Of those, reads whose first unread edge is proven, or that cannot tell.
+    windows_cutting_proven: usize,
+    /// Edges past the windows, when the store counted them.
+    edges_cut: Option<usize>,
+    /// Proven edges past the windows, when the store counted them.
+    proven_edges_cut: Option<usize>,
 }
 
 /// The edges into `node_id` that can carry impact, read by type, with the nodes they come from.
@@ -1263,49 +1980,71 @@ struct InboundImpactEdges {
 /// impact while an 8-symbol file did.) Each impacted type is read inbound and filtered in SQL, so
 /// the cap applies per type, in window order, to edges that can actually be impacts.
 ///
-/// A store without typed reads falls back to the untyped window.
+/// `counts`, when the store gave them, skips a type with no edge into the node and says how many
+/// edges, and how many proven ones, a full window left out: windows keep proven edges first, so a
+/// window of `n` proven edges past its limit cut `n` minus the limit of them. Each read asks for
+/// one edge past its window, so a window that is exactly full is not reported as cut, and the
+/// first edge left out says whether a proven one was.
+///
+/// A store without typed reads falls back to the untyped window, which cannot say what it cut:
+/// a full one is counted as possibly cutting a proven edge.
 fn inbound_impact_edges(
     graph: &dyn GraphStore,
     node_id: &NodeId,
+    counts: Option<&BTreeMap<GraphEdgeType, EdgeCount>>,
     files_by_path: &HashMap<String, FileId>,
+    policy: &RelationshipUsePolicy,
 ) -> Result<InboundImpactEdges> {
-    const IMPACT_EDGE_TYPES: [GraphEdgeType; 8] = [
-        GraphEdgeType::Calls,
-        GraphEdgeType::References,
-        GraphEdgeType::UsesType,
-        GraphEdgeType::Implements,
-        GraphEdgeType::Extends,
-        GraphEdgeType::Imports,
-        GraphEdgeType::DependsOn,
-        GraphEdgeType::DerivedFrom,
-    ];
     debug_assert!(IMPACT_EDGE_TYPES.iter().all(is_impacted_by_edge_type));
     let mut edges = Vec::new();
-    let mut full_windows = 0;
-    for edge_type in IMPACT_EDGE_TYPES {
-        // Derived edges join two file nodes, so a symbol seed never has one.
-        if edge_type == GraphEdgeType::DerivedFrom && !node_id.0.starts_with("file:") {
+    let mut windows_at_limit = 0;
+    let mut windows_cutting_proven = 0;
+    let mut edges_cut = counts.map(|_| 0usize);
+    let mut proven_edges_cut = counts.map(|_| 0usize);
+    for edge_type in impact_edge_types_for(node_id) {
+        let counted = counts.map(|counts| counts.get(&edge_type).copied().unwrap_or_default());
+        if counted.is_some_and(|count| count.total == 0) {
             continue;
         }
         match graph.edges_by_type_for_node(
             edge_type,
             &node_id.0,
             false,
-            RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT,
+            RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT + 1,
             0,
         ) {
-            Ok(batch) => {
-                full_windows += usize::from(batch.len() >= RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
+            Ok(mut batch) => {
+                if batch.len() > RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT {
+                    windows_at_limit += 1;
+                    let first_cut = &batch[RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT];
+                    windows_cutting_proven +=
+                        usize::from(policy.classify(first_cut) == RelationshipUseClass::Proven);
+                    batch.truncate(RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
+                }
+                if let (Some(cut), Some(counted)) = (edges_cut.as_mut(), counted) {
+                    *cut += counted.total.saturating_sub(batch.len());
+                }
+                proven_edges_cut = match (proven_edges_cut, counted.and_then(|count| count.proven))
+                {
+                    (Some(cut), Some(proven)) => {
+                        Some(cut + proven.saturating_sub(RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT))
+                    }
+                    _ => None,
+                };
                 edges.extend(batch);
             }
             Err(OkError::Unsupported(_)) => {
                 let (nodes, edges) =
                     graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT)?;
-                let full_windows = usize::from(edges.len() >= RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
+                let windows_at_limit =
+                    usize::from(edges.len() >= RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
                 return Ok(InboundImpactEdges {
                     nodes,
                     edges,
-                    full_windows,
+                    windows_at_limit,
+                    windows_cutting_proven: windows_at_limit,
+                    edges_cut: None,
+                    proven_edges_cut: None,
                 });
             }
             Err(err) => return Err(err),
@@ -1334,7 +2073,10 @@ fn inbound_impact_edges(
     Ok(InboundImpactEdges {
         nodes,
         edges,
-        full_windows,
+        windows_at_limit,
+        windows_cutting_proven,
+        edges_cut,
+        proven_edges_cut,
     })
 }
 
@@ -2427,6 +3169,7 @@ mod tests {
             target: target.into(),
             target_kind: GraphNodeType::File,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::SimilarTo,
             range: None,
             confidence: Confidence::High,
@@ -2873,6 +3616,7 @@ mod tests {
             target: historical_neighbor.path.display().to_string(),
             target_kind: GraphNodeType::File,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::SimilarTo,
             range: None,
             confidence: Confidence::High,
@@ -2963,6 +3707,7 @@ mod tests {
             target: "GET /v1/orders".into(),
             target_kind: GraphNodeType::Endpoint,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::ExposesEndpoint,
             range: Some(LineRange { start: 1, end: 1 }),
             confidence: Confidence::Medium,
@@ -3054,6 +3799,7 @@ mod tests {
             target: "complexity:crate::hot_path".into(),
             target_kind: GraphNodeType::Resource,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::BelongsTo,
             range: Some(LineRange { start: 1, end: 12 }),
             confidence: Confidence::Medium,
@@ -3862,7 +4608,7 @@ mod tests {
     /// A changed symbol with more inbound edges of one type than impact reads: the read stops at
     /// its limit, and the report says so rather than reading as every dependent.
     #[test]
-    fn a_full_inbound_read_is_a_relationship_impact_caveat() {
+    fn a_full_inbound_read_is_counted_in_the_relationship_reads() {
         use open_kioku_core::{identity, GraphEdge, GraphNode};
 
         let store = make_store();
@@ -3966,14 +4712,13 @@ mod tests {
             .with_graph_store(Some(&store))
             .for_file(Path::new("src/ledger.rs"))
             .unwrap();
-        assert!(
-            report
-                .relationship_impact_caveats
-                .iter()
-                .any(|caveat| caveat.contains("40-edge limit")),
-            "{:?}",
-            report.relationship_impact_caveats
-        );
+        let reads = report.relationship_impact_reads.clone().unwrap();
+        assert_eq!(reads.windows_at_limit, 1);
+        assert_eq!(reads.edges_unread, Some(5));
+        // Every edge is a guess, so the cut left possibilities out, and the capped possible
+        // list's count already reads as a lower bound.
+        assert_eq!(reads.windows_cutting_proven, 0);
+        assert!(report.possible_impact_omitted > 0);
     }
 
     /// The marker is the only record that a pre-4.0 index's edges were discarded on open. The
@@ -4702,5 +5447,909 @@ mod tests {
             impact_terms(&source.path, &source, &symbols, &[term_test(&test_fn)]),
             vec!["rounds_half_up".to_string(), "checks".to_string()]
         );
+    }
+
+    /// A changed file `src/ledger.rs`, its symbols, and graph edges into them from other files,
+    /// built up by a test and written into a fresh store.
+    struct LedgerGraph {
+        files: Vec<File>,
+        symbols: Vec<Symbol>,
+        nodes: Vec<open_kioku_core::GraphNode>,
+        edges: Vec<open_kioku_core::GraphEdge>,
+    }
+
+    impl LedgerGraph {
+        fn new() -> Self {
+            let mut graph = Self {
+                files: Vec::new(),
+                symbols: Vec::new(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            };
+            graph.file("src/ledger.rs");
+            graph
+        }
+
+        fn file(&mut self, path: &str) -> FileId {
+            let id = FileId::new(path);
+            if !self.files.iter().any(|file| file.id == id) {
+                self.files.push(File {
+                    id: id.clone(),
+                    repository_id: RepositoryId::new("repo"),
+                    path: PathBuf::from(path),
+                    language: Language::Rust,
+                    size_bytes: 100,
+                    content_hash: path.into(),
+                    is_generated: false,
+                    is_vendor: false,
+                });
+            }
+            id
+        }
+
+        /// A symbol of the changed file, on lines `10 * n + 1 ..= 10 * n + 5` for the `n`-th.
+        fn changed_symbol(
+            &mut self,
+            name: &str,
+            visibility: open_kioku_core::Visibility,
+        ) -> Symbol {
+            let start = 10 * self.symbols.len() as u32 + 1;
+            let symbol = Symbol {
+                id: SymbolId::new(format!("ledger::{name}")),
+                name: name.into(),
+                qualified_name: format!("ledger::{name}"),
+                kind: SymbolKind::Function,
+                file_id: FileId::new("src/ledger.rs"),
+                range: Some(LineRange {
+                    start,
+                    end: start + 4,
+                }),
+                language: Language::Rust,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::TreeSitter,
+                module_id: None,
+                parent_symbol_id: None,
+                scope_id: None,
+                signature: None,
+                visibility,
+                alias_of: None,
+            };
+            self.nodes.push(open_kioku_core::GraphNode {
+                id: identity::symbol_node_id(&symbol),
+                node_type: GraphNodeType::Function,
+                label: symbol.qualified_name.clone(),
+                file_id: Some(symbol.file_id.clone()),
+                symbol_id: Some(symbol.id.clone()),
+                ..Default::default()
+            });
+            self.symbols.push(symbol.clone());
+            symbol
+        }
+
+        /// `caller` (a symbol named after its path) references `target`, with an exact-reference proof
+        /// when `proven`, and with none, as the symbol registry draws one, otherwise.
+        fn call(&mut self, caller_path: &str, caller: &str, target: &Symbol, proven: bool) {
+            let file_id = self.file(caller_path);
+            let caller_id = open_kioku_core::NodeId::new(format!("symbol:{caller}"));
+            if !self.nodes.iter().any(|node| node.id == caller_id) {
+                self.nodes.push(open_kioku_core::GraphNode {
+                    id: caller_id.clone(),
+                    node_type: GraphNodeType::Function,
+                    label: caller.into(),
+                    file_id: Some(file_id),
+                    symbol_id: Some(SymbolId::new(caller)),
+                    ..Default::default()
+                });
+            }
+            let mut edge = open_kioku_core::GraphEdge {
+                id: open_kioku_core::EdgeId::new(format!("edge:{caller}->{}", target.name)),
+                from: caller_id,
+                to: identity::symbol_node_id(target),
+                edge_type: GraphEdgeType::References,
+                ..Default::default()
+            };
+            if proven {
+                edge.set_relationship_proofs(vec![open_kioku_core::RelationshipProof::new(
+                    open_kioku_core::RelationshipProofKind::ExactReference,
+                    "test-exact-reference",
+                    1,
+                )])
+                .unwrap();
+            }
+            self.edges.push(edge);
+        }
+
+        fn report(&self, focus: &ChangeFocus) -> ImpactReport {
+            let store = self.store();
+            ImpactEngine::new(&store)
+                .with_graph_store(Some(&store))
+                .for_change(Path::new("src/ledger.rs"), focus)
+                .unwrap()
+        }
+
+        fn answer(&self, root: &Path, request: ImpactRequest<'_>) -> Result<ImpactAnswer> {
+            let store = self.store();
+            ImpactEngine::new(&store)
+                .with_graph_store(Some(&store))
+                .answer(root, request)
+        }
+
+        fn store(&self) -> SqliteStore {
+            let store = make_store();
+            let manifest = IndexManifest {
+                analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+                repository: Repository {
+                    id: RepositoryId::new("repo"),
+                    name: "repo".into(),
+                    root: PathBuf::from("."),
+                    branch: None,
+                    commit: None,
+                    indexed_at: None,
+                },
+                file_count: self.files.len(),
+                symbol_count: self.symbols.len(),
+                chunk_count: 0,
+                indexed_at: Utc::now(),
+                schema_version: 1,
+                index_mode: Default::default(),
+                phase_reports: Vec::new(),
+                quality: IndexQuality::default(),
+                snapshot: None,
+            };
+            store
+                .replace_index(IndexData {
+                    manifest: &manifest,
+                    files: &self.files,
+                    symbols: &self.symbols,
+                    occurrences: &[],
+                    chunks: &[],
+                    imports: &[],
+                    tests: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                })
+                .unwrap();
+            store.replace_graph(&self.nodes, &self.edges).unwrap();
+            store
+        }
+    }
+
+    fn listed(impacts: &[RelationshipImpact]) -> Vec<String> {
+        impacts
+            .iter()
+            .map(|impact| impact.symbol.clone().unwrap_or_default())
+            .collect()
+    }
+
+    /// Impact read the dependents of the first 16 symbols in file order, so a change deep in a
+    /// large file lost its dependents, proven ones included, and the truncation caveat fired for
+    /// every file with more than 16 symbols, whether or not the unread ones had any dependent.
+    /// A symbol with no inbound edge needs no read, and leaving it unread skips nothing.
+    #[test]
+    fn a_symbol_late_in_a_large_file_has_its_dependents_read() {
+        let mut graph = LedgerGraph::new();
+        let mut last = None;
+        for index in 0..20 {
+            last = Some(graph.changed_symbol(
+                &format!("entry_{index:02}"),
+                open_kioku_core::Visibility::Private,
+            ));
+        }
+        graph.call("src/books.rs", "books::close", &last.unwrap(), true);
+
+        let report = graph.report(&ChangeFocus::default());
+        assert_eq!(listed(&report.proven_impact), ["books::close"]);
+        assert!(
+            report.relationship_impact_caveats.is_empty(),
+            "{:?}",
+            report.relationship_impact_caveats
+        );
+        assert_eq!(
+            report.relationship_impact_reads,
+            Some(RelationshipImpactReads {
+                symbols_total: 20,
+                symbols_touched: 0,
+                symbols_read: 1,
+                symbols_unread_with_dependents: Some(0),
+                edges_unread: Some(0),
+                proven_edges_unread: Some(0),
+                windows_at_limit: 0,
+                windows_cutting_proven: 0,
+            })
+        );
+    }
+
+    /// Past the read limit, symbols are taken by importance, not file order: public first, then
+    /// by inbound edges. What is left unread is counted, and the caveat says so.
+    #[test]
+    fn symbols_past_the_read_limit_are_taken_by_importance_and_counted() {
+        let mut graph = LedgerGraph::new();
+        let private = (0..RELATIONSHIP_IMPACT_SYMBOL_SEEDS)
+            .map(|index| {
+                graph.changed_symbol(
+                    &format!("entry_{index:03}"),
+                    open_kioku_core::Visibility::Private,
+                )
+            })
+            .collect::<Vec<_>>();
+        let busy = graph.changed_symbol("busy", open_kioku_core::Visibility::Private);
+        let public = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        for (index, symbol) in private.iter().enumerate() {
+            graph.call(
+                "src/audit.rs",
+                &format!("audit::trace_{index:03}"),
+                symbol,
+                false,
+            );
+        }
+        // Read only if taken by importance: both come last in the file.
+        graph.call("src/books.rs", "books::close", &public, true);
+        graph.call("src/books.rs", "books::open", &busy, true);
+        graph.call("src/books.rs", "books::reopen", &busy, true);
+
+        let report = graph.report(&ChangeFocus::default());
+        assert_eq!(
+            listed(&report.proven_impact),
+            ["books::close", "books::open", "books::reopen"]
+        );
+        let reads = report.relationship_impact_reads.unwrap();
+        assert_eq!(reads.symbols_total, RELATIONSHIP_IMPACT_SYMBOL_SEEDS + 2);
+        assert_eq!(reads.symbols_read, RELATIONSHIP_IMPACT_SYMBOL_SEEDS);
+        // Two of the private symbols with one inbound edge each.
+        assert_eq!(reads.symbols_unread_with_dependents, Some(2));
+        assert_eq!(reads.edges_unread, Some(2));
+        assert!(
+            report
+                .relationship_impact_caveats
+                .iter()
+                .any(|caveat| caveat.contains(
+                    "the 2 others have 2 inbound edge(s), 0 of them proven, that were not read"
+                )),
+            "{:?}",
+            report.relationship_impact_caveats
+        );
+    }
+
+    /// The symbols a change touches are read first, whatever their visibility or fan-in, so
+    /// their dependents are never the ones a bounded read leaves out.
+    #[test]
+    fn the_symbols_a_change_touches_are_read_first() {
+        let mut graph = LedgerGraph::new();
+        for index in 0..RELATIONSHIP_IMPACT_SYMBOL_SEEDS {
+            let symbol = graph.changed_symbol(
+                &format!("entry_{index:03}"),
+                open_kioku_core::Visibility::Public,
+            );
+            graph.call(
+                "src/audit.rs",
+                &format!("audit::trace_{index:03}"),
+                &symbol,
+                true,
+            );
+        }
+        let edited = graph.changed_symbol("reopen", open_kioku_core::Visibility::Private);
+        graph.call("src/books.rs", "books::close", &edited, true);
+        let lists_close = |report: &ImpactReport| {
+            listed(&report.proven_impact).contains(&"books::close".to_string())
+        };
+
+        // Unfocused, the private symbol ranks last and is left unread.
+        let unfocused = graph.report(&ChangeFocus::default());
+        assert!(!lists_close(&unfocused), "{:?}", unfocused.proven_impact);
+        assert_eq!(
+            unfocused
+                .relationship_impact_reads
+                .as_ref()
+                .and_then(|reads| reads.symbols_unread_with_dependents),
+            Some(1)
+        );
+
+        // A change to its lines reads it first.
+        let range = edited.range.clone().unwrap();
+        let by_line = graph.report(&ChangeFocus::lines(vec![LineRange {
+            start: range.start + 1,
+            end: range.start + 1,
+        }]));
+        assert!(lists_close(&by_line), "{:?}", by_line.proven_impact);
+        let reads = by_line.relationship_impact_reads.unwrap();
+        assert_eq!(reads.symbols_touched, 1);
+        assert_eq!(reads.symbols_unread_with_dependents, Some(1));
+
+        // So does naming it.
+        let by_name = graph.report(&ChangeFocus::symbols(vec![edited.id.clone()]));
+        assert!(lists_close(&by_name), "{:?}", by_name.proven_impact);
+    }
+
+    /// A changed line touches the innermost symbols around it: an edit inside one method of a
+    /// large class or `impl` block touches that method, not the class and every member with it.
+    #[test]
+    fn a_changed_line_touches_the_innermost_symbol_around_it() {
+        let mut graph = LedgerGraph::new();
+        let mut ledger = graph.changed_symbol("Ledger", open_kioku_core::Visibility::Public);
+        let mut settle = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        let mut reopen = graph.changed_symbol("reopen", open_kioku_core::Visibility::Public);
+        ledger.range = Some(LineRange { start: 1, end: 30 });
+        settle.range = Some(LineRange { start: 3, end: 10 });
+        reopen.range = Some(LineRange { start: 12, end: 20 });
+        let symbols = [&ledger, &settle, &reopen];
+        let touched =
+            |start, end| ChangeFocus::lines(vec![LineRange { start, end }]).touched(&symbols);
+
+        assert_eq!(touched(5, 6), [false, true, false]);
+        // A line of the class no member holds touches the class.
+        assert_eq!(touched(1, 1), [true, false, false]);
+        assert_eq!(touched(9, 11), [true, true, false]);
+        assert_eq!(touched(8, 14), [true, true, true]);
+        assert_eq!(touched(40, 41), [false, false, false]);
+        // A symbol named as changed is touched, whatever lines say.
+        assert_eq!(
+            ChangeFocus::symbols(vec![ledger.id.clone()]).touched(&symbols),
+            [true, false, false]
+        );
+    }
+
+    /// Past the read limit, a symbol with a proven dependent is read before symbols with only
+    /// name matches, however many: a run of guesses never pushes a proof out of the read.
+    #[test]
+    fn a_proven_dependent_is_read_before_any_number_of_guesses() {
+        let mut graph = LedgerGraph::new();
+        for index in 0..RELATIONSHIP_IMPACT_SYMBOL_SEEDS + 1 {
+            let symbol = graph.changed_symbol(
+                &format!("entry_{index:03}"),
+                open_kioku_core::Visibility::Public,
+            );
+            for caller in ["audit", "books"] {
+                graph.call(
+                    &format!("src/{caller}.rs"),
+                    &format!("{caller}::guess_{index:03}"),
+                    &symbol,
+                    false,
+                );
+            }
+        }
+        let proven = graph.changed_symbol("settle", open_kioku_core::Visibility::Private);
+        graph.call("src/ledger_test.rs", "ledger_test::settles", &proven, true);
+
+        let report = graph.report(&ChangeFocus::default());
+        assert_eq!(listed(&report.proven_impact), ["ledger_test::settles"]);
+        let reads = report.relationship_impact_reads.unwrap();
+        assert_eq!(reads.symbols_unread_with_dependents, Some(2));
+        assert_eq!(reads.edges_unread, Some(4));
+        // Every proven edge was read.
+        assert_eq!(reads.proven_edges_unread, Some(0));
+    }
+
+    /// A read cut after every proven edge left possibilities unread. Where `possible_impact` was
+    /// not cut it would read as complete, so the caveat says it is not.
+    #[test]
+    fn a_heuristic_cut_beside_an_uncut_possible_list_is_a_caveat() {
+        let mut graph = LedgerGraph::new();
+        let settle = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        let reopen = graph.changed_symbol("reopen", open_kioku_core::Visibility::Public);
+        // Every caller of `reopen` is proven, in a file of its own; each also names `settle`
+        // without proof, so the possibilities it would add repeat listed proven dependents.
+        for index in 0..RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT {
+            let path = format!("src/books_{index:02}.rs");
+            let caller = format!("books::close_{index:02}");
+            graph.call(&path, &caller, &reopen, true);
+            graph.call(&path, &caller, &settle, false);
+        }
+        graph.call("src/books_99.rs", "books::close_99", &settle, false);
+
+        let report = graph.report(&ChangeFocus::default());
+        let reads = report.relationship_impact_reads.clone().unwrap();
+        assert_eq!(
+            (
+                reads.windows_at_limit,
+                reads.windows_cutting_proven,
+                reads.edges_unread
+            ),
+            (1, 0, Some(1))
+        );
+        assert_eq!(report.possible_impact_omitted, 0);
+        assert!(
+            report
+                .relationship_impact_caveats
+                .iter()
+                .any(|caveat| caveat.contains("after every proven edge")),
+            "{:?}",
+            report.relationship_impact_caveats
+        );
+    }
+
+    /// A read that came back exactly full left nothing out. It used to be reported as cut.
+    #[test]
+    fn an_exactly_full_inbound_read_is_not_reported_as_cut() {
+        let mut graph = LedgerGraph::new();
+        let settle = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        for index in 0..RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT {
+            graph.call(
+                "src/audit.rs",
+                &format!("audit::trace_{index:02}"),
+                &settle,
+                false,
+            );
+        }
+
+        let report = graph.report(&ChangeFocus::default());
+        assert!(
+            report.relationship_impact_caveats.is_empty(),
+            "{:?}",
+            report.relationship_impact_caveats
+        );
+        let reads = report.relationship_impact_reads.unwrap();
+        assert_eq!(reads.windows_at_limit, 0);
+        assert_eq!(reads.edges_unread, Some(0));
+    }
+
+    /// Windows keep proven edges first, so the first edge a full read leaves out says whether any
+    /// proven dependent went unread; the count says how many edges did.
+    #[test]
+    fn a_cut_inbound_read_says_whether_it_left_proven_edges_unread() {
+        let mut graph = LedgerGraph::new();
+        let guessed = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        for index in 0..RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT + 5 {
+            graph.call(
+                "src/audit.rs",
+                &format!("audit::trace_{index:02}"),
+                &guessed,
+                false,
+            );
+        }
+        let heuristic_only = graph.report(&ChangeFocus::default());
+        let reads = heuristic_only.relationship_impact_reads.clone().unwrap();
+        assert_eq!(
+            (
+                reads.windows_at_limit,
+                reads.windows_cutting_proven,
+                reads.edges_unread
+            ),
+            (1, 0, Some(5))
+        );
+        // The possible list is already cut and counted, and the count reads as a lower bound;
+        // a sentence would only repeat the numbers.
+        assert!(heuristic_only.possible_impact_omitted > 0);
+        assert!(
+            heuristic_only.relationship_impact_caveats.is_empty(),
+            "{:?}",
+            heuristic_only.relationship_impact_caveats
+        );
+
+        let proven = graph.changed_symbol("reopen", open_kioku_core::Visibility::Public);
+        for index in 0..RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT + 1 {
+            graph.call(
+                "src/books.rs",
+                &format!("books::close_{index:02}"),
+                &proven,
+                true,
+            );
+        }
+        let report = graph.report(&ChangeFocus::default());
+        let reads = report.relationship_impact_reads.clone().unwrap();
+        assert_eq!(
+            (
+                reads.windows_at_limit,
+                reads.windows_cutting_proven,
+                reads.edges_unread
+            ),
+            (2, 1, Some(6))
+        );
+        assert!(
+            report
+                .relationship_impact_caveats
+                .iter()
+                .any(|caveat| caveat.contains("1 of them possibly before every proven edge was read (1 proven edge(s) in all were not read)")),
+            "{:?}",
+            report.relationship_impact_caveats
+        );
+    }
+
+    /// `proven_impact` is cut by the rule `possible_impact` is, and says how many it cut: each
+    /// other file's first entry before any file's second, the changed file's own last, except
+    /// that a dependent of a symbol the change touches is never cut. Cut by path alone, one busy
+    /// file filled the list, and a capped list read as every proven dependent.
+    #[test]
+    fn the_proven_impact_cap_keeps_touched_and_other_files_first_and_counts_the_rest() {
+        let mut graph = LedgerGraph::new();
+        let settle = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        let reopen = graph.changed_symbol("reopen", open_kioku_core::Visibility::Public);
+        let busy_callers = RELATIONSHIP_IMPACT_LIMIT + 5;
+        assert!(busy_callers < RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
+        for index in 0..busy_callers {
+            graph.call(
+                "src/b_audit.rs",
+                &format!("audit::trace_{index:02}"),
+                &settle,
+                true,
+            );
+        }
+        graph.call("src/ledger.rs", "ledger::entry", &settle, true);
+        graph.call("src/z_books.rs", "books::close", &settle, true);
+        // Sorts after every other caller in its file.
+        graph.call("src/b_audit.rs", "audit::zz_reopen", &reopen, true);
+
+        let report = graph.report(&ChangeFocus::default());
+        assert_eq!(report.proven_impact.len(), RELATIONSHIP_IMPACT_LIMIT);
+        assert_eq!(
+            report.proven_impact_omitted,
+            busy_callers + 3 - RELATIONSHIP_IMPACT_LIMIT
+        );
+        // The cut entries are in the busy file, which is named, and in the changed file, which
+        // is no dependent of itself.
+        assert_eq!(report.proven_impact_omitted_files, 0);
+        let kept = listed(&report.proven_impact);
+        assert!(kept.contains(&"books::close".to_string()), "{kept:?}");
+        assert!(!kept.contains(&"ledger::entry".to_string()), "{kept:?}");
+        assert!(!kept.contains(&"audit::zz_reopen".to_string()), "{kept:?}");
+        // Still listed by path, as proven entries always were.
+        let mut sorted = report.proven_impact.clone();
+        sorted.sort_by(|a, b| (&a.path, &a.symbol).cmp(&(&b.path, &b.symbol)));
+        assert_eq!(report.proven_impact, sorted);
+        // Every dependent of the edited symbol is kept, whatever the cap.
+        let focused = graph.report(&ChangeFocus::symbols(vec![reopen.id.clone()]));
+        assert!(
+            listed(&focused.proven_impact).contains(&"audit::zz_reopen".to_string()),
+            "{:?}",
+            focused.proven_impact
+        );
+        assert_eq!(focused.proven_impact_omitted, report.proven_impact_omitted);
+        // Even past the cap: an edit to `settle` lists all of its proven dependents, and the cap
+        // cuts only the dependent of the symbol it did not touch.
+        let busy_edit = graph.report(&ChangeFocus::symbols(vec![settle.id.clone()]));
+        assert_eq!(busy_edit.proven_impact.len(), busy_callers + 2);
+        assert_eq!(busy_edit.proven_impact_omitted, 1);
+        assert!(!listed(&busy_edit.proven_impact).contains(&"audit::zz_reopen".to_string()));
+        // A cut proven list is counted, not a caveat, as for possible_impact.
+        assert!(
+            report.relationship_impact_caveats.is_empty(),
+            "{:?}",
+            report.relationship_impact_caveats
+        );
+    }
+
+    /// A registry match the registry flags as speculative reaches impact as ambiguous.
+    #[test]
+    fn a_speculative_registry_edge_is_an_ambiguous_possibility() {
+        let mut graph = LedgerGraph::new();
+        let settle = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        graph.call("src/books.rs", "books::close", &settle, false);
+        graph.call("src/audit.rs", "audit::trace", &settle, false);
+        graph.edges[0]
+            .ambiguity
+            .push("name-only match via unique-project-name".into());
+
+        let report = graph.report(&ChangeFocus::default());
+        let ambiguous = report
+            .possible_impact
+            .iter()
+            .map(|impact| (impact.symbol.clone().unwrap_or_default(), impact.ambiguous))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            ambiguous,
+            BTreeMap::from([
+                ("audit::trace".to_string(), false),
+                ("books::close".to_string(), true),
+            ])
+        );
+    }
+
+    /// The graph of [`LedgerGraph`] where the read limit leaves one private symbol, `reopen`
+    /// (proven caller `books::close`), unread unless the change focuses on it.
+    fn ledger_with_an_unread_symbol() -> (LedgerGraph, Symbol) {
+        let mut graph = LedgerGraph::new();
+        for index in 0..RELATIONSHIP_IMPACT_SYMBOL_SEEDS {
+            let symbol = graph.changed_symbol(
+                &format!("entry_{index:03}"),
+                open_kioku_core::Visibility::Public,
+            );
+            graph.call(
+                "src/audit.rs",
+                &format!("audit::trace_{index:03}"),
+                &symbol,
+                true,
+            );
+        }
+        let edited = graph.changed_symbol("reopen", open_kioku_core::Visibility::Private);
+        graph.call("src/books.rs", "books::close", &edited, true);
+        (graph, edited)
+    }
+
+    fn diff_changing(path: &str, lines: Option<LineRange>) -> open_kioku_git::DiffFile {
+        open_kioku_git::DiffFile {
+            old_path: Some(PathBuf::from(path)),
+            new_path: Some(PathBuf::from(path)),
+            status: GitChangeKind::Modified,
+            rename_score: None,
+            hunks: vec![open_kioku_git::DiffHunk {
+                old_range: lines.clone(),
+                new_range: lines,
+            }],
+        }
+    }
+
+    fn one_report(answer: ImpactAnswer) -> ImpactReport {
+        match answer {
+            ImpactAnswer::File(report) => *report,
+            ImpactAnswer::Diff(diff) => panic!("expected one report, got {}", diff.reports.len()),
+        }
+    }
+
+    /// `ok impact` and MCP `impact_analysis` both answer through `ImpactEngine::answer`. A diff
+    /// focuses a file on the symbols its changed lines touch, but only while the index holds the
+    /// file as it is on disk: otherwise the lines could name other symbols, and the report says
+    /// why the focus is missing where it would have changed the answer.
+    #[test]
+    fn a_diff_focuses_a_file_on_its_changed_lines_while_the_index_holds_it() {
+        let (mut graph, edited) = ledger_with_an_unread_symbol();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/ledger.rs"), "pub fn reopen() {}\n").unwrap();
+        graph.files[0].content_hash = format!("{:x}", Sha256::digest(b"pub fn reopen() {}\n"));
+        let range = edited.range.clone().unwrap();
+        let line = LineRange::single(range.start + 1);
+        let diff = [diff_changing("src/ledger.rs", Some(line.clone()))];
+        let path = Path::new("src/ledger.rs");
+        let lists_close = |report: &ImpactReport| {
+            listed(&report.proven_impact).contains(&"books::close".to_string())
+        };
+
+        let focused = one_report(
+            graph
+                .answer(
+                    root.path(),
+                    ImpactRequest {
+                        path: Some(path),
+                        diff: Some(&diff),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        );
+        assert!(lists_close(&focused), "{:?}", focused.proven_impact);
+        assert_eq!(
+            focused
+                .relationship_impact_reads
+                .as_ref()
+                .map(|reads| reads.symbols_touched),
+            Some(1)
+        );
+
+        // The same diff over every file it changes gives the same report.
+        let ImpactAnswer::Diff(DiffImpact { reports, .. }) = graph
+            .answer(
+                root.path(),
+                ImpactRequest {
+                    diff: Some(&diff),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        else {
+            panic!("a diff alone answers per changed file");
+        };
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].proven_impact, focused.proven_impact);
+
+        // Edited since it was indexed: the lines are dropped, and the report says why.
+        std::fs::write(root.path().join("src/ledger.rs"), "pub fn reopen() { 1 }\n").unwrap();
+        let stale = one_report(
+            graph
+                .answer(
+                    root.path(),
+                    ImpactRequest {
+                        path: Some(path),
+                        diff: Some(&diff),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        );
+        assert!(!lists_close(&stale), "{:?}", stale.proven_impact);
+        assert!(
+            stale
+                .relationship_impact_caveats
+                .iter()
+                .any(|caveat| caveat.contains("differs from the indexed copy")),
+            "{:?}",
+            stale.relationship_impact_caveats
+        );
+
+        // A diff that changes no line of the file says so.
+        let elsewhere = [diff_changing("src/books.rs", Some(line))];
+        let untouched = one_report(
+            graph
+                .answer(
+                    root.path(),
+                    ImpactRequest {
+                        path: Some(path),
+                        diff: Some(&elsewhere),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        );
+        assert!(
+            untouched
+                .relationship_impact_caveats
+                .iter()
+                .any(|caveat| caveat.contains("changes no line of `src/ledger.rs`")),
+            "{:?}",
+            untouched.relationship_impact_caveats
+        );
+
+        // A symbol alone analyzes the file that defines it, focused on the symbol.
+        let by_symbol = one_report(
+            graph
+                .answer(
+                    root.path(),
+                    ImpactRequest {
+                        symbol: Some(&edited),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        );
+        assert_eq!(by_symbol.target, "src/ledger.rs");
+        assert!(lists_close(&by_symbol), "{:?}", by_symbol.proven_impact);
+
+        // Nothing to analyze is the caller's mistake.
+        assert!(matches!(
+            graph.answer(root.path(), ImpactRequest::default()),
+            Err(OkError::InvalidInput(_))
+        ));
+    }
+
+    /// An omitted count says how many entries the cap cut; the file count says how many whole
+    /// dependent files the list does not name, which the entry count cannot tell apart.
+    #[test]
+    fn omitted_entries_count_the_dependent_files_the_list_does_not_name() {
+        let mut graph = LedgerGraph::new();
+        let settle = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        // One busy file with more callers than the cap, then three files of one caller each,
+        // and the changed file's own callers, which go last.
+        for index in 0..RELATIONSHIP_IMPACT_LIMIT + 3 {
+            graph.call(
+                "src/b_audit.rs",
+                &format!("audit::trace_{index:02}"),
+                &settle,
+                false,
+            );
+        }
+        for name in ["c_books", "d_close", "e_open"] {
+            graph.call(
+                &format!("src/{name}.rs"),
+                &format!("{name}::run"),
+                &settle,
+                false,
+            );
+        }
+        let report = graph.report(&ChangeFocus::default());
+        assert_eq!(report.possible_impact.len(), RELATIONSHIP_IMPACT_LIMIT);
+        assert_eq!(report.possible_impact_omitted, 6);
+        // Every other file's first entry is kept, so every file is named.
+        assert_eq!(report.possible_impact_omitted_files, 0);
+
+        // More files than slots, every edge inside one 40-edge read: three entries in one file
+        // and one in each of 28 others.
+        let mut graph = LedgerGraph::new();
+        let settle = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        for index in 0..3 {
+            graph.call(
+                "src/b_audit.rs",
+                &format!("audit::trace_{index:02}"),
+                &settle,
+                false,
+            );
+        }
+        for index in 0..RELATIONSHIP_IMPACT_LIMIT + 3 {
+            graph.call(
+                &format!("src/z_{index:02}.rs"),
+                &format!("z_{index:02}::run"),
+                &settle,
+                false,
+            );
+        }
+        let report = graph.report(&ChangeFocus::default());
+        assert_eq!(report.possible_impact.len(), RELATIONSHIP_IMPACT_LIMIT);
+        assert_eq!(report.possible_impact_omitted, 6);
+        // 29 files with a first entry for 25 slots: four whole files are not named.
+        assert_eq!(report.possible_impact_omitted_files, 4);
+    }
+
+    /// 26 proven callers in other files and one in the changed file: the cap keeps 25 other
+    /// files, so one whole dependent file is unnamed. The changed file's own cut entry is not a
+    /// dependent file, and counting it read as two.
+    #[test]
+    fn the_changed_file_is_not_counted_as_an_omitted_dependent_file() {
+        let mut graph = LedgerGraph::new();
+        let settle = graph.changed_symbol("settle", open_kioku_core::Visibility::Public);
+        for index in 0..RELATIONSHIP_IMPACT_LIMIT + 1 {
+            graph.call(
+                &format!("src/caller_{index:02}.rs"),
+                &format!("caller_{index:02}::run"),
+                &settle,
+                true,
+            );
+        }
+        graph.call("src/ledger.rs", "ledger::entry", &settle, true);
+        let report = graph.report(&ChangeFocus::default());
+        assert_eq!(report.proven_impact_omitted, 2);
+        assert_eq!(report.proven_impact_omitted_files, 1);
+    }
+
+    /// A diff of an old revision can change hundreds of files, each a full impact read. A `since`
+    /// request reports at most `DIFF_REPORT_LIMIT` of them, those whose touched symbols have the
+    /// most proven dependents first, starts none after its deadline, and counts the rest.
+    #[test]
+    fn a_diff_reports_a_bounded_number_of_paths_ranked_by_proven_dependents() {
+        let (graph, edited) = ledger_with_an_unread_symbol();
+        let root = tempfile::tempdir().unwrap();
+        let range = edited.range.clone().unwrap();
+        let mut diff = (0..DIFF_REPORT_LIMIT + 4)
+            .map(|index| diff_changing(&format!("src/other_{index:02}.rs"), None))
+            .collect::<Vec<_>>();
+        // Last in diff order, but its edited line touches `reopen`, which has a proven caller.
+        diff.push(diff_changing(
+            "src/ledger.rs",
+            Some(LineRange::single(range.start)),
+        ));
+        // The index holds `src/ledger.rs` as it is on disk.
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/ledger.rs"), "ledger").unwrap();
+        let mut graph = graph;
+        graph.files[0].content_hash = format!("{:x}", Sha256::digest(b"ledger"));
+        let request = |deadline| ImpactRequest {
+            diff: Some(&diff),
+            deadline,
+            ..Default::default()
+        };
+
+        let ImpactAnswer::Diff(bounded) = graph.answer(root.path(), request(None)).unwrap() else {
+            panic!("a diff alone answers per changed path");
+        };
+        assert_eq!(bounded.reports.len(), DIFF_REPORT_LIMIT);
+        assert_eq!(bounded.reports_omitted, 5);
+        assert_eq!(bounded.reports[0].target, "src/ledger.rs");
+        assert!(
+            bounded.caveats[0].contains(&format!("at most {DIFF_REPORT_LIMIT} are reported")),
+            "{:?}",
+            bounded.caveats
+        );
+        let shape = bounded.to_json("HEAD~9", &diff);
+        assert_eq!(shape["impact_reports_omitted"], 5);
+        assert_eq!(shape["changed_files"].as_array().unwrap().len(), diff.len());
+
+        // A deadline already past: no path is ranked or started, and the answer says so.
+        let ImpactAnswer::Diff(late) = graph
+            .answer(root.path(), request(Some(std::time::Instant::now())))
+            .unwrap()
+        else {
+            panic!("a diff alone answers per changed path");
+        };
+        assert!(late.reports.is_empty());
+        assert_eq!(late.reports_omitted, diff.len());
+        assert!(
+            late.caveats[0].contains("not started within the time"),
+            "{:?}",
+            late.caveats
+        );
+        assert!(
+            late.caveats[1].contains(&format!("{} changed path(s) were not ranked", diff.len())),
+            "{:?}",
+            late.caveats
+        );
+    }
+
+    /// `since` compares against git history; outside a git work tree there is none, and an empty
+    /// diff would read as a repository where nothing changed.
+    #[test]
+    fn a_revision_outside_a_git_repository_is_invalid_input() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            ImpactEngine::changes_since(root.path(), "HEAD"),
+            Err(OkError::InvalidInput(message)) if message.contains("not a git repository")
+        ));
     }
 }

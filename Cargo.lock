@@ -2758,6 +2758,7 @@ dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-evidence",
+ "open-kioku-git",
  "open-kioku-graph",
  "open-kioku-ingest",
  "open-kioku-search-regex",
@@ -2765,6 +2766,7 @@ dependencies = [
  "open-kioku-storage-sqlite",
  "rusqlite",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

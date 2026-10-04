@@ -4667,9 +4667,12 @@ impl GraphStore for SqliteStore {
         // module it is named after, and a generated file does not depend on its banner's origin.
         // It is the first file-to-file edge in the graph that is not a real dependency, so it is
         // excluded here rather than becoming a traversable hop in a path a caller reads as one.
+        // Similarity (`SIMILAR_TO`, `SEMANTICALLY_RELATED`) joins two symbols whose code looks
+        // alike, and neither uses the other, so it is no hop either.
         let mut edge_stmt = conn
             .prepare(&format!(
-                "{} WHERE e.from_sid = ?1 AND e.edge_type != 'DerivedFrom'",
+                "{} WHERE e.from_sid = ?1 \
+                 AND e.edge_type NOT IN ('DerivedFrom', 'SimilarTo', 'SemanticallyRelated')",
                 compact::EDGE_SELECT
             ))
             .map_err(storage_err)?;
@@ -4867,6 +4870,89 @@ impl GraphStore for SqliteStore {
         Ok(edges)
     }
 
+    fn edge_counts_for_nodes(
+        &self,
+        edge_types: &[GraphEdgeType],
+        node_ids: &[&str],
+        outgoing: bool,
+    ) -> Result<open_kioku_storage::EdgeCountsByNode> {
+        require_authoritative_relationship_semantics(self)?;
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let mut counts = open_kioku_storage::EdgeCountsByNode::new();
+        let types_by_name = edge_types
+            .iter()
+            .map(|edge_type| (format!("{edge_type:?}"), edge_type.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if types_by_name.is_empty() {
+            return Ok(counts);
+        }
+        // One snapshot for the lookups and every chunk, so the counts describe one generation of
+        // the graph.
+        let _snapshot = read_snapshot(&conn)?;
+        let mut nodes_by_sid = HashMap::with_capacity(node_ids.len());
+        for node_id in node_ids {
+            // A node id that was never stored has no edges.
+            if let Some(sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, node_id)? {
+                nodes_by_sid.insert(sid, *node_id);
+            }
+        }
+        let mut node_sids = nodes_by_sid.keys().copied().collect::<Vec<_>>();
+        node_sids.sort_unstable();
+        let endpoint_column = if outgoing { "from_sid" } else { "to_sid" };
+        let type_placeholders = vec!["?"; types_by_name.len()].join(", ");
+        // A persisted rank under one tier's span is a proven relationship's; ranks another
+        // binary wrote may not be, and then proven edges are not counted.
+        let ranked = window_ranks_current(&conn)?;
+        let proven_ranks = i64::from(open_kioku_core::GRAPH_EDGE_WINDOW_RANKS_PER_TIER);
+        // Chunks stay under SQLite's historical limit of 999 bound parameters per statement. The
+        // `(to_sid, edge_type, window_rank, ..)` and `(from_sid, edge_type, window_rank, ..)`
+        // indexes answer the counts without reading a row.
+        for chunk in node_sids.chunks(900 - types_by_name.len()) {
+            let node_placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "SELECT e.{endpoint_column}, e.edge_type, COUNT(*), \
+                 SUM(CASE WHEN e.window_rank >= 0 AND e.window_rank < {proven_ranks} THEN 1 ELSE 0 END) \
+                 FROM graph_edges e \
+                 WHERE e.edge_type IN ({type_placeholders}) AND e.{endpoint_column} IN ({node_placeholders}) \
+                 GROUP BY e.{endpoint_column}, e.edge_type"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
+            let params = types_by_name
+                .keys()
+                .map(|name| rusqlite::types::Value::Text(name.clone()))
+                .chain(
+                    chunk
+                        .iter()
+                        .map(|sid| rusqlite::types::Value::Integer(*sid)),
+                );
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(params))
+                .map_err(storage_err)?;
+            while let Some(row) = rows.next().map_err(storage_err)? {
+                let sid: i64 = row.get(0).map_err(storage_err)?;
+                let edge_type: String = row.get(1).map_err(storage_err)?;
+                let count: i64 = row.get(2).map_err(storage_err)?;
+                let proven: i64 = row.get(3).map_err(storage_err)?;
+                let (Some(node_id), Some(edge_type)) =
+                    (nodes_by_sid.get(&sid), types_by_name.get(&edge_type))
+                else {
+                    continue;
+                };
+                counts.entry((*node_id).to_string()).or_default().insert(
+                    edge_type.clone(),
+                    open_kioku_storage::EdgeCount {
+                        total: usize::try_from(count).unwrap_or(0),
+                        proven: ranked.then(|| usize::try_from(proven).unwrap_or(0)),
+                    },
+                );
+            }
+        }
+        Ok(counts)
+    }
+
     fn graph_counts(&self) -> Result<GraphCounts> {
         let conn = self
             .connection
@@ -4946,21 +5032,26 @@ impl GraphStore for SqliteStore {
     }
 }
 
-/// A node's outgoing edges in [`GraphStore::neighbor_window`]: `DERIVED_FROM` is left out.
-const NEIGHBOR_OUTGOING: &str = "e.from_sid = ?1 AND e.edge_type != 'DerivedFrom'";
+/// A node's outgoing edges in [`GraphStore::neighbor_window`]. `DERIVED_FROM` is left out, and so
+/// is similarity (`SIMILAR_TO`, `SEMANTICALLY_RELATED`): neither is a dependency, and an untyped
+/// neighbourhood is read as one (`dependency_path` without `to`, the context pack's graph
+/// stream). A consumer that wants them reads them by type.
+const NEIGHBOR_OUTGOING: &str =
+    "e.from_sid = ?1 AND e.edge_type NOT IN ('DerivedFrom', 'SimilarTo', 'SemanticallyRelated')";
 /// A node's incoming edges in [`GraphStore::neighbor_window`]. A self-loop is outgoing only.
 const NEIGHBOR_INCOMING: &str =
-    "e.to_sid = ?1 AND e.from_sid != ?1 AND e.edge_type != 'DerivedFrom'";
+    "e.to_sid = ?1 AND e.from_sid != ?1 AND e.edge_type NOT IN ('DerivedFrom', 'SimilarTo', 'SemanticallyRelated')";
 /// Every incoming edge a [`GraphStore::neighbor_window`] counts, self-loops included, so the
 /// count reads only the `(to_sid, edge_type, ...)` index.
-const NEIGHBOR_INCOMING_WITH_LOOPS: &str = "e.to_sid = ?1 AND e.edge_type != 'DerivedFrom'";
+const NEIGHBOR_INCOMING_WITH_LOOPS: &str =
+    "e.to_sid = ?1 AND e.edge_type NOT IN ('DerivedFrom', 'SimilarTo', 'SemanticallyRelated')";
 /// A node's self-loops, found through its outgoing edges. The unary `+` keeps SQLite from
 /// reading them through the incoming index instead.
 const NEIGHBOR_LOOPS_BY_OUTGOING: &str =
-    "e.from_sid = ?1 AND +e.to_sid = ?1 AND e.edge_type != 'DerivedFrom'";
+    "e.from_sid = ?1 AND +e.to_sid = ?1 AND e.edge_type NOT IN ('DerivedFrom', 'SimilarTo', 'SemanticallyRelated')";
 /// A node's self-loops, found through its incoming edges.
 const NEIGHBOR_LOOPS_BY_INCOMING: &str =
-    "+e.from_sid = ?1 AND e.to_sid = ?1 AND e.edge_type != 'DerivedFrom'";
+    "+e.from_sid = ?1 AND e.to_sid = ?1 AND e.edge_type NOT IN ('DerivedFrom', 'SimilarTo', 'SemanticallyRelated')";
 /// The edges of one pair, for [`GraphStore::graph_edges_between`].
 const EDGES_BETWEEN: &str = "e.from_sid = ?1 AND e.to_sid = ?2";
 
@@ -8885,6 +8976,7 @@ mod tests {
             target: "GET /api/orders".into(),
             target_kind: GraphNodeType::Endpoint,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::ExposesEndpoint,
             range: Some(LineRange::single(12)),
             confidence: Confidence::High,
@@ -8899,6 +8991,7 @@ mod tests {
             target: "orders".into(),
             target_kind: GraphNodeType::DatabaseTable,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::ReadsTable,
             range: None,
             confidence: Confidence::Medium,
@@ -8913,6 +9006,7 @@ mod tests {
             target: "tests/handler_test.rs".into(),
             target_kind: GraphNodeType::Test,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::ChangedBy,
             range: None,
             confidence: Confidence::High,
@@ -8927,6 +9021,7 @@ mod tests {
             target: "billing::InvoicePublisher".into(),
             target_kind: GraphNodeType::Interface,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::Implements,
             range: Some(LineRange::single(24)),
             confidence: Confidence::High,
@@ -9014,6 +9109,7 @@ mod tests {
             target: "tests/lib_test.rs".into(),
             target_kind: GraphNodeType::Test,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::ChangedBy,
             range: None,
             confidence: Confidence::High,
@@ -10036,6 +10132,145 @@ mod tests {
         assert_eq!(typed.len(), 1);
     }
 
+    /// Edges between file nodes `a.rs`, `b.rs` and `c.rs`, written into a fresh store. An edge
+    /// whose id starts `p-` carries an exact-reference proof.
+    fn store_with_file_edges(edges: &[(&str, &str, &str, GraphEdgeType)]) -> SqliteStore {
+        let store = make_store();
+        let manifest = make_manifest();
+        let files = vec![make_file("f1", "a.rs")];
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &files,
+                symbols: &[],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        let node = |path: &str| GraphNode {
+            id: NodeId::new(format!("file:{path}")),
+            node_type: GraphNodeType::File,
+            label: path.into(),
+            ..Default::default()
+        };
+        let edges = edges
+            .iter()
+            .map(|(id, from, to, edge_type)| {
+                let mut edge = GraphEdge {
+                    id: EdgeId::new(*id),
+                    from: NodeId::new(format!("file:{from}")),
+                    to: NodeId::new(format!("file:{to}")),
+                    edge_type: edge_type.clone(),
+                    ..Default::default()
+                };
+                if id.starts_with("p-") {
+                    edge.set_relationship_proofs(vec![open_kioku_core::RelationshipProof::new(
+                        open_kioku_core::RelationshipProofKind::ExactReference,
+                        "test-exact-reference",
+                        1,
+                    )])
+                    .unwrap();
+                }
+                edge
+            })
+            .collect::<Vec<_>>();
+        store
+            .replace_graph(&[node("a.rs"), node("b.rs"), node("c.rs")], &edges)
+            .unwrap();
+        store
+    }
+
+    /// Impact orders and bounds its reads by these counts, so they must be exact per node and
+    /// type, leave out types not asked for, and leave out a node with no such edge.
+    #[test]
+    fn edge_counts_for_nodes_count_each_node_and_type_asked_for() {
+        let store = store_with_file_edges(&[
+            ("e1", "b.rs", "a.rs", GraphEdgeType::Calls),
+            ("e2", "c.rs", "a.rs", GraphEdgeType::Calls),
+            ("e3", "c.rs", "a.rs", GraphEdgeType::Imports),
+            ("e4", "a.rs", "b.rs", GraphEdgeType::Calls),
+            ("p-e5", "c.rs", "b.rs", GraphEdgeType::References),
+            ("e6", "a.rs", "b.rs", GraphEdgeType::References),
+        ]);
+        let count = |total, proven| open_kioku_storage::EdgeCount {
+            total,
+            proven: Some(proven),
+        };
+        let counts = store
+            .edge_counts_for_nodes(
+                &[GraphEdgeType::Calls, GraphEdgeType::Imports],
+                &["file:a.rs", "file:b.rs", "file:c.rs", "file:missing.rs"],
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            counts["file:a.rs"],
+            BTreeMap::from([
+                (GraphEdgeType::Calls, count(2, 0)),
+                (GraphEdgeType::Imports, count(1, 0))
+            ])
+        );
+        // `References` was not asked for.
+        assert_eq!(
+            counts["file:b.rs"],
+            BTreeMap::from([(GraphEdgeType::Calls, count(1, 0))])
+        );
+        assert!(!counts.contains_key("file:c.rs"), "{counts:?}");
+        assert!(!counts.contains_key("file:missing.rs"), "{counts:?}");
+        // The proven edge is counted apart from the guess beside it.
+        let references = store
+            .edge_counts_for_nodes(&[GraphEdgeType::References], &["file:b.rs"], false)
+            .unwrap();
+        assert_eq!(
+            references["file:b.rs"],
+            BTreeMap::from([(GraphEdgeType::References, count(2, 1))])
+        );
+        let outgoing = store
+            .edge_counts_for_nodes(&[GraphEdgeType::Calls], &["file:c.rs"], true)
+            .unwrap();
+        assert_eq!(
+            outgoing["file:c.rs"],
+            BTreeMap::from([(GraphEdgeType::Calls, count(1, 0))])
+        );
+    }
+
+    /// Similarity joins two nodes whose code looks alike, and neither uses the other: a path a
+    /// caller reads as a dependency route must not cross it.
+    #[test]
+    fn shortest_paths_do_not_cross_similarity_edges() {
+        let store = store_with_file_edges(&[
+            ("e-similar", "a.rs", "b.rs", GraphEdgeType::SimilarTo),
+            (
+                "e-semantic",
+                "a.rs",
+                "c.rs",
+                GraphEdgeType::SemanticallyRelated,
+            ),
+        ]);
+        assert!(store
+            .shortest_path("file:a.rs", "file:b.rs", 4)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .shortest_path("file:a.rs", "file:c.rs", 4)
+            .unwrap()
+            .is_empty());
+        // Nor is it a neighbour in an untyped read; a reader that wants it asks by type.
+        let window = store.neighbor_window("file:a.rs", 10).unwrap();
+        assert!(window.edges.is_empty(), "{:?}", window.edges);
+        assert_eq!(window.total_edges, 0);
+        let typed = store
+            .edges_by_type_for_node(GraphEdgeType::SimilarTo, "file:a.rs", true, 10, 0)
+            .unwrap();
+        assert_eq!(typed.len(), 1);
+    }
+
     #[test]
     fn capped_reference_reads_keep_the_same_occurrences_whatever_the_write_order() {
         let store = make_store();
@@ -10588,8 +10823,13 @@ mod tests {
             edges
                 .iter()
                 .filter(|edge| {
-                    edge.edge_type != GraphEdgeType::DerivedFrom
-                        && (edge.from.0 == hub || edge.to.0 == hub)
+                    // Untyped reads leave out what is not a dependency.
+                    !matches!(
+                        edge.edge_type,
+                        GraphEdgeType::DerivedFrom
+                            | GraphEdgeType::SimilarTo
+                            | GraphEdgeType::SemanticallyRelated
+                    ) && (edge.from.0 == hub || edge.to.0 == hub)
                 })
                 .collect(),
         );

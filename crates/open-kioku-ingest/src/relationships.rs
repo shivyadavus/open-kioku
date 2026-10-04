@@ -359,6 +359,7 @@ fn complexity_fact(file_id: FileId, symbol: &Symbol, metrics: &ComplexityMetrics
         target: format!("complexity:{}", symbol.qualified_name),
         target_kind: GraphNodeType::Resource,
         target_symbol_id: None,
+        ambiguity: Vec::new(),
         edge_type: GraphEdgeType::BelongsTo,
         range: symbol.range.clone(),
         confidence: Confidence::Medium,
@@ -410,7 +411,12 @@ fn similarity_facts(
                 symbol_id: Some(left.symbol.id.clone()),
                 target: right.symbol.qualified_name.clone(),
                 target_kind: graph_node_type(right.symbol),
-                target_symbol_id: None,
+                // Both ends are indexed symbols, so the edge ends at the other symbol's node, as a
+                // symbol-registry fact's does (#475), not at a node made from its label that no
+                // symbol-keyed read reaches. Similarity is not a dependency: impact does not read
+                // it and `shortest_path` does not cross it.
+                target_symbol_id: Some(right.symbol.id.clone()),
+                ambiguity: Vec::new(),
                 edge_type: GraphEdgeType::SimilarTo,
                 range: left.symbol.range.clone(),
                 confidence: Confidence::Low,
@@ -455,7 +461,9 @@ fn semantic_facts(
                 symbol_id: Some(left.symbol.id.clone()),
                 target: right.symbol.qualified_name.clone(),
                 target_kind: graph_node_type(right.symbol),
-                target_symbol_id: None,
+                // As for structural similarity above.
+                target_symbol_id: Some(right.symbol.id.clone()),
+                ambiguity: Vec::new(),
                 edge_type: GraphEdgeType::SemanticallyRelated,
                 range: left.symbol.range.clone(),
                 confidence: Confidence::Low,
@@ -829,6 +837,7 @@ mod tests {
                 target: "crate::b".into(),
                 target_kind: GraphNodeType::Function,
                 target_symbol_id: None,
+                ambiguity: Vec::new(),
                 edge_type: GraphEdgeType::Calls,
                 range: None,
                 confidence: Confidence::Medium,
@@ -843,6 +852,7 @@ mod tests {
                 target: "crate::a".into(),
                 target_kind: GraphNodeType::Function,
                 target_symbol_id: None,
+                ambiguity: Vec::new(),
                 edge_type: GraphEdgeType::Calls,
                 range: None,
                 confidence: Confidence::Medium,
@@ -892,6 +902,7 @@ mod tests {
             target: "crate::b".into(),
             target_kind: GraphNodeType::Function,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::Calls,
             range: None,
             confidence: Confidence::Medium,
@@ -938,9 +949,18 @@ mod tests {
             IndexMode::Full,
             &semantic_config(false),
         );
-        assert!(full
+        // Both ends are indexed symbols, so the fact names the other one, and its edge ends at
+        // that symbol's node rather than at a node made from the label.
+        let similar = full
             .iter()
-            .any(|fact| fact.edge_type == GraphEdgeType::SimilarTo));
+            .find(|fact| fact.edge_type == GraphEdgeType::SimilarTo)
+            .unwrap();
+        let other = if similar.symbol_id == Some(SymbolId::new("a")) {
+            "b"
+        } else {
+            "a"
+        };
+        assert_eq!(similar.target_symbol_id, Some(SymbolId::new(other)));
 
         let fast = collect_relationship_analysis_facts(
             &files,

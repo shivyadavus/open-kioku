@@ -498,6 +498,7 @@ fn coverage_facts(context: &ValidationContext<'_>, record: &CoverageRecord) -> V
             target: normalize_path(&test_file.path.to_string_lossy()),
             target_kind: GraphNodeType::Test,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::TestCovers,
             range: Some(LineRange::single(first_line)),
             confidence: if symbol.is_some() {
@@ -543,6 +544,7 @@ fn junit_facts(record: &JunitRecord) -> Vec<AnalysisFact> {
         target: record.test_name.clone(),
         target_kind: GraphNodeType::Test,
         target_symbol_id: None,
+        ambiguity: Vec::new(),
         edge_type: GraphEdgeType::Validates,
         range: record.line.map(LineRange::single),
         confidence: if record.status == "passed" {

@@ -19,7 +19,7 @@ use open_kioku_core::{
     StatusDetail,
 };
 use open_kioku_errors::OkError;
-use open_kioku_impact::ImpactEngine;
+use open_kioku_impact::{ImpactAnswer, ImpactEngine, ImpactRequest};
 use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::{
     ChangeVerifier, ContractVerificationReport, ContractVerifier, PatchPlanner, VerifyChangeInput,
@@ -48,6 +48,9 @@ const MAX_MCP_LIMIT: usize = 100;
 const MAX_MCP_FETCH: usize = 500;
 const MAX_TOOL_TEXT_BYTES: usize = 120_000;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Time `impact_analysis` with `since` alone spends starting reports of a diff's paths, well inside
+/// [`TOOL_TIMEOUT`], which wraps synchronous work it cannot interrupt.
+const IMPACT_DIFF_BUDGET: Duration = Duration::from_secs(10);
 const STORE_IDLE_TTL: Duration = Duration::from_secs(300);
 const CONTINUATION_TTL_SECS: u64 = 900;
 
@@ -897,12 +900,30 @@ async fn dispatch(
         }
         "impact_analysis" => {
             require_authoritative_relationships(store)?;
-            let path = required_str(&params, "path")?;
+            // The request `ok impact` answers, through the same `ImpactEngine::answer`: a file
+            // (or a symbol's file) focused on the symbol and on the lines `since` changed in it,
+            // or every file `since` changed. `since` only reads git: it reaches git after
+            // `--end-of-options`, as `plan_change`'s does.
+            let path = optional_str(&params, "path")?;
+            let symbol = optional_str(&params, "symbol")?;
+            let since = optional_str(&params, "since")?;
+            if path.is_none() && symbol.is_none() && since.is_none() {
+                return Err(OkError::InvalidInput(
+                    "impact_analysis needs `path`, `symbol` or `since`".into(),
+                )
+                .into());
+            }
+            let changed = since
+                .map(|since| ImpactEngine::changes_since(repo, since))
+                .transpose()?;
+            let definition = symbol
+                .map(|symbol| SymbolEngine::new(store).definition(symbol))
+                .transpose()?;
             let search_dir = default_index_dir(repo);
             let search_index = TantivySearchIndex::exists(&search_dir)
                 .then(|| TantivySearchIndex::open_or_create(&search_dir))
                 .transpose()?;
-            let mut report = ImpactEngine::new(store)
+            let answer = ImpactEngine::new(store)
                 .with_search_index(
                     search_index
                         .as_ref()
@@ -910,9 +931,30 @@ async fn dispatch(
                 )
                 .with_history_store(Some(store))
                 .with_graph_store(Some(store))
-                .for_file(Path::new(path))?;
-            report.architecture_policy = configured_architecture_policy_report(repo, store)?;
-            Ok(json!(report))
+                .answer(
+                    repo,
+                    ImpactRequest {
+                        path: path.map(Path::new),
+                        symbol: definition.as_ref(),
+                        diff: changed.as_deref(),
+                        // The tool timeout cannot interrupt synchronous work, so the paths of a
+                        // diff stop being started well inside it, and the rest are counted.
+                        deadline: Some(Instant::now() + IMPACT_DIFF_BUDGET),
+                    },
+                )?;
+            let architecture_policy = configured_architecture_policy_report(repo, store)?;
+            match answer {
+                ImpactAnswer::File(mut report) => {
+                    report.architecture_policy = architecture_policy;
+                    Ok(json!(report))
+                }
+                ImpactAnswer::Diff(mut answer) => {
+                    for report in &mut answer.reports {
+                        report.architecture_policy = architecture_policy.clone();
+                    }
+                    Ok(answer.to_json(since.unwrap_or_default(), &changed.unwrap_or_default()))
+                }
+            }
         }
         "find_tests_for_change" => {
             // `path` is optional in the schema, but tests are selected for one
@@ -1746,7 +1788,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("get_definition", "Retrieve the indexed definition record for a symbol (function, class, struct, trait, module) by name: its file, line range, kind, qualified name, confidence, and provenance. With include_body=true it also joins the symbol back to the indexed chunk text covering it, returning the definition body with the line range it spans plus up to ten indexed lines above and below it verbatim; anything that could not be recovered from the index is stated in `caveats` rather than returned as a shorter body.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."},"include_body":{"type":"boolean","description":"Set true to return the definition body and the indexed lines around it alongside the record. Defaults to false, which returns the record only."}}})),
         ("get_references", "Retrieve evidence about how one resolved symbol is used, in sections that keep their provenance apart: `references` returns indexed occurrences, each with its own provenance and confidence; `callers` and `callees` return persisted CALLS graph edges in the named direction; `implementations` returns verified implementation sites from persisted IMPLEMENTS facts with parser provenance. Every section names its own evidence_source and caveats, because an empty occurrence list and an empty IMPLEMENTS list are different claims.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol to gather usage evidence for. For implementations this is the interface, trait, abstract class, or protocol name."},"kind":{"type":"string","enum":["references","callers","callees","implementations","all"],"description":"Which evidence sections to return. Defaults to 'references'. 'all' returns every section in one response, each still labelled with its own evidence_source. An unknown kind is an invalid-params error (-32602)."},"limit":{"type":"integer","description":"Maximum number of entries per section. Defaults to 20, capped at 100."}}})),
         ("dependency_path", "Trace the shortest dependency or reference path between two files or symbols from the persisted graph, or, when `to` is omitted, list the direct graph neighbours of `from` instead: proven imports, dependents and calls first, then the symbols it contains or defines, then corroborated and heuristic relationships.", json!({"type":"object","required":["from"],"properties":{"from":{"type":"string","description":"The starting node path or symbol name."},"to":{"type":"string","description":"The target node path or symbol name. Omit to return the direct neighbours of `from` rather than a route between two nodes."},"limit":{"type":"integer","description":"Maximum number of neighbour edges to return when `to` is omitted. Edges are kept in evidence order: proven relationships, then parsed CONTAINS/DEFINES edges, then corroborated, then heuristic relationships; within each, stronger confidence first, then edge id. On a file with many symbols its DEFINES edges can fill the window ahead of unproven imports. `edges_omitted` counts what the limit cut. Defaults to 20, capped at 100."}}})),
-        ("impact_analysis", "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact).", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze for downstream impact (e.g., 'src/auth/handler.rs')."}}})),
+        ("impact_analysis", "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact). Give `symbol` or `since` to say which symbols the change touches, so their dependents are read first and the proven ones are never cut by the list cap.", json!({"type":"object","properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze for downstream impact (e.g., 'src/auth/handler.rs'). Give this, `symbol`, or `since`."},"symbol":{"type":"string","description":"Optional symbol the change touches. Its dependents are read and listed first and its proven dependents are never cut by the list cap. Without `path`, the file that defines it is analyzed."},"since":{"type":"string","description":"Optional git revision or range compared with git diff --unified=0. With `path` or `symbol`, the symbols on the lines it changed in that file are read first; alone, the changed files are analyzed and the result is {since, changed_files, impact_reports}, as ok impact --since returns: at most 25 reports, files whose touched symbols have the most proven dependents first, none started after 10 s, with impact_reports_omitted and caveats saying what was left out. Outside a git repository it is an invalid-params error."}}})),
         ("explain_flow", "Return graph-backed endpoint-to-call flow evidence, plus a heuristic architecture summary. Each flow contains an indexed endpoint and a bounded directed CALLS path.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum endpoint flows to return. Defaults to 20, capped at 100."}}})),
         ("build_context_pack", "Assemble a ranked context pack of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task. Returns Markdown by default, sized for an agent's context window. With compress=true it stores the original snippets under the .ok data directory and returns compact handles instead, which retrieve_context expands on demand.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for (e.g., 'refactor the authentication middleware to support OAuth2')."},"compress":{"type":"boolean","description":"Set true to store snippets locally and return short handles instead of inline source, reducing token count. Defaults to false. This is the only path that writes."},"limit":{"type":"integer","description":"Maximum number of context items to gather. Defaults to 20. Raise it when the pack missed a file you expected; it controls coverage, not rendering cost."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Output format. Defaults to 'markdown', which carries the same evidence as 'json' at a small fraction of the context cost and is what an agent should read. Ask for 'json' only when the result will be parsed rather than read - for example a plan saved for verify_change. 'toon' is token-optimized notation. With compress=true the default is 'json' and 'markdown' is not produced."}}})),
         ("retrieve_context", "Retrieve the original uncompressed source code snippet associated with a compressed context handle.", json!({"type":"object","required":["handle"],"properties":{"handle":{"type":"string","description":"The handle ID returned by build_context_pack with compress=true."}}})),
@@ -3473,6 +3515,67 @@ mod tests {
         assert!(!store_idle_expired(Instant::now()));
     }
 
+    /// `impact_analysis` takes the focus `ok impact` takes: a symbol, a revision to diff
+    /// against, or both with a path. Asked for nothing, or for a revision outside a git work tree,
+    /// it says so as invalid params, as `ok impact` does.
+    #[tokio::test]
+    async fn impact_analysis_takes_the_focus_ok_impact_takes() {
+        let fixture = McpSnapshotFixture::new();
+        let call = |params: Value| {
+            json!({"jsonrpc": "2.0", "id": "impact", "method": "impact_analysis", "params": params})
+                .to_string()
+        };
+        let answer = |line: String| {
+            let fixture = &fixture;
+            async move {
+                handle_line(
+                    &fixture.repo,
+                    ServedIndex::Ready(&fixture.store),
+                    &fixture.config,
+                    &line,
+                )
+                .await
+                .expect("impact_analysis should answer")
+            }
+        };
+
+        let nothing = answer(call(json!({}))).await;
+        assert_eq!(nothing.error.unwrap()["code"], -32602);
+
+        let focused = answer(call(json!({"symbol": "publish_invoice_event"})))
+            .await
+            .result
+            .expect("a symbol is enough");
+        assert_eq!(focused["target"], "src/billing.rs");
+        assert_eq!(focused["relationship_impact_reads"]["symbols_touched"], 1);
+
+        let by_path = answer(call(json!({"path": "src/billing.rs"})))
+            .await
+            .result
+            .unwrap();
+        assert_eq!(by_path["relationship_impact_reads"]["symbols_touched"], 0);
+
+        // The fixture is no git work tree: a revision there is the caller's mistake, not an
+        // empty diff that would read as nothing changed, alone or beside a path.
+        for params in [
+            json!({"since": "HEAD"}),
+            json!({"path": "src/billing.rs", "since": "HEAD"}),
+        ] {
+            let error = answer(call(params))
+                .await
+                .error
+                .expect("not a git repository");
+            assert_eq!(error["code"], -32602, "{error}");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not a git repository"),
+                "{error}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn golden_mcp_protocol_snapshots_are_stable() {
         let fixture = McpSnapshotFixture::new();
@@ -3600,6 +3703,12 @@ mod tests {
             (
                 "find_recent_failures_disabled.json",
                 r#"{"jsonrpc":"2.0","id":"recent-failures","method":"find_recent_failures","params":{"limit":1}}"#,
+            ),
+            // A focused call, as `ok impact --symbol` makes one: the symbol's file is analyzed
+            // and the symbol is read first.
+            (
+                "impact_analysis_symbol.json",
+                r#"{"jsonrpc":"2.0","id":"impact-symbol","method":"impact_analysis","params":{"symbol":"publish_invoice_event"}}"#,
             ),
         ] {
             let response = handle_line(
@@ -4976,6 +5085,7 @@ mod tests {
                 target: "InvoicePublisher".into(),
                 target_kind: GraphNodeType::Interface,
                 target_symbol_id: None,
+                ambiguity: Vec::new(),
                 edge_type: GraphEdgeType::Implements,
                 range: Some(LineRange::single(15)),
                 confidence: Confidence::High,
