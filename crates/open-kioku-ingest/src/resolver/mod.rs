@@ -334,6 +334,7 @@ fn analysis_fact_for_resolution(
         target,
         target_kind,
         target_symbol_id: None,
+        ambiguity: Vec::new(),
         edge_type,
         range: resolution.import.range.clone(),
         confidence: resolution.confidence,

@@ -877,66 +877,68 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 .with_graph_store(Some(&store));
             let architecture_policy = configured_architecture_policy_report(&repo, &store)?;
 
-            if let Some(since) = args.since.as_deref() {
-                let changed = changed_ranges_since(&repo, since)?;
-                let mut reports = Vec::new();
-                let mut files = Vec::new();
-                for change in &changed {
-                    files.extend(change.new_path.iter());
-                    // A rename removes its previous path, which the index still describes.
-                    if change.status == GitChangeKind::Renamed {
-                        files.extend(
-                            change
-                                .old_path
-                                .iter()
-                                .filter(|old| change.new_path.as_ref() != Some(*old)),
-                        );
-                    }
-                }
-                for file in files {
-                    let mut report = engine.for_file(file)?;
-                    report.architecture_policy = architecture_policy.clone();
-                    reports.push(report);
-                }
-                if cli.json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "since": since,
-                            "changed_files": changed,
-                            "impact_reports": reports,
-                        }))?
-                    );
-                } else {
-                    println!("Changed files since {since}:");
-                    for change in &changed {
-                        println!("  {}", render_changed_range(change));
-                    }
-                    for report in &reports {
-                        println!("\nImpact target: {}", report.target);
-                        println!(
-                            "Risk: {} ({:.2})",
-                            report.risk_report.level, report.risk_report.score
-                        );
-                    }
-                }
-                return Ok(());
+            // The request MCP `impact_analysis` answers too, through the same
+            // `ImpactEngine::answer`: a file (or the file of a symbol), focused on the symbol and
+            // on the lines `--since` changed in it, or every file `--since` changed.
+            let changed = args
+                .since
+                .as_deref()
+                .map(|since| ImpactEngine::changes_since(&repo, since))
+                .transpose()?;
+            let definition = args
+                .symbol
+                .as_deref()
+                .map(|symbol| SymbolEngine::new(&store).definition(symbol))
+                .transpose()?;
+            let file = args
+                .file
+                .as_deref()
+                .map(|path| normalize_to_repo_relative(&repo, path));
+            if file.is_none() && definition.is_none() && changed.is_none() {
+                anyhow::bail!("provide --file, --symbol or --since");
             }
-
-            let mut report = if let Some(path) = args.file {
-                let normalized = normalize_to_repo_relative(&repo, &path);
-                engine.for_file(&normalized)?
-            } else if let Some(symbol) = args.symbol {
-                let definition = SymbolEngine::new(&store).definition(&symbol)?;
-                let files = store.list_files(usize::MAX, 0)?;
-                let file = files.iter().find(|file| file.id == definition.file_id);
-                let path_to_use = file
-                    .map(|file| file.path.as_path())
-                    .unwrap_or(Path::new(&symbol));
-                let normalized = normalize_to_repo_relative(&repo, path_to_use);
-                engine.for_file(&normalized)?
-            } else {
-                anyhow::bail!("provide --file or --symbol");
+            let answer = engine.answer(
+                &repo,
+                ImpactRequest {
+                    path: file.as_deref(),
+                    symbol: definition.as_ref(),
+                    diff: changed.as_deref(),
+                    // A terminal waits; MCP's deadline is its transport's, not a cap on the answer.
+                    deadline: None,
+                },
+            )?;
+            let mut report = match answer {
+                ImpactAnswer::File(report) => *report,
+                ImpactAnswer::Diff(mut answer) => {
+                    let since = args.since.as_deref().unwrap_or_default();
+                    let changed = changed.unwrap_or_default();
+                    for report in &mut answer.reports {
+                        report.architecture_policy = architecture_policy.clone();
+                    }
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&answer.to_json(since, &changed))?
+                        );
+                    } else {
+                        println!("Changed files since {since}:");
+                        for change in &changed {
+                            println!("  {}", render_changed_range(change));
+                        }
+                        for caveat in &answer.caveats {
+                            println!("caveat: {caveat}");
+                        }
+                        for report in &answer.reports {
+                            println!("\nImpact target: {}", report.target);
+                            println!(
+                                "Risk: {} ({:.2})",
+                                report.risk_report.level, report.risk_report.score
+                            );
+                            print_relationship_impact_summary(report);
+                        }
+                    }
+                    return Ok(());
+                }
             };
             report.architecture_policy = architecture_policy;
             output(cli.json, &report, || {
@@ -976,6 +978,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         println!("  ... {unshown} more not shown");
                     }
                 }
+                print_relationship_impact_summary(&report);
             })?;
         }
         Command::Path { from, to } => {
@@ -1904,5 +1907,63 @@ fn print_test_selection(selection: &open_kioku_tests::TestSelection) {
     }
     for caveat in &selection.caveats {
         println!("caveat: {caveat}");
+    }
+}
+
+/// The relationship evidence of an impact report, for text output: how many proven and possible
+/// dependents it lists, how many entries and whole files each cap left out, and what the bounded
+/// reads behind them did not read.
+fn print_relationship_impact_summary(report: &open_kioku_core::ImpactReport) {
+    let omitted = |entries: usize, files: usize| {
+        if entries == 0 {
+            String::new()
+        } else {
+            format!(", {entries} more omitted by the list cap ({files} file(s) not listed at all)")
+        }
+    };
+    println!(
+        "\nRelationship impact: {} proven{}; {} possible{}",
+        report.proven_impact.len(),
+        omitted(
+            report.proven_impact_omitted,
+            report.proven_impact_omitted_files
+        ),
+        report.possible_impact.len(),
+        omitted(
+            report.possible_impact_omitted,
+            report.possible_impact_omitted_files
+        ),
+    );
+    for impact in report.proven_impact.iter().take(5) {
+        println!(
+            "  proven: {}{} ({:?})",
+            impact.path.display(),
+            impact
+                .symbol
+                .as_deref()
+                .map(|symbol| format!(" `{symbol}`"))
+                .unwrap_or_default(),
+            impact.edge_type
+        );
+    }
+    if report.proven_impact.len() > 5 {
+        println!("  ... {} more proven listed", report.proven_impact.len() - 5);
+    }
+    if let Some(reads) = &report.relationship_impact_reads {
+        // Only symbols with an inbound edge are read, so the read count is of those.
+        println!(
+            "  symbols: {} in the file, {} touched by the change, {} with dependents read{}",
+            reads.symbols_total,
+            reads.symbols_touched,
+            reads.symbols_read,
+            match reads.symbols_unread_with_dependents {
+                Some(0) => String::new(),
+                Some(unread) => format!(", {unread} with dependents not read"),
+                None => ", others not counted".to_string(),
+            }
+        );
+    }
+    for caveat in &report.relationship_impact_caveats {
+        println!("  caveat: {caveat}");
     }
 }

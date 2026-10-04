@@ -31,7 +31,7 @@ use open_kioku_core::{
     Symbol, SymbolId, SymbolProvenance, TestTarget, INDEX_COVERAGE_WARN_PERCENT,
 };
 use open_kioku_graph::InMemoryGraph;
-use open_kioku_impact::ImpactEngine;
+use open_kioku_impact::{ImpactAnswer, ImpactEngine, ImpactRequest};
 use open_kioku_ingest::{IndexProgress, Indexer};
 use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::{

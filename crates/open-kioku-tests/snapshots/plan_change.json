@@ -290,6 +290,16 @@
         }
       ],
       "indirect_impacts": [],
+      "relationship_impact_reads": {
+        "edges_unread": 0,
+        "proven_edges_unread": 0,
+        "symbols_read": 0,
+        "symbols_total": 2,
+        "symbols_touched": 0,
+        "symbols_unread_with_dependents": 0,
+        "windows_at_limit": 0,
+        "windows_cutting_proven": 0
+      },
       "risk_report": {
         "level": "low",
         "reasons": [

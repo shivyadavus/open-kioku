@@ -1021,6 +1021,7 @@ fn analysis_fact(
         target,
         target_kind,
         target_symbol_id: None,
+        ambiguity: Vec::new(),
         edge_type,
         range: Some(LineRange::single(line_number)),
         confidence: Confidence::Medium,

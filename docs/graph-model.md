@@ -348,15 +348,50 @@ read:
   `proven_impact`, with a reason that names the pass that inferred it
   (`no structural proof; inferred by open-kioku-symbol-registry/<strategy>`). A dependent
   `proven_impact` already lists (same path and symbol, through any changed symbol and edge type)
-  is not repeated there. Connecting these edges made possibilities far more numerous than
+  is not repeated there. A match the registry made by name alone (unique project name, suffix
+  import reachability, fuzzy) records why it may name the wrong target in
+  `AnalysisFact::ambiguity`, which the graph copies onto the edge (`ri3-graph-emission-v5`), so
+  the entry is `ambiguous`. A use several symbols of one name could answer writes no edge at all.
+  Connecting these edges made possibilities far more numerous than
   proofs, so the 25-entry cap on `possible_impact` keeps dependent files apart: each other
   file's first entry, then each one's second, and so on, in path order, with the changed
-  file's own symbols last, and `possible_impact_omitted` counts what it cut (a lower bound: impact
-  reads at most 16 of the changed file's symbols and 40 inbound edges of each type per symbol
-  before the cap, and `relationship_impact_caveats` says when a read stopped at either limit;
-  `ok plan` names the count, or the truncation, in its confidence summary). Cut by path alone,
-  one busy file or the changed file's own symbols filled the list and dropped whole dependent
-  files.
+  file's own symbols last, and `possible_impact_omitted` counts what it cut. `proven_impact` is
+  cut by the same rule and counted in `proven_impact_omitted`, and with a change focus (`ok impact
+  --since`, `ok impact --symbol`) the dependents of the symbols the change touches come first in
+  both, and the cap never cuts a proven one: no ordering of a capped list keeps every proven
+  dependent of a touched symbol that a list cut by path kept before, and those are the
+  dependents a change most certainly breaks. Cut by path alone, one busy file or the changed
+  file's own symbols filled the list and dropped whole dependent files.
+
+  The counts cover what impact read. It counts each changed symbol's inbound impact edges, and
+  how many of them are proven, in one query (`GraphStore::edge_counts_for_nodes`; the SQLite store
+  reads the proven ones off the persisted window rank), and reads only the symbols that have any,
+  at most 256: the symbols the change touches first, then those with a proven dependent, so no
+  run of name matches pushes a proof out of the read, then public ones, then those with the most
+  inbound edges. It reads at most 40 inbound edges of each type into each, proven ones first. It
+  used to read the first 16 symbols in file order, so a change deep in a large file lost its
+  dependents, proven ones included, and the truncation caveat fired for nearly every large file
+  whether or not anything was skipped. `relationship_impact_reads` reports the reads as numbers
+  (symbols read and in all, unread symbols with dependents, edges and proven edges left unread,
+  windows that held more edges than they read and how many of those may have cut a proven edge).
+  `relationship_impact_caveats` says so in prose only when something that matters was left
+  unread: symbols with dependents, proven edges, or possibilities beside a `possible_impact` the
+  cap did not cut (where it did, its omitted count already reads as a lower bound). Each read asks
+  for one edge past its window, so a window exactly full is not reported as cut; windows keep
+  proven edges first, so the first edge left out tells whether a proven dependent went unread.
+  `ok plan` names the counts, or the truncation, in its confidence summary, the proven side
+  apart from the possible one.
+
+  A change focus comes from `ok impact --symbol` (the named symbol) or `ok impact --since` (the
+  lines each file's diff adds or modifies). A line touches the innermost symbols around it, so
+  an edit inside one method of a large class touches the method, not the class and all its
+  members. `--since` matches lines only for a file the index holds as it is on disk; otherwise
+  the line numbers could name other symbols, so the focus is dropped. A hunk that only removes
+  lines has no line on the new side and touches no symbol. A caveat says either where it could
+  change the answer: a symbol with dependents went unread, or the proven list was cut. The proven
+  dependents of touched symbols are listed up to 200, a bound for a diff that rewrites a large
+  file. MCP `impact_analysis` takes the same focus (`symbol`, `since`) and answers through the same
+  `ImpactEngine::answer`.
 - The context pack's graph stream gives a neighbour `corroborating` retrieval authority only
   when a proven or corroborated edge, or parsed containment, joins it to the anchor; a
   neighbour reached only by heuristic edges is `heuristic`. The stream ranks and cuts its
@@ -378,8 +413,17 @@ Where a proven or corroborated edge already joins the same two nodes with the sa
 registry edge is not written: folded in, its line would join the stronger edge's call sites,
 which that edge's proofs do not establish. Beside a heuristic edge of the same pair it is folded
 in as any other write, and the result stays heuristic. A registry edge from a symbol to itself is
-not written. A fact that names no symbol of this index still ends at a node made from its label,
-as do similarity facts (`SIMILAR_TO`), which name no symbol.
+not written. A fact that names no symbol of this index still ends at a node made from its label.
+
+Similarity facts (`SIMILAR_TO`, and `SEMANTICALLY_RELATED` when a local semantic provider is
+enabled) join two indexed symbols, and since `ri3-graph-emission-v5` they end at the similar
+symbol's node, as registry facts do, and a typed read of a symbol (`edges_by_type_for_node`, a
+`SIMILAR_TO` pattern in `ok graph query`) finds them. Until then they ended at a node made from
+the symbol's label, which nothing that reads by symbol reached. Similarity is not a dependency,
+so it is treated as `DERIVED_FROM` is: impact does not read it, `shortest_path` (`ok path`, MCP
+`dependency_path` with a `to`) does not cross it, and untyped neighbourhood reads
+(`neighbors`, `neighbor_window`: `dependency_path` without a `to`, the
+context pack's graph stream, untyped `ok graph query` hops) leave it out.
 
 Symbol-registry name matches are read from code only: a word inside a comment or a string literal
 is not a use of anything. The registry finds them with a lexical pass per language, not a parse.

@@ -589,24 +589,8 @@ impl<'a> PlanEngine<'a> {
         let mut confidence_summary = confidence_summary(&confidence_breakdown);
         // RI3.7: the plan states its relationship claims with their authority split rather
         // than presenting heuristic dependents as certainty.
-        if !impact.proven_impact.is_empty() || !impact.possible_impact.is_empty() {
-            // The possible list is capped; a count of the shown entries alone read as all of them.
-            let possible_unlisted = if impact.possible_impact_omitted > 0 {
-                format!(
-                    " (at least {} more not listed)",
-                    impact.possible_impact_omitted
-                )
-            } else if !impact.relationship_impact_caveats.is_empty() {
-                // Reads stopped at their limits: what they left unread was never counted.
-                " (possibly more: the relationship reads were truncated)".to_string()
-            } else {
-                String::new()
-            };
-            confidence_summary = format!(
-                "{confidence_summary} Relationship evidence: {} structurally proven dependent(s), {} possible (heuristic) dependent(s){possible_unlisted} retained without certainty.",
-                impact.proven_impact.len(),
-                impact.possible_impact.len()
-            );
+        if let Some(relationships) = relationship_evidence_summary(&impact) {
+            confidence_summary = format!("{confidence_summary} {relationships}");
         }
         let evidence_by_section = evidence_by_section(
             &primary_context,
@@ -662,9 +646,13 @@ impl<'a> PlanEngine<'a> {
                 direct_impacts_omitted: 0,
                 indirect_impacts_omitted: 0,
                 proven_impact: Vec::new(),
+                proven_impact_omitted: 0,
+                proven_impact_omitted_files: 0,
                 possible_impact: Vec::new(),
                 possible_impact_omitted: 0,
+                possible_impact_omitted_files: 0,
                 relationship_impact_caveats: Vec::new(),
+                relationship_impact_reads: None,
                 target: impact_target
                     .map(|target| target.path.display().to_string())
                     .unwrap_or_else(|| task.into()),
@@ -692,9 +680,13 @@ impl<'a> PlanEngine<'a> {
                 direct_impacts_omitted: 0,
                 indirect_impacts_omitted: 0,
                 proven_impact: Vec::new(),
+                proven_impact_omitted: 0,
+                proven_impact_omitted_files: 0,
                 possible_impact: Vec::new(),
                 possible_impact_omitted: 0,
+                possible_impact_omitted_files: 0,
                 relationship_impact_caveats: Vec::new(),
+                relationship_impact_reads: None,
                 target: task.into(),
                 direct_impacts: Vec::new(),
                 indirect_impacts: Vec::new(),
@@ -1346,6 +1338,54 @@ fn push_unique_negative_evidence(items: &mut Vec<NegativeEvidence>, item: Negati
     if !items.iter().any(|existing| existing.scope == item.scope) {
         items.push(item);
     }
+}
+
+/// RI3.7: the plan states its relationship claims with their authority split rather than
+/// presenting heuristic dependents as certainty. Both lists are capped, and a count of the shown
+/// entries alone read as all of them; proven dependents the reads left out are named on the
+/// proven count, not folded into the hedge on the possible one.
+fn relationship_evidence_summary(impact: &ImpactReport) -> Option<String> {
+    if impact.proven_impact.is_empty() && impact.possible_impact.is_empty() {
+        return None;
+    }
+    let proven_unread = impact
+        .relationship_impact_reads
+        .as_ref()
+        .is_some_and(|reads| match reads.proven_edges_unread {
+            Some(unread) => unread > 0,
+            None => {
+                reads.windows_cutting_proven > 0
+                    || reads
+                        .symbols_unread_with_dependents
+                        .map_or(reads.symbols_read < reads.symbols_total, |n| n > 0)
+            }
+        });
+    let proven_unlisted = if impact.proven_impact_omitted > 0 {
+        format!(
+            " (at least {} more not listed)",
+            impact.proven_impact_omitted
+        )
+    } else if proven_unread {
+        " (possibly more: some proven edges were not read)".to_string()
+    } else {
+        String::new()
+    };
+    let possible_unlisted = if impact.possible_impact_omitted > 0 {
+        format!(
+            " (at least {} more not listed)",
+            impact.possible_impact_omitted
+        )
+    } else if !impact.relationship_impact_caveats.is_empty() {
+        // Reads stopped at their limits: what they left unread was never counted.
+        " (possibly more: the relationship reads were truncated)".to_string()
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "Relationship evidence: {} structurally proven dependent(s){proven_unlisted}, {} possible (heuristic) dependent(s){possible_unlisted} retained without certainty.",
+        impact.proven_impact.len(),
+        impact.possible_impact.len()
+    ))
 }
 
 fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
@@ -3409,9 +3449,13 @@ mod tests {
             direct_impacts_omitted: 0,
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
             possible_impact: Vec::new(),
             possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
             relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
             target: "tests/auth_flow.rs".into(),
             direct_impacts: Vec::new(),
             indirect_impacts: Vec::new(),
@@ -3634,6 +3678,7 @@ mod tests {
             target: "crate::payment".into(),
             target_kind: GraphNodeType::Module,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::Imports,
             range: None,
             confidence: Confidence::Low,
@@ -3664,6 +3709,7 @@ mod tests {
             target: "POST /login".into(),
             target_kind: GraphNodeType::Endpoint,
             target_symbol_id: None,
+            ambiguity: Vec::new(),
             edge_type: GraphEdgeType::ExposesEndpoint,
             range: Some(LineRange { start: 3, end: 5 }),
             confidence: Confidence::High,
@@ -3757,9 +3803,13 @@ mod tests {
             direct_impacts_omitted: 0,
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
             possible_impact: Vec::new(),
             possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
             relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
             target: "src/auth.rs".into(),
             direct_impacts,
             indirect_impacts: indirect
@@ -3831,9 +3881,13 @@ mod tests {
             direct_impacts_omitted: 0,
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
             possible_impact: Vec::new(),
             possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
             relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
             target: "src/auth.rs".into(),
             direct_impacts: vec![impact_result],
             indirect_impacts: Vec::new(),
@@ -3882,9 +3936,13 @@ mod tests {
             direct_impacts_omitted: 0,
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
             possible_impact: Vec::new(),
             possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
             relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
             target: "src/primary_00.rs".into(),
             direct_impacts: vec![wide, narrow.clone()],
             indirect_impacts: Vec::new(),
@@ -4005,9 +4063,13 @@ mod tests {
             direct_impacts_omitted: 0,
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
             possible_impact: Vec::new(),
             possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
             relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
             target: "src/limits.rs".into(),
             direct_impacts: vec![exact],
             indirect_impacts: Vec::new(),
@@ -4092,9 +4154,13 @@ mod tests {
             direct_impacts_omitted: 0,
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
             possible_impact: Vec::new(),
             possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
             relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
             target: "src/auth.rs".into(),
             direct_impacts: starts
                 .iter()
@@ -4663,9 +4729,13 @@ mod tests {
             direct_impacts_omitted: 0,
             indirect_impacts_omitted: 0,
             proven_impact: Vec::new(),
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
             possible_impact: Vec::new(),
             possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
             relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
             target: "src/status_setup_doctor.rs".into(),
             direct_impacts: vec![impact_hit],
             indirect_impacts: Vec::new(),
@@ -4679,6 +4749,82 @@ mod tests {
             score_breakdown: Vec::new(),
         };
         (context, impact)
+    }
+
+    /// Proven dependents the relationship reads left out are named on the proven count. They
+    /// used to be folded into a hedge on the possible count, and only when that was not cut.
+    #[test]
+    fn relationship_summary_names_unread_proven_dependents_on_the_proven_count() {
+        use open_kioku_core::{RelationshipAuthority, RelationshipImpact, RelationshipImpactReads};
+
+        let entry = |authority| RelationshipImpact {
+            path: PathBuf::from("src/session.rs"),
+            symbol: None,
+            source: "auth::issue_token".into(),
+            edge_type: GraphEdgeType::Calls,
+            authority,
+            proof_kinds: Vec::new(),
+            ambiguous: false,
+            reason: "fixture".into(),
+        };
+        let mut impact = ImpactReport {
+            direct_impacts_omitted: 0,
+            indirect_impacts_omitted: 0,
+            proven_impact: vec![entry(RelationshipAuthority::Authoritative)],
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
+            possible_impact: vec![entry(RelationshipAuthority::Heuristic)],
+            possible_impact_omitted: 30,
+            possible_impact_omitted_files: 0,
+            relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: Some(RelationshipImpactReads {
+                symbols_total: 3,
+                symbols_read: 3,
+                symbols_unread_with_dependents: Some(0),
+                edges_unread: Some(0),
+                proven_edges_unread: Some(0),
+                ..Default::default()
+            }),
+            target: "src/auth.rs".into(),
+            direct_impacts: Vec::new(),
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        assert_eq!(
+            relationship_evidence_summary(&impact).unwrap(),
+            "Relationship evidence: 1 structurally proven dependent(s), 1 possible (heuristic) dependent(s) (at least 30 more not listed) retained without certainty."
+        );
+
+        let reads = impact.relationship_impact_reads.as_mut().unwrap();
+        reads.windows_at_limit = 1;
+        reads.windows_cutting_proven = 1;
+        reads.edges_unread = Some(4);
+        reads.proven_edges_unread = Some(2);
+        assert!(relationship_evidence_summary(&impact).unwrap().contains(
+            "1 structurally proven dependent(s) (possibly more: some proven edges were not read),"
+        ));
+
+        // A store that cannot count leaves an unread symbol possibly proven.
+        let reads = impact.relationship_impact_reads.as_mut().unwrap();
+        reads.windows_cutting_proven = 0;
+        reads.proven_edges_unread = None;
+        reads.symbols_read = 2;
+        reads.symbols_unread_with_dependents = None;
+        assert!(relationship_evidence_summary(&impact)
+            .unwrap()
+            .contains("(possibly more: some proven edges were not read)"));
+
+        impact.proven_impact_omitted = 4;
+        assert!(relationship_evidence_summary(&impact)
+            .unwrap()
+            .contains("1 structurally proven dependent(s) (at least 4 more not listed),"));
     }
 
     #[test]
@@ -4702,9 +4848,13 @@ mod tests {
                 proven("src/auth.rs", GraphEdgeType::UsesType),
                 proven("src/session.rs", GraphEdgeType::Calls),
             ],
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
             possible_impact: Vec::new(),
             possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
             relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
             target: "src/auth.rs".into(),
             direct_impacts: Vec::new(),
             indirect_impacts: Vec::new(),
@@ -4751,9 +4901,13 @@ mod tests {
                 ambiguous: false,
                 reason: "fixture".into(),
             }],
+            proven_impact_omitted: 0,
+            proven_impact_omitted_files: 0,
             possible_impact: Vec::new(),
             possible_impact_omitted: 0,
+            possible_impact_omitted_files: 0,
             relationship_impact_caveats: Vec::new(),
+            relationship_impact_reads: None,
             target: "src/lib.rs".into(),
             direct_impacts: Vec::new(),
             indirect_impacts: Vec::new(),

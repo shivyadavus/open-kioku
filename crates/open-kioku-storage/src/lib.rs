@@ -701,6 +701,19 @@ impl NeighborWindow {
     }
 }
 
+/// How many edges of one type join one node, counted without reading them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EdgeCount {
+    pub total: usize,
+    /// Of those, the relationships proven by their typed proofs (effective authority
+    /// `authoritative`). `None` when the store cannot tell without decoding them.
+    pub proven: Option<usize>,
+}
+
+/// Edge counts by node id, then edge type; see [`GraphStore::edge_counts_for_nodes`].
+pub type EdgeCountsByNode =
+    std::collections::HashMap<String, std::collections::BTreeMap<GraphEdgeType, EdgeCount>>;
+
 pub trait GraphStore: Send + Sync {
     fn replace_graph(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()>;
     fn node_by_id(&self, _id: &str) -> Result<Option<GraphNode>> {
@@ -816,6 +829,22 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<Vec<GraphEdge>> {
         Err(OkError::Unsupported(
             "edges_by_type_for_nodes is not implemented by this graph store".into(),
+        ))
+    }
+
+    /// How many edges of each of `edge_types` end at (or, with `outgoing`, start from) each of
+    /// `node_ids`, counted without reading them: keyed by node id, then edge type, with a node or
+    /// type that has no such edge left out. A caller that orders or bounds its reads by these
+    /// counts can say exactly what it left unread. A store that returns `Unsupported` leaves a
+    /// caller without counts, which must then treat every unread node as possibly connected.
+    fn edge_counts_for_nodes(
+        &self,
+        _edge_types: &[GraphEdgeType],
+        _node_ids: &[&str],
+        _outgoing: bool,
+    ) -> Result<EdgeCountsByNode> {
+        Err(OkError::Unsupported(
+            "edge_counts_for_nodes is not implemented by this graph store".into(),
         ))
     }
 

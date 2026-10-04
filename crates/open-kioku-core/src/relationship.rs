@@ -645,6 +645,11 @@ pub fn graph_edge_window_tier(edge: &GraphEdge) -> u8 {
 /// before each write and withdraw it on a mismatch, or record the version per row.
 pub const GRAPH_EDGE_WINDOW_RANK_VERSION: u32 = 1;
 
+/// Window ranks one tier spans, one per evidence confidence. The ranks below it belong to
+/// [`GRAPH_EDGE_WINDOW_TIER_MAX`], proven relationships, so a store that persists
+/// [`graph_edge_window_rank`] can count proven edges without decoding them.
+pub const GRAPH_EDGE_WINDOW_RANKS_PER_TIER: u8 = 4;
+
 /// Window position class of one edge: 0 is kept first, 15 last.
 /// Evidence tier ([`graph_edge_window_tier`]) decides it, and evidence confidence orders edges
 /// within one tier, so a confident heuristic edge never ranks ahead of a proven one.
@@ -653,7 +658,7 @@ pub const GRAPH_EDGE_WINDOW_RANK_VERSION: u32 = 1;
 /// ordering by `(rank, edge id)` is then exactly [`sort_graph_edges_for_window`], and a bounded
 /// read is an index range scan instead of a decode and sort of every edge of the node.
 pub fn graph_edge_window_rank(edge: &GraphEdge) -> u8 {
-    const CONFIDENCE_LEVELS: u8 = 4;
+    const CONFIDENCE_LEVELS: u8 = GRAPH_EDGE_WINDOW_RANKS_PER_TIER;
     (GRAPH_EDGE_WINDOW_TIER_MAX - graph_edge_window_tier(edge)) * CONFIDENCE_LEVELS
         + (CONFIDENCE_LEVELS - 1 - confidence_rank(edge.evidence.confidence))
 }

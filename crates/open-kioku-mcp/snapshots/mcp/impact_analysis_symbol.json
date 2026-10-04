@@ -1,0 +1,154 @@
+{
+  "id": "impact-symbol",
+  "jsonrpc": "2.0",
+  "result": {
+    "direct_impacts": [],
+    "evidence": [
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": null,
+          "path": "src/billing.rs"
+        },
+        "id": "impact:src/billing.rs",
+        "indexed_at": "<indexed_at>",
+        "message": "impact report derived from indexed symbols and lexical references",
+        "source": "open-kioku-impact",
+        "source_type": "lexical",
+        "symbol_id": null
+      },
+      {
+        "confidence": "exact",
+        "file_range": {
+          "line_range": null,
+          "path": "src/billing.rs"
+        },
+        "id": "history-churn:src/billing.rs",
+        "indexed_at": "<indexed_at>",
+        "message": "history_churn_hotspot_score=0.950; touch_count=1; last_30d=1; last_90d=1; confidence=Exact",
+        "source": "open-kioku-history-churn",
+        "source_type": "git_history",
+        "symbol_id": null
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": null,
+          "path": "src/billing.rs"
+        },
+        "id": "history-author:publish-invoice",
+        "indexed_at": "<indexed_at>",
+        "message": "history churn: hotspot 0.95 from 1 touch(es); ownership risk: 1 distinct historical author(s), 0 reviewer(s); similar change overlap: 1 similar historical change(s), top `Publish invoice event`",
+        "source": "open-kioku-history-signals",
+        "source_type": "git_history",
+        "symbol_id": null
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": null,
+          "path": "src/billing.rs"
+        },
+        "id": "history-churn:src/billing.rs",
+        "indexed_at": "<indexed_at>",
+        "message": "history churn: hotspot 0.95 from 1 touch(es); ownership risk: 1 distinct historical author(s), 0 reviewer(s); similar change overlap: 1 similar historical change(s), top `Publish invoice event`",
+        "source": "open-kioku-history-signals",
+        "source_type": "git_history",
+        "symbol_id": null
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": null,
+          "path": "src/billing.rs"
+        },
+        "id": "history-similar:publish-invoice",
+        "indexed_at": "<indexed_at>",
+        "message": "history churn: hotspot 0.95 from 1 touch(es); ownership risk: 1 distinct historical author(s), 0 reviewer(s); similar change overlap: 1 similar historical change(s), top `Publish invoice event`",
+        "source": "open-kioku-history-signals",
+        "source_type": "git_history",
+        "symbol_id": null
+      }
+    ],
+    "indirect_impacts": [],
+    "possible_impact": [
+      {
+        "ambiguous": false,
+        "authority": "heuristic",
+        "edge_type": "CALLS",
+        "path": "src/billing.rs",
+        "reason": "Calls edge from `publish_invoice_event` into `billing::routes::archive_invoice_event` (no structural proof; inferred by )",
+        "source": "billing::routes::archive_invoice_event",
+        "symbol": "publish_invoice_event"
+      }
+    ],
+    "relationship_impact_reads": {
+      "edges_unread": 0,
+      "proven_edges_unread": 0,
+      "symbols_read": 1,
+      "symbols_total": 3,
+      "symbols_touched": 1,
+      "symbols_unread_with_dependents": 0,
+      "windows_at_limit": 0,
+      "windows_cutting_proven": 0
+    },
+    "risk_report": {
+      "level": "low",
+      "reasons": [
+        "downstream crates were not measured: no indexed Cargo.toml the index read says which package compiles the file; an absent crate-import impact is not evidence that no other crate depends on this file",
+        "history hotspot score 0.95 from 1 touch(es), confidence Exact",
+        "history churn: hotspot 0.95 from 1 touch(es)",
+        "ownership risk: 1 distinct historical author(s), 0 reviewer(s)",
+        "similar change overlap: 1 similar historical change(s), top `Publish invoice event`"
+      ],
+      "score": "<score>"
+    },
+    "score_breakdown": [
+      {
+        "contribution": "<score>",
+        "evidence_ids": [
+          "impact:src/billing.rs"
+        ],
+        "normalized_value": "<score>",
+        "rationale": "impact risk from count of exact and lexical direct dependents",
+        "raw_value": "<score>",
+        "signal": "direct_reference_density",
+        "weight": "<score>"
+      },
+      {
+        "contribution": "<score>",
+        "evidence_ids": [
+          "history-churn:src/billing.rs"
+        ],
+        "normalized_value": "<score>",
+        "rationale": "bounded churn/hotspot signal from persisted local git history",
+        "raw_value": "<score>",
+        "signal": "history_churn",
+        "weight": "<score>"
+      },
+      {
+        "contribution": "<score>",
+        "evidence_ids": [
+          "history-author:publish-invoice"
+        ],
+        "normalized_value": "<score>",
+        "rationale": "bounded ownership risk from dispersed local author history",
+        "raw_value": "<score>",
+        "signal": "ownership_risk",
+        "weight": "<score>"
+      },
+      {
+        "contribution": "<score>",
+        "evidence_ids": [
+          "history-similar:publish-invoice"
+        ],
+        "normalized_value": "<score>",
+        "rationale": "bounded similar-change overlap from persisted local history",
+        "raw_value": "<score>",
+        "signal": "similar_change_overlap",
+        "weight": "<score>"
+      }
+    ],
+    "target": "src/billing.rs"
+  }
+}
