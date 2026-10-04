@@ -64,6 +64,7 @@ impl TestSelection {
                 .cmp(&right.file_id.0)
                 .then_with(|| range_start(left).cmp(&range_start(right)))
                 .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.id.cmp(&right.id))
         });
         let excluded_sample = sample
             .into_iter()
@@ -130,6 +131,32 @@ impl TestSelection {
             path.display()
         )
     }
+}
+
+/// Ranked order of scored test targets: score, then name, then repository position (the test
+/// file's path, then the target's line range), then file and target id. Score and name alone
+/// tie for two equally scored targets of one name in different files (`it_works`, `TestNew`),
+/// and those then kept the order the store returned them in, which decided which of them a
+/// `limit` kept. `path_of` may know no path (the fast selector skips loading files without a
+/// manifest); the ids still make the order total.
+fn compare_scored_tests<'p>(
+    left: &(f32, TestTarget),
+    right: &(f32, TestTarget),
+    path_of: impl Fn(&FileId) -> Option<&'p Path>,
+) -> std::cmp::Ordering {
+    let position = |test: &TestTarget| {
+        (
+            path_of(&test.file_id),
+            test.range.as_ref().map(|range| (range.start, range.end)),
+        )
+    };
+    right
+        .0
+        .total_cmp(&left.0)
+        .then_with(|| left.1.name.cmp(&right.1.name))
+        .then_with(|| position(&left.1).cmp(&position(&right.1)))
+        .then_with(|| left.1.file_id.0.cmp(&right.1.file_id.0))
+        .then_with(|| left.1.id.cmp(&right.1.id))
 }
 
 fn range_start(test: &TestTarget) -> u32 {
@@ -308,7 +335,11 @@ impl<'a> TestSelector<'a> {
             set_test_score_breakdown(&mut candidate, score);
             scored.push((score, candidate));
         }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            compare_scored_tests(a, b, |id| {
+                files_by_id.get(id).map(|file| file.path.as_path())
+            })
+        });
         Ok(scored
             .into_iter()
             .map(|(_, test)| test)
@@ -407,9 +438,9 @@ impl<'a> TestSelector<'a> {
             scored.push((score, test));
         }
         scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.name.cmp(&b.1.name))
+            compare_scored_tests(a, b, |id| {
+                files_by_id.get(id).map(|file| file.path.as_path())
+            })
         });
         Ok(RankedTests {
             runnable_count: scored.len(),
@@ -575,9 +606,9 @@ impl<'a> TestSelector<'a> {
             scored.push((score, test));
         }
         scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.name.cmp(&b.1.name))
+            compare_scored_tests(a, b, |id| {
+                files_by_id.get(id).map(|file| file.path.as_path())
+            })
         });
         Ok(RankedTests {
             runnable_count: scored.len(),
@@ -1405,6 +1436,66 @@ mod tests {
             tests,
             occurrences: Vec::new(),
             analysis_facts: Vec::new(),
+        }
+    }
+
+    /// Two targets named alike in two test files score the same for `src/rates.ts`; which one
+    /// a limit of 1 keeps must not depend on the order the store lists them in.
+    fn tied_targets_in(file_ids: [&str; 2]) -> Vec<TestTarget> {
+        file_ids
+            .iter()
+            .map(|file_id| TestTarget {
+                id: format!("target:{file_id}"),
+                file_id: FileId::new(*file_id),
+                ..origin_target(
+                    "rounds half up",
+                    open_kioku_core::TestTargetOrigin::RegistrationCall,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tied_targets_are_kept_by_path_whatever_order_the_store_lists_them_in() {
+        // File ids sort opposite to paths, so only a path tiebreak keeps the `a/` target.
+        let files = vec![
+            file("source", "src/rates.ts"),
+            file("test-z", "src/a/rates.test.ts"),
+            file("test-a", "src/b/rates.test.ts"),
+        ];
+        for listed in [["test-z", "test-a"], ["test-a", "test-z"]] {
+            let store = EvidenceStore {
+                files: files.clone(),
+                tests: tied_targets_in(listed),
+                occurrences: Vec::new(),
+                analysis_facts: Vec::new(),
+            };
+            let kept = TestSelector::new(&store)
+                .for_changed_path(Path::new("src/rates.ts"), 1)
+                .unwrap();
+            assert_eq!(
+                kept.iter().map(|test| test.id.as_str()).collect::<Vec<_>>(),
+                ["target:test-z"],
+                "listed as {listed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tied_targets_without_known_paths_are_kept_by_file_id_whatever_the_listing_order() {
+        // No manifest, so the fast selector does not load files and only ids can break the tie.
+        for listed in [["test-b", "test-a"], ["test-a", "test-b"]] {
+            let store = FastStore {
+                tests: tied_targets_in(listed),
+            };
+            let kept = TestSelector::new(&store)
+                .for_changed_path_fast(Path::new("src/rates.ts"), 1)
+                .unwrap();
+            assert_eq!(
+                kept.iter().map(|test| test.id.as_str()).collect::<Vec<_>>(),
+                ["target:test-a"],
+                "listed as {listed:?}"
+            );
         }
     }
 

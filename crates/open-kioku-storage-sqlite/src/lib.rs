@@ -1857,7 +1857,18 @@ impl MetadataStore for SqliteStore {
         let rows = stmt
             .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
-        collect_json(rows)
+        let mut symbols: Vec<Symbol> = collect_json(rows)?;
+        // Symbols of one name (overloads, `new` in several impls) come back in row order, which
+        // is the order they were written; callers cap this list, so ties are put in source
+        // order here rather than left to how the index was filled.
+        symbols.sort_by(|left, right| {
+            let bounds = |symbol: &Symbol| symbol.range.as_ref().map(|r| (r.start, r.end));
+            left.name
+                .cmp(&right.name)
+                .then_with(|| bounds(left).cmp(&bounds(right)))
+                .then_with(|| left.id.0.cmp(&right.id.0))
+        });
+        Ok(symbols)
     }
 
     fn find_chunks_containing(&self, query: &str, limit: usize) -> Result<Vec<CodeChunk>> {
@@ -1902,7 +1913,12 @@ impl MetadataStore for SqliteStore {
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
 
         let placeholders = file_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT json FROM tests WHERE file_id IN ({})", placeholders);
+        // Ordered so the result does not depend on the order of `file_ids` or on the plan
+        // SQLite picks for the `IN` list.
+        let sql = format!(
+            "SELECT json FROM tests WHERE file_id IN ({}) ORDER BY file_id, id",
+            placeholders
+        );
         let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
 
         let params = rusqlite::params_from_iter(file_ids.iter().map(|id| &id.0));
@@ -9343,6 +9359,111 @@ mod tests {
             kept_per_write_order[0], kept_per_write_order[1],
             "a capped reference read must keep the same occurrences whatever order they were written in"
         );
+    }
+
+    /// Impact seeds its relationship read from the first symbols of a file and keeps a capped
+    /// number of them, so symbols that share a name must come back in source order, not in the
+    /// order they were written.
+    #[test]
+    fn symbols_of_one_name_read_in_source_order_whatever_the_write_order() {
+        let store = make_store();
+        let manifest = make_manifest();
+        let files = vec![make_file("f1", "ledger.rs")];
+        let at = |id: &str, name: &str, line: u32| Symbol {
+            range: Some(LineRange::single(line)),
+            ..make_symbol(id, name, "f1")
+        };
+        // Ids sort opposite to lines, so neither id nor write order can pass for source order.
+        let forward = vec![
+            at("s-c", "build", 10),
+            at("s-b", "new", 30),
+            at("s-a", "new", 50),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        for symbols in [forward, reversed] {
+            store
+                .replace_index(IndexData {
+                    manifest: &manifest,
+                    files: &files,
+                    symbols: &symbols,
+                    occurrences: &[],
+                    chunks: &[],
+                    imports: &[],
+                    tests: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                })
+                .unwrap();
+            let read = store
+                .symbols_for_file(&FileId::new("f1"))
+                .unwrap()
+                .into_iter()
+                .map(|symbol| symbol.id.0)
+                .collect::<Vec<_>>();
+            assert_eq!(read, ["s-c", "s-b", "s-a"]);
+        }
+    }
+
+    /// Test targets read for several files come back in one order whatever order they were
+    /// written in and whatever order the files are asked for in.
+    #[test]
+    fn tests_for_files_read_in_one_order_whatever_the_write_or_request_order() {
+        let store = make_store();
+        let manifest = make_manifest();
+        let files = vec![make_file("f1", "a_test.rs"), make_file("f2", "b_test.rs")];
+        let target = |id: &str, file: &str| open_kioku_core::TestTarget {
+            id: id.into(),
+            name: "it_works".into(),
+            file_id: FileId::new(file),
+            range: None,
+            command: None,
+            confidence: Confidence::Medium,
+            reason: "test".into(),
+            evidence_refs: Vec::new(),
+            score_breakdown: Vec::new(),
+            selection_tier: Default::default(),
+            tier_justification: Vec::new(),
+            origin: Default::default(),
+        };
+        let forward = vec![
+            target("t-1", "f1"),
+            target("t-2", "f1"),
+            target("t-3", "f2"),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        for tests in [forward, reversed] {
+            store
+                .replace_index(IndexData {
+                    manifest: &manifest,
+                    files: &files,
+                    symbols: &[],
+                    occurrences: &[],
+                    chunks: &[],
+                    imports: &[],
+                    tests: &tests,
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                })
+                .unwrap();
+            for request in [
+                [FileId::new("f1"), FileId::new("f2")],
+                [FileId::new("f2"), FileId::new("f1")],
+            ] {
+                let read = store
+                    .tests_for_files(&request)
+                    .unwrap()
+                    .into_iter()
+                    .map(|test| test.id)
+                    .collect::<Vec<_>>();
+                assert_eq!(read, ["t-1", "t-2", "t-3"]);
+            }
+        }
     }
 
     #[test]

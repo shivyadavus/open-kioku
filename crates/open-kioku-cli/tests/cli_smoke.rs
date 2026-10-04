@@ -3532,6 +3532,96 @@ fn fresh_indexes_of_one_tree_agree_on_context_order_and_quality_notes() {
     }
 }
 
+/// Seven test files hold a test of one name that matches the changed ledger equally well, so
+/// only a tiebreak decides which five the context pack lists. The copies are written in
+/// opposite orders and indexed on one thread and on eight, so neither filesystem order nor
+/// worker scheduling can decide it either.
+#[test]
+fn fresh_indexes_of_one_tree_agree_on_tied_validation_targets() {
+    let copies = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let suffixes = ["a", "b", "c", "d", "e", "f", "g"];
+    for (copy_index, copy) in copies.iter().enumerate() {
+        let repo = copy.path();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::create_dir_all(repo.join("tests")).unwrap();
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"ledger\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(repo.join("src/lib.rs"), "pub mod ledger;\n").unwrap();
+        fs::write(
+            repo.join("src/ledger.rs"),
+            "pub fn settle_ledger(total: u32) -> u32 {\n    total\n}\n",
+        )
+        .unwrap();
+        let mut order = suffixes.to_vec();
+        if copy_index == 1 {
+            order.reverse();
+        }
+        for suffix in order {
+            fs::write(
+                repo.join(format!("tests/ledger_{suffix}.rs")),
+                "use ledger::ledger::settle_ledger;\n\n#[test]\nfn settles_ledger() {\n    assert_eq!(settle_ledger(1), 1);\n}\n",
+            )
+            .unwrap();
+        }
+    }
+
+    let observe = |repo: &std::path::Path, threads: &str| {
+        run({
+            let mut command = ok();
+            command.arg("init").arg(repo);
+            command
+        });
+        run({
+            let mut command = ok();
+            command
+                .env("RAYON_NUM_THREADS", threads)
+                .arg("index")
+                .arg(repo);
+            command
+        });
+        let pack: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .arg("--json")
+                .arg("context")
+                .arg("change settle_ledger in src/ledger.rs");
+            command
+        }))
+        .unwrap();
+        let files = ["primary_files", "supporting_files"]
+            .iter()
+            .flat_map(|key| pack[*key].as_array().cloned().unwrap_or_default())
+            .map(|result| format!("{} {}", result["path"], result["line_range"]))
+            .collect::<Vec<_>>();
+        let tests = pack["test_candidates"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|test| format!("{} {}", test["id"], test["name"]))
+            .collect::<Vec<_>>();
+        (files, tests)
+    };
+
+    let (baseline_files, baseline_tests) = observe(copies[0].path(), "1");
+    let tied = baseline_tests
+        .iter()
+        .filter(|test| test.ends_with("\"settles_ledger\""))
+        .count();
+    assert!(
+        tied >= 2,
+        "several tied targets must reach the pack: {baseline_tests:?}"
+    );
+    let (files, tests) = observe(copies[1].path(), "8");
+    assert_eq!(files, baseline_files);
+    assert_eq!(tests, baseline_tests);
+}
+
 /// Set the marker `SqliteStore::open` leaves behind when it discards a pre-4.0 edge layout.
 fn mark_graph_rebuild_required(repo: &std::path::Path) {
     let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
