@@ -996,7 +996,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                             edge.from,
                             edge.to,
                             edge.edge_type,
-                            edge.relationship_authority()
+                            open_kioku_core::graph_edge_authority(edge)
                         );
                     }
                 }

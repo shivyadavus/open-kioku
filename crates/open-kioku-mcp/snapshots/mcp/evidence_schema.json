@@ -353,6 +353,10 @@
       {
         "description": "Calls recorded from tree-sitter evidence at high or exact confidence. The edge variable c exists for WHERE only; evidence_source, evidence_source_type and confidence are read from the edge's evidence.",
         "query": "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 AND c.evidence_source_type = 'tree_sitter' RETURN a, b"
+      },
+      {
+        "description": "Functions reachable within one to three CALLS hops that relationship proofs establish, every hop of them. Without the filter, routes through heuristic hops are returned too, and paths[i].weakest_authority marks them.",
+        "query": "MATCH (a:Function)-[c:CALLS *1..3]->(b:Function) WHERE c.authority = 'authoritative' RETURN a, b"
       }
     ],
     "feature_flags": [
@@ -685,6 +689,8 @@
       "regex_filters_on_label_qualified_name_file_path",
       "edge_evidence_filters",
       "numeric_confidence_comparison",
+      "edge_authority_filters",
+      "per_row_path_authority",
       "return_variables",
       "limit",
       "offset",
@@ -803,12 +809,13 @@
       "A path is exactly one edge pattern between two nodes, such as (f:File)-[:DEFINES]->(s:Function) or (s:Function)<-[:DEFINES]-(f:File); a MATCH without an edge pattern is rejected.",
       "A node is (variable:Type); the variable and the :Type are each optional, so (f), (:File) and () are nodes.",
       "A one-hop edge is -[:TYPE]-> or <-[:TYPE]-, and it must name its type to run; -[e:TYPE]-> binds the edge to a variable that WHERE can filter on its evidence.",
-      "A multi-hop edge is -[:TYPE *min..max]-> with 1 <= min <= max, where max may not exceed the depth cap (3 unless raised, never above 5); the :TYPE is optional, it binds no variable, the source node must name its type, and only forward edges are followed.",
+      "A multi-hop edge is -[:TYPE *min..max]-> with 1 <= min <= max, where max may not exceed the depth cap (3 unless raised, never above 5); the :TYPE is optional, the source node must name its type, and only forward edges are followed. -[e:TYPE *min..max]-> binds the range to a variable that binds no single edge: a WHERE filter on it must hold for every hop, so a hop that fails it is never walked.",
       "Type names are case-insensitive and may be written as node_types and edge_types name them or in their underscored form: (t:DatabaseTable) or (t:database_table), [:DependsOn] or [:DEPENDS_ON].",
-      "A filter is variable.field = 'text', variable.field STARTS_WITH 'text', or variable.field =~ 'regex' on a variable bound in MATCH, with a single- or double-quoted value; confidence also takes <, <=, > and >=, and takes = or any of those with an unquoted number such as 0.85.",
+      "A filter is variable.field = 'text', variable.field STARTS_WITH 'text', or variable.field =~ 'regex' on a variable bound in MATCH, with a single- or double-quoted value; confidence also takes <, <=, > and >=, and takes = or any of those with an unquoted number such as 0.85; authority takes =, <, <=, > and >= with a quoted class.",
       "A File node's label is its repository-relative path (src/config.rs). A symbol node's label is that path without its extension, with / replaced by ::, followed by ::name (src::config::parse_config); this holds for every language, Java and Go included, with no package prefix and no segment dropped (src/main/java/com/acme/OrderService.java gives src::main::java::com::acme::OrderService::handle), except in a file where tree-sitter finds no symbols and a regex fallback names them. A label filter compares against that whole label, except that a one-hop label = filter also matches a bare symbol name (parse_config) through the index.",
-      "Filter fields depend on what the variable binds. File nodes take label, id, file_path; file_path is the File node's label. Module, Class, Trait, Interface, Function, Method, Field, Endpoint, DatabaseTable, Test nodes take label, id, file_path, qualified_name; on a node built from an indexed symbol, qualified_name is its label and file_path is the label of the File node that DEFINES it, while a node of these types built from an import or an analysis fact carries neither. Directory, Package, Collection, Queue, Topic, ConfigKey, BuildTarget, RuntimeError, Ticket, PullRequest, Resource, ArchitectureComponent nodes take label, id. An untyped node takes label, id, file_path, qualified_name. An edge variable takes evidence_source, evidence_source_type, confidence, read from the edge's evidence. A filter on a field the variable does not take is a parse error listing the fields it takes; a filter on a field a matched node does not carry excludes that row, and a caveat counts the rows excluded that way.",
+      "Filter fields depend on what the variable binds. File nodes take label, id, file_path; file_path is the File node's label. Module, Class, Trait, Interface, Function, Method, Field, Endpoint, DatabaseTable, Test nodes take label, id, file_path, qualified_name; on a node built from an indexed symbol, qualified_name is its label and file_path is the label of the File node that DEFINES it, while a node of these types built from an import or an analysis fact carries neither. Directory, Package, Collection, Queue, Topic, ConfigKey, BuildTarget, RuntimeError, Ticket, PullRequest, Resource, ArchitectureComponent nodes take label, id. An untyped node takes label, id, file_path, qualified_name. An edge variable takes evidence_source, evidence_source_type, confidence, authority, read from the edge's evidence. A filter on a field the variable does not take is a parse error listing the fields it takes; a filter on a field a matched node does not carry excludes that row, and a caveat counts the rows excluded that way.",
       "confidence = 'high' compares the edge evidence's band (low, medium, high, exact); a number compares the band's score (low 0.35, medium 0.6, high 0.85, exact 1), so e.confidence >= 0.85 keeps high and exact edges. evidence_source_type = takes a name from evidence_source_types, and evidence_source names the pass that recorded the evidence, such as open-kioku-graph or open-kioku-resolution; neither names the edge's source node, which is the node variable on its left.",
+      "authority is an edge's evidence class, recomputed from its typed relationship proofs, ordered heuristic < corroborating < authoritative: authoritative is a relationship its proofs establish, or containment (CONTAINS, DEFINES) a parser or index extracted; corroborating is supported by proof but not established; heuristic has no proof, such as a symbol-registry name match, a similarity edge or regex-fallback containment. No confidence or evidence source raises it. Every edge is matched whatever its authority, and each row's entry in paths lists the edges it was matched through with each one's authority and the weakest among them, weakest_authority, since a route is only as established as its weakest hop. A multi-hop row reports the strongest route the walk found to it at that depth. e.authority >= 'corroborating' on a bound edge or hop range leaves heuristic edges out, and a caveat counts the returned rows that cross one.",
       "=~ applies to label, file_path and qualified_name only, with a valid regex of at most 100 bytes.",
       "RETURN lists node variables bound in MATCH, each at most once; an edge variable is for WHERE only, so read labels and properties from the returned node objects.",
       "LIMIT is clamped to 500 rows, and a write-like or composition keyword (CREATE, MERGE, DELETE, DETACH, SET, REMOVE, DROP, CALL, LOAD, UNION, WITH, FOREACH) rejects the whole query."
@@ -843,11 +850,6 @@
         "alternative": "RETURN node variables; an edge variable is bound only to filter the edge's evidence in WHERE, such as WHERE c.confidence >= 0.85.",
         "example": "MATCH (a:Function)-[c:CALLS]->(b:Function) RETURN a, c",
         "form": "edge_variable_in_return"
-      },
-      {
-        "alternative": "A hop range binds no single edge; bind and filter one hop at a time, such as (a:Function)-[c:CALLS]->(b:Function).",
-        "example": "MATCH (a:Function)-[c:CALLS *1..2]->(b:Function) RETURN b",
-        "form": "edge_variable_on_hop_range"
       },
       {
         "alternative": "Give the edge a direction with -[:CALLS]-> or <-[:CALLS]-, one query per direction.",
@@ -885,7 +887,7 @@
         "form": "or_or_not_in_where"
       },
       {
-        "alternative": "Use =, STARTS_WITH or =~, and <, <=, > or >= on confidence; =~ 'parse' matches a substring of label, file_path or qualified_name.",
+        "alternative": "Use =, STARTS_WITH or =~, and <, <=, > or >= on confidence and authority; =~ 'parse' matches a substring of label, file_path or qualified_name.",
         "example": "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE s.label CONTAINS 'parse' RETURN s",
         "form": "other_filter_operators"
       },
@@ -900,7 +902,7 @@
         "form": "field_the_node_type_does_not_carry"
       },
       {
-        "alternative": "Nodes carry no evidence_source, evidence_source_type or confidence; bind the edge and filter its evidence: MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 RETURN a.",
+        "alternative": "Nodes carry no evidence_source, evidence_source_type, confidence or authority; bind the edge and filter its evidence: MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 RETURN a.",
         "example": "MATCH (a:Function)-[:CALLS]->(b:Function) WHERE b.confidence >= 0.85 RETURN a",
         "form": "evidence_field_on_a_node"
       },

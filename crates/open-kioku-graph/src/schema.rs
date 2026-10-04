@@ -1,7 +1,8 @@
 use crate::query::{DEFAULT_MAX_DEPTH, HARD_MAX_DEPTH, HARD_ROW_LIMIT};
 use open_kioku_core::{
     Confidence, EdgeTypeSpec, EvidenceGraphSchema, GraphEdgeType, GraphNodeType, GraphQueryExample,
-    IndexManifest, NodeTypeSpec, OptionalEvidenceSpec, PropertySpec, UnsupportedGraphQueryForm,
+    IndexManifest, NodeTypeSpec, OptionalEvidenceSpec, PropertySpec, RelationshipAuthority,
+    UnsupportedGraphQueryForm,
 };
 
 /// Node types in schema order. The schema advertises these and the query parser resolves and lists
@@ -197,11 +198,38 @@ pub(crate) const SYMBOL_NODE_TYPES: [GraphNodeType; 10] = [
 const FILE_FILTER_FIELDS: &[&str] = &["label", "id", "file_path"];
 const SYMBOL_FILTER_FIELDS: &[&str] = &["label", "id", "file_path", "qualified_name"];
 const OTHER_NODE_FILTER_FIELDS: &[&str] = &["label", "id"];
-/// Graph nodes carry no evidence; these are read from a bound edge's `Evidence`. The `evidence_`
-/// prefix is load-bearing: in Cypher an edge's "source" is the node it leaves, and a field named
-/// `source` read as that endpoint while filtering on the pass that recorded the evidence.
-pub(crate) const EDGE_FILTER_FIELDS: &[&str] =
-    &["evidence_source", "evidence_source_type", "confidence"];
+/// Graph nodes carry no evidence; these are read from a bound edge's `Evidence`, and `authority`
+/// from its typed proofs. The `evidence_` prefix is load-bearing: in Cypher an edge's "source" is
+/// the node it leaves, and a field named `source` read as that endpoint while filtering on the
+/// pass that recorded the evidence.
+pub(crate) const EDGE_FILTER_FIELDS: &[&str] = &[
+    "evidence_source",
+    "evidence_source_type",
+    "confidence",
+    "authority",
+];
+
+/// Authority classes, weakest first: the order `<` and `>=` compare them in.
+pub(crate) const AUTHORITY_CLASSES: [RelationshipAuthority; 3] = [
+    RelationshipAuthority::Heuristic,
+    RelationshipAuthority::Corroborating,
+    RelationshipAuthority::Authoritative,
+];
+
+/// The serialized class name, which is how `paths` and `edge_authority` spell it.
+pub(crate) fn authority_name(authority: RelationshipAuthority) -> &'static str {
+    match authority {
+        RelationshipAuthority::Heuristic => "heuristic",
+        RelationshipAuthority::Corroborating => "corroborating",
+        RelationshipAuthority::Authoritative => "authoritative",
+    }
+}
+
+pub(crate) fn authority_for_query_name(name: &str) -> Option<RelationshipAuthority> {
+    AUTHORITY_CLASSES
+        .into_iter()
+        .find(|class| name.eq_ignore_ascii_case(authority_name(*class)))
+}
 
 /// The WHERE fields a node variable takes. An untyped node may bind a File or a symbol node, so it
 /// takes every node field and each row resolves the field for the node it holds.
@@ -394,6 +422,8 @@ fn query_features() -> Vec<String> {
         "regex_filters_on_label_qualified_name_file_path",
         "edge_evidence_filters",
         "numeric_confidence_comparison",
+        "edge_authority_filters",
+        "per_row_path_authority",
         "return_variables",
         "limit",
         "offset",
@@ -416,12 +446,13 @@ fn query_syntax() -> Vec<String> {
         "A path is exactly one edge pattern between two nodes, such as (f:File)-[:DEFINES]->(s:Function) or (s:Function)<-[:DEFINES]-(f:File); a MATCH without an edge pattern is rejected.".into(),
         "A node is (variable:Type); the variable and the :Type are each optional, so (f), (:File) and () are nodes.".into(),
         "A one-hop edge is -[:TYPE]-> or <-[:TYPE]-, and it must name its type to run; -[e:TYPE]-> binds the edge to a variable that WHERE can filter on its evidence.".into(),
-        format!("A multi-hop edge is -[:TYPE *min..max]-> with 1 <= min <= max, where max may not exceed the depth cap ({DEFAULT_MAX_DEPTH} unless raised, never above {HARD_MAX_DEPTH}); the :TYPE is optional, it binds no variable, the source node must name its type, and only forward edges are followed."),
+        format!("A multi-hop edge is -[:TYPE *min..max]-> with 1 <= min <= max, where max may not exceed the depth cap ({DEFAULT_MAX_DEPTH} unless raised, never above {HARD_MAX_DEPTH}); the :TYPE is optional, the source node must name its type, and only forward edges are followed. -[e:TYPE *min..max]-> binds the range to a variable that binds no single edge: a WHERE filter on it must hold for every hop, so a hop that fails it is never walked."),
         "Type names are case-insensitive and may be written as node_types and edge_types name them or in their underscored form: (t:DatabaseTable) or (t:database_table), [:DependsOn] or [:DEPENDS_ON].".into(),
-        "A filter is variable.field = 'text', variable.field STARTS_WITH 'text', or variable.field =~ 'regex' on a variable bound in MATCH, with a single- or double-quoted value; confidence also takes <, <=, > and >=, and takes = or any of those with an unquoted number such as 0.85.".into(),
+        "A filter is variable.field = 'text', variable.field STARTS_WITH 'text', or variable.field =~ 'regex' on a variable bound in MATCH, with a single- or double-quoted value; confidence also takes <, <=, > and >=, and takes = or any of those with an unquoted number such as 0.85; authority takes =, <, <=, > and >= with a quoted class.".into(),
         "A File node's label is its repository-relative path (src/config.rs). A symbol node's label is that path without its extension, with / replaced by ::, followed by ::name (src::config::parse_config); this holds for every language, Java and Go included, with no package prefix and no segment dropped (src/main/java/com/acme/OrderService.java gives src::main::java::com::acme::OrderService::handle), except in a file where tree-sitter finds no symbols and a regex fallback names them. A label filter compares against that whole label, except that a one-hop label = filter also matches a bare symbol name (parse_config) through the index.".into(),
         filter_field_sentence(),
         confidence_sentence(),
+        authority_sentence(),
         "=~ applies to label, file_path and qualified_name only, with a valid regex of at most 100 bytes.".into(),
         "RETURN lists node variables bound in MATCH, each at most once; an edge variable is for WHERE only, so read labels and properties from the returned node objects.".into(),
         format!("LIMIT is clamped to {HARD_ROW_LIMIT} rows, and a write-like or composition keyword (CREATE, MERGE, DELETE, DETACH, SET, REMOVE, DROP, CALL, LOAD, UNION, WITH, FOREACH) rejects the whole query."),
@@ -468,6 +499,17 @@ fn confidence_sentence() -> String {
     )
 }
 
+fn authority_sentence() -> String {
+    let classes = AUTHORITY_CLASSES
+        .iter()
+        .map(|class| authority_name(*class))
+        .collect::<Vec<_>>()
+        .join(" < ");
+    format!(
+        "authority is an edge's evidence class, recomputed from its typed relationship proofs, ordered {classes}: authoritative is a relationship its proofs establish, or containment (CONTAINS, DEFINES) a parser or index extracted; corroborating is supported by proof but not established; heuristic has no proof, such as a symbol-registry name match, a similarity edge or regex-fallback containment. No confidence or evidence source raises it. Every edge is matched whatever its authority, and each row's entry in paths lists the edges it was matched through with each one's authority and the weakest among them, weakest_authority, since a route is only as established as its weakest hop. A multi-hop row reports the strongest route the walk found to it at that depth. e.authority >= 'corroborating' on a bound edge or hop range leaves heuristic edges out, and a caveat counts the returned rows that cross one."
+    )
+}
+
 fn query_examples() -> Vec<GraphQueryExample> {
     [
         (
@@ -501,6 +543,10 @@ fn query_examples() -> Vec<GraphQueryExample> {
         (
             "MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 AND c.evidence_source_type = 'tree_sitter' RETURN a, b",
             "Calls recorded from tree-sitter evidence at high or exact confidence. The edge variable c exists for WHERE only; evidence_source, evidence_source_type and confidence are read from the edge's evidence.",
+        ),
+        (
+            "MATCH (a:Function)-[c:CALLS *1..3]->(b:Function) WHERE c.authority = 'authoritative' RETURN a, b",
+            "Functions reachable within one to three CALLS hops that relationship proofs establish, every hop of them. Without the filter, routes through heuristic hops are returned too, and paths[i].weakest_authority marks them.",
         ),
     ]
     .into_iter()
@@ -544,11 +590,6 @@ fn unsupported_query_forms() -> Vec<UnsupportedGraphQueryForm> {
             "RETURN node variables; an edge variable is bound only to filter the edge's evidence in WHERE, such as WHERE c.confidence >= 0.85.",
         ),
         unsupported(
-            "edge_variable_on_hop_range",
-            "MATCH (a:Function)-[c:CALLS *1..2]->(b:Function) RETURN b",
-            "A hop range binds no single edge; bind and filter one hop at a time, such as (a:Function)-[c:CALLS]->(b:Function).",
-        ),
-        unsupported(
             "undirected_edge",
             "MATCH (a:Function)-[:CALLS]-(b:Function) RETURN a, b",
             "Give the edge a direction with -[:CALLS]-> or <-[:CALLS]-, one query per direction.",
@@ -586,7 +627,7 @@ fn unsupported_query_forms() -> Vec<UnsupportedGraphQueryForm> {
         unsupported(
             "other_filter_operators",
             "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE s.label CONTAINS 'parse' RETURN s",
-            "Use =, STARTS_WITH or =~, and <, <=, > or >= on confidence; =~ 'parse' matches a substring of label, file_path or qualified_name.",
+            "Use =, STARTS_WITH or =~, and <, <=, > or >= on confidence and authority; =~ 'parse' matches a substring of label, file_path or qualified_name.",
         ),
         unsupported(
             "unsupported_filter_field",
@@ -601,7 +642,7 @@ fn unsupported_query_forms() -> Vec<UnsupportedGraphQueryForm> {
         unsupported(
             "evidence_field_on_a_node",
             "MATCH (a:Function)-[:CALLS]->(b:Function) WHERE b.confidence >= 0.85 RETURN a",
-            "Nodes carry no evidence_source, evidence_source_type or confidence; bind the edge and filter its evidence: MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 RETURN a.",
+            "Nodes carry no evidence_source, evidence_source_type, confidence or authority; bind the edge and filter its evidence: MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 RETURN a.",
         ),
         unsupported(
             "inline_property_map",
