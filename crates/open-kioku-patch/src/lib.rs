@@ -368,7 +368,8 @@ impl<'a> ChangeVerifier<'a> {
             input.unified_diff.as_deref(),
         )?;
         let recommended_tests = recommended_tests(self.store, &changed_files)?;
-        let missing_tests = missing_tests(plan, &recommended_tests);
+        let test_paths = open_kioku_plan::validation_target_paths(self.store, &recommended_tests)?;
+        let missing_tests = missing_tests(plan, &recommended_tests, &test_paths);
         let changed_impact = changed_impact(self.store, self.search_index, plan, &changed_files)?;
         let command_results = if input.run_commands {
             run_validation_commands(repo, plan)?
@@ -401,7 +402,7 @@ impl<'a> ChangeVerifier<'a> {
             input.traceability_strict,
         ));
         warnings.extend(plan_caveat_warnings(plan));
-        warnings.extend(pending_plan_validation_warnings(plan, &input));
+        warnings.extend(pending_plan_validation_warnings(self.store, plan, &input)?);
         warnings.extend(runtime_warnings(self.store, &changed_files)?);
         let traceability = verification_traceability(plan, &input);
 
@@ -3189,21 +3190,26 @@ fn plan_caveat_warnings(plan: &PlanReport) -> Vec<VerificationFinding> {
         .collect()
 }
 
+/// A pending warning's path is the planned test's file, looked up as `missing_tests` does: a
+/// target whose file the store does not know, such as one a contract named, carries no path.
 fn pending_plan_validation_warnings(
+    store: &dyn MetadataStore,
     plan: &PlanReport,
     input: &VerifyChangeInput,
-) -> Vec<VerificationFinding> {
+) -> Result<Vec<VerificationFinding>> {
     if input.suppress_plan_validation_pending
         || input.run_commands
         || !input.validation_attestations.is_empty()
     {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    plan.validation
+    let paths = open_kioku_plan::validation_target_paths(store, &plan.validation)?;
+    Ok(plan
+        .validation
         .iter()
         .filter_map(|test| {
             test.command.as_ref().map(|command| VerificationFinding {
-                path: Some(PathBuf::from(test.file_id.0.clone())),
+                path: paths.get(&test.file_id).cloned(),
                 kind: "validation_command_pending".into(),
                 reason: format!(
                     "planned validation command `{command}` has not been run during verification"
@@ -3211,7 +3217,7 @@ fn pending_plan_validation_warnings(
                 evidence_refs: test.evidence_refs.clone(),
             })
         })
-        .collect()
+        .collect())
 }
 
 fn evidence_refs_for_caveat(plan: &PlanReport, caveat: &str) -> Vec<String> {
@@ -3521,7 +3527,13 @@ fn recommended_tests(store: &dyn OkStore, changed_files: &[PathBuf]) -> Result<V
 /// Every recommendation the plan does not list stays a finding, including those the plan's
 /// validation bound left out: the plan chose not to run them, and verify cannot call that
 /// covered. The reason says which case it is, so a disclosed omission does not read as a miss.
-fn missing_tests(plan: &PlanReport, recommended_tests: &[TestTarget]) -> Vec<VerificationFinding> {
+/// A finding's path is the test file's, from `paths`; a file the store does not know leaves it
+/// unset rather than standing in its id, which is a hash and names no file.
+fn missing_tests(
+    plan: &PlanReport,
+    recommended_tests: &[TestTarget],
+    paths: &BTreeMap<FileId, PathBuf>,
+) -> Vec<VerificationFinding> {
     let planned = plan
         .validation
         .iter()
@@ -3532,7 +3544,7 @@ fn missing_tests(plan: &PlanReport, recommended_tests: &[TestTarget]) -> Vec<Ver
         .iter()
         .filter(|test| !planned.contains(&test.id) && !planned.contains(&test.name))
         .map(|test| VerificationFinding {
-            path: Some(PathBuf::from(test.file_id.0.clone())),
+            path: paths.get(&test.file_id).cloned(),
             kind: "missing_test".into(),
             reason: if omitted_by_cap.contains(&test.id) {
                 format!(
@@ -3977,10 +3989,11 @@ mod tests {
         // target in for both paths and the count merely looked large enough.
         assert_eq!(names.len(), 14, "{names:?}");
         assert_eq!(recommended.len(), 14, "{recommended:?}");
+        let paths = open_kioku_plan::validation_target_paths(&store, &recommended).unwrap();
 
         let mut plan = plan_with_validation_command("cargo test");
         plan.validation = planned;
-        let missing = missing_tests(&plan, &recommended);
+        let missing = missing_tests(&plan, &recommended, &paths);
         assert_eq!(missing.len(), 6, "{missing:?}");
     }
 
@@ -4006,7 +4019,7 @@ mod tests {
             .iter()
             .map(|test| test.id.clone())
             .collect();
-        let missing = missing_tests(&plan, &recommended);
+        let missing = missing_tests(&plan, &recommended, &paths);
 
         assert_eq!(plan.validation_omitted, 6);
         assert_eq!(missing.len(), plan.validation_omitted, "{missing:?}");
@@ -4023,7 +4036,7 @@ mod tests {
         // A plan that never disclosed the omission keeps the plain wording.
         plan.validation_omitted = 0;
         plan.validation_omitted_ids.clear();
-        for finding in missing_tests(&plan, &recommended) {
+        for finding in missing_tests(&plan, &recommended, &paths) {
             assert!(
                 finding.reason.ends_with("is not in the saved plan"),
                 "{}",
@@ -4091,7 +4104,82 @@ mod tests {
 
         let mut plan = plan_with_validation_command("npm test");
         plan.validation = recommended.clone();
-        assert!(missing_tests(&plan, &recommended).is_empty());
+        let paths = open_kioku_plan::validation_target_paths(&store, &recommended).unwrap();
+        assert!(missing_tests(&plan, &recommended, &paths).is_empty());
+    }
+
+    /// A `missing_test` finding names the test file by its repository path. It used to carry the
+    /// target's file id, which is a hash of the path and names no file a reader can open.
+    #[test]
+    fn verify_reports_a_missing_test_at_its_test_files_path_not_its_file_id() {
+        let store = RuntimeStore::new()
+            .without_runtime()
+            .with_file_text("tests/handler_test.rs", "fn settles_ledger() {}")
+            .with_test_target(file_symbol_target(
+                "settles_ledger",
+                "tests_handler_test_rs",
+                Confidence::High,
+            ));
+
+        let report = verify_handler(
+            &store,
+            VerifyChangeInput {
+                changed_files: vec![PathBuf::from("src/handler.rs")],
+                ..Default::default()
+            },
+        );
+
+        let paths = report
+            .missing_tests
+            .iter()
+            .map(|finding| (finding.kind.as_str(), finding.path.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [("missing_test", Some(Path::new("tests/handler_test.rs")))],
+            "{:?}",
+            report.missing_tests
+        );
+    }
+
+    /// A recommendation whose file the store does not know has no path to report, and says so
+    /// with none rather than with its id.
+    #[test]
+    fn a_missing_test_in_an_unknown_file_carries_no_path() {
+        let recommended = vec![file_symbol_target(
+            "settles_ledger",
+            "a1b2c3d4e5f6",
+            Confidence::High,
+        )];
+        let missing = missing_tests(
+            &plan_with_boundary_evidence(),
+            &recommended,
+            &BTreeMap::new(),
+        );
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert_eq!(missing[0].path, None);
+    }
+
+    /// The pending-validation warning names a planned test by its file's path the same way, and
+    /// a planned target the store has no file for, as a contract's named tests are, by none.
+    #[test]
+    fn pending_validation_warnings_name_the_planned_tests_file_path() {
+        let store = RuntimeStore::new()
+            .without_runtime()
+            .with_file_text("tests/ledger_test.rs", "fn settles_ledger() {}");
+        let mut plan = plan_with_validation_command("cargo test");
+        let mut indexed = plan.validation[0].clone();
+        indexed.id = "validation:ledger".into();
+        indexed.file_id = FileId::new("tests_ledger_test_rs");
+        plan.validation.push(indexed);
+
+        let warnings =
+            pending_plan_validation_warnings(&store, &plan, &VerifyChangeInput::default()).unwrap();
+        let paths = warnings
+            .iter()
+            .map(|warning| warning.path.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, [None, Some(Path::new("tests/ledger_test.rs"))]);
     }
 
     impl MetadataStore for RuntimeStore {
