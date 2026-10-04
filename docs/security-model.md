@@ -33,6 +33,13 @@ Default posture:
   them, while an unanchored one (`**/vault/**`) and the secret-like rules do. An index built
   before this rule keeps such SCIP rows, and still reports itself compatible, until it is
   rebuilt: `ok watch` does not re-import SCIP, so re-run `ok index` to remove them
+- directories pruned as build output or installed packages are named in the index's
+  coverage record and skipped paths (`docs/indexing-pipeline.md`, "Pruned directories"),
+  except a secret-like one (`.ssh/build`), which is counted in `pruned_unlisted` and listed
+  as `[redacted]`; `ok snapshot import` withholds an artifact's secret-like pruned paths the
+  same way. No file under a pruned directory is opened: deciding to prune checks only
+  whether marker files exist, and counting committed source asks Git, locally, for its
+  tracked paths
 - redact-capable output boundary
 - source edits occur in the user's normal editor
 

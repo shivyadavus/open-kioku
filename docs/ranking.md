@@ -227,10 +227,14 @@ confidence.
 
 How ignored directories are counted decides what can be a gap. Discovery descends into
 git-ignored directories and records each file as `git_ignore`, before the vendor detector
-runs, so a git-ignored `venv/`, `env/`, `out/` or `site-packages` tree of `.py` or `.js` files
-is a gap. Directories pruned by name (`.git`, `.ok`, `target`, `node_modules`, `dist`,
-`build`, `.venv`) count once each in `pruned_dirs`; their files are never discovered, so they
-never produce a gap.
+runs, so a git-ignored `env/`, `out/` or `site-packages` tree of `.py` or `.js` files, or a
+`venv/` holding neither `pyvenv.cfg` nor `conda-meta`, is a gap. Directories discovery prunes as build output or installed packages count once
+each in `pruned_dirs` and are named in `coverage.pruned`; their untracked files are never
+discovered and never produce a gap. Git-tracked source under a `build` or `dist` pruned only
+because nothing declares it (`undeclared_build_dir`) is the exception: it is discovered and
+skipped as `pruned`, an omission, so enough of it is an `omitted` gap. Committed files under
+a directory pruned on strong evidence (a cache tag, a build manifest beside it) never are: a
+`dist/` bundle committed beside `package.json` caps no confidence (`docs/indexing-pipeline.md`, "Pruned directories").
 
 A gap is always reported, and by itself changes no score or label:
 

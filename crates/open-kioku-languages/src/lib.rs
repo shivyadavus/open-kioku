@@ -71,20 +71,18 @@ pub fn likely_test_path(path: &Path) -> bool {
         || value.starts_with("tests/")
 }
 
+/// Third-party source: a `vendor/`, `node_modules/` or `.venv/` directory, none of which a
+/// module system can name. `target`, `build` and `dist` are not here: discovery prunes them
+/// when they are build output (`open-kioku-ingest`'s `prune` module), and a directory it walks
+/// under one of those names is a declared source module, which a name match would drop (#477).
 pub fn likely_vendor_path(path: &Path) -> bool {
     let value = path.to_string_lossy();
     value.starts_with("node_modules/")
-        || value.starts_with("target/")
         || value.starts_with("vendor/")
         || value.starts_with(".venv/")
-        || value.starts_with("dist/")
-        || value.starts_with("build/")
         || value.contains("node_modules/")
-        || value.contains("/target/")
         || value.contains("/vendor/")
         || value.contains("/.venv/")
-        || value.contains("/dist/")
-        || value.contains("/build/")
 }
 
 pub fn likely_generated(content: &str) -> bool {

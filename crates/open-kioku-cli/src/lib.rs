@@ -437,6 +437,105 @@ mod tests {
         assert!(step.is_none());
     }
 
+    /// An `ok.toml` an earlier `ok init` wrote still excludes `**/build/**`: the doctor names
+    /// the stale globs; the defaults written now carry none.
+    #[test]
+    fn doctor_suggests_removing_stale_build_directory_excludes() {
+        let mut config = OkConfig::default();
+        assert!(stale_build_dir_excludes_step(&config).is_none());
+        config.index.exclude.push("**/build/**".into());
+        config.index.exclude.push("**/target/**".into());
+        let step = stale_build_dir_excludes_step(&config).expect("stale globs carry a step");
+        assert!(
+            step.contains("lists `**/build/**`, `**/target/**`, which an earlier `ok init` wrote"),
+            "{step}"
+        );
+    }
+
+    /// Pruned build output and installed packages are named and never warn; a pruned
+    /// build-output directory holding committed source warns at any count and is named,
+    /// because 99.9% of what was walked says nothing about the package that was not (#477).
+    #[test]
+    fn doctor_coverage_warns_only_when_a_pruned_directory_holds_tracked_source() {
+        use open_kioku_core::{Language, PruneReason, PrunedDir, SkipReason, SkipSource};
+
+        let pruned = |path: &str, reason, tracked| PrunedDir {
+            path: path.into(),
+            reason,
+            tracked_source_files: Some(tracked),
+        };
+        let mut coverage = rust_coverage_beside_policy_exclusions(
+            0,
+            SkipReason::Ignored,
+            SkipSource::GitIgnore,
+            "src",
+        );
+        for _ in 0..988 {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_indexed(&Language::Rust, false);
+        }
+        coverage.record_pruned_dirs(
+            vec![
+                // A committed bundle beside its `package.json` (strong evidence) and committed
+                // packages are listed with their counts, never counted against the source.
+                pruned("dist", PruneReason::BuildOutput, 60),
+                pruned("web/node_modules", PruneReason::Dependencies, 40),
+            ],
+            0,
+        );
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(
+            matches!(check.status, CheckStatus::Pass),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.ends_with(
+                "2 directories pruned as build output or dependencies (contents not counted): dist/, web/node_modules/"
+            ),
+            "{}",
+            check.message
+        );
+        assert!(step.is_none());
+
+        // One committed file under a pruned `tools/build/`: 1,000 of 1,001 is still above
+        // every ratio threshold, and the check warns and names the directory.
+        coverage.record_discovered(&Language::Rust);
+        coverage.record_skipped(&Language::Rust, SkipReason::Pruned);
+        coverage.record_pruned_dirs(
+            vec![
+                pruned("target", PruneReason::BuildOutput, 0),
+                pruned("tools/build", PruneReason::UndeclaredBuildDir, 1),
+                pruned("web/node_modules", PruneReason::Dependencies, 40),
+            ],
+            0,
+        );
+        assert!(!coverage.below_warn_threshold());
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(
+            matches!(check.status, CheckStatus::Warn),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains(
+                "1 git-tracked source file not indexed under undeclared build directory: tools/build/"
+            ),
+            "{}",
+            check.message
+        );
+        // The directory holding source is listed first.
+        assert!(
+            check
+                .message
+                .ends_with("3 directories pruned as build output or dependencies (contents not counted): tools/build/, target/, web/node_modules/"),
+            "{}",
+            check.message
+        );
+        let step = step.expect("pruned source carries a next step");
+        assert!(step.contains("discovery pruned `tools/build/`"), "{step}");
+    }
+
     #[test]
     fn status_markdown_bounds_quality_notes_without_hiding_the_total() {
         let notes = (0..105)

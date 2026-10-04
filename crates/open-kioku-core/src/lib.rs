@@ -3479,6 +3479,11 @@ pub enum SkipReason {
     SecretPolicy,
     SymlinkPolicy,
     Error,
+    /// A directory discovery cut from the walk as build output or installed dependencies
+    /// (`IndexCoverage::pruned`), or, in coverage, a git-tracked source file under a
+    /// directory pruned as undeclared build output (`PruneReason::UndeclaredBuildDir`), which the
+    /// index therefore does not hold.
+    Pruned,
 }
 
 #[derive(
@@ -3634,15 +3639,19 @@ impl SkipReason {
             Self::SecretPolicy => "secret-policy",
             Self::SymlinkPolicy => "symlink-policy",
             Self::Error => "error",
+            Self::Pruned => "pruned",
         }
     }
 
     /// A skip a policy chose — ignore rules, the hidden-file rule, security and
     /// vendor rules, the index mode — as opposed to one the index did not intend
-    /// (`too-large`, `binary`, `error`, `unsupported-language`). Policy exclusions are
-    /// reported beside the coverage ratio, never inside its denominator: on a
+    /// (`too-large`, `binary`, `error`, `unsupported-language`, `pruned`). Policy exclusions
+    /// are reported beside the coverage ratio, never inside its denominator: on a
     /// repository whose git-ignored agent worktrees live under a hidden directory,
     /// 1,485 hidden `.rs` files read as 24.9% coverage of a fully indexed tree.
+    ///
+    /// `pruned` is judged: in coverage it counts only git-tracked source under a directory
+    /// pruned as undeclared build output, which someone committed and the index still does not hold.
     pub fn is_policy(self) -> bool {
         matches!(
             self,
@@ -3947,16 +3956,75 @@ pub const INDEX_COVERAGE_LANGUAGE_FLOOR: usize = 50;
 /// percentage: 25 of 10,012 Java files is 99.75% and still a dropped package.
 pub const INDEX_COVERAGE_MISSING_FILES_WARN: usize = 20;
 
+/// At most this many pruned directories are named in [`IndexCoverage::pruned`]; the rest are
+/// counted in `pruned_unlisted`. A monorepo with a `node_modules` per package would otherwise
+/// put thousands of entries into every `repo_status` answer.
+pub const PRUNED_DIRS_LISTED: usize = 50;
+
+/// Why discovery cut a directory from the walk.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PruneReason {
+    /// Build output on strong evidence: a `target`, `build` or `dist` holding a `CACHEDIR.TAG`
+    /// or sitting beside its project's build manifest (`Cargo.toml`, `pom.xml`, `package.json`,
+    /// ...). Files committed under it are listed, not counted as missing: a committed `dist/`
+    /// bundle beside a `package.json` is still a bundle.
+    BuildOutput,
+    /// A `build` or `dist` directory pruned only because no module, package or build manifest
+    /// accounts for it. The weak rule: a source directory it misclassifies is plausible, so
+    /// git-tracked source under it counts as missing (`SkipReason::Pruned`).
+    UndeclaredBuildDir,
+    /// Installed packages: `node_modules`.
+    Dependencies,
+    /// A Python environment: `.venv` or `venv` holding `pyvenv.cfg` or `conda-meta`.
+    VirtualEnv,
+}
+
+impl PruneReason {
+    /// Label for summaries (`build-output`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BuildOutput => "build-output",
+            Self::UndeclaredBuildDir => "undeclared-build-dir",
+            Self::Dependencies => "dependencies",
+            Self::VirtualEnv => "virtual-env",
+        }
+    }
+
+    /// Whether git-tracked source under a directory pruned for this reason is counted as
+    /// missing from the index. Only the weak rule's guess can hide real source.
+    pub fn counts_tracked_source(self) -> bool {
+        self == Self::UndeclaredBuildDir
+    }
+}
+
+/// One directory discovery pruned, by repository-relative path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PrunedDir {
+    /// `/`-separated, relative to the repository root.
+    pub path: String,
+    pub reason: PruneReason,
+    /// Git-tracked programming-language files under the directory. `None` outside a Git work
+    /// tree, where nothing says whether the directory holds committed source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracked_source_files: Option<usize>,
+}
+
 /// What discovery found versus what the index holds, for every recognised language.
 ///
-/// `discovered` counts only files the walker visited. Two things it cannot see are
-/// counted beside it so the ratio is never read as more than it is: `pruned_dirs`,
-/// directories cut from the walk by name (`target`, `node_modules`, `dist`, `build`,
-/// `.venv`; `.git` and `.ok` are not counted, they are never user source), whose
-/// contents are unknown; and `walk_errors`, directory reads that failed, whose files
-/// were never discovered. Files whose language is unknown are not source files and
-/// are not counted; their skips remain in `skip_counts`. Files admitted to the
-/// document corpus count as indexed.
+/// `discovered` counts only files the walker visited, plus git-tracked programming-language
+/// files under a `build` or `dist` pruned only because nothing declares it (each also skipped
+/// as `pruned`, so the index visibly lacks them). Two things the walk cannot see are counted
+/// beside the ratio so it is never read as more than it is: `pruned_dirs`, directories cut
+/// from the walk as build output or dependencies (`.git` and `.ok` are not counted, they are
+/// never user source), named in `pruned`; and `walk_errors`, directory reads that failed,
+/// whose files were never discovered. Untracked build output, and anything under a
+/// directory pruned on strong evidence (a cache tag, a build manifest beside it), is never
+/// counted against the ratio. Files
+/// whose language is unknown are not source files and are not counted; their skips remain
+/// in `skip_counts`. Files admitted to the document corpus count as indexed.
 ///
 /// The ratio is `indexed` over `considered()`: discovered files minus those a policy
 /// excluded (`SkipReason::is_policy`). Policy exclusions stay in `skipped` and are
@@ -3971,10 +4039,19 @@ pub struct IndexCoverage {
     pub skipped: BTreeMap<SkipReason, usize>,
     #[serde(default)]
     pub by_language: BTreeMap<String, LanguageCoverage>,
-    /// Directories pruned by name before discovery; a real package named `build`
-    /// lands here, not in `discovered`.
+    /// Directories pruned before discovery as build output or dependencies, listed or not.
     #[serde(default)]
     pub pruned_dirs: usize,
+    /// The pruned directories by path: undeclared build directories holding tracked source first,
+    /// then by
+    /// path, at most [`PRUNED_DIRS_LISTED`]. Empty on a manifest written before paths were recorded,
+    /// where `pruned_dirs` alone says something was pruned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pruned: Vec<PrunedDir>,
+    /// Pruned directories counted in `pruned_dirs` but not in `pruned`: past the cap, or a
+    /// secret-like path that is not shown.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub pruned_unlisted: usize,
     /// Directory reads that failed (`skip_counts.error`); their files are unknown.
     #[serde(default)]
     pub walk_errors: usize,
@@ -4069,6 +4146,45 @@ impl IndexCoverage {
         if let Some(dir) = top_dir {
             *self.policy_excluded_dirs.entry(dir.to_owned()).or_default() += 1;
         }
+    }
+
+    /// Record every directory discovery pruned: `listed` by path, `unlisted` (secret-like
+    /// paths) by count. Undeclared build directories holding tracked source sort first, most
+    /// files first, so the cap never hides the ones that matter; the rest follow by path.
+    pub fn record_pruned_dirs(&mut self, mut listed: Vec<PrunedDir>, unlisted: usize) {
+        let missing_source = |dir: &PrunedDir| {
+            if dir.reason.counts_tracked_source() {
+                dir.tracked_source_files.unwrap_or(0)
+            } else {
+                0
+            }
+        };
+        listed.sort_by(|a, b| {
+            missing_source(b)
+                .cmp(&missing_source(a))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        self.pruned_dirs = listed.len() + unlisted;
+        listed.truncate(PRUNED_DIRS_LISTED);
+        self.pruned_unlisted = self.pruned_dirs - listed.len();
+        self.pruned = listed;
+    }
+
+    /// Git-tracked programming-language files the index does not hold because a directory
+    /// above them was pruned as undeclared build output.
+    pub fn pruned_source_files(&self) -> usize {
+        self.skipped.get(&SkipReason::Pruned).copied().unwrap_or(0)
+    }
+
+    /// Listed undeclared build directories that hold tracked source, most first.
+    pub fn pruned_source_dirs(&self) -> Vec<&PrunedDir> {
+        self.pruned
+            .iter()
+            .filter(|dir| {
+                dir.reason.counts_tracked_source()
+                    && dir.tracked_source_files.is_some_and(|count| count > 0)
+            })
+            .collect()
     }
 
     /// Discovered files a policy excluded, across every recognised language.
@@ -4421,16 +4537,49 @@ impl IndexCoverage {
     /// What the ratio does not cover, phrased for a summary line or a doctor check.
     pub fn blind_spot_caveats(&self) -> Vec<String> {
         let mut caveats = Vec::new();
-        if self.pruned_dirs > 0 {
+        let source_dirs = self.pruned_source_dirs();
+        if self.pruned_source_files() > 0 {
             caveats.push(format!(
-                "{} {} pruned by name (contents not counted)",
-                group_thousands(self.pruned_dirs),
-                if self.pruned_dirs == 1 {
+                "{} git-tracked source {} not indexed under undeclared build {}: {}",
+                group_thousands(self.pruned_source_files()),
+                if self.pruned_source_files() == 1 {
+                    "file"
+                } else {
+                    "files"
+                },
+                if source_dirs.len() == 1 {
                     "directory"
                 } else {
                     "directories"
-                }
+                },
+                name_some(
+                    source_dirs.iter().map(|dir| format!("{}/", dir.path)),
+                    source_dirs.len()
+                )
             ));
+        }
+        if self.pruned_dirs > 0 {
+            let noun = if self.pruned_dirs == 1 {
+                "directory"
+            } else {
+                "directories"
+            };
+            if self.pruned.is_empty() && self.pruned_unlisted == 0 {
+                // Written before pruned paths were recorded: the count is all there is.
+                caveats.push(format!(
+                    "{} {noun} pruned by name (contents not counted)",
+                    group_thousands(self.pruned_dirs)
+                ));
+            } else {
+                caveats.push(format!(
+                    "{} {noun} pruned as build output or dependencies (contents not counted): {}",
+                    group_thousands(self.pruned_dirs),
+                    name_some(
+                        self.pruned.iter().map(|dir| format!("{}/", dir.path)),
+                        self.pruned_dirs
+                    )
+                ));
+            }
         }
         if self.walk_errors > 0 {
             caveats.push(format!(
@@ -4454,6 +4603,18 @@ fn language_key_is_programming(key: &str) -> bool {
         key,
         "rust" | "java" | "type_script" | "java_script" | "python" | "go" | "sql"
     )
+}
+
+/// The first three of `names`, then how many of `total` were left out: `target/, dist/ and
+/// 4 more`. A summary line names enough to act on; the full list is in the coverage record.
+fn name_some(names: impl Iterator<Item = String>, total: usize) -> String {
+    let shown = names.take(3).collect::<Vec<_>>();
+    let rest = total.saturating_sub(shown.len());
+    match (shown.is_empty(), rest) {
+        (true, _) => format!("{} unlisted", group_thousands(rest)),
+        (false, 0) => shown.join(", "),
+        (false, _) => format!("{} and {} more", shown.join(", "), group_thousands(rest)),
+    }
 }
 
 /// `25 secret-policy, 5 too-large`
@@ -7640,6 +7801,40 @@ mod index_coverage_tests {
             coverage.summary_line(),
             "1 of 1 programming-language files indexed (100.0%); 1 of 1 recognised files indexed (100.0%) overall; 2 directories pruned by name (contents not counted); 1 walk error (files under unreadable directories were never discovered)"
         );
+    }
+
+    /// Pruned directories are named, capped at `PRUNED_DIRS_LISTED` with the rest counted,
+    /// and a manifest written before paths were recorded reads as before.
+    #[test]
+    fn pruned_directories_are_named_and_capped() {
+        let mut coverage = IndexCoverage::default();
+        coverage.record_discovered(&Language::Go);
+        coverage.record_indexed(&Language::Go, false);
+        let dirs = (0..PRUNED_DIRS_LISTED + 5)
+            .map(|index| PrunedDir {
+                path: format!("svc{index:03}/node_modules"),
+                reason: PruneReason::Dependencies,
+                tracked_source_files: Some(0),
+            })
+            .collect::<Vec<_>>();
+        coverage.record_pruned_dirs(dirs, 2);
+        assert_eq!(coverage.pruned_dirs, PRUNED_DIRS_LISTED + 7);
+        assert_eq!(coverage.pruned.len(), PRUNED_DIRS_LISTED);
+        assert_eq!(coverage.pruned_unlisted, 7);
+        assert_eq!(coverage.pruned_source_files(), 0);
+        assert!(coverage.summary_line().ends_with(
+            "57 directories pruned as build output or dependencies (contents not counted): svc000/node_modules/, svc001/node_modules/, svc002/node_modules/ and 54 more"
+        ));
+
+        let mut encoded = serde_json::to_value(&coverage).unwrap();
+        let object = encoded.as_object_mut().unwrap();
+        object.remove("pruned").unwrap();
+        object.remove("pruned_unlisted").unwrap();
+        let legacy: IndexCoverage = serde_json::from_value(encoded).unwrap();
+        assert!(legacy.pruned.is_empty());
+        assert!(legacy
+            .summary_line()
+            .ends_with("57 directories pruned by name (contents not counted)"));
     }
 
     /// The motivating shape of a real repository: every source file indexed, while

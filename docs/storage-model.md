@@ -284,8 +284,8 @@ copy of the artifact:
   with `HEAD` (an ancestor, a descendant, or a diverged branch) is imported with the number
   of commits behind and ahead and the number of files whose working-tree content differs
   from it (tracked files changed since it, committed or not, and untracked files Git does
-  not ignore, leaving out the directories discovery prunes: `.ok`, `.git`, `target`,
-  `node_modules`, `dist`, `build`, `.venv`). An artifact whose relation cannot be established — its commit is not in
+  not ignore, leaving out the directories discovery prunes: `.ok`, `.git`, and build output
+  and installed packages as `docs/indexing-pipeline.md`, "Pruned directories", judges them). An artifact whose relation cannot be established — its commit is not in
   this repository, shares no history with `HEAD`, or was never recorded, or the directory has
   no `HEAD` — is refused, and the current index stays published; `--allow-foreign` imports it
   marked `foreign`. `ok index --from-snapshot auto` applies the same refusal and indexes from

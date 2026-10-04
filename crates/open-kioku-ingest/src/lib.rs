@@ -7,9 +7,9 @@ use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, DocumentSection, DocumentType, EvidenceSourceType, File,
     FileId, GitCochangeEdge, GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType,
     HistoryRecordId, HistorySnapshot, Import, IndexCoverage, IndexManifest, IndexMode,
-    IndexPhaseReport, IndexQuality, Language, LineRange, QualityNote, QualityNoteKind, Repository,
-    RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol, SymbolId, SymbolOccurrence,
-    TestExclusionReason, TestTarget, HISTORY_SCHEMA_VERSION,
+    IndexPhaseReport, IndexQuality, Language, LineRange, PruneReason, PrunedDir, QualityNote,
+    QualityNoteKind, Repository, RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol,
+    SymbolId, SymbolOccurrence, TestExclusionReason, TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -24,13 +24,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod cargo_facts;
 pub mod derived;
 mod git_ignore;
 pub mod path_policy;
+mod prune;
 
 /// Trim a freshly formatted evidence message to its exact length.
 ///
@@ -1518,20 +1519,24 @@ impl Indexer {
         builder.git_ignore(false).git_exclude(false).parents(false);
         builder.ignore(false);
         builder.follow_links(false);
-        // Pruned directories never reach the ledger, so count them: a real `build/`
-        // or `dist/` package would otherwise read as full coverage.
-        let pruned_dirs = Arc::new(AtomicUsize::new(0));
+        // Pruned directories never reach the per-file ledger, so each is recorded here by path
+        // and reason: a source directory pruned by mistake must be nameable, not a bare count.
+        let pruned = Arc::new(Mutex::new(Vec::<(PathBuf, PruneReason)>::new()));
         builder.filter_entry({
-            let pruned_dirs = Arc::clone(&pruned_dirs);
+            let pruned = Arc::clone(&pruned);
+            let root = root.to_path_buf();
             move |entry| {
-                let path = entry.path();
-                if !is_heavy_discovery_dir(path) {
-                    return true;
+                let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+                match prune::classify(&root, entry.path(), is_dir) {
+                    prune::DirVerdict::Walk => true,
+                    prune::DirVerdict::Tooling => false,
+                    prune::DirVerdict::Prune(reason) => {
+                        if let Ok(mut pruned) = pruned.lock() {
+                            pruned.push((entry.path().to_path_buf(), reason));
+                        }
+                        false
+                    }
                 }
-                if entry.file_type().is_some_and(|kind| kind.is_dir()) && !is_tooling_dir(path) {
-                    pruned_dirs.fetch_add(1, Ordering::Relaxed);
-                }
-                false
             }
         });
         let mut files = Vec::new();
@@ -1786,6 +1791,9 @@ impl Indexer {
                 );
             }
         }
+        // The walk is over; the filter holds the only other handle and is never called again.
+        let pruned = std::mem::take(&mut *pruned.lock().unwrap_or_else(|err| err.into_inner()));
+        ledger.record_pruned_dirs(root, &policy, pruned, &mut warnings);
         let fast_skipped = ledger
             .skipped_paths
             .iter()
@@ -1814,7 +1822,6 @@ impl Indexer {
                 .skipped(ledger.skipped_paths.len())
                 .warnings(warnings.clone()),
         );
-        ledger.coverage.pruned_dirs = pruned_dirs.load(Ordering::Relaxed);
         let ScanLedger {
             skipped_paths,
             coverage,
@@ -1907,6 +1914,116 @@ impl ScanLedger {
                     .record_policy_exclusion(language, source, top_dir.as_deref());
             }
         }
+    }
+}
+
+impl ScanLedger {
+    /// Record the directories the walk pruned: each by path in `skipped_paths` and in coverage,
+    /// with the Git-tracked programming-language files under it counted. Tracked source under a
+    /// `build` or `dist` pruned only because nothing declares it may be a misclassified source
+    /// directory, so each such file is discovered and skipped (`pruned`, or the policy that
+    /// excludes it anyway). Under a directory pruned on strong evidence (a cache tag, a build
+    /// manifest beside it, installed packages) committed files are a published bundle or
+    /// vendored packages: counted on the directory, never against the ratio.
+    fn record_pruned_dirs(
+        &mut self,
+        root: &Path,
+        policy: &path_policy::IndexPathPolicy,
+        mut pruned: Vec<(PathBuf, PruneReason)>,
+        warnings: &mut Vec<String>,
+    ) {
+        if pruned.is_empty() {
+            return;
+        }
+        pruned.sort();
+        let tracked = match git_ignore::tracked_files(root) {
+            Ok(tracked) => tracked,
+            Err(err) => {
+                warnings.push(format!(
+                    "could not list tracked files under pruned directories, so whether they hold committed source is unknown: {err}"
+                ));
+                None
+            }
+        };
+        let rel_dirs = pruned
+            .iter()
+            .map(|(path, _)| path.strip_prefix(root).unwrap_or(path).to_path_buf())
+            .collect::<Vec<_>>();
+        let index_of = rel_dirs
+            .iter()
+            .enumerate()
+            .map(|(index, rel)| (rel.as_path(), index))
+            .collect::<HashMap<_, _>>();
+        let mut tracked_counts = vec![0usize; pruned.len()];
+        for file in tracked.iter().flatten() {
+            // Pruned directories never nest: the walk stopped at the outermost one.
+            let Some(index) = file
+                .ancestors()
+                .skip(1)
+                .find_map(|ancestor| index_of.get(ancestor).copied())
+            else {
+                continue;
+            };
+            let language = detect_language(file);
+            if !(is_supported_code(&language) && language.is_programming()) {
+                continue;
+            }
+            tracked_counts[index] += 1;
+            if !pruned[index].1.counts_tracked_source() {
+                continue;
+            }
+            self.discovered(&language);
+            let absolute = root.join(file);
+            match policy.exclusion(file) {
+                Some(exclusion) => self.skip(
+                    root,
+                    &absolute,
+                    &language,
+                    exclusion.reason,
+                    exclusion.source,
+                    exclusion.safe_to_show,
+                ),
+                None => self.skip(
+                    root,
+                    &absolute,
+                    &language,
+                    SkipReason::Pruned,
+                    SkipSource::Detector,
+                    true,
+                ),
+            }
+        }
+        let mut listed = Vec::with_capacity(pruned.len());
+        let mut unlisted = 0;
+        for ((path, reason), (rel, tracked_source)) in
+            pruned.iter().zip(rel_dirs.iter().zip(tracked_counts))
+        {
+            let safe_to_show = policy
+                .security_exclusion(rel)
+                .is_none_or(|exclusion| exclusion.safe_to_show);
+            push_skip(
+                root,
+                path,
+                SkipReason::Pruned,
+                SkipSource::Detector,
+                safe_to_show,
+                &mut self.skipped_paths,
+            );
+            if !safe_to_show {
+                unlisted += 1;
+                continue;
+            }
+            listed.push(PrunedDir {
+                path: rel
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                reason: *reason,
+                tracked_source_files: tracked.is_some().then_some(tracked_source),
+            });
+        }
+        self.coverage.record_pruned_dirs(listed, unlisted);
     }
 }
 
@@ -3244,7 +3361,13 @@ fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<ScopedIgnoreMatc
         .parents(false)
         .ignore(false)
         .follow_links(false)
-        .filter_entry(|entry| !is_heavy_discovery_dir(entry.path()))
+        .filter_entry({
+            let root = root.to_path_buf();
+            move |entry| {
+                let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+                prune::classify(&root, entry.path(), is_dir) == prune::DirVerdict::Walk
+            }
+        })
         .build()
     {
         let entry = match entry {
@@ -3281,23 +3404,6 @@ fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<ScopedIgnoreMatc
         layers.push((scope, matcher));
     }
     Ok(ScopedIgnoreMatcher { layers })
-}
-
-/// Pruned directories that are never user source and so are not counted as blind spots.
-fn is_tooling_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| matches!(name, ".git" | ".ok"))
-}
-
-fn is_heavy_discovery_dir(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    matches!(
-        name,
-        ".git" | ".ok" | "target" | "node_modules" | "dist" | "build" | ".venv"
-    )
 }
 
 fn push_skip(
