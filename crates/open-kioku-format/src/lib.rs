@@ -780,6 +780,8 @@ mod tests {
                 indirect_impacts_omitted: 0,
                 proven_impact: Vec::new(),
                 possible_impact: Vec::new(),
+                possible_impact_omitted: 0,
+                relationship_impact_caveats: Vec::new(),
                 target: "src/auth.rs".into(),
                 direct_impacts: Vec::new(),
                 indirect_impacts: Vec::new(),

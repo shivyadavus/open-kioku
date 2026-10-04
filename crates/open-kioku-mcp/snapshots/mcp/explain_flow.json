@@ -4,7 +4,7 @@
   "result": {
     "caveats": [
       "flows are derived only from persisted endpoint nodes and directed CALLS graph edges",
-      "each flow includes up to four directed call hops; repositories without endpoint or call evidence return no flow entries"
+      "each flow includes up to four directed call hops, and ends at the first hop no relationship proof establishes; repositories without endpoint or call evidence return no flow entries"
     ],
     "components": [],
     "flows": [
@@ -27,6 +27,9 @@
             "to": "symbol:symbol-archive"
           }
         ],
+        "edge_authority": {
+          "edge-publish-calls-archive": "heuristic"
+        },
         "entrypoint": {
           "file_id": "file-billing",
           "id": "route:publish-invoice",

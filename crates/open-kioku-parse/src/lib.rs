@@ -1020,6 +1020,7 @@ fn analysis_fact(
         symbol_id: symbol.map(|symbol| symbol.id.clone()),
         target,
         target_kind,
+        target_symbol_id: None,
         edge_type,
         range: Some(LineRange::single(line_number)),
         confidence: Confidence::Medium,

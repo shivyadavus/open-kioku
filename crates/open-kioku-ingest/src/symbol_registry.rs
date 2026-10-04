@@ -1859,6 +1859,8 @@ fn fact_for_resolution(
         symbol_id: chunk.symbol_id.clone(),
         target: symbol.qualified_name.clone(),
         target_kind: graph_node_type(symbol),
+        // The resolved symbol itself, so the edge ends at its node (#475).
+        target_symbol_id: Some(symbol.id.clone()),
         edge_type,
         range: Some(open_kioku_core::LineRange::single(
             chunk

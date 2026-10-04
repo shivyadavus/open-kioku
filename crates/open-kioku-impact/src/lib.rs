@@ -9,8 +9,8 @@ use open_kioku_errors::{OkError, Result};
 use open_kioku_evidence::{RelationshipUseClass, RelationshipUsePolicy};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_storage::{GraphStore, HistoryStore, MetadataStore, SearchIndex};
-use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 mod cargo;
 use cargo::{CargoWorkspace, Membership, CRATE_IMPORT_SIGNAL, CRATE_IMPORT_USE_SIGNAL};
@@ -476,11 +476,11 @@ impl<'a> ImpactEngine<'a> {
             .as_ref()
             .map(|signals| history_signal_evidence(signals, path))
             .unwrap_or_default();
-        let (proven_impact, possible_impact) = match (self.graph_store, &file) {
+        let relationships = match (self.graph_store, &file) {
             (Some(graph), Some(file)) => {
                 relationship_impacts(graph, self.store, file, &target_symbols)?
             }
-            _ => (Vec::new(), Vec::new()),
+            _ => RelationshipImpacts::default(),
         };
         let mut report = ImpactReport {
             target: path.display().to_string(),
@@ -488,8 +488,10 @@ impl<'a> ImpactEngine<'a> {
             indirect_impacts: indirect,
             direct_impacts_omitted: omitted_direct,
             indirect_impacts_omitted: omitted_indirect,
-            proven_impact,
-            possible_impact,
+            proven_impact: relationships.proven,
+            possible_impact: relationships.possible,
+            possible_impact_omitted: relationships.possible_omitted,
+            relationship_impact_caveats: relationships.caveats,
             risk_report: RiskReport {
                 // A target the index does not hold was not measured; a score of zero for it
                 // is absence, not low risk, and `level` is the field consumers branch on.
@@ -1078,12 +1080,21 @@ fn is_dependency_edge_type(edge_type: &GraphEdgeType) -> bool {
 /// Classify inbound relationship edges around the changed file into proven versus possible
 /// impact. Authority is recomputed from typed proofs through the shared fail-closed policy, so a
 /// heuristic same-name edge can only ever surface as a possibility.
+/// What `relationship_impacts` found, and what its bounded reads left unread.
+#[derive(Default)]
+struct RelationshipImpacts {
+    proven: Vec<RelationshipImpact>,
+    possible: Vec<RelationshipImpact>,
+    possible_omitted: usize,
+    caveats: Vec<String>,
+}
+
 fn relationship_impacts(
     graph: &dyn GraphStore,
     store: &dyn MetadataStore,
     target_file: &File,
     symbols: &[Symbol],
-) -> Result<(Vec<RelationshipImpact>, Vec<RelationshipImpact>)> {
+) -> Result<RelationshipImpacts> {
     let policy = RelationshipUsePolicy::proven_and_possible();
     let files_by_id = store
         .list_files(usize::MAX, 0)?
@@ -1101,9 +1112,21 @@ fn relationship_impacts(
         })
         .collect::<HashMap<String, FileId>>();
 
+    let mut caveats = Vec::new();
     let mut seeds: Vec<(NodeId, String)> = Vec::new();
     if let Ok(node_id) = identity::try_file_node_id(&target_file.path) {
         seeds.push((node_id, target_file.path.display().to_string()));
+    }
+    let own_symbols = symbols
+        .iter()
+        .filter(|symbol| symbol.file_id == target_file.id)
+        .count();
+    if own_symbols > RELATIONSHIP_IMPACT_SYMBOL_SEEDS {
+        caveats.push(format!(
+            "relationship impact read the dependents of {RELATIONSHIP_IMPACT_SYMBOL_SEEDS} of the \
+             changed file's {own_symbols} symbols; dependents of the other {} were not read",
+            own_symbols - RELATIONSHIP_IMPACT_SYMBOL_SEEDS
+        ));
     }
     for symbol in symbols
         .iter()
@@ -1118,6 +1141,7 @@ fn relationship_impacts(
 
     let mut proven = Vec::new();
     let mut possible = Vec::new();
+    let mut full_windows = 0usize;
     for (node_id, source_label) in &seeds {
         // A store with no graph support has no relationship evidence to offer, and an empty
         // list is the documented answer for that. Every other failure — a graph awaiting
@@ -1126,7 +1150,10 @@ fn relationship_impacts(
         // Two surfaces (`ok impact`, MCP `impact_analysis`) answered `proven_impact: []` from
         // an index whose edges had been discarded on open before this propagated.
         let (nodes, edges) = match inbound_impact_edges(graph, node_id, &files_by_path) {
-            Ok(read) => read,
+            Ok(read) => {
+                full_windows += read.full_windows;
+                (read.nodes, read.edges)
+            }
             Err(OkError::Unsupported(_)) => continue,
             Err(err) => return Err(err),
         };
@@ -1151,6 +1178,14 @@ fn relationship_impacts(
         }
     }
 
+    if full_windows > 0 {
+        caveats.push(format!(
+            "{full_windows} inbound edge read(s) stopped at the {RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT}-edge \
+             limit for one edge type of one changed symbol, so further dependents through them \
+             were not read"
+        ));
+    }
+
     for list in [&mut proven, &mut possible] {
         list.sort_by(|a, b| {
             (&a.path, &a.symbol, &a.edge_type).cmp(&(&b.path, &b.symbol, &b.edge_type))
@@ -1158,9 +1193,64 @@ fn relationship_impacts(
         list.dedup_by(|a, b| {
             a.path == b.path && a.symbol == b.symbol && a.edge_type == b.edge_type
         });
-        list.truncate(RELATIONSHIP_IMPACT_LIMIT);
     }
-    Ok((proven, possible))
+    if proven.len() > RELATIONSHIP_IMPACT_LIMIT {
+        caveats.push(format!(
+            "proven_impact lists {RELATIONSHIP_IMPACT_LIMIT} of {} proven dependents read",
+            proven.len()
+        ));
+    }
+    proven.truncate(RELATIONSHIP_IMPACT_LIMIT);
+    // A dependent the report lists as proven, through any changed symbol and any edge type, is
+    // not also a possibility: the weaker entry would only repeat the dependent, and take a slot
+    // in the capped list from one that is not proven at all. Compared after the cut, so an entry
+    // is removed only for a proven entry the report actually lists.
+    let proven_dependents = proven
+        .iter()
+        .map(|impact| (&impact.path, &impact.symbol))
+        .collect::<HashSet<_>>();
+    possible.retain(|impact| !proven_dependents.contains(&(&impact.path, &impact.symbol)));
+    // Possibilities are many more than proofs where name matches reach real symbols: a changed
+    // file's own symbols use each other (cut by path, 502 of the 835 entries listed for 43
+    // files of this repository were inside the changed file), and one dependent file can name
+    // the change from dozens of symbols. Cut by path alone, the cap filled with both and dropped
+    // whole dependent files, such as a test file named after the change. A dependent file is
+    // what the blast radius is about, so the cap keeps each other file's first entry, then each
+    // one's second, and so on, in path order, and the changed file's own last; and it says how
+    // many it cut, so a capped list is not read as the whole of it. The count is of what was
+    // read: the symbol seeds and per-type edge windows above cut first, so it is a lower bound,
+    // and the caveats say when they did.
+    let mut seen_per_path = HashMap::<PathBuf, usize>::new();
+    let spread = possible
+        .iter()
+        .map(|impact| {
+            let nth = seen_per_path.entry(impact.path.clone()).or_default();
+            *nth += 1;
+            (impact.path == target_file.path, *nth)
+        })
+        .collect::<Vec<_>>();
+    let mut keyed = spread.into_iter().zip(possible).collect::<Vec<_>>();
+    keyed.sort_by_key(|(key, _)| *key);
+    let mut possible = keyed
+        .into_iter()
+        .map(|(_, impact)| impact)
+        .collect::<Vec<_>>();
+    let possible_omitted = possible.len().saturating_sub(RELATIONSHIP_IMPACT_LIMIT);
+    possible.truncate(RELATIONSHIP_IMPACT_LIMIT);
+    Ok(RelationshipImpacts {
+        proven,
+        possible,
+        possible_omitted,
+        caveats,
+    })
+}
+
+/// One seed's inbound impact edges, with the nodes they come from, and how many of the per-type
+/// reads came back at their limit and so may have left edges unread.
+struct InboundImpactEdges {
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+    full_windows: usize,
 }
 
 /// The edges into `node_id` that can carry impact, read by type, with the nodes they come from.
@@ -1178,7 +1268,7 @@ fn inbound_impact_edges(
     graph: &dyn GraphStore,
     node_id: &NodeId,
     files_by_path: &HashMap<String, FileId>,
-) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)> {
+) -> Result<InboundImpactEdges> {
     const IMPACT_EDGE_TYPES: [GraphEdgeType; 8] = [
         GraphEdgeType::Calls,
         GraphEdgeType::References,
@@ -1191,6 +1281,7 @@ fn inbound_impact_edges(
     ];
     debug_assert!(IMPACT_EDGE_TYPES.iter().all(is_impacted_by_edge_type));
     let mut edges = Vec::new();
+    let mut full_windows = 0;
     for edge_type in IMPACT_EDGE_TYPES {
         // Derived edges join two file nodes, so a symbol seed never has one.
         if edge_type == GraphEdgeType::DerivedFrom && !node_id.0.starts_with("file:") {
@@ -1203,9 +1294,19 @@ fn inbound_impact_edges(
             RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT,
             0,
         ) {
-            Ok(batch) => edges.extend(batch),
+            Ok(batch) => {
+                full_windows += usize::from(batch.len() >= RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
+                edges.extend(batch);
+            }
             Err(OkError::Unsupported(_)) => {
-                return graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
+                let (nodes, edges) =
+                    graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT)?;
+                let full_windows = usize::from(edges.len() >= RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
+                return Ok(InboundImpactEdges {
+                    nodes,
+                    edges,
+                    full_windows,
+                });
             }
             Err(err) => return Err(err),
         }
@@ -1230,7 +1331,11 @@ fn inbound_impact_edges(
             nodes.push(node);
         }
     }
-    Ok((nodes, edges))
+    Ok(InboundImpactEdges {
+        nodes,
+        edges,
+        full_windows,
+    })
 }
 
 /// Rebuild the `GraphNode` for a `file:<path>` id from the indexed files. Used for edges fetched
@@ -1275,7 +1380,9 @@ fn relationship_impact_entry(
     proof_kinds.dedup();
     let ambiguous = open_kioku_evidence::edge_is_ambiguous(edge);
     let proof_summary = if proof_kinds.is_empty() {
-        "no structural proof".to_string()
+        // With no proof to name, the pass that inferred the edge is what a reader can weigh it
+        // by: a symbol-registry name match reads differently from a parsed occurrence.
+        format!("no structural proof; inferred by {}", edge.evidence.source)
     } else {
         proof_kinds
             .iter()
@@ -2319,6 +2426,7 @@ mod tests {
             symbol_id: None,
             target: target.into(),
             target_kind: GraphNodeType::File,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::SimilarTo,
             range: None,
             confidence: Confidence::High,
@@ -2764,6 +2872,7 @@ mod tests {
             symbol_id: None,
             target: historical_neighbor.path.display().to_string(),
             target_kind: GraphNodeType::File,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::SimilarTo,
             range: None,
             confidence: Confidence::High,
@@ -2853,6 +2962,7 @@ mod tests {
             symbol_id: None,
             target: "GET /v1/orders".into(),
             target_kind: GraphNodeType::Endpoint,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::ExposesEndpoint,
             range: Some(LineRange { start: 1, end: 1 }),
             confidence: Confidence::Medium,
@@ -2943,6 +3053,7 @@ mod tests {
             symbol_id: Some(SymbolId::new("hot-symbol")),
             target: "complexity:crate::hot_path".into(),
             target_kind: GraphNodeType::Resource,
+            target_symbol_id: None,
             edge_type: GraphEdgeType::BelongsTo,
             range: Some(LineRange { start: 1, end: 12 }),
             confidence: Confidence::Medium,
@@ -3175,6 +3286,9 @@ mod tests {
             "billing::issue_token",
             &unrelated_file,
         );
+        // A second symbol of the target file, which the proven caller also reaches through a
+        // proof-less edge of another type: a second seed reaching the same dependent.
+        let target_type = make_symbol("symbol:auth::Token", "Token", "auth::Token", &target_file);
 
         let manifest = IndexManifest {
             analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
@@ -3187,7 +3301,7 @@ mod tests {
                 indexed_at: None,
             },
             file_count: 3,
-            symbol_count: 3,
+            symbol_count: 4,
             chunk_count: 0,
             indexed_at: Utc::now(),
             schema_version: 1,
@@ -3206,6 +3320,7 @@ mod tests {
                 ],
                 symbols: &[
                     target_symbol.clone(),
+                    target_type.clone(),
                     caller_symbol.clone(),
                     unrelated_symbol.clone(),
                 ],
@@ -3232,6 +3347,7 @@ mod tests {
             symbol_node(&target_symbol, &target_file),
             symbol_node(&caller_symbol, &caller_file),
             symbol_node(&unrelated_symbol, &unrelated_file),
+            symbol_node(&target_type, &target_file),
         ];
 
         let target_node_id = identity::symbol_node_id(&target_symbol);
@@ -3259,8 +3375,16 @@ mod tests {
             evidence: Evidence::default(),
             ..Default::default()
         };
+        let repeated_edge = GraphEdge {
+            id: open_kioku_core::EdgeId::new("edge:repeated"),
+            from: identity::symbol_node_id(&caller_symbol),
+            to: identity::symbol_node_id(&target_type),
+            edge_type: GraphEdgeType::Calls,
+            evidence: Evidence::default(),
+            ..Default::default()
+        };
         store
-            .replace_graph(&nodes, &[proven_edge, heuristic_edge])
+            .replace_graph(&nodes, &[proven_edge, heuristic_edge, repeated_edge])
             .unwrap();
 
         let report = ImpactEngine::new(&store)
@@ -3294,6 +3418,19 @@ mod tests {
                 .any(|impact| impact.path == Path::new("src/billing.rs")),
             "heuristic same-name edge must never be presented as proven impact"
         );
+        assert!(
+            !report
+                .possible_impact
+                .iter()
+                .any(|impact| impact.path == Path::new("src/session.rs")),
+            "a dependent listed as proven is not repeated as a possibility: {:?}",
+            report.possible_impact
+        );
+        // A proof-less entry names the pass that inferred it.
+        assert!(report
+            .possible_impact
+            .iter()
+            .all(|impact| impact.reason.contains("no structural proof; inferred by")));
     }
 
     #[test]
@@ -3568,6 +3705,274 @@ mod tests {
                 .any(|impact| impact.path == Path::new("src/caller.rs")),
             "{:?}",
             report.possible_impact
+        );
+    }
+
+    /// Name matches reach real symbols: a changed file's own symbols use each other, and one
+    /// dependent file can name the change from many symbols. The cap on possibilities keeps every
+    /// other dependent file, even one whose path sorts last behind a file that alone would fill
+    /// it, puts the changed file's own last, and counts what it cut.
+    #[test]
+    fn the_possible_impact_cap_keeps_other_files_first_and_counts_the_rest() {
+        use open_kioku_core::{identity, GraphEdge, GraphNode};
+
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let make_file = |id: &str, path: &str| File {
+            id: FileId::new(id),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: id.into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let target = make_file("target", "src/a_ledger.rs");
+        let caller = make_file("caller", "src/z_books.rs");
+        let busy = make_file("busy", "src/b_audit.rs");
+        let settle = Symbol {
+            id: SymbolId::new("symbol:ledger::settle"),
+            name: "settle".into(),
+            qualified_name: "ledger::settle".into(),
+            kind: SymbolKind::Function,
+            file_id: target.id.clone(),
+            range: Some(LineRange { start: 1, end: 3 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
+        };
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: repo_id.clone(),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 3,
+            symbol_count: 1,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+            snapshot: None,
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[target.clone(), caller.clone(), busy.clone()],
+                symbols: std::slice::from_ref(&settle),
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let settle_node = identity::symbol_node_id(&settle);
+        let symbol_node = |id: &str, file: &File| GraphNode {
+            id: open_kioku_core::NodeId::new(format!("symbol:{id}")),
+            node_type: GraphNodeType::Function,
+            label: id.into(),
+            file_id: Some(file.id.clone()),
+            symbol_id: Some(SymbolId::new(id)),
+            ..Default::default()
+        };
+        // A proof-less call, as the symbol registry draws one.
+        let guess = |from: &GraphNode| GraphEdge {
+            id: open_kioku_core::EdgeId::new(format!("edge:{}", from.label)),
+            from: from.id.clone(),
+            to: settle_node.clone(),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        };
+        let mut nodes = vec![GraphNode {
+            id: settle_node.clone(),
+            node_type: GraphNodeType::Function,
+            label: settle.qualified_name.clone(),
+            file_id: Some(target.id.clone()),
+            symbol_id: Some(settle.id.clone()),
+            ..Default::default()
+        }];
+        // Every edge is read: the per-type window around `settle` holds them all.
+        let (own, busy_callers) = (5, RELATIONSHIP_IMPACT_LIMIT + 5);
+        assert!(own + busy_callers < RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT);
+        let mut edges = Vec::new();
+        for index in 0..own {
+            let node = symbol_node(&format!("ledger::entry_{index:02}"), &target);
+            edges.push(guess(&node));
+            nodes.push(node);
+        }
+        for index in 0..busy_callers {
+            let node = symbol_node(&format!("audit::trace_{index:02}"), &busy);
+            edges.push(guess(&node));
+            nodes.push(node);
+        }
+        let close = symbol_node("books::close", &caller);
+        edges.push(guess(&close));
+        nodes.push(close);
+        store.replace_graph(&nodes, &edges).unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .with_graph_store(Some(&store))
+            .for_file(Path::new("src/a_ledger.rs"))
+            .unwrap();
+        let paths = report
+            .possible_impact
+            .iter()
+            .map(|impact| impact.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), RELATIONSHIP_IMPACT_LIMIT);
+        assert_eq!(
+            paths[..2],
+            ["src/b_audit.rs", "src/z_books.rs"],
+            "{paths:?}"
+        );
+        assert!(
+            !paths.contains(&"src/a_ledger.rs".to_string()),
+            "the changed file's own symbols go last: {paths:?}"
+        );
+        assert_eq!(
+            report.possible_impact_omitted,
+            own + busy_callers + 1 - RELATIONSHIP_IMPACT_LIMIT
+        );
+        // Every edge was read, so the count is the whole of what the cap cut.
+        assert!(
+            report.relationship_impact_caveats.is_empty(),
+            "{:?}",
+            report.relationship_impact_caveats
+        );
+    }
+
+    /// A changed symbol with more inbound edges of one type than impact reads: the read stops at
+    /// its limit, and the report says so rather than reading as every dependent.
+    #[test]
+    fn a_full_inbound_read_is_a_relationship_impact_caveat() {
+        use open_kioku_core::{identity, GraphEdge, GraphNode};
+
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let file = |id: &str, path: &str| File {
+            id: FileId::new(id),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: id.into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let target = file("target", "src/ledger.rs");
+        let caller = file("caller", "src/books.rs");
+        let settle = Symbol {
+            id: SymbolId::new("symbol:ledger::settle"),
+            name: "settle".into(),
+            qualified_name: "ledger::settle".into(),
+            kind: SymbolKind::Function,
+            file_id: target.id.clone(),
+            range: Some(LineRange { start: 1, end: 3 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
+        };
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: repo_id.clone(),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 2,
+            symbol_count: 1,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+            snapshot: None,
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[target.clone(), caller.clone()],
+                symbols: std::slice::from_ref(&settle),
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        let settle_node = identity::symbol_node_id(&settle);
+        let mut nodes = vec![GraphNode {
+            id: settle_node.clone(),
+            node_type: GraphNodeType::Function,
+            label: settle.qualified_name.clone(),
+            file_id: Some(target.id.clone()),
+            symbol_id: Some(settle.id.clone()),
+            ..Default::default()
+        }];
+        let mut edges = Vec::new();
+        for index in 0..(RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT + 5) {
+            let id = format!("books::close_{index:02}");
+            let node = GraphNode {
+                id: open_kioku_core::NodeId::new(format!("symbol:{id}")),
+                node_type: GraphNodeType::Function,
+                label: id.clone(),
+                file_id: Some(caller.id.clone()),
+                symbol_id: Some(SymbolId::new(id)),
+                ..Default::default()
+            };
+            edges.push(GraphEdge {
+                id: open_kioku_core::EdgeId::new(format!("edge:{index:02}")),
+                from: node.id.clone(),
+                to: settle_node.clone(),
+                edge_type: GraphEdgeType::Calls,
+                ..Default::default()
+            });
+            nodes.push(node);
+        }
+        store.replace_graph(&nodes, &edges).unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .with_graph_store(Some(&store))
+            .for_file(Path::new("src/ledger.rs"))
+            .unwrap();
+        assert!(
+            report
+                .relationship_impact_caveats
+                .iter()
+                .any(|caveat| caveat.contains("40-edge limit")),
+            "{:?}",
+            report.relationship_impact_caveats
         );
     }
 

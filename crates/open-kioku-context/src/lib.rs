@@ -1262,7 +1262,7 @@ fn select_context_units(
             let safety_priority = if authority == RetrievalAuthority::Exact {
                 2
             } else if sources.contains(&RetrievalSourceKind::Validation)
-                || sources.contains(&RetrievalSourceKind::Graph)
+                || is_evidenced_graph_context(authority, &sources)
             {
                 1
             } else {
@@ -1337,7 +1337,18 @@ fn is_high_value_context(
 ) -> bool {
     authority == RetrievalAuthority::Exact
         || sources.contains(&RetrievalSourceKind::Validation)
-        || sources.contains(&RetrievalSourceKind::Graph)
+        || is_evidenced_graph_context(authority, sources)
+}
+
+/// A graph neighbour earns the graph's priority only when an edge of evidence reaches it. The
+/// graph stream also offers neighbours reached only by heuristic edges (a symbol-registry name
+/// match), which it labels `heuristic`; those are possibilities, and are weighed by score like
+/// any other unproven candidate (#475).
+fn is_evidenced_graph_context(
+    authority: RetrievalAuthority,
+    sources: &std::collections::BTreeSet<RetrievalSourceKind>,
+) -> bool {
+    sources.contains(&RetrievalSourceKind::Graph) && authority >= RetrievalAuthority::Corroborating
 }
 
 fn record_high_value_omission(
@@ -3782,6 +3793,8 @@ fn empty_impact(task: &str) -> open_kioku_core::ImpactReport {
         indirect_impacts_omitted: 0,
         proven_impact: Vec::new(),
         possible_impact: Vec::new(),
+        possible_impact_omitted: 0,
+        relationship_impact_caveats: Vec::new(),
         target: task.into(),
         direct_impacts: Vec::new(),
         indirect_impacts: Vec::new(),
@@ -4997,6 +5010,23 @@ mod tests {
             [RetrievalSourceKind::DerivedSibling].into_iter().collect()
         );
         assert!(!is_high_value_context(trace.authority, &sources));
+    }
+
+    /// The graph stream offers neighbours a symbol-registry name match reaches as `heuristic`;
+    /// the graph source kind alone must not give them the priority of evidenced neighbours.
+    #[test]
+    fn a_heuristic_graph_neighbor_is_not_high_value_context() {
+        let graph = [RetrievalSourceKind::Graph]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(!is_high_value_context(
+            RetrievalAuthority::Heuristic,
+            &graph
+        ));
+        assert!(is_high_value_context(
+            RetrievalAuthority::Corroborating,
+            &graph
+        ));
     }
 
     #[test]

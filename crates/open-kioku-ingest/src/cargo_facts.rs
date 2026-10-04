@@ -52,6 +52,7 @@ pub(crate) fn cargo_manifest_facts(project: &ProjectModel, files: &[File]) -> Ve
                 symbol_id: None,
                 target,
                 target_kind,
+                target_symbol_id: None,
                 edge_type,
                 range: None,
                 confidence: Confidence::Exact,

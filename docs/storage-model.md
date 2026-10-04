@@ -333,8 +333,9 @@ copy of the artifact:
 - **What the remaining rows said about removed ones.** A removed file's symbols are named
   elsewhere by their qualified names, which no path rule matches: the symbol registry's
   resolution of a bare `KeyAnchored` in an admitted file is a fact targeting
-  `internal::vault::keys::KeyAnchored`, drawn as a graph node with that label and an edge
-  whose message quotes it. The names are taken from the removed symbols themselves, as the
+  `internal::vault::keys::KeyAnchored`, with an edge to that symbol's node, which goes with the
+  removed file's nodes (a similarity link is drawn to a graph node with the label instead, and
+  an edge whose message quotes it). The names are taken from the removed symbols themselves, as the
   language's parser spelled them (for Rust, the module path), not derived from the file's
   path. Only facts that record a symbol the code resolved to are withdrawn by name (sources
   `open-kioku-symbol-registry/*` and the similarity passes, `open-kioku-relationships:*`),

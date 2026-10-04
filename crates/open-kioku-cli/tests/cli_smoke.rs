@@ -1827,6 +1827,73 @@ fn init_index_search_and_doctor_work_together() {
     assert!(!setup_markdown.contains("0 BSP descriptor"));
 }
 
+/// A call the resolver cannot see (inside a macro's token tree) is found only by the symbol
+/// registry. Its edge used to end at a node made from the callee's label, which no impact read
+/// reached, so the caller was missing from both lists (#475). It is a possibility, never proven,
+/// and a caller the resolver proves is listed once, as proven.
+#[test]
+fn impact_reports_a_symbol_registry_caller_as_possible_only() {
+    let temp = snapshot_fixture_repo_with(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"books\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("src/lib.rs", "pub mod books;\npub mod ledger;\n"),
+        (
+            "src/ledger.rs",
+            "pub struct Receipt(pub u64);\n\npub fn settle(amount: u64) -> Receipt {\n    Receipt(amount)\n}\n",
+        ),
+        (
+            "src/books.rs",
+            "use crate::ledger::settle;\n\npub fn close(amount: u64) -> u64 {\n    settle(amount).0\n}\n\npub fn summary(amount: u64) -> String {\n    format!(\"settled {}\", settle(amount).0)\n}\n",
+        ),
+    ]);
+    let output = run({
+        let mut command = ok();
+        command.arg("--repo").arg(temp.path()).args([
+            "--json",
+            "impact",
+            "--file",
+            "src/ledger.rs",
+        ]);
+        command
+    });
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let entries = |list: &str, symbol: &str| {
+        report[list]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| {
+                entry["path"] == "src/books.rs"
+                    && entry["symbol"] == symbol
+                    && entry["edge_type"] == "CALLS"
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let possible = entries("possible_impact", "src::books::summary");
+    assert_eq!(possible.len(), 1, "{report:#}");
+    assert_eq!(possible[0]["authority"], "heuristic");
+    let reason = possible[0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("open-kioku-symbol-registry/"),
+        "the inferring pass is named: {reason}"
+    );
+    assert!(entries("proven_impact", "src::books::summary").is_empty());
+
+    assert_eq!(
+        entries("proven_impact", "src::books::close").len(),
+        1,
+        "{report:#}"
+    );
+    assert!(
+        entries("possible_impact", "src::books::close").is_empty(),
+        "a proven caller is not repeated as a possibility: {report:#}"
+    );
+}
+
 /// Commit everything in `repo` except Open Kioku's local state, creating the repository on
 /// first use. A snapshot import relates the artifact's commit to `HEAD`, so a repository whose
 /// snapshot is imported has to be one.
@@ -2304,10 +2371,16 @@ fn snapshot_import_leaves_no_trace_of_a_path_the_local_policy_excludes() {
     {
         let conn = rusqlite::Connection::open(active_index_db(repo)).unwrap();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        // The symbol registry's resolution of `KeyAnchored` in `main`, drawn to the struct's
+        // own node (#475).
         assert!(
             count(
-                "SELECT COUNT(*) FROM graph_nodes WHERE (file_id IS NULL OR file_id = '') \
-                 AND label = 'internal::vault::keys::KeyAnchored'"
+                "SELECT COUNT(*) FROM graph_edges e \
+                 JOIN graph_strings s ON s.sid = e.source_sid \
+                 JOIN graph_strings t ON t.sid = e.to_sid \
+                 JOIN graph_nodes n ON n.id = t.value \
+                 WHERE s.value LIKE 'open-kioku-symbol-registry/%' \
+                 AND n.label = 'internal::vault::keys::KeyAnchored' AND n.symbol_id IS NOT NULL"
             ) > 0
         );
         assert!(
