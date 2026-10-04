@@ -3847,6 +3847,49 @@ mod tests {
         }
     }
 
+    /// A `dependency_path` search that stops at the hop limit says so (#666): `step-00` calls
+    /// `step-01`, and so on to `step-13`, thirteen hops, one past the limit. The empty route
+    /// carries `stopped_at_hop_limit` and a caveat naming the limit, so it does not read as
+    /// "not connected".
+    #[tokio::test]
+    async fn golden_dependency_path_hop_limit_snapshot_is_stable() {
+        let fixture = McpSnapshotFixture::new();
+        let hops = open_kioku_graph::DEPENDENCY_ROUTE_MAX_HOPS + 1;
+        let nodes = (0..=hops)
+            .map(|i| GraphNode {
+                id: NodeId::new(format!("symbol:step-{i:02}")),
+                node_type: GraphNodeType::Function,
+                label: format!("step_{i:02}"),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let edges = (0..hops)
+            .map(|i| GraphEdge {
+                id: EdgeId::new(format!("edge-step-{i:02}-calls-step-{:02}", i + 1)),
+                from: NodeId::new(format!("symbol:step-{i:02}")),
+                to: NodeId::new(format!("symbol:step-{:02}", i + 1)),
+                edge_type: GraphEdgeType::Calls,
+                evidence: open_kioku_core::Evidence {
+                    source: "open-kioku-resolution".into(),
+                    source_type: EvidenceSourceType::TreeSitter,
+                    confidence: Confidence::Exact,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        fixture.store.replace_graph(&nodes, &edges).unwrap();
+        let response = handle_line(
+            &fixture.repo,
+            ServedIndex::Ready(&fixture.store),
+            &fixture.config,
+            r#"{"jsonrpc":"2.0","id":"dependency-hop-limit","method":"dependency_path","params":{"from":"symbol:step-00","to":"symbol:step-13"}}"#,
+        )
+        .await
+        .expect("snapshot request should return a response");
+        assert_mcp_snapshot("dependency_path_hop_limit.json", &response);
+    }
+
     /// Every line a session sends is answered from no store at all, and the repository on
     /// disk is exactly as it was: no `.ok`, no database. The handshake and the inventory
     /// still answer so a client can connect and see what indexing would give it.
@@ -4349,10 +4392,13 @@ mod tests {
             assert_eq!(response["to"], expected_to, "{response}");
             assert_eq!(
                 response["edges"],
-                json!(fixture
-                    .store
-                    .shortest_path(&expected_from, &expected_to, 12)
-                    .unwrap()),
+                json!(
+                    fixture
+                        .store
+                        .shortest_path(&expected_from, &expected_to, 12)
+                        .unwrap()
+                        .edges
+                ),
                 "{response}"
             );
         }

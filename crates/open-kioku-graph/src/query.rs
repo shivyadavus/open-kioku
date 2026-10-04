@@ -2352,8 +2352,8 @@ mod tests {
             _from: &str,
             _to: &str,
             _max_depth: usize,
-        ) -> open_kioku_errors::Result<Vec<open_kioku_core::GraphEdge>> {
-            Ok(vec![])
+        ) -> open_kioku_errors::Result<open_kioku_core::RouteSearch> {
+            Ok(open_kioku_core::RouteSearch::default())
         }
         fn nodes_by_type(
             &self,
@@ -2489,7 +2489,7 @@ mod tests {
             from: &str,
             to: &str,
             max_depth: usize,
-        ) -> open_kioku_errors::Result<Vec<open_kioku_core::GraphEdge>> {
+        ) -> open_kioku_errors::Result<open_kioku_core::RouteSearch> {
             self.inner.shortest_path(from, to, max_depth)
         }
         fn nodes_by_type(
@@ -2575,7 +2575,7 @@ mod tests {
             from: &str,
             to: &str,
             max_depth: usize,
-        ) -> open_kioku_errors::Result<Vec<open_kioku_core::GraphEdge>> {
+        ) -> open_kioku_errors::Result<open_kioku_core::RouteSearch> {
             self.inner.shortest_path(from, to, max_depth)
         }
         fn nodes_by_type(

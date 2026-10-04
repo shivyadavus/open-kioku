@@ -4654,7 +4654,12 @@ impl GraphStore for SqliteStore {
         ))
     }
 
-    fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>> {
+    fn shortest_path(
+        &self,
+        from: &str,
+        to: &str,
+        max_depth: usize,
+    ) -> Result<open_kioku_core::RouteSearch> {
         require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
@@ -4668,11 +4673,11 @@ impl GraphStore for SqliteStore {
         // It is the first file-to-file edge in the graph that is not a real dependency, so it is
         // excluded here rather than becoming a traversable hop in a path a caller reads as one.
         // Similarity (`SIMILAR_TO`, `SEMANTICALLY_RELATED`) joins two symbols whose code looks
-        // alike, and neither uses the other, so it is no hop either.
+        // alike, and neither uses the other, so it is no hop either
+        // (`open_kioku_core::UNTYPED_WALK_EXCLUDED_EDGE_TYPES`).
         let mut edge_stmt = conn
             .prepare(&format!(
-                "{} WHERE e.from_sid = ?1 \
-                 AND e.edge_type NOT IN ('DerivedFrom', 'SimilarTo', 'SemanticallyRelated')",
+                "{} WHERE {SHORTEST_PATH_OUTGOING}",
                 compact::EDGE_SELECT
             ))
             .map_err(storage_err)?;
@@ -5032,6 +5037,12 @@ impl GraphStore for SqliteStore {
     }
 }
 
+/// The hops [`GraphStore::shortest_path`] reads from a node: its outgoing edges, less the types no
+/// untyped read follows. These filters spell the list out as SQL literals so each stays one
+/// static statement; `untyped_read_filters_exclude_exactly_the_shared_edge_types` holds every
+/// one of them to `open_kioku_core::UNTYPED_WALK_EXCLUDED_EDGE_TYPES`.
+const SHORTEST_PATH_OUTGOING: &str =
+    "e.from_sid = ?1 AND e.edge_type NOT IN ('DerivedFrom', 'SimilarTo', 'SemanticallyRelated')";
 /// A node's outgoing edges in [`GraphStore::neighbor_window`]. `DERIVED_FROM` is left out, and so
 /// is similarity (`SIMILAR_TO`, `SEMANTICALLY_RELATED`): neither is a dependency, and an untyped
 /// neighbourhood is read as one (`dependency_path` without `to`, the context pack's graph
@@ -6567,8 +6578,9 @@ mod tests {
         window_ranks_current, SqliteStore, EDGES_BETWEEN, GRAPH_INDEXES,
         GRAPH_REBUILD_REQUIRED_FLAG, LIST_SYMBOLS_BY_ALIAS_ORDER_SQL, LIST_SYMBOLS_SQL,
         NEIGHBOR_INCOMING, NEIGHBOR_INCOMING_WITH_LOOPS, NEIGHBOR_LOOPS_BY_INCOMING,
-        NEIGHBOR_LOOPS_BY_OUTGOING, NEIGHBOR_OUTGOING, SQLITE_GRAPH_SCHEMA_VERSION,
-        SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION, SYMBOL_LIST_ORDER_KEY_COLUMN,
+        NEIGHBOR_LOOPS_BY_OUTGOING, NEIGHBOR_OUTGOING, SHORTEST_PATH_OUTGOING,
+        SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION,
+        SYMBOL_LIST_ORDER_KEY_COLUMN,
     };
     use chrono::{TimeZone, Utc};
     use open_kioku_core::{
@@ -10069,7 +10081,7 @@ mod tests {
         };
         store.replace_graph(&[node_a, node_b], &[edge]).unwrap();
 
-        let path = store.shortest_path("a", "b", 5).unwrap();
+        let path = store.shortest_path("a", "b", 5).unwrap().edges;
         assert_eq!(path.len(), 1);
         assert_eq!(path[0].id.0, "a-b");
     }
@@ -10240,6 +10252,30 @@ mod tests {
         );
     }
 
+    /// Every untyped read's SQL filter excludes exactly the shared list, written as the store
+    /// writes an edge type, so the SQLite store, the in-memory store and the docs that name the
+    /// list cannot drift apart.
+    #[test]
+    fn untyped_read_filters_exclude_exactly_the_shared_edge_types() {
+        let names = open_kioku_core::UNTYPED_WALK_EXCLUDED_EDGE_TYPES
+            .iter()
+            .map(|edge_type| format!("'{edge_type:?}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let clause = format!("e.edge_type NOT IN ({names})");
+        for filter in [
+            SHORTEST_PATH_OUTGOING,
+            NEIGHBOR_OUTGOING,
+            NEIGHBOR_INCOMING,
+            NEIGHBOR_INCOMING_WITH_LOOPS,
+            NEIGHBOR_LOOPS_BY_OUTGOING,
+            NEIGHBOR_LOOPS_BY_INCOMING,
+        ] {
+            assert!(filter.ends_with(&clause), "{filter} vs {clause}");
+            assert_eq!(filter.matches("edge_type").count(), 1, "{filter}");
+        }
+    }
+
     /// Similarity joins two nodes whose code looks alike, and neither uses the other: a path a
     /// caller reads as a dependency route must not cross it.
     #[test]
@@ -10256,10 +10292,12 @@ mod tests {
         assert!(store
             .shortest_path("file:a.rs", "file:b.rs", 4)
             .unwrap()
+            .edges
             .is_empty());
         assert!(store
             .shortest_path("file:a.rs", "file:c.rs", 4)
             .unwrap()
+            .edges
             .is_empty());
         // Nor is it a neighbour in an untyped read; a reader that wants it asks by type.
         let window = store.neighbor_window("file:a.rs", 10).unwrap();
@@ -10824,12 +10862,8 @@ mod tests {
                 .iter()
                 .filter(|edge| {
                     // Untyped reads leave out what is not a dependency.
-                    !matches!(
-                        edge.edge_type,
-                        GraphEdgeType::DerivedFrom
-                            | GraphEdgeType::SimilarTo
-                            | GraphEdgeType::SemanticallyRelated
-                    ) && (edge.from.0 == hub || edge.to.0 == hub)
+                    !open_kioku_core::is_untyped_walk_excluded(&edge.edge_type)
+                        && (edge.from.0 == hub || edge.to.0 == hub)
                 })
                 .collect(),
         );
@@ -11466,7 +11500,10 @@ mod tests {
             hop("c-to-d", "c.rs", "d.rs"),
         ];
         store.replace_graph(&nodes, &edges).unwrap();
-        let path = store.shortest_path("file:a.rs", "file:d.rs", 5).unwrap();
+        let path = store
+            .shortest_path("file:a.rs", "file:d.rs", 5)
+            .unwrap()
+            .edges;
         let ids = path
             .iter()
             .map(|edge| edge.id.0.as_str())
@@ -11529,7 +11566,8 @@ mod tests {
         store.replace_graph(&nodes, &edges).unwrap();
         let path = store
             .shortest_path("file:ledger.rs", "symbol:record", 12)
-            .unwrap();
+            .unwrap()
+            .edges;
         let ids = path
             .iter()
             .map(|edge| edge.id.0.as_str())
@@ -11565,8 +11603,10 @@ mod tests {
         store.replace_index(data).unwrap();
         store.replace_graph(&[], &[]).unwrap();
 
-        let path = store.shortest_path("x", "y", 5).unwrap();
-        assert!(path.is_empty());
+        let search = store.shortest_path("x", "y", 5).unwrap();
+        assert!(search.edges.is_empty());
+        // `x` has no outgoing edges: the walk ran out of nodes, not hops.
+        assert!(!search.stopped_at_hop_limit);
     }
 
     #[test]

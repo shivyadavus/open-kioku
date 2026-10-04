@@ -8071,6 +8071,116 @@ fn a_route_into_an_imported_file_s_other_symbols_is_not_authoritative() {
     assert_eq!(upward["returned"], 0, "{upward:#}");
 }
 
+/// `step_00` calls `step_01`, and so on to `step_13`: a route of 13 hops, one past the 12 a path
+/// search takes. Both surfaces say the search stopped at the limit rather than return a bare
+/// empty route that reads as "not connected", and say nothing of a limit for a pair the search
+/// proves unconnected (#666).
+#[test]
+fn path_and_dependency_path_say_when_the_search_stopped_at_the_hop_limit() {
+    let chain = (0..=13)
+        .map(|i| {
+            let body = if i < 13 {
+                format!("step_{:02}(amount) + 1", i + 1)
+            } else {
+                "amount".to_string()
+            };
+            format!("pub fn step_{i:02}(amount: u64) -> u64 {{\n    {body}\n}}\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let temp = snapshot_fixture_repo_with(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"relay\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("src/lib.rs", "pub mod chain;\n"),
+        ("src/chain.rs", &chain),
+    ]);
+    let repo = temp.path();
+    let route = |from: &str, to: &str| {
+        let response = mcp_tool_call(
+            repo,
+            "dependency_path",
+            serde_json::json!({"from": from, "to": to}),
+        );
+        let mut mcp = response["result"]["structuredContent"].clone();
+        assert_eq!(
+            mcp.as_object_mut()
+                .unwrap_or_else(|| panic!("{response}"))
+                .remove("evidence_source"),
+            Some(serde_json::json!("sqlite_graph_store"))
+        );
+        let cli: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "path", from, to]);
+            command
+        }))
+        .unwrap();
+        assert_eq!(mcp, cli, "{from} -> {to}");
+        cli
+    };
+
+    // Twelve hops is within the limit.
+    let near = route("src::chain::step_01", "src::chain::step_13");
+    assert_eq!(near["edges"].as_array().unwrap().len(), 12, "{near:#}");
+    assert!(near.get("stopped_at_hop_limit").is_none(), "{near:#}");
+    assert!(near.get("caveats").is_none(), "{near:#}");
+
+    let far = route("src::chain::step_00", "src::chain::step_13");
+    assert_eq!(far["edges"], serde_json::json!([]), "{far:#}");
+    assert_eq!(far["stopped_at_hop_limit"], 12, "{far:#}");
+    let caveats = far["caveats"].as_array().unwrap();
+    assert_eq!(caveats.len(), 1, "{far:#}");
+    assert!(
+        caveats[0]
+            .as_str()
+            .unwrap()
+            .starts_with("no route within 12 hops"),
+        "{far:#}"
+    );
+    let text = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "path",
+            "src::chain::step_00",
+            "src::chain::step_13",
+        ]);
+        command
+    });
+    assert!(
+        text.contains("No dependency path found within 12 hops."),
+        "{text}"
+    );
+    assert!(text.contains("caveat: no route within 12 hops"), "{text}");
+
+    // Nothing `step_13` reaches leads back to `step_00`: a proven absence, with no limit named.
+    let unconnected = route("src::chain::step_13", "src::chain::step_00");
+    assert_eq!(
+        unconnected["edges"],
+        serde_json::json!([]),
+        "{unconnected:#}"
+    );
+    assert!(
+        unconnected.get("stopped_at_hop_limit").is_none(),
+        "{unconnected:#}"
+    );
+    assert!(unconnected.get("caveats").is_none(), "{unconnected:#}");
+    let text = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "path",
+            "src::chain::step_13",
+            "src::chain::step_00",
+        ]);
+        command
+    });
+    assert!(text.contains("No dependency path found.\n"), "{text}");
+    assert!(!text.contains("caveat"), "{text}");
+}
+
 /// What the lock holder prints once it holds the lock.
 const INDEX_LOCK_HELD: &str = "ok-test: index lock held";
 /// The line that tells the lock holder to release the lock as a finishing writer does.

@@ -4301,8 +4301,8 @@ mod tests {
             _from: &str,
             _to: &str,
             _max_depth: usize,
-        ) -> Result<Vec<GraphEdge>> {
-            Ok(Vec::new())
+        ) -> Result<open_kioku_core::RouteSearch> {
+            Ok(open_kioku_core::RouteSearch::default())
         }
 
         fn node_type_stats(

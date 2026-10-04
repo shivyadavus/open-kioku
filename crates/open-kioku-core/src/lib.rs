@@ -17,10 +17,11 @@ pub use analysis_semantics::*;
 pub use relationship::{
     graph_edge_authority, graph_edge_window_key, graph_edge_window_rank, graph_edge_window_tier,
     graph_route_authorities, graph_route_hop_authority, is_containment_edge_type,
-    normalize_relationship_proofs, relationship_authority, sort_graph_edges_for_window,
-    strongest_shortest_route, RelationshipAuthority, RelationshipProof, RelationshipProofFilter,
-    RelationshipProofKind, GRAPH_EDGE_WINDOW_RANKS_PER_TIER, GRAPH_EDGE_WINDOW_RANK_VERSION,
-    GRAPH_EDGE_WINDOW_TIER_MAX, RELATIONSHIP_PROOFS_PROPERTY,
+    is_untyped_walk_excluded, normalize_relationship_proofs, relationship_authority,
+    sort_graph_edges_for_window, strongest_shortest_route, RelationshipAuthority,
+    RelationshipProof, RelationshipProofFilter, RelationshipProofKind, RouteSearch,
+    GRAPH_EDGE_WINDOW_RANKS_PER_TIER, GRAPH_EDGE_WINDOW_RANK_VERSION, GRAPH_EDGE_WINDOW_TIER_MAX,
+    RELATIONSHIP_PROOFS_PROPERTY, UNTYPED_WALK_EXCLUDED_EDGE_TYPES,
 };
 
 macro_rules! id_type {
