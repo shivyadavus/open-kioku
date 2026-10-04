@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod cargo_facts;
+mod cycle_memo;
 pub mod derived;
 mod git_ignore;
 pub mod path_policy;
