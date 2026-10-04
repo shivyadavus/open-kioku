@@ -866,11 +866,13 @@ impl<'a> RustModuleTree<'a> {
                 .or_else(|| self.aliased_path_target(path, walk, symbols, scopes));
         }
         let stems = self.module_stems(path, parent);
-        // An inline `mod` of the name is the type the path names, which no edge reaches.
-        if walk.namespace == Some(RustNamespace::Type)
-            && !rust_module_symbols(&stems, item_name, symbols).is_empty()
-        {
-            return None;
+        // An inline `mod` of the name is the type the path names: a path continues through it
+        // (#654), and no edge reaches it.
+        if walk.namespace == Some(RustNamespace::Type) {
+            let modules = rust_module_symbols(&stems, item_name, symbols);
+            if !modules.is_empty() {
+                return inline_module_target(&modules, scopes);
+            }
         }
         let items = rust_module_items(&stems, item_name, symbols)
             .into_iter()
@@ -1023,13 +1025,22 @@ impl<'a> RustModuleTree<'a> {
             .filter_map(|id| symbols.get(id))
             .filter(|symbol| symbol.language == Language::Rust)
             .collect::<Vec<_>>();
-        // A nested `mod` of the name is the type the path names, which no edge reaches.
+        // A nested `mod` of the name is the type the path names, which no edge reaches; a path
+        // read in the type namespace continues through it (#654).
         if walk.namespace != Some(RustNamespace::Value)
             && defined
                 .iter()
                 .any(|symbol| symbol.kind == SymbolKind::Module)
         {
-            return None;
+            if walk.namespace != Some(RustNamespace::Type) {
+                return None;
+            }
+            let modules = defined
+                .iter()
+                .filter(|symbol| symbol.kind == SymbolKind::Module)
+                .map(|symbol| symbol.id.clone())
+                .collect::<Vec<_>>();
+            return inline_module_target(&modules, scopes);
         }
         let items = defined
             .iter()
@@ -1083,14 +1094,29 @@ impl<'a> RustModuleTree<'a> {
                 walk.in_namespace(RustNamespace::Type),
             )
             .target()?;
-        let module_file = match target {
+        // The module is a file, or an inline `mod` block a glob brings in (#654), read from the
+        // top of its file through the blocks around it.
+        let (module_file, blocks) = match target {
             RustPathTarget {
                 module_file: Some(module_file),
                 item: None,
                 configured: None,
                 variant: None,
                 ..
-            } => module_file,
+            } => (module_file, Vec::new()),
+            RustPathTarget {
+                module_file: None,
+                item: Some(module),
+                configured: None,
+                variant: None,
+                ..
+            } => {
+                let body = scopes.inline_module_body(&module)?;
+                (
+                    body.file_id.clone(),
+                    inline_chain(&body.id, symbols, scopes)?,
+                )
+            }
             _ => return None,
         };
         let module_path = self.files.get(&module_file)?;
@@ -1098,7 +1124,12 @@ impl<'a> RustModuleTree<'a> {
         if tree != path.tree {
             return None;
         }
-        let rest = path.segments[at + 1..].join("::");
+        let rest = blocks
+            .iter()
+            .map(String::as_str)
+            .chain(path.segments[at + 1..].iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("::");
         let mapped = map_rust_use_path(&tree, module_path, &format!("self::{rest}"))?;
         if !self.declares_file_modules(&mapped, &mapped.importer_module)
             || self
@@ -1519,6 +1550,22 @@ impl<'a> RustModuleTree<'a> {
                         Some(target) if glob_brings_in(&target, walk, symbols, scopes) => {
                             found.globbed.push(target);
                         }
+                        // A module file, as a type, when its `mod` item is visible (#654).
+                        Some(target)
+                            if walk.namespace == Some(RustNamespace::Type)
+                                && target.item.is_none()
+                                && target.configured.is_none()
+                                && target.module_file.is_some()
+                                && self.glob_module_is_visible(
+                                    (file, importer),
+                                    site,
+                                    name,
+                                    (symbols, scopes),
+                                    walk,
+                                ) =>
+                        {
+                            found.globbed.push(target);
+                        }
                         // A module the glob opens that holds nothing of the name brings none in.
                         None if self.glob_lacks_name(
                             (file, importer),
@@ -1557,6 +1604,48 @@ impl<'a> RustModuleTree<'a> {
                     .is_some_and(|names| names.contains(name));
         }
         found
+    }
+
+    /// Whether the one `mod name` item of the module the glob `site` in `importer` opens is
+    /// visible to the glob, as [`glob_brings_in`] reads an item's visibility (#654).
+    fn glob_module_is_visible(
+        &self,
+        importer: (&FileId, &Path),
+        site: &ImportSite,
+        name: &str,
+        (symbols, scopes): (
+            &open_kioku_resolution::SymbolIndex,
+            &open_kioku_resolution::ScopeIndex,
+        ),
+        walk: ReexportWalk,
+    ) -> bool {
+        let Some((path, crate_name)) = self.rust_path(
+            importer,
+            site.scope_id.as_ref(),
+            &site.source,
+            symbols,
+            scopes,
+        ) else {
+            return false;
+        };
+        let Some((_, module)) = path.segments.split_last() else {
+            return false;
+        };
+        if !self.declares_file_modules(&path, module) {
+            return false;
+        }
+        let stems = self.module_stems(&path, module);
+        let modules = rust_module_symbols(&stems, name, symbols);
+        let [module] = modules.as_slice() else {
+            return false;
+        };
+        symbols.get(module).is_some_and(|symbol| {
+            if walk.from_other_crate || crate_name {
+                symbol.visibility == Visibility::Public
+            } else {
+                symbol.visibility != Visibility::Private
+            }
+        })
     }
 
     /// Whether the module the glob `site` in `importer` opens provably holds nothing named
@@ -1610,15 +1699,23 @@ impl<'a> RustModuleTree<'a> {
         {
             return false;
         }
+        // Only an item of the namespace the walk reads is the name there (#654): a module `f`
+        // the glob opens holds brings in no value `f`, and a `fn f` no type.
         let defined = stems.iter().any(|stem| {
             symbols
                 .by_qualified
                 .get(&format!("{}::{name}", stem.replace('/', "::")))
-                .is_some_and(|ids| !ids.is_empty())
+                .is_some_and(|ids| {
+                    ids.iter()
+                        .filter_map(|id| symbols.get(id))
+                        .any(|symbol| walk.admits(symbol, scopes))
+                })
         });
         path.segments = module;
         path.segments.push(name.to_string());
-        if defined || self.module_file(&path, &path.segments).is_some() {
+        let module_file = walk.namespace != Some(RustNamespace::Value)
+            && self.module_file(&path, &path.segments).is_some();
+        if defined || module_file {
             return false;
         }
         let used = self.used_name(&path, symbols, scopes, walk);
@@ -1887,6 +1984,13 @@ impl<'a> RustModuleTree<'a> {
             };
             let mut renamed = BTreeSet::new();
             let mut blocks = BTreeMap::<Vec<String>, BTreeSet<String>>::new();
+            // A module a glob may bring in is read as one a `use` renames (#654).
+            if self.module_uses[file]
+                .iter()
+                .any(|site| site.is_glob && is_module_level(site.scope_id.as_ref(), scopes))
+            {
+                renamed.extend(names.get(file).into_iter().flatten().cloned());
+            }
             for site in self.module_uses[file].iter().filter(|site| !site.is_glob) {
                 let locals = site.bindings.iter().map(|binding| binding.local.clone());
                 if is_module_level(site.scope_id.as_ref(), scopes) {
@@ -1917,7 +2021,7 @@ impl<'a> RustModuleTree<'a> {
                 let Some(alias_path) = path_to(&[alias.as_str()]) else {
                     continue;
                 };
-                let Some(module_file) = self
+                let Some(target) = self
                     .used_name(
                         &alias_path,
                         symbols,
@@ -1925,24 +2029,55 @@ impl<'a> RustModuleTree<'a> {
                         ReexportWalk::start(false).in_namespace(RustNamespace::Type),
                     )
                     .target()
-                    .and_then(|target| target.module_file)
                 else {
                     continue;
                 };
-                // What the renamed module's file defines and brings in.
-                let mut reached = names.get(&module_file).cloned().unwrap_or_default();
-                reached.extend(
-                    symbols
-                        .by_file
-                        .get(&module_file)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|id| symbols.get(id))
-                        .filter(|symbol| {
-                            symbol.language == Language::Rust && symbol.parent_symbol_id.is_none()
-                        })
-                        .map(|symbol| symbol.name.clone()),
-                );
+                let mut reached = BTreeSet::new();
+                if let Some(module_file) = &target.module_file {
+                    // What the renamed module's file defines and brings in.
+                    reached.extend(names.get(module_file).cloned().unwrap_or_default());
+                    reached.extend(
+                        symbols
+                            .by_file
+                            .get(module_file)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|id| symbols.get(id))
+                            .filter(|symbol| {
+                                symbol.language == Language::Rust
+                                    && symbol.parent_symbol_id.is_none()
+                            })
+                            .map(|symbol| symbol.name.clone()),
+                    );
+                } else if let Some(body) = target
+                    .item
+                    .as_ref()
+                    .and_then(|module| scopes.inline_module_body(module))
+                {
+                    // What an inline block a glob brings in defines and names with `use`.
+                    reached.extend(
+                        symbols
+                            .by_file
+                            .get(&body.file_id)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|id| symbols.get(id))
+                            .filter(|symbol| symbol.scope_id.as_ref() == Some(&body.id))
+                            .map(|symbol| symbol.name.clone()),
+                    );
+                    reached.extend(
+                        self.module_uses
+                            .get(&body.file_id)
+                            .into_iter()
+                            .flatten()
+                            .filter(|site| {
+                                !site.is_glob && site.scope_id.as_ref() == Some(&body.id)
+                            })
+                            .flat_map(|site| {
+                                site.bindings.iter().map(|binding| binding.local.clone())
+                            }),
+                    );
+                }
                 for name in reached.iter().filter(|name| wants(name)) {
                     if let Some(path) = path_to(&[alias.as_str(), name.as_str()]) {
                         found.push((resolver_qualified_name(&path), file.clone(), path));
@@ -3651,6 +3786,26 @@ fn inline_chain(
         }
     }
     None
+}
+
+/// What a path read in the type namespace reaches when it ends at the `mod` items `modules`:
+/// the one module of the name, when it has an inline block, through which a path continues
+/// (#654). `None` for a `mod name;` and for several modules of the name.
+fn inline_module_target(
+    modules: &[SymbolId],
+    scopes: &open_kioku_resolution::ScopeIndex,
+) -> Option<RustPathTarget> {
+    let [module] = modules else {
+        return None;
+    };
+    scopes.inline_module_body(module)?;
+    Some(RustPathTarget {
+        module_file: None,
+        item: Some(module.clone()),
+        reexport: false,
+        configured: None,
+        variant: None,
+    })
 }
 
 /// A `use` path written directly in the inline `mod` block `chain` names, read from the top level

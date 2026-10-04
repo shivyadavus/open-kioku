@@ -174,7 +174,14 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v1";
 /// alias. A path is followed through an enum's variants (`pub use Shape::*;`), a module a `use`
 /// renames (`pub use inner as facade;`) and the named `use` declarations of an inline `mod`
 /// block. v40 indexes hold the old edges. v41 is taken by an open change.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v42";
+/// v43: a Rust method call through a struct field reads the field's type through a `type`
+/// alias and through the standard library's `Box`, `Rc` and `Arc`, where no method of the
+/// pointer may answer it, and an inherent method takes precedence over trait methods of the
+/// same name that rustc tries no earlier; a local built by a tuple or unit struct's constructor
+/// is an instance of it; an associated function is found through an alias; and two globs that
+/// bring in one name in different namespaces settle each namespace, a path continuing through
+/// a module a glob brings in. v42 indexes hold no edge for any of these.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v43";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -236,7 +243,11 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// `use` declarations; a v16 index does not.
 /// v18: a Rust file records which of its structs, enums, unions and type aliases are types
 /// alone, not also values, and the variants of each enum; a v17 index records neither.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v18";
+/// v19: a Rust file records its unit structs, the type each `type` alias stands for and each
+/// `impl` block's trait and generic coverage; a `let` initialized by `Name(..)` or a plain path
+/// records it; and a struct field typed by `Box`, `Rc` or `Arc` of a type parameter has no
+/// declared type. A v18 index records none of these.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v19";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

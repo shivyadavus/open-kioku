@@ -2996,9 +2996,14 @@
         "selector": "caller_fn",
         "identity": "symbol:rust:calls:struct_field_of_boxed_type:source"
       },
-      "expected_outcome": "must_not_emit",
+      "expected_outcome": "must_emit",
       "scenario": "struct_field_of_boxed_type",
-      "notes": "Regression case (#630): A field `engine: Box<Engine>` is a `Box` to the receiver logic, as a local of that type is, so no method of `Engine` is proven."
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::engine::target_fn",
+        "identity": "symbol:rust:calls:struct_field_of_boxed_type:target"
+      },
+      "notes": "Regression case (#630, #639): a method call through a field `engine: Box<Engine>` sees through the `Box` to `Engine`, whose inherent `target_fn` no method of `Box` shadows."
     },
     {
       "id": "ci-rust-calls-144-crate_root_reexport_bare_call",
@@ -3532,6 +3537,323 @@
       "expected_outcome": "may_emit_heuristic_only",
       "scenario": "macro_token_tree_call_heuristic",
       "notes": "Regression case (#475): a call written inside a macro's token tree (`format!(\"{}\", target_fn())`) is not parsed as a call, so only the symbol-registry pass links it to the imported `target_fn`. Its edge ends at `target_fn`'s node and stays heuristic: no proof, no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-172-struct_field_of_aliased_type",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_of_aliased_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_of_aliased_type:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "struct_field_of_aliased_type",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::engine::target_fn",
+        "identity": "symbol:rust:calls:struct_field_of_aliased_type:target"
+      },
+      "notes": "Regression case (#639): a field typed by `type Store = Engine;` reaches `Engine`'s method."
+    },
+    {
+      "id": "ci-rust-calls-173-struct_field_of_alias_to_arc",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_of_alias_to_arc",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_of_alias_to_arc:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "struct_field_of_alias_to_arc",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::engine::target_fn",
+        "identity": "symbol:rust:calls:struct_field_of_alias_to_arc:target"
+      },
+      "notes": "Regression case (#639): a field typed by `type Shared = Arc<Engine>;`, read where the alias is declared, reaches `Engine`'s method through the `Arc`."
+    },
+    {
+      "id": "ci-rust-calls-174-struct_field_of_rc_type",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_of_rc_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_of_rc_type:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "struct_field_of_rc_type",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::engine::target_fn",
+        "identity": "symbol:rust:calls:struct_field_of_rc_type:target"
+      },
+      "notes": "Regression case (#639): a field `engine: Rc<Engine>` with `use std::rc::Rc;` reaches `Engine`'s inherent method."
+    },
+    {
+      "id": "ci-rust-calls-175-struct_field_of_arc_type",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_of_arc_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_of_arc_type:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "struct_field_of_arc_type",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::engine::target_fn",
+        "identity": "symbol:rust:calls:struct_field_of_arc_type:target"
+      },
+      "notes": "Regression case (#639): a field `engine: Arc<Engine>` with `use std::sync::Arc;` reaches `Engine`'s inherent method."
+    },
+    {
+      "id": "ci-rust-calls-176-struct_field_rc_clone_is_the_pointers",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_rc_clone_is_the_pointers",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_rc_clone_is_the_pointers:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_rc_clone_is_the_pointers",
+      "notes": "Regression case (#639): `Rc::clone(&self.engine)` and `self.engine.clone()` call `Rc`'s `clone`, never the `clone` `Engine` declares."
+    },
+    {
+      "id": "ci-rust-calls-177-struct_field_arc_strong_count_is_the_pointers",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_arc_strong_count_is_the_pointers",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_arc_strong_count_is_the_pointers:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_arc_strong_count_is_the_pointers",
+      "notes": "Regression case (#639): `Arc::strong_count(&self.engine)` and `self.engine.strong_count()` must not reach the `strong_count` `Engine` declares."
+    },
+    {
+      "id": "ci-rust-calls-178-struct_field_mutex_lock_is_not_unwrapped",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_mutex_lock_is_not_unwrapped",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_mutex_lock_is_not_unwrapped:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_mutex_lock_is_not_unwrapped",
+      "notes": "Regression case (#639): a `Mutex<Engine>` field is not seen through: `self.engine.lock()` is the mutex's, and `self.engine.lock().unwrap().target_fn()` reaches no method of `Engine`."
+    },
+    {
+      "id": "ci-rust-calls-179-struct_field_arc_with_unknown_trait_in_scope",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_arc_with_unknown_trait_in_scope",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_arc_with_unknown_trait_in_scope:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_arc_with_unknown_trait_in_scope",
+      "notes": "Regression case (#639): `use outside::EngineExt;` may bring in a trait implemented for `Arc<Engine>` whose `target_fn` rustc tries first, so the call through `Arc<Engine>` proves nothing."
+    },
+    {
+      "id": "ci-rust-calls-180-struct_field_arc_blanket_trait_method",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_arc_blanket_trait_method",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_arc_blanket_trait_method:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_arc_blanket_trait_method",
+      "notes": "Regression case (#639): a blanket `impl<T> Ext for T` in scope gives `Arc<Engine>` a `target_fn` that rustc tries before `Engine`'s inherent one."
+    },
+    {
+      "id": "ci-rust-calls-181-struct_field_by_value_trait_method_first",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_by_value_trait_method_first",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_by_value_trait_method_first:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_by_value_trait_method_first",
+      "notes": "Regression case (#639): `Run::target_fn(self)`, in scope, is tried by value before the inherent `target_fn(&self)`, so the inherent method does not take precedence."
+    },
+    {
+      "id": "ci-rust-calls-182-tuple_struct_constructor_local",
+      "fixture_id": "ci/ri3/rust/calls/tuple_struct_constructor_local",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:tuple_struct_constructor_local:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "tuple_struct_constructor_local",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::engine::target_fn",
+        "identity": "symbol:rust:calls:tuple_struct_constructor_local:target"
+      },
+      "notes": "Regression case (#654): `let engine = Engine(1);` with a tuple struct `Engine` makes `engine` an `Engine`."
+    },
+    {
+      "id": "ci-rust-calls-183-unit_struct_value_local",
+      "fixture_id": "ci/ri3/rust/calls/unit_struct_value_local",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:unit_struct_value_local:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "unit_struct_value_local",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::engine::target_fn",
+        "identity": "symbol:rust:calls:unit_struct_value_local:target"
+      },
+      "notes": "Regression case (#654): `let engine = Engine;` with a unit struct `Engine` makes `engine` an `Engine`."
+    },
+    {
+      "id": "ci-rust-calls-184-tuple_struct_constructor_value_is_not_an_instance",
+      "fixture_id": "ci/ri3/rust/calls/tuple_struct_constructor_value_is_not_an_instance",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:tuple_struct_constructor_value_is_not_an_instance:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "tuple_struct_constructor_value_is_not_an_instance",
+      "notes": "Regression case (#654): `let engine = Engine;` with a tuple struct `Engine` binds its constructor, not an `Engine`."
+    },
+    {
+      "id": "ci-rust-calls-185-enum_alias_associated_function_path",
+      "fixture_id": "ci/ri3/rust/calls/enum_alias_associated_function_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:enum_alias_associated_function_path:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "enum_alias_associated_function_path",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::shapes::target_fn",
+        "identity": "symbol:rust:calls:enum_alias_associated_function_path:target"
+      },
+      "notes": "Regression case (#654): `Alias::target_fn()` through `pub type Alias = Shape;` reaches the enum's associated function."
+    },
+    {
+      "id": "ci-rust-calls-186-glob_namespaces_value_call",
+      "fixture_id": "ci/ri3/rust/calls/glob_namespaces_value_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:glob_namespaces_value_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "glob_namespaces_value_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::b::target_fn",
+        "identity": "symbol:rust:calls:glob_namespaces_value_call:target"
+      },
+      "notes": "Regression case (#654): globs of `a`, holding a module `target_fn`, and `b`, holding a function `target_fn`, fill different namespaces: `crate::c::target_fn()` names the function."
+    },
+    {
+      "id": "ci-rust-calls-187-glob_namespaces_module_path",
+      "fixture_id": "ci/ri3/rust/calls/glob_namespaces_module_path",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:glob_namespaces_module_path:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "glob_namespaces_module_path",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::a::target_fn",
+        "identity": "symbol:rust:calls:glob_namespaces_module_path:target"
+      },
+      "notes": "Regression case (#654): globs of `a`, holding a module `f`, and `b`, holding a function `f`: `crate::c::f::target_fn()` continues through the module."
+    },
+    {
+      "id": "ci-rust-calls-188-glob_namespaces_module_clash",
+      "fixture_id": "ci/ri3/rust/calls/glob_namespaces_module_clash",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:glob_namespaces_module_clash:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "glob_namespaces_module_clash",
+      "notes": "Regression case (#654): globs of `a` and `b` each bring in a module `f`, so `crate::c::f::target_fn()` names neither."
     },
     {
       "id": "ci-rust-references-01-metamorphic_a",

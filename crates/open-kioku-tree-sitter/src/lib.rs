@@ -1,8 +1,9 @@
 use open_kioku_core::{
     Binding, BindingId, CallSite, CallSiteId, Confidence, EvidenceSourceType, ExportSite, File,
     ImportSite, ImportedName, InheritanceKind, InheritanceSite, Language, LineRange,
-    ModuleDeclarationSite, PackageDeclarationSite, ReceiverKind, RustEnumVariants, Scope, ScopeId,
-    ScopeKind, SourceRange, Symbol, SymbolId, SymbolKind, SyntaxFacts, TypeAliasSite, Visibility,
+    ModuleDeclarationSite, PackageDeclarationSite, ReceiverKind, RustEnumVariants, RustImplBlock,
+    RustTypeAlias, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId, SymbolKind,
+    SyntaxFacts, TypeAliasSite, Visibility,
 };
 use open_kioku_errors::{OkError, Result};
 use sha2::{Digest, Sha256};
@@ -559,6 +560,10 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
             range: node_source_range(node),
         };
         out.scopes.push(scope);
+        if file.language == Language::Rust && node.kind() == "impl_item" {
+            out.rust_impl_blocks
+                .push(rust_impl_block(content.as_bytes(), node, &scope_id));
+        }
         ctx.scope_stack.push(scope_id.clone());
         pushed_scope = Some(scope_id);
     }
@@ -853,6 +858,17 @@ fn record_rust_type_item(
     if type_only {
         out.rust_type_only_items.push(symbol_id.clone());
     }
+    if node.kind() == "struct_item" && node.child_by_field_name("body").is_none() {
+        out.rust_unit_structs.push(symbol_id.clone());
+    }
+    if node.kind() == "type_item" {
+        if let Some(target) = rust_alias_target(node, source) {
+            out.rust_type_aliases.push(RustTypeAlias {
+                alias_symbol_id: symbol_id.clone(),
+                target,
+            });
+        }
+    }
     if node.kind() != "enum_item" {
         return;
     }
@@ -875,6 +891,87 @@ fn record_rust_type_item(
         enum_symbol_id: symbol_id.clone(),
         variants,
     });
+}
+
+/// The `impl` block `node`, whose scope is `scope_id`: its trait, and whether it covers every
+/// instantiation of its type (see [`RustImplBlock`]).
+fn rust_impl_block(source: &[u8], node: Node<'_>, scope_id: &ScopeId) -> RustImplBlock {
+    let trait_name = node
+        .child_by_field_name("trait")
+        .and_then(|name| name.utf8_text(source).ok())
+        .map(|name| name.trim().to_string());
+    let mut parameters = Vec::new();
+    let mut bounded = false;
+    if let Some(list) = node.child_by_field_name("type_parameters") {
+        let mut cursor = list.walk();
+        for parameter in list.named_children(&mut cursor) {
+            match parameter.kind() {
+                "type_parameter" => {
+                    if let Some(name) = parameter
+                        .child_by_field_name("name")
+                        .and_then(|name| name.utf8_text(source).ok())
+                    {
+                        parameters.push(name.to_string());
+                    }
+                    bounded |= parameter
+                        .child_by_field_name("bounds")
+                        .and_then(|bounds| bounds.utf8_text(source).ok())
+                        .is_some_and(|bounds| {
+                            bounds
+                                .trim_start_matches(':')
+                                .split('+')
+                                .any(|bound| bound.trim() != "?Sized")
+                        });
+                    bounded |= parameter.child_by_field_name("default_type").is_some();
+                }
+                "const_parameter" => {
+                    if let Some(name) = parameter
+                        .child_by_field_name("name")
+                        .and_then(|name| name.utf8_text(source).ok())
+                    {
+                        parameters.push(name.to_string());
+                    }
+                }
+                "lifetime_parameter" | "attribute_item" => {}
+                _ => bounded = true,
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    let has_where = node
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "where_clause");
+    let arguments_are_parameters = node.child_by_field_name("type").is_some_and(|written| {
+        if written.kind() != "generic_type" {
+            return matches!(written.kind(), "type_identifier" | "scoped_type_identifier");
+        }
+        let Some(arguments) = written.child_by_field_name("type_arguments") else {
+            return false;
+        };
+        let mut seen = Vec::new();
+        let mut cursor = arguments.walk();
+        let all = arguments
+            .named_children(&mut cursor)
+            .all(|argument| match argument.kind() {
+                "lifetime" => true,
+                "type_identifier" | "identifier" => argument
+                    .utf8_text(source)
+                    .ok()
+                    .filter(|name| parameters.iter().any(|parameter| parameter == name))
+                    .is_some_and(|name| {
+                        let fresh = !seen.contains(&name);
+                        seen.push(name);
+                        fresh
+                    }),
+                _ => false,
+            });
+        all
+    });
+    RustImplBlock {
+        scope_id: scope_id.clone(),
+        trait_name,
+        covers_every_instantiation: arguments_are_parameters && !bounded && !has_where,
+    }
 }
 
 /// A macro that expands to no item a path can name.
@@ -1728,7 +1825,9 @@ fn extract_binding(
             } else if kind == "field_declaration" && rust_is_struct_field(node) {
                 // A named field of a struct, in the struct's scope, which no function body is
                 // inside: the resolver reads `self.field` and `value.field` through it (#630).
-                // A field typed by a type parameter of the struct has no declared type.
+                // A field typed by a type parameter of the struct has no declared type, and
+                // neither has one typed by `Box`, `Rc` or `Arc` of one, which method calls see
+                // through (#639).
                 let name = node
                     .child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source_bytes).ok())
@@ -1736,7 +1835,13 @@ fn extract_binding(
                 let declared_type = node
                     .child_by_field_name("type")
                     .and_then(|t| t.utf8_text(source_bytes).ok())
-                    .and_then(|text| rust_declared_type(node, text, source_bytes));
+                    .and_then(|text| rust_declared_type(node, text, source_bytes))
+                    .filter(|text| {
+                        let head = rust_type_head_through_wrappers(text);
+                        !rust_enclosing_type_parameters(node, source_bytes)
+                            .iter()
+                            .any(|name| name == head)
+                    });
                 if let Some(n) = name {
                     extracted.push((n, declared_type, None));
                 }
@@ -1825,23 +1930,84 @@ fn rust_enclosing_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> 
     let mut names = Vec::new();
     let mut current = node.parent();
     while let Some(ancestor) = current {
-        if let Some(parameters) = ancestor.child_by_field_name("type_parameters") {
-            let mut cursor = parameters.walk();
-            for parameter in named_children(&mut cursor) {
-                if parameter.kind() != "type_parameter" {
-                    continue;
-                }
-                if let Some(name) = parameter
-                    .child_by_field_name("name")
-                    .and_then(|name| name.utf8_text(source).ok())
-                {
-                    names.push(name.to_string());
-                }
-            }
-        }
+        names.extend(rust_own_type_parameters(ancestor, source));
         current = ancestor.parent();
     }
     names
+}
+
+/// The type parameters `node` itself declares, such as `T` of `type Own<T> = Box<T>;`.
+fn rust_own_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let Some(parameters) = node.child_by_field_name("type_parameters") else {
+        return Vec::new();
+    };
+    let mut cursor = parameters.walk();
+    named_children(&mut cursor)
+        .into_iter()
+        .filter(|parameter| parameter.kind() == "type_parameter")
+        .filter_map(|parameter| {
+            parameter
+                .child_by_field_name("name")
+                .and_then(|name| name.utf8_text(source).ok())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// The type a Rust type's method calls reach once `Box`, `Rc` and `Arc` are seen through, as the
+/// head of its path: `Arc<Box<T>>` is `T` and `&Store<u8>` is `Store` (#639). A struct field or
+/// alias whose type is a type parameter this way names no declared type.
+fn rust_type_head_through_wrappers(type_text: &str) -> &str {
+    let mut text = type_text.trim();
+    for _ in 0..8 {
+        let base = text.trim_start_matches('&').trim();
+        let base = base.strip_prefix("mut ").unwrap_or(base).trim();
+        let Some((head, arguments)) = base.split_once('<') else {
+            return base;
+        };
+        let head = head.trim();
+        let name = head.rsplit("::").next().unwrap_or(head).trim();
+        if !matches!(name, "Box" | "Rc" | "Arc") {
+            return head;
+        }
+        let Some(arguments) = arguments.trim_end().strip_suffix('>') else {
+            return head;
+        };
+        let mut depth = 0usize;
+        let end = arguments
+            .char_indices()
+            .find(|(_, ch)| match ch {
+                '<' | '(' | '[' => {
+                    depth += 1;
+                    false
+                }
+                '>' | ')' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    false
+                }
+                ',' => depth == 0,
+                _ => false,
+            })
+            .map_or(arguments.len(), |(index, _)| index);
+        text = arguments[..end].trim();
+    }
+    text
+}
+
+/// What the Rust `type` alias `node` is written to stand for, unless that is a type parameter
+/// of the alias or an item around it, directly or through `Box`, `Rc` or `Arc`.
+fn rust_alias_target(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let target = node
+        .child_by_field_name("type")?
+        .utf8_text(source)
+        .ok()?
+        .trim();
+    let head = rust_type_head_through_wrappers(target);
+    let generic = rust_own_type_parameters(node, source)
+        .into_iter()
+        .chain(rust_enclosing_type_parameters(node, source))
+        .any(|name| name == head);
+    (!generic && !target.is_empty()).then(|| target.to_string())
 }
 
 fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<String> {
@@ -1860,14 +2026,20 @@ fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<St
             if kind == "call_expression" {
                 if let Some(function) = expr.child_by_field_name("function") {
                     // Recorded as the whole call path, `Foo::bar()`: the call names `Foo` but may
-                    // return anything, so resolution proves the type from `bar`'s signature.
-                    if function.kind() == "scoped_identifier" {
+                    // return anything, so resolution proves the type from `bar`'s signature. A
+                    // plain `Foo(1)` is recorded as `Foo()`: it builds a `Foo` only when the value
+                    // `Foo` is a tuple struct's constructor, which resolution proves (#654).
+                    if matches!(function.kind(), "scoped_identifier" | "identifier") {
                         return function
                             .utf8_text(source)
                             .ok()
                             .map(|path| format!("{path}()"));
                     }
                 }
+            } else if matches!(kind, "identifier" | "scoped_identifier") {
+                // A plain path's value, recorded as `=Marker`: an instance of `Marker` only when
+                // that value is a unit struct, which resolution proves (#654).
+                return expr.utf8_text(source).ok().map(|path| format!("={path}"));
             } else if kind == "struct_expression" {
                 if let Some(name) = expr.child_by_field_name("name") {
                     return name.utf8_text(source).ok().map(|s| s.to_string());
@@ -3436,7 +3608,7 @@ mod ri3_rust_use_import_site_tests {
 #[cfg(test)]
 mod ri3_rust_binding_type_tests {
     use super::parse_file;
-    use open_kioku_core::{Binding, File, FileId, Language, RepositoryId, ScopeKind};
+    use open_kioku_core::{Binding, File, FileId, Language, RepositoryId, ScopeKind, SymbolId};
 
     fn rust_bindings(source: &str) -> Vec<Binding> {
         let file = File {
@@ -3564,16 +3736,99 @@ mod ri3_rust_binding_type_tests {
             })
             .collect::<Vec<_>>();
         let holder = Some((ScopeKind::Class, "Holder".to_string()));
-        // A field typed by the struct's own type parameter has no declared type; the fields of an
-        // enum variant, a union or a tuple struct are not recorded.
+        // A field typed by the struct's own type parameter has no declared type, nor has one
+        // typed by a `Box` of it (#639); the fields of an enum variant, a union or a tuple struct
+        // are not recorded.
         assert_eq!(
             fields,
             vec![
                 ("store", Some("&'static Store"), holder.clone()),
                 ("item", None, holder.clone()),
-                ("boxed", Some("Box<T>"), holder),
+                ("boxed", None, holder),
             ]
         );
+    }
+
+    #[test]
+    fn rust_unit_structs_type_aliases_impl_blocks_and_constructor_initializers_are_recorded() {
+        let file = File {
+            id: FileId::new("file:src/lib.rs"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/lib.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "pub struct Unit;\npub struct Pair(u8);\npub struct Named {\n    x: u8,\n}\n\
+             pub type Store = Disk;\npub type Shared = std::sync::Arc<Disk>;\n\
+             pub type Own<T> = Box<T>;\npub type Same<T> = T;\n\
+             impl Disk {}\nimpl Saver for Disk {}\nimpl<'a, T: ?Sized> Page<'a, T> {}\n\
+             impl Page<u8> {}\nimpl<T: Clone> Page<T> {}\nimpl<T> Page<T> where T: Copy {}\n\
+             impl<T> Page<T, T> {}\n\
+             fn go() {\n    let u = Unit;\n    let p = Pair(1);\n    let q = crate::Pair(2);\n    let n = Named { x: 1 };\n}\n",
+        )
+        .expect("Rust fixture should parse");
+        let name_of = |id: &SymbolId| {
+            facts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.id == *id)
+                .map(|symbol| symbol.name.clone())
+        };
+        assert_eq!(
+            facts
+                .rust_unit_structs
+                .iter()
+                .map(name_of)
+                .collect::<Vec<_>>(),
+            vec![Some("Unit".to_string())]
+        );
+        // An alias of its own type parameter, directly or through a `Box`, names no type.
+        assert_eq!(
+            facts
+                .rust_type_aliases
+                .iter()
+                .map(|alias| (name_of(&alias.alias_symbol_id), alias.target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("Store".to_string()), "Disk"),
+                (Some("Shared".to_string()), "std::sync::Arc<Disk>"),
+            ]
+        );
+        assert_eq!(
+            facts
+                .rust_impl_blocks
+                .iter()
+                .map(|block| (
+                    block.trait_name.as_deref(),
+                    block.covers_every_instantiation
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (None, true),
+                (Some("Saver"), true),
+                (None, true),
+                (None, false),
+                (None, false),
+                (None, false),
+                (None, false),
+            ]
+        );
+        let initializer = |name: &str| {
+            facts
+                .bindings
+                .iter()
+                .find(|binding| binding.name == name)
+                .and_then(|binding| binding.inferred_type.clone())
+        };
+        assert_eq!(initializer("u").as_deref(), Some("=Unit"));
+        assert_eq!(initializer("p").as_deref(), Some("Pair()"));
+        assert_eq!(initializer("q").as_deref(), Some("crate::Pair()"));
+        assert_eq!(initializer("n").as_deref(), Some("Named"));
     }
 }
 

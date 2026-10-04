@@ -6,6 +6,7 @@ pub mod index;
 pub mod inheritance;
 pub mod language_capabilities;
 pub mod pipeline;
+mod rust_methods;
 mod self_calls;
 mod type_relations;
 mod typed_calls;
@@ -27,6 +28,7 @@ pub use pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
     MAX_RESOLUTION_CANDIDATES,
 };
+pub use rust_methods::rust_open_trait_scope_files;
 pub use type_relations::{
     resolve_declared_type_use_outcome, resolve_inheritance_relationship_outcome,
 };

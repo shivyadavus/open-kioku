@@ -6,6 +6,10 @@ use crate::index::{
 use crate::pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
 };
+use crate::rust_methods::{
+    rust_aliased_types, rust_dereference_reaches_pointee, rust_inherent_precedence,
+    rust_read_declared_type, RustReadType, RustReceiverForm,
+};
 use open_kioku_core::{
     Binding, CallSite, Confidence, EvidenceSourceType, FileId, FileRange, GraphEdgeType, Language,
     LineRange, RelationshipProof, RelationshipProofKind, ScopeId, ScopeKind, Symbol, SymbolId,
@@ -95,48 +99,102 @@ fn rust_field_receiver_outcome(
             None if first => return None,
             None => return nothing(),
         };
-        let Some(declared) = binding
-            .declared_type
-            .as_deref()
-            .and_then(rust_annotated_receiver_type)
-        else {
+        // The field's type is named where the struct is declared, read through aliases and
+        // smart pointers (#639).
+        let Some(read) = binding.declared_type.as_deref().and_then(|declared| {
+            rust_read_declared_type(ctx, (&body.file_id, &binding.scope_id), declared)
+        }) else {
             return nothing();
         };
-        // The field's type is named where the struct is declared. Only type lookup runs in this
-        // context, and it records no evidence, so the caller's path is not used.
-        let declaring = ResolutionContext::new(
-            &body.file_id,
-            ctx.file_path,
-            None,
-            ctx.language.clone(),
-            ctx.repository,
-            ctx.symbols,
-            ctx.scopes,
-            ctx.bindings,
-            ctx.inheritance,
-            ctx.semantics,
-        );
-        let found = collect_type_candidate_set(&declaring, &binding.scope_id, declared);
         if index + 1 == fields.len() {
-            let types = found
-                .targets
-                .into_iter()
-                .map(|(target, _)| target)
-                .collect();
-            return Some(type_member_outcome(
-                call,
-                ctx,
-                types,
-                found.configured,
-                Some(RUST_FIELD_RECEIVER),
-            ));
+            return Some(rust_field_member_outcome(call, ctx, read));
         }
-        match rust_one_struct(ctx, found) {
+        // A field is reached through a smart pointer as through the type it holds: the pointer
+        // has no field a caller can name.
+        match rust_one_struct(ctx, read.found) {
             Some(next) => owner = next,
             None => return nothing(),
         }
     }
     None
+}
+
+/// A method call on the last field of a Rust field chain, whose declared type reads as `read`
+/// (#630, #639). A method of an alias the type was read through is a method of the type. With
+/// several methods of the name, an inherent one takes precedence over trait methods as
+/// [`rust_inherent_precedence`] proves it. Through `Box`, `Rc` or `Arc`, the call reaches only
+/// an inherent method of the type the pointer holds, and only when
+/// [`rust_dereference_reaches_pointee`] rules out a method of the pointer.
+fn rust_field_member_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    read: RustReadType,
+) -> ResolutionOutcome {
+    let nothing = || evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
+    let mut owners = read
+        .found
+        .targets
+        .iter()
+        .map(|(target, _)| target.clone())
+        .chain(read.aliases.iter().cloned())
+        .collect::<Vec<_>>();
+    normalize_symbol_ids(&mut owners);
+    if read.dereferenced && read.found.configured.is_some() {
+        return nothing();
+    }
+    let mut direct = owners
+        .iter()
+        .flat_map(|owner| find_members_by_name(ctx, owner, &call.callee_name))
+        .collect::<Vec<_>>();
+    normalize_symbol_ids(&mut direct);
+    let types = read
+        .found
+        .targets
+        .iter()
+        .map(|(target, _)| target.clone())
+        .collect::<Vec<_>>();
+    let precedence = || {
+        rust_inherent_precedence(
+            ctx,
+            &call.callee_name,
+            &types,
+            &direct,
+            read.form.unwrap_or(RustReceiverForm::Place),
+        )
+    };
+    if read.dereferenced {
+        // `read.form` is that of the place the pointer holds, which the probe reaches after
+        // every step on the pointer.
+        if read.form.is_none() || !rust_dereference_reaches_pointee(ctx, &call.callee_name) {
+            return nothing();
+        }
+        return match (types.as_slice(), precedence()) {
+            ([_], Some(target)) => evaluate_direct_member_targets_via(
+                call,
+                ctx,
+                vec![target],
+                RUST_FIELD_DEREF_RECEIVER,
+            ),
+            _ => nothing(),
+        };
+    }
+    if direct.len() > 1 && read.found.configured.is_none() && read.form.is_some() {
+        if let ([_], Some(target)) = (types.as_slice(), precedence()) {
+            return evaluate_direct_member_targets_via(
+                call,
+                ctx,
+                vec![target],
+                RUST_FIELD_INHERENT_RECEIVER,
+            );
+        }
+    }
+    type_member_outcome(
+        call,
+        ctx,
+        owners,
+        read.found.configured,
+        Some(RUST_FIELD_RECEIVER),
+    )
 }
 
 /// The struct the first segment of a Rust field chain has: for `self`, the type the caller's
@@ -216,7 +274,98 @@ pub(crate) fn binding_receiver_type(
         .as_deref()
         .map(str::trim)
         .filter(|inferred| !inferred.is_empty())?;
+    if ctx.language == Language::Rust {
+        // A path's value, or a call through a plain name, gives a type only as a constructor
+        // (#654).
+        if let Some(path) = inferred.strip_prefix('=') {
+            return rust_constructed_type(ctx, scope_id, path.trim(), true);
+        }
+        if let Some(name) = inferred
+            .strip_suffix("()")
+            .filter(|name| !name.contains("::"))
+        {
+            return rust_constructed_type(ctx, scope_id, name.trim(), false);
+        }
+        if let Some(path) = inferred.strip_suffix("()") {
+            if let Some(found) = rust_constructed_type(ctx, scope_id, path.trim(), false) {
+                return Some(found);
+            }
+        }
+    }
     Some(inferred_receiver_type(ctx, scope_id, inferred))
+}
+
+/// The struct a Rust local is an instance of when its initializer is a struct's constructor
+/// (#654): `S(1)`, whose callee is the value of a tuple struct `S`, or, when `unit`, `S`, the
+/// value of a unit struct `S`. The value is read at `scope_id` in the value namespace: an item
+/// declared in scope, or the one item an explicit import binds, or for a path, the one item the
+/// module it names holds. The struct is proven when looking its name up as a type there reaches
+/// it alone. `None` when the value is any other item, such as a function, or cannot be read.
+fn rust_constructed_type(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    path: &str,
+    unit: bool,
+) -> Option<(String, bool)> {
+    let is_struct_value = |symbol: &Symbol| {
+        symbol.kind == SymbolKind::Class
+            && ctx.scopes.rust_in_namespace(symbol, RustNamespace::Value)
+            && (!unit || ctx.scopes.rust_is_unit_struct(&symbol.id))
+    };
+    let item = match path.rsplit_once("::") {
+        Some((module_path, name)) => {
+            let (targets, strategy) = rust_module_path_items(
+                scope_id,
+                ctx,
+                module_path.trim(),
+                (name.trim(), RustNamespace::Value),
+                &|symbol| !matches!(symbol.kind, SymbolKind::Module | SymbolKind::Package),
+            )?;
+            let exact = matches!(
+                strategy,
+                RustModulePathStrategy::CrateQualified
+                    | RustModulePathStrategy::ModuleScope
+                    | RustModulePathStrategy::CrateName
+                    | RustModulePathStrategy::Reexport
+            );
+            match targets.as_slice() {
+                [item] if exact => item.clone(),
+                _ => return None,
+            }
+        }
+        None => {
+            let in_value_namespace =
+                |symbol: &Symbol| ctx.scopes.rust_in_namespace(symbol, RustNamespace::Value);
+            match crate::context::nearest_lexical_items(ctx, scope_id, path, in_value_namespace) {
+                Some(items) => match items.as_slice() {
+                    [item] => item.clone(),
+                    _ => return None,
+                },
+                None => {
+                    let ScopedImport::Resolved(bindings) =
+                        ctx.scoped_import(scope_id, path, |binding| {
+                            binding.target_symbol.is_some()
+                        })
+                    else {
+                        return None;
+                    };
+                    match bindings.as_slice() {
+                        [binding] if !binding.is_glob && binding.configured_targets.is_none() => {
+                            binding.target_symbol.clone()?
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+        }
+    };
+    if !ctx.symbols.get(&item).is_some_and(is_struct_value) {
+        return None;
+    }
+    let found = collect_type_candidate_set(ctx, scope_id, path);
+    let proven = found.configured.is_none()
+        && matches!(found.targets.as_slice(), [(target, _)] if *target == item);
+    proven.then(|| (path.to_string(), true))
 }
 
 /// The type whose members a method call on a Rust binding annotated `annotation` reaches: the
@@ -224,7 +373,7 @@ pub(crate) fn binding_receiver_type(
 /// `w: &Wrapper<u8>` and `m: &'a mut Foo` are a `Foo`, a `Wrapper` and a `Foo`; generic arguments
 /// pick an instantiation of the type, not another type. `v: Vec<Foo>` is a `Vec`, never a `Foo`.
 /// `None` for any other form, such as a tuple, slice, pointer, trait object or `impl Trait`.
-fn rust_annotated_receiver_type(annotation: &str) -> Option<&str> {
+pub(crate) fn rust_annotated_receiver_type(annotation: &str) -> Option<&str> {
     let mut rest = annotation.trim();
     while let Some(referent) = rest.strip_prefix('&') {
         rest = referent.trim_start();
@@ -429,8 +578,10 @@ fn resolve_rust_qualified_module_outcome(
             )
         },
     )?;
+    let aliased = rust_aliased_types(ctx, &types);
     let mut members = types
         .iter()
+        .chain(&aliased)
         .flat_map(|type_id| find_members_by_name(ctx, type_id, &call.callee_name))
         .filter(|member| {
             ctx.symbols.get(member).is_some_and(|symbol| {
@@ -1434,18 +1585,38 @@ pub(crate) fn resolve_type_names_member_outcome_with(
 struct ReceiverTypeRoute {
     strategy: &'static str,
     message: &'static str,
+    /// The strategy of the proof that the target is a member of the receiver's type.
+    member_strategy: &'static str,
 }
 
 /// A receiver whose binding states or proves its type.
 const TYPED_RECEIVER: ReceiverTypeRoute = ReceiverTypeRoute {
     strategy: "typed_receiver",
     message: "method candidate from typed receiver binding",
+    member_strategy: "direct_member_of_receiver_type",
 };
 
 /// A receiver that is a field of a Rust struct, typed by the field's declaration (#630).
 const RUST_FIELD_RECEIVER: ReceiverTypeRoute = ReceiverTypeRoute {
     strategy: "rust_field_declared_type",
     message: "method candidate from the declared type of a Rust struct field",
+    member_strategy: "direct_member_of_receiver_type",
+};
+
+/// The same receiver, where the type has an inherent method of the name and trait methods of it
+/// that rustc tries no earlier (#639).
+const RUST_FIELD_INHERENT_RECEIVER: ReceiverTypeRoute = ReceiverTypeRoute {
+    strategy: "rust_field_declared_type",
+    message: "inherent method of the declared type of a Rust struct field, which takes precedence over its trait methods of the same name",
+    member_strategy: "inherent_member_of_receiver_type",
+};
+
+/// A receiver that is a field of a Rust struct whose declared type is a `Box`, `Rc` or `Arc`,
+/// read as the type the pointer holds (#639).
+const RUST_FIELD_DEREF_RECEIVER: ReceiverTypeRoute = ReceiverTypeRoute {
+    strategy: "rust_field_dereferenced_type",
+    message: "inherent method of the type a Rust struct field's `Box`, `Rc` or `Arc` holds, which no method of the pointer shadows",
+    member_strategy: "inherent_member_of_receiver_type",
 };
 
 /// Member calls on a receiver whose type is one of `type_candidates`. `receiver` is how the
@@ -1460,6 +1631,12 @@ fn type_member_outcome(
     receiver: Option<ReceiverTypeRoute>,
 ) -> ResolutionOutcome {
     let receiver_type_proven = receiver.is_some();
+    // A Rust alias is the type it stands for, whose methods it has besides those of an `impl`
+    // of the alias itself (#639, #654).
+    if ctx.language == Language::Rust {
+        let aliased = rust_aliased_types(ctx, &type_candidates);
+        type_candidates.extend(aliased);
+    }
     normalize_symbol_ids(&mut type_candidates);
     if type_candidates.is_empty() {
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
@@ -1707,7 +1884,7 @@ fn evaluate_direct_member_targets_via(
             ));
             candidate.proofs.push(proof(
                 RelationshipProofKind::ContainingType,
-                "direct_member_of_receiver_type",
+                route.member_strategy,
                 call,
                 ctx,
                 &target,

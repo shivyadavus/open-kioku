@@ -248,12 +248,46 @@ whose type is the one the caller's `impl` names, looked up where the `impl` is w
 binding whose type the index proves; that type must be one struct, not reached through a module
 whose file configuration selects. Each field after it is looked up in that struct's scope, and its
 type is read from there, with the struct's own imports and module, not the caller's. References
-and generic arguments are read through as for a binding (`&'a S` and `S<u8>` are an `S`); `Box<S>`
-and `Option<S>` are not an `S`. The edge carries the `receiver_type` proof with strategy
+and generic arguments are read through as for a binding (`&'a S` and `S<u8>` are an `S`);
+`Option<S>` and `Mutex<S>` are not an `S`. The edge carries the `receiver_type` proof with strategy
 `rust_field_declared_type`. A field declared more than once (`#[cfg]`-gated fields), one typed by a
 type parameter of the struct, or a type on the way that is not one struct reaches no candidate.
 Fields of an enum variant, a union or a tuple struct are not read, and a field's type is not a
 `USES_TYPE` of its struct.
+
+A field's type is read further (#639). A `type` alias that names one type of the repository is
+that type, read where the alias is declared, and a method an `impl` of the alias declares is one
+of the type. The standard library's `Box`, `Rc` and `Arc`, named by a `std`/`alloc` path, an
+import of one, or for `Box` the prelude with no item or import of the name in scope, are read as
+the type they hold: a field reaches through them, and a method call through one reaches an
+inherent method of the type it holds, with the strategy `rust_field_dereferenced_type`, only when
+no method of the pointer can answer first. rustc tries the pointer and references to it before
+what it holds, so the method's name must not be one the standard library gives these pointers
+(their associated functions, such as `Rc::clone` and `Arc::strong_count`, and the methods of the
+traits implemented for them, those forwarding to what a `Box` holds included), must not be
+declared by any trait of the repository, which a blanket `impl` may give the pointer, and the
+caller's file must have no import that names neither a repository item or module nor a
+standard-library path, and no glob other than an inline block's `use super::*;`, since either may
+bring in a trait the index does not know. When the type has an inherent method and trait methods
+of the called name, the inherent method is proven (containing-type strategy
+`inherent_member_of_receiver_type`) when its `impl` is for the type itself and covers every
+instantiation (no concrete generic arguments, no bounds but `?Sized`, no `where` clause), and
+rustc's probe tries its `self` no later than that of each trait method of the name, those of the
+type's trait `impl` blocks and every one a repository trait declares: `&self` precedes a trait's
+`&self` and `&mut self`, but a trait's by-value `self` precedes it. The probe order is that of the
+field's form: a plain field tries `self`, `&self`, `&mut self`; a `&S` field `&self` first; a
+`&mut S` field `&mut self` first.
+
+A Rust local is an instance of a struct when its initializer is the struct's constructor (#654):
+`let s = S(1);` where the value `S` is a tuple struct, or `let s = S;` where it is a unit struct,
+read in the value namespace from the item in scope, the one explicit import, or the one item a
+module path names, and only when the type `S` looked up there is that struct. An associated
+function or method of a type reached through an alias (`Alias::make()`) is one of the aliased
+type. Two globs that bring in one name in different namespaces settle each namespace on its own:
+a glob opening a module that holds only a module `f` brings in no value `f`, and one holding only
+a function `f` no type `f`, so `crate::c::f()` reaches the function and `crate::c::f::h()`
+continues through the module, an inline block or a module file whose `mod` item is visible to the
+glob.
 
 A file a `path` attribute mounts inside one alternative is not placed in the module tree, but it
 is the module its route holds (#633): `unix/mod.rs` mounted by
