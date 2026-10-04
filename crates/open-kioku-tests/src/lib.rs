@@ -673,15 +673,12 @@ impl<'a> TestSelector<'a> {
 /// evidence (collected in `strong_evidence`) can lift a test above Optional. Heuristic
 /// name/path similarity contributes to ranking but never to requiredness.
 fn assign_selection_tier(test: &mut TestTarget, score: f32, strong_evidence: Vec<String>) {
-    // Evidence that a disabled test overlaps the change says where it would run, not that it
-    // runs. Recommending it would read as "run this" for a test the runner skips, so it stays
-    // Optional and says why.
-    if !test.counts_as_validation_evidence() {
+    // Evidence that a disabled test or a helper overlaps the change says where it would run,
+    // not that it runs. Recommending it would read as "run this" for code the runner skips or
+    // never discovers, so it stays Optional and says why.
+    if let Some(reason) = test.validation_exclusion() {
         test.selection_tier = TestSelectionTier::Optional;
-        test.tier_justification = vec![
-            "the runner skips this test (`skip`, `todo`, `failing`), so running it validates nothing"
-                .into(),
-        ];
+        test.tier_justification = vec![reason.tier_justification().into()];
         return;
     }
     if strong_evidence.is_empty() {

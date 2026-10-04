@@ -888,12 +888,14 @@ fn quality_provider_report(
         } else if test_count > 0 {
             "indexed validation candidates available".into()
         } else {
-            match &excluded_tests {
-                Some(excluded) if !excluded.is_empty() => format!(
-                    "no indexed validation candidates; {}",
-                    all_tests_excluded(excluded)
-                ),
-                _ => "no indexed validation candidates".into(),
+            // Worded by the core sentence the context pack's validation caveat uses, so one
+            // index is not described two ways.
+            match excluded_tests
+                .as_ref()
+                .and_then(open_kioku_core::every_test_target_excluded)
+            {
+                Some(reason) => format!("no indexed validation candidates; {reason}"),
+                None => "no indexed validation candidates".into(),
             }
         },
         next_step: tests_next_step(
@@ -923,23 +925,6 @@ fn tests_evidence(
     format!("{test_count} runnable indexed test target(s); excluded: {withheld}")
 }
 
-/// Worded as the context pack words it (`validation_unavailable_reason`), so one index is not
-/// described two ways.
-fn all_tests_excluded(
-    excluded: &std::collections::BTreeMap<open_kioku_core::TestExclusionReason, usize>,
-) -> String {
-    match excluded.keys().collect::<Vec<_>>().as_slice() {
-        [reason] => format!("every indexed test target is a {}", reason.describe()),
-        _ => format!(
-            "every indexed test target is excluded ({})",
-            excluded
-                .iter()
-                .map(|(reason, count)| format!("{count} {}", reason.describe()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
-}
 
 const CROSS_PROJECT_TESTS_NOT_APPLICABLE: &str =
     "not applicable in cross-project mode; see each linked project's own index";

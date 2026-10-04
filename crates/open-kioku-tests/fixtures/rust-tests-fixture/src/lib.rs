@@ -1,3 +1,5 @@
+pub mod eviction;
+
 pub const CACHE_LIMIT: usize = 64;
 
 pub struct CacheEntry {

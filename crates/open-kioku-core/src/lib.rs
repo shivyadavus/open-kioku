@@ -2565,9 +2565,16 @@ pub enum TestTargetOrigin {
     /// A declared symbol outside a test file, matched by a test annotation or naming convention.
     #[default]
     Symbol,
-    /// A declared symbol in a file the shared test-path rule recognises. The file is tests, so
-    /// the symbol is one whatever it is called: `shouldRoundHalfUp`, `roundsHalfUp`, `testRounds`.
+    /// A declared symbol in a file the shared test-path rule recognises that the language's
+    /// runner discovers as a test: a `#[test]` or `@Test` callable, a `test`-prefixed Python
+    /// function in a test module, a Go `TestX` in a `_test.go` file. The runner decides, not the
+    /// name, so a JUnit `shouldRoundHalfUp` is one.
     TestFileSymbol,
+    /// A declared symbol in a test-path file that no runner discovers as a test: a helper,
+    /// fixture, builder or lifecycle hook (`setUp`, `TestMain`, `makeClient`), or any callable in
+    /// a support module such as `conftest.py` or a `testutil/` package. It is still test code,
+    /// so it is kept, but running it validates nothing.
+    TestFileHelper,
     /// A JavaScript or TypeScript runner call such as `test("name", fn)`.
     RegistrationCall,
     /// A registration call the runner will not execute: `test.skip`, `it.todo`, `test.failing`.
@@ -2584,6 +2591,8 @@ pub enum TestTargetOrigin {
 pub enum TestExclusionReason {
     /// A registration the runner will not execute: `test.skip`, `it.todo`, `test.failing`.
     Disabled,
+    /// Test code no runner executes as a test: a helper, fixture or lifecycle hook.
+    Helper,
 }
 
 impl TestExclusionReason {
@@ -2592,6 +2601,7 @@ impl TestExclusionReason {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Disabled => DISABLED_TEST_TARGET,
+            Self::Helper => HELPER_TEST_TARGET,
         }
     }
 
@@ -2601,12 +2611,55 @@ impl TestExclusionReason {
             Self::Disabled => {
                 "Enable the skipped tests (`test.skip`, `it.todo`, `test.failing`) before relying on validation recommendations."
             }
+            Self::Helper => {
+                "Add tests a runner executes (`#[test]`, `@Test`, `def test_*`, `func TestX`, `test(..)`/`it(..)`); helpers and lifecycle hooks in test files validate nothing on their own."
+            }
+        }
+    }
+
+    /// Why a target excluded for this reason stays optional however strongly it overlaps a
+    /// change.
+    pub fn tier_justification(self) -> &'static str {
+        match self {
+            Self::Disabled => {
+                "the runner skips this test (`skip`, `todo`, `failing`), so running it validates nothing"
+            }
+            Self::Helper => {
+                "no runner executes this helper or lifecycle hook as a test, so it validates nothing"
+            }
         }
     }
 }
 
 /// How a disabled registration is described wherever it is withheld from validation.
 pub const DISABLED_TEST_TARGET: &str = "disabled test the runner skips";
+
+/// How a test-file helper or lifecycle hook is described wherever it is withheld from
+/// validation.
+pub const HELPER_TEST_TARGET: &str = "helper or lifecycle hook no test runner executes";
+
+/// The sentence every surface uses when an index holds test targets and every one is excluded,
+/// so `ok status` and the context pack's validation caveat word one index one way. `None` when
+/// nothing is excluded.
+pub fn every_test_target_excluded(
+    excluded: &BTreeMap<TestExclusionReason, usize>,
+) -> Option<String> {
+    match excluded.keys().collect::<Vec<_>>().as_slice() {
+        [] => None,
+        [reason] => Some(format!(
+            "every indexed test target is a {}",
+            reason.describe()
+        )),
+        _ => Some(format!(
+            "every indexed test target is excluded ({})",
+            excluded
+                .iter()
+                .map(|(reason, count)| format!("{count} {}", reason.describe()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
 
 /// Selection strength for a validation candidate.
 ///
@@ -2641,8 +2694,9 @@ pub enum TestSelectionTier {
 
 impl TestTarget {
     /// Whether this target can stand as validation evidence. A disabled registration is a test
-    /// the runner skips, so counting it would let a file of `test.skip` calls satisfy a
-    /// task family that requires validation evidence.
+    /// the runner skips and a test-file helper is one it never runs, so counting either would
+    /// let a file of `test.skip` calls or `withTempRepo` helpers satisfy a task family that
+    /// requires validation evidence.
     pub fn counts_as_validation_evidence(&self) -> bool {
         self.validation_exclusion().is_none()
     }
@@ -2651,19 +2705,22 @@ impl TestTarget {
     pub fn validation_exclusion(&self) -> Option<TestExclusionReason> {
         match self.origin {
             TestTargetOrigin::DisabledRegistrationCall => Some(TestExclusionReason::Disabled),
+            TestTargetOrigin::TestFileHelper => Some(TestExclusionReason::Helper),
             TestTargetOrigin::Symbol
             | TestTargetOrigin::TestFileSymbol
             | TestTargetOrigin::RegistrationCall => None,
         }
     }
 
-    /// Whether provenance alone establishes that this is a test: the index extracted it from a
-    /// test file, or a runner call registered it. Only targets matched outside a test file, by
-    /// annotation or naming convention, need a name heuristic to judge them.
+    /// Whether provenance alone settles what this target is: the index extracted it from a test
+    /// file and judged it by the runner's discovery rule, or a runner call registered it. Only
+    /// targets matched outside a test file, by annotation or naming convention, need a name
+    /// heuristic to judge them.
     pub fn has_test_provenance(&self) -> bool {
         matches!(
             self.origin,
             TestTargetOrigin::TestFileSymbol
+                | TestTargetOrigin::TestFileHelper
                 | TestTargetOrigin::RegistrationCall
                 | TestTargetOrigin::DisabledRegistrationCall
         )

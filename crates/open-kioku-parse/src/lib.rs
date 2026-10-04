@@ -7,6 +7,9 @@ use open_kioku_tree_sitter::TestRegistrationCall;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use test_discovery::TestFileDiscovery;
+
+mod test_discovery;
 
 #[derive(Debug, Clone)]
 pub struct ParsedFile {
@@ -1158,6 +1161,7 @@ pub fn extract_tests(
 ) -> Vec<TestTarget> {
     let is_test_file = open_kioku_core::is_test_code_path(&file.path.to_string_lossy());
     let lines = content.lines().collect::<Vec<_>>();
+    let discovery = is_test_file.then(|| TestFileDiscovery::new(file, &lines, symbols));
     let mut targets = symbols
         .iter()
         .filter(|symbol| {
@@ -1167,46 +1171,19 @@ pub fn extract_tests(
                     || has_test_name_prefix(&symbol.name)
                     || has_adjacent_test_annotation(&lines, symbol))
         })
-        .map(|symbol| TestTarget {
-            selection_tier: open_kioku_core::TestSelectionTier::default(),
-            tier_justification: Vec::new(),
-            id: stable_id(&format!("test:{}:{}", file.path.display(), symbol.name)),
-            name: symbol.name.clone(),
-            file_id: file.id.clone(),
-            range: symbol.range.clone(),
-            command: recommended_command(&file.language, &file.path.to_string_lossy(), build_hint),
-            confidence: if is_test_file {
-                Confidence::High
-            } else {
-                Confidence::Medium
-            },
-            reason: "test-like path, annotation, or naming convention".into(),
-            evidence_refs: vec![stable_id(&format!(
-                "test:{}:{}",
-                file.path.display(),
-                symbol.name
-            ))],
-            score_breakdown: vec![ScoreComponent::single(
-                "indexed_test_confidence",
-                if is_test_file {
-                    Confidence::High.score()
-                } else {
-                    Confidence::Medium.score()
-                },
-                vec![stable_id(&format!(
-                    "test:{}:{}",
-                    file.path.display(),
-                    symbol.name
-                ))],
-                "test-like path, annotation, or naming convention",
-            )],
-            // A symbol in a test file is a test by provenance; one matched outside a test file
-            // is a test by annotation or name, and the surfaces that filter say so differently.
-            origin: if is_test_file {
-                open_kioku_core::TestTargetOrigin::TestFileSymbol
-            } else {
-                open_kioku_core::TestTargetOrigin::Symbol
-            },
+        .map(|symbol| {
+            // Every callable of a test file is kept as test code, but only those its runner
+            // discovers are tests; a helper or lifecycle hook beside them validates nothing. One
+            // matched outside a test file is a test by annotation or name, and the surfaces that
+            // filter say so differently.
+            let origin = match &discovery {
+                Some(discovery) if discovery.runs(symbol) => {
+                    open_kioku_core::TestTargetOrigin::TestFileSymbol
+                }
+                Some(_) => open_kioku_core::TestTargetOrigin::TestFileHelper,
+                None => open_kioku_core::TestTargetOrigin::Symbol,
+            };
+            symbol_target(file, symbol, origin, build_hint)
         })
         .collect::<Vec<_>>();
     // Most JavaScript and TypeScript tests are calls, not declarations, so they have no symbol.
@@ -1218,6 +1195,44 @@ pub fn extract_tests(
         );
     }
     targets
+}
+
+const SYMBOL_TEST_REASON: &str = "test-like path, annotation, or naming convention";
+const HELPER_REASON: &str =
+    "helper or lifecycle callable in a test-path file that no test runner discovers as a test";
+
+fn symbol_target(
+    file: &File,
+    symbol: &Symbol,
+    origin: open_kioku_core::TestTargetOrigin,
+    build_hint: Option<&str>,
+) -> TestTarget {
+    let id = stable_id(&format!("test:{}:{}", file.path.display(), symbol.name));
+    // A helper is test code, not a test, so it is the weakest target there is.
+    let (confidence, reason) = match origin {
+        open_kioku_core::TestTargetOrigin::TestFileSymbol => (Confidence::High, SYMBOL_TEST_REASON),
+        open_kioku_core::TestTargetOrigin::TestFileHelper => (Confidence::Low, HELPER_REASON),
+        _ => (Confidence::Medium, SYMBOL_TEST_REASON),
+    };
+    TestTarget {
+        selection_tier: open_kioku_core::TestSelectionTier::default(),
+        tier_justification: Vec::new(),
+        id: id.clone(),
+        name: symbol.name.clone(),
+        file_id: file.id.clone(),
+        range: symbol.range.clone(),
+        command: recommended_command(&file.language, &file.path.to_string_lossy(), build_hint),
+        confidence,
+        reason: reason.into(),
+        evidence_refs: vec![id.clone()],
+        score_breakdown: vec![ScoreComponent::single(
+            "indexed_test_confidence",
+            confidence.score(),
+            vec![id],
+            reason,
+        )],
+        origin,
+    }
 }
 
 const REGISTRATION_REASON: &str = "test registration call in a test-path file";
@@ -1432,6 +1447,32 @@ fn multiline_attribute_opener(lines: &[&str], close: usize) -> Option<usize> {
 /// a test body is not a test. Scanned per symbol, not per file: a `#[cfg(test)] mod tests`
 /// elsewhere in the file says nothing about the constant or struct three hundred lines earlier.
 fn has_adjacent_test_annotation(lines: &[&str], symbol: &Symbol) -> bool {
+    declares_registered_test(lines, symbol)
+        || has_adjacent_annotation(lines, symbol, is_stacked_test_annotation)
+}
+
+/// Whether the symbol's own first line is a JS/TS `it(` or `test(` call or a Python `def test_`.
+fn declares_registered_test(lines: &[&str], symbol: &Symbol) -> bool {
+    symbol_first_line(lines, symbol).is_some_and(|first| {
+        DECLARATION_TEST_PREFIXES
+            .iter()
+            .any(|prefix| first.starts_with(prefix))
+    })
+}
+
+fn symbol_first_line<'a>(lines: &[&'a str], symbol: &Symbol) -> Option<&'a str> {
+    let start = (symbol.range.as_ref()?.start as usize).checked_sub(1)?;
+    lines.get(start).map(|line| line.trim_start())
+}
+
+/// Whether `matches` accepts the symbol's first line or an annotation opener in the contiguous
+/// attribute, annotation, decorator and comment stack directly above it. See
+/// [`has_adjacent_test_annotation`] for how the walk stops.
+fn has_adjacent_annotation(
+    lines: &[&str],
+    symbol: &Symbol,
+    matches: impl Fn(&str) -> bool,
+) -> bool {
     let Some(range) = &symbol.range else {
         return false;
     };
@@ -1439,12 +1480,7 @@ fn has_adjacent_test_annotation(lines: &[&str], symbol: &Symbol) -> bool {
     let Some(first) = lines.get(start) else {
         return false;
     };
-    let first = first.trim_start();
-    if is_stacked_test_annotation(first)
-        || DECLARATION_TEST_PREFIXES
-            .iter()
-            .any(|prefix| first.starts_with(prefix))
-    {
+    if matches(first.trim_start()) {
         return true;
     }
     let mut index = start;
@@ -1453,7 +1489,7 @@ fn has_adjacent_test_annotation(lines: &[&str], symbol: &Symbol) -> bool {
         let above = index - 1;
         let line = lines[above].trim();
         if is_annotation_stack_line(line) {
-            if is_stacked_test_annotation(line) {
+            if matches(line) {
                 return true;
             }
             index = above;
@@ -1463,7 +1499,7 @@ fn has_adjacent_test_annotation(lines: &[&str], symbol: &Symbol) -> bool {
         let Some(opener) = multiline_attribute_opener(lines, above) else {
             return false;
         };
-        if is_stacked_test_annotation(lines[opener].trim()) {
+        if matches(lines[opener].trim()) {
             return true;
         }
         walked += index - opener;
@@ -1517,6 +1553,7 @@ mod tests {
         Confidence, EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType, Language,
         LineRange, RepositoryId, Symbol, SymbolId, SymbolKind,
     };
+    use std::collections::BTreeMap;
 
     fn rust_file() -> File {
         File {
@@ -2058,8 +2095,10 @@ endpoint = "https://orders.example.com/v1/orders"
         names
     }
 
+    /// A JS/TS runner executes registration calls, never a declared function, so every callable
+    /// of a test file is kept as test code and none of them is a test.
     #[test]
-    fn javascript_and_typescript_test_layouts_make_every_callable_a_target() {
+    fn javascript_and_typescript_test_layouts_keep_every_callable_as_a_helper() {
         let src = "import { convert } from \"../rates\";\n\nconst SAMPLE_RATE = 1.25;\n\nfunction roundsHalfUp() {\n  expect(convert(2, SAMPLE_RATE)).toBe(2.5);\n}\n\nexport async function loadsRateTable() {\n  await loadTable();\n}\n";
         for (path, language) in [
             ("src/rates_test.ts", Language::TypeScript),
@@ -2077,12 +2116,21 @@ endpoint = "https://orders.example.com/v1/orders"
                 "{path}"
             );
             let symbols = extract_symbols(&file, src);
-            assert!(
-                extract_tests(&file, src, &symbols, None)
-                    .iter()
-                    .all(|test| matches!(test.confidence, Confidence::High)),
-                "{path}: a test-path target is high confidence"
-            );
+            for test in extract_tests(&file, src, &symbols, None) {
+                assert_eq!(
+                    test.origin,
+                    open_kioku_core::TestTargetOrigin::TestFileHelper,
+                    "{path}: {}",
+                    test.name
+                );
+                assert!(test.has_test_provenance(), "{path}: {}", test.name);
+                assert!(
+                    !test.counts_as_validation_evidence(),
+                    "{path}: {}",
+                    test.name
+                );
+                assert!(matches!(test.confidence, Confidence::Low), "{path}");
+            }
         }
     }
 
@@ -2241,9 +2289,10 @@ endpoint = "https://orders.example.com/v1/orders"
         );
     }
 
-    /// A JUnit class declares its tests as methods named for behaviour, and a Python
-    /// `unittest.TestCase` does the same. Neither name contains "test", so the target carries the
-    /// fact that the file is tests instead of leaving later surfaces to guess from the name.
+    /// A JUnit class declares its tests as `@Test` methods named for behaviour, which no name
+    /// heuristic recognises, so the target carries the runner's verdict instead of leaving later
+    /// surfaces to guess from the name. A `unittest.TestCase` runs only its `test*` methods: any
+    /// other method beside them is kept as test code but is a helper, not validation.
     #[test]
     fn junit_and_unittest_methods_are_targets_by_test_file_provenance() {
         let java = file_at("src/test/java/com/acme/RatesTest.java", Language::Java);
@@ -2282,7 +2331,7 @@ endpoint = "https://orders.example.com/v1/orders"
         );
         assert!(
             python_names.contains(&"rounds_towards_even"),
-            "a helper in a test file is still a target: {python_names:?}"
+            "a helper in a test file is still test code: {python_names:?}"
         );
         assert!(
             !python_names.contains(&"RatesTest"),
@@ -2290,7 +2339,192 @@ endpoint = "https://orders.example.com/v1/orders"
         );
         for target in &python_targets {
             assert!(target.has_test_provenance(), "{}", target.name);
+            assert_eq!(
+                target.counts_as_validation_evidence(),
+                target.name == "test_rounds_half_up",
+                "{}",
+                target.name
+            );
         }
+    }
+
+    /// Each target of `src` at `path`, by name, with whether it is validation evidence.
+    fn runnable_by_name(path: &str, language: Language, src: &str) -> BTreeMap<String, bool> {
+        use crate::{HeuristicParser, Parser};
+        let file = file_at(path, language);
+        HeuristicParser
+            .parse_with_hint(&file, src, None)
+            .tests
+            .into_iter()
+            .map(|test| {
+                assert!(
+                    test.has_test_provenance() || !open_kioku_core::is_test_code_path(path),
+                    "{path}: {}",
+                    test.name
+                );
+                (test.name.clone(), test.counts_as_validation_evidence())
+            })
+            .collect()
+    }
+
+    fn assert_runnable(path: &str, language: Language, src: &str, expected: &[(&str, bool)]) {
+        let expected = expected
+            .iter()
+            .map(|(name, runs)| ((*name).to_string(), *runs))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(runnable_by_name(path, language, src), expected, "{path}");
+    }
+
+    #[test]
+    fn a_rust_test_file_runs_only_its_attributed_functions() {
+        let src = "mod common;\n\nfn make_client() -> Client {\n    Client::default()\n}\n\nfn with_temp_repo<F: FnOnce(&Path)>(run: F) {\n    run(Path::new(\".\"));\n}\n\n#[test]\nfn posts_an_entry() {\n    with_temp_repo(|_| make_client().post());\n}\n\n#[tokio::test]\nasync fn replays_the_journal() {}\n\n#[sqlx::test]\nasync fn stores_a_row() {}\n";
+        assert_runnable(
+            "tests/ledger.rs",
+            Language::Rust,
+            src,
+            &[
+                ("make_client", false),
+                ("with_temp_repo", false),
+                ("posts_an_entry", true),
+                ("replays_the_journal", true),
+                ("stores_a_row", true),
+            ],
+        );
+        // A shared helper module of an integration-test directory holds no test.
+        assert_runnable(
+            "tests/common/mod.rs",
+            Language::Rust,
+            "pub fn setup() -> Ledger {\n    Ledger::open()\n}\n",
+            &[("setup", false)],
+        );
+    }
+
+    #[test]
+    fn a_python_test_module_runs_test_functions_and_test_class_methods_only() {
+        let src = "import pytest\nimport unittest\n\n\n@pytest.fixture\ndef test_ledger():\n    return Ledger()\n\n\ndef make_client():\n    return Client()\n\n\ndef test_posts_entry(test_ledger):\n    assert make_client().post(test_ledger)\n\n\nclass LedgerTest(unittest.TestCase):\n    def setUp(self):\n        self.ledger = Ledger()\n\n    def tearDown(self):\n        self.ledger.close()\n\n    def test_balance(self):\n        self.assertEqual(self.ledger.balance(), 0)\n\n    def rounds_towards_even(self):\n        pass\n\n\nclass TestJournal:\n    def setup_method(self):\n        pass\n\n    def test_replays(self):\n        pass\n\n\nclass FakeJournal:\n    def test_stub(self):\n        pass\n";
+        assert_runnable(
+            "tests/test_ledger.py",
+            Language::Python,
+            src,
+            &[
+                ("test_ledger", false),
+                ("make_client", false),
+                ("test_posts_entry", true),
+                ("setUp", false),
+                ("tearDown", false),
+                ("test_balance", true),
+                ("rounds_towards_even", false),
+                ("setup_method", false),
+                ("test_replays", true),
+                ("test_stub", false),
+            ],
+        );
+        // pytest collects no test from `conftest.py` or a helper module beside the tests.
+        for path in [
+            "tests/conftest.py",
+            "tests/helpers.py",
+            "testutil/ledger.py",
+        ] {
+            assert_runnable(
+                path,
+                Language::Python,
+                "def test_data():\n    return []\n\n\ndef make_ledger():\n    return Ledger()\n",
+                &[("test_data", false), ("make_ledger", false)],
+            );
+        }
+    }
+
+    #[test]
+    fn a_go_test_file_runs_test_fuzz_and_output_examples_only() {
+        let src = "package ledger\n\nimport \"testing\"\n\nfunc TestMain(m *testing.M) {\n\tos.Exit(m.Run())\n}\n\nfunc newServer(t *testing.T) *Server {\n\treturn &Server{}\n}\n\nfunc TestPostsEntry(t *testing.T) {\n\tnewServer(t)\n}\n\nfunc FuzzParse(f *testing.F) {}\n\nfunc BenchmarkPost(b *testing.B) {}\n\nfunc Testify() {}\n\nfunc ExampleLedger() {\n\tfmt.Println(1)\n\t// Output: 1\n}\n\nfunc ExampleLedger_quiet() {\n\tfmt.Println(1)\n}\n";
+        assert_runnable(
+            "ledger/ledger_test.go",
+            Language::Go,
+            src,
+            &[
+                ("TestMain", false),
+                ("newServer", false),
+                ("TestPostsEntry", true),
+                ("FuzzParse", true),
+                ("BenchmarkPost", false),
+                ("Testify", false),
+                ("ExampleLedger", true),
+                ("ExampleLedger_quiet", false),
+            ],
+        );
+        // `go test` compiles only `_test.go` files as tests: a `testutil` package's exported
+        // helpers are no test, whatever they are called.
+        assert_runnable(
+            "internal/testutil/server.go",
+            Language::Go,
+            "package testutil\n\nfunc NewServer() *Server {\n\treturn &Server{}\n}\n\nfunc TestServer() *Server {\n\treturn NewServer()\n}\n",
+            &[("NewServer", false), ("TestServer", false)],
+        );
+    }
+
+    #[test]
+    fn a_java_test_class_runs_annotated_methods_junit3_tests_and_testng_class_methods() {
+        let junit5 = "package com.acme;\n\nclass LedgerTest {\n  @BeforeEach\n  void setUp() {\n    ledger = new Ledger();\n  }\n\n  @AfterEach\n  void tearDown() {}\n\n  private Client makeClient() {\n    return new Client();\n  }\n\n  @Test\n  void shouldPostEntry() {\n    makeClient().post(ledger);\n  }\n\n  @ParameterizedTest\n  @ValueSource(ints = {1, 2})\n  void roundsTowardsEven(int value) {}\n}\n";
+        assert_runnable(
+            "src/test/java/com/acme/LedgerTest.java",
+            Language::Java,
+            junit5,
+            &[
+                ("setUp", false),
+                ("tearDown", false),
+                ("makeClient", false),
+                ("shouldPostEntry", true),
+                ("roundsTowardsEven", true),
+            ],
+        );
+        let junit3 = "package com.acme;\n\npublic class JournalTest extends TestCase {\n  protected void setUp() {}\n\n  public void testReplays() {}\n\n  private Journal journal() {\n    return new Journal();\n  }\n}\n";
+        assert_runnable(
+            "src/test/java/com/acme/JournalTest.java",
+            Language::Java,
+            junit3,
+            &[("setUp", false), ("testReplays", true), ("journal", false)],
+        );
+        let testng = "package com.acme;\n\n@Test\npublic class BalanceTest {\n  @BeforeMethod\n  public void reset() {}\n\n  @DataProvider\n  public Object[][] amounts() {\n    return new Object[][] {};\n  }\n\n  public void sumsEntries() {}\n\n  private Ledger ledger() {\n    return new Ledger();\n  }\n}\n";
+        assert_runnable(
+            "src/test/java/com/acme/BalanceTest.java",
+            Language::Java,
+            testng,
+            &[
+                ("reset", false),
+                ("amounts", false),
+                ("sumsEntries", true),
+                ("ledger", false),
+            ],
+        );
+        let support = "package com.acme.testing;\n\npublic final class LedgerFixtures {\n  public static Ledger emptyLedger() {\n    return new Ledger();\n  }\n\n  public static Client makeClient() {\n    return new Client();\n  }\n}\n";
+        assert_runnable(
+            "src/test/java/com/acme/testing/LedgerFixtures.java",
+            Language::Java,
+            support,
+            &[("emptyLedger", false), ("makeClient", false)],
+        );
+    }
+
+    #[test]
+    fn a_typescript_test_file_runs_its_registrations_and_none_of_its_helpers() {
+        let src = "import { Ledger } from \"../src/ledger\";\n\nfunction makeClient() {\n  return new Client();\n}\n\nasync function withTempRepo(run: (dir: string) => Promise<void>) {\n  await run(\"/tmp\");\n}\n\nbeforeEach(() => {\n  makeClient();\n});\n\ndescribe(\"ledger\", () => {\n  it(\"posts an entry\", async () => {\n    await withTempRepo(async () => {});\n  });\n  test.skip(\"replays the journal\", () => {});\n});\n";
+        assert_runnable(
+            "test/ledger.test.ts",
+            Language::TypeScript,
+            src,
+            &[
+                ("makeClient", false),
+                ("withTempRepo", false),
+                ("posts an entry", true),
+                ("replays the journal", false),
+            ],
+        );
+        assert_runnable(
+            "test-utils/repo.ts",
+            Language::TypeScript,
+            "export async function withTempRepo(run: () => Promise<void>) {\n  await run();\n}\n\nexport function makeClient() {\n  return new Client();\n}\n",
+            &[("withTempRepo", false), ("makeClient", false)],
+        );
     }
 
     #[test]

@@ -31,6 +31,10 @@ enum Targets {
     OnlyInSourceBesideTestFile,
     /// `test/ledger_test.ts` holds one registration target the runner skips.
     OnlyDisabled,
+    /// `test/ledger_test.ts` holds only helpers no runner executes, like a `testutil` package.
+    OnlyHelpers,
+    /// `test/ledger_test.ts` holds a helper and a registration the runner skips.
+    OnlyHelpersAndDisabled,
     /// No test file; `src/ledger.ts` holds the target, like a crate with only inline tests.
     OnlyInSource,
 }
@@ -184,6 +188,33 @@ fn store(targets: Targets) -> SqliteStore {
             ));
             files.push(ledger_test);
         }
+        Targets::OnlyHelpers | Targets::OnlyHelpersAndDisabled => {
+            let with_temp_repo = function(
+                "with-temp-ledger",
+                "withTempLedger",
+                &ledger_test,
+                LineRange { start: 5, end: 7 },
+            );
+            for helper in [&parses_header, &with_temp_repo] {
+                tests.push(typed_target(
+                    &format!("{}-helper-target", helper.id.0),
+                    helper,
+                    TestTargetOrigin::TestFileHelper,
+                    Confidence::Low,
+                ));
+            }
+            if matches!(targets, Targets::OnlyHelpersAndDisabled) {
+                tests.pop();
+                tests.push(typed_target(
+                    "ledger-skipped-target",
+                    &with_temp_repo,
+                    TestTargetOrigin::DisabledRegistrationCall,
+                    Confidence::Low,
+                ));
+            }
+            files.push(ledger_test);
+            symbols.extend([parses_header, with_temp_repo]);
+        }
     }
     let quality = IndexQuality::default();
     let manifest = IndexManifest {
@@ -313,6 +344,24 @@ fn code_to_test_whose_only_targets_are_disabled_keeps_its_primary_result_with_a_
     assert_validation_unavailable(
         &pack(Targets::OnlyDisabled),
         "every indexed test target is a disabled test the runner skips",
+    );
+}
+
+/// A test file of helpers (`withTempLedger`) is test code no runner executes, so a repository
+/// holding nothing else has no validation, however many such targets it indexes.
+#[test]
+fn code_to_test_whose_only_targets_are_helpers_keeps_its_primary_result_with_a_caveat() {
+    assert_validation_unavailable(
+        &pack(Targets::OnlyHelpers),
+        "every indexed test target is a helper or lifecycle hook no test runner executes",
+    );
+}
+
+#[test]
+fn code_to_test_whose_targets_are_helpers_and_disabled_names_both_reasons() {
+    assert_validation_unavailable(
+        &pack(Targets::OnlyHelpersAndDisabled),
+        "every indexed test target is excluded (1 disabled test the runner skips, 1 helper or lifecycle hook no test runner executes)",
     );
 }
 

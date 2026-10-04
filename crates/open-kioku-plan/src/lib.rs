@@ -873,10 +873,11 @@ fn validation_cap_reason(omitted: usize) -> Option<String> {
 }
 
 pub fn is_plausible_test(test: &TestTarget) -> bool {
-    // Provenance decides whenever the index knows where the target came from: a JUnit method in a
-    // test file (`shouldRoundHalfUp`) and a registered test ("rounds half up") are both tests no
-    // name heuristic recognises, and a disabled one is not evidence. The heuristics below judge
-    // only targets matched outside a test file, by annotation or naming convention.
+    // Provenance decides whenever the index knows where the target came from: a JUnit `@Test`
+    // method (`shouldRoundHalfUp`) and a registered test ("rounds half up") are both tests no
+    // name heuristic recognises, while a disabled registration and a test-file helper the
+    // runner never discovers (`setUp`, `withTempRepo`) are not evidence. The heuristics below
+    // judge only targets matched outside a test file, by annotation or naming convention.
     if test.has_test_provenance() {
         return test.counts_as_validation_evidence();
     }
@@ -5618,6 +5619,40 @@ mod tests {
         assert!(is_plausible_test(&enabled));
         let disabled = registration_test_target("skips stale rows", "test/rates_test.ts", true);
         assert!(!is_plausible_test(&disabled));
+    }
+
+    /// A helper's name passes every heuristic below the provenance check (`with_temp_repo` is
+    /// snake case, `TestServerBuilder` class-like and test-named), so only its provenance keeps
+    /// it out of the plan and out of `ok verify`'s expected tests.
+    #[test]
+    fn a_test_file_helper_is_never_plannable_whatever_its_name() {
+        let helpers = [
+            "withTempRepo",
+            "with_temp_repo",
+            "TestServerBuilder",
+            "setUp",
+        ]
+        .map(|name| TestTarget {
+            origin: open_kioku_core::TestTargetOrigin::TestFileHelper,
+            ..registration_test_target(name, "test/support_test.go", false)
+        });
+        for helper in &helpers {
+            assert!(!is_plausible_test(helper), "{}", helper.name);
+        }
+        let test = TestTarget {
+            origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+            ..registration_test_target("TestPostsEntry", "test/support_test.go", false)
+        };
+        let mut candidates = helpers.to_vec();
+        candidates.push(test);
+        let selection = select_validation_targets(candidates, &BTreeMap::new());
+        let names = selection
+            .selected
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["TestPostsEntry"]);
+        assert!(selection.omitted_by_cap.is_empty());
     }
 
     /// The task shares vocabulary with the registered name, so the validation stream votes and

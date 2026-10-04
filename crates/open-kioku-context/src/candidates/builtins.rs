@@ -1307,17 +1307,18 @@ fn is_overlap_stopword(term: &str) -> bool {
 /// none the runner would execute. It is decided from the indexed targets alone, never from a
 /// census of files, so the diagnostics can never call validation unavailable while the pack
 /// carries a validation target.
-fn validation_unavailable_reason(tests: &[TestTarget]) -> Option<&'static str> {
+fn validation_unavailable_reason(tests: &[TestTarget]) -> Option<String> {
     if tests.is_empty() {
-        return Some("no test targets are indexed for this repository");
+        return Some("no test targets are indexed for this repository".into());
     }
-    if !tests
-        .iter()
-        .any(|test| test.counts_as_validation_evidence())
-    {
-        return Some("every indexed test target is a disabled test the runner skips");
+    let mut excluded = BTreeMap::new();
+    // A single target that can stand as evidence makes validation available.
+    for test in tests {
+        *excluded
+            .entry(test.validation_exclusion()?)
+            .or_insert(0usize) += 1;
     }
-    None
+    open_kioku_core::every_test_target_excluded(&excluded)
 }
 
 fn term_overlap(terms: &[String], haystack: &str) -> usize {
