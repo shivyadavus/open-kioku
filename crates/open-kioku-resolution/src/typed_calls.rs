@@ -1,6 +1,6 @@
 use crate::context::{ResolutionContext, RustRelativeModule, ScopedImport};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
-use crate::index::{RustConfiguredRead, RustModuleFiles, RustModulePlacement};
+use crate::index::{RustConfiguredRead, RustModuleFiles, RustModulePlacement, RustReexported};
 use crate::pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
 };
@@ -522,10 +522,13 @@ fn rust_module_path_items(
         .rust_configured_module(placement, Some(ctx.file_id), &module)
     {
         Some(configured) => rust_configured_items(ctx, configured, targets, name, &accept),
-        None => {
-            normalize_symbol_ids(&mut targets);
-            (!targets.is_empty()).then_some((targets, RustModulePathStrategy::CrateQualified))
-        }
+        None => match rust_reexported_items(ctx, placement, &names, &targets, false, &accept) {
+            Some(found) => (!found.0.is_empty()).then_some(found),
+            None => {
+                normalize_symbol_ids(&mut targets);
+                (!targets.is_empty()).then_some((targets, RustModulePathStrategy::CrateQualified))
+            }
+        },
     };
     match crate_named {
         Some(crate_name) => {
@@ -744,6 +747,11 @@ fn rust_type_path_outcome(
         RustModulePathStrategy::ModuleOrCrate(_) => {
             ("rust_module_or_crate_path", "rust_module_or_crate_type")
         }
+        RustModulePathStrategy::Reexport => ("rust_reexport_module", "rust_reexport_type"),
+        RustModulePathStrategy::ReexportAmbiguous => (
+            "rust_reexport_ambiguous_module",
+            "rust_reexport_ambiguous_type",
+        ),
     };
     let candidate_count = targets.len();
     let (confidence, ambiguity, message) = match &strategy {
@@ -756,6 +764,17 @@ fn rust_type_path_outcome(
             Confidence::High,
             module_or_crate_ambiguity(crate_name),
             module_or_crate_message(crate_name),
+        ),
+        RustModulePathStrategy::ReexportAmbiguous => (
+            Confidence::High,
+            reexport_ambiguity(),
+            REEXPORT_AMBIGUOUS_MESSAGE.to_string(),
+        ),
+        RustModulePathStrategy::Reexport => (
+            Confidence::Exact,
+            ambiguity_strings(&targets),
+            "associated function of the type a Rust path names through a `use` re-export of its module"
+                .to_string(),
         ),
         _ => (
             Confidence::Exact,
@@ -822,8 +841,26 @@ fn rust_path_outcome(
                 candidate_cap_hit: false,
             }
         }
+        RustModulePathStrategy::ReexportAmbiguous => {
+            let candidates = normalize_candidates(candidates);
+            ResolutionOutcome::Ambiguous {
+                candidates_considered: candidates.len(),
+                candidates,
+                reason: REEXPORT_AMBIGUOUS_MESSAGE.to_string(),
+                candidate_cap_hit: false,
+            }
+        }
         _ => evaluate_candidates(&GraphEdgeType::Calls, candidates),
     }
+}
+
+/// The caveat of a Rust path naming a module that both defines an item of the name and brings
+/// another in with `use` (#476).
+const REEXPORT_AMBIGUOUS_MESSAGE: &str = "the module the Rust path names defines an item of this name and also brings one in with `use`; a `cfg` or another namespace decides which the path names, so neither is proven";
+
+/// What a proof of a candidate of such a path is short of.
+fn reexport_ambiguity() -> Vec<String> {
+    vec!["another item of the name the module brings in with `use`".to_string()]
 }
 
 /// What a proof of a candidate reached through a module whose name is also a crate's is short
@@ -986,6 +1023,16 @@ fn rust_module_path_outcome(
             "rust_module_or_crate_path",
             "rust_module_or_crate_member",
         ),
+        RustModulePathStrategy::Reexport => (
+            "candidate reached through a `use` re-export of the module an exact Rust path names",
+            "rust_reexport_module",
+            "rust_reexport_member",
+        ),
+        RustModulePathStrategy::ReexportAmbiguous => (
+            "candidate from a Rust path",
+            "rust_reexport_ambiguous_module",
+            "rust_reexport_ambiguous_member",
+        ),
     };
     let candidate_count = targets.len();
     let (confidence, ambiguity, message) = match &strategy {
@@ -998,6 +1045,11 @@ fn rust_module_path_outcome(
             Confidence::High,
             module_or_crate_ambiguity(crate_name),
             module_or_crate_message(crate_name),
+        ),
+        RustModulePathStrategy::ReexportAmbiguous => (
+            Confidence::High,
+            reexport_ambiguity(),
+            REEXPORT_AMBIGUOUS_MESSAGE.to_string(),
         ),
         _ => (
             Confidence::Exact,
@@ -1069,8 +1121,82 @@ fn rust_crate_name_items(
     {
         return rust_configured_items(ctx, configured, targets, name, &accept);
     }
+    if let Some(found) =
+        rust_reexported_items(ctx, crate_placement, &names, &targets, true, &accept)
+    {
+        return (!found.0.is_empty()).then_some(found);
+    }
     normalize_symbol_ids(&mut targets);
     (!targets.is_empty()).then_some((targets, RustModulePathStrategy::CrateName))
+}
+
+/// What a Rust path reaches through the `use` declarations of the module it names (#476), read
+/// from the qualified names `names` it spells there: when the module defines no item of the name
+/// (`defined` is empty), what a `use` of the module brings in, and when it defines one that a
+/// `use` beside it may stand for instead, that item and the other as candidates proving nothing.
+/// A path written in another crate reaches only what `pub use` declarations bring in.
+/// `None` leaves the path to `defined`. The candidates may be empty: a module whose name stays
+/// ambiguous names no item `accept` admits, and its own item is not proven either.
+fn rust_reexported_items(
+    ctx: &ResolutionContext<'_>,
+    placement: &RustModulePlacement,
+    names: &[String],
+    defined: &[SymbolId],
+    from_other_crates: bool,
+    accept: impl Fn(&Symbol) -> bool,
+) -> Option<(Vec<SymbolId>, RustModulePathStrategy)> {
+    let mut items = Vec::new();
+    let mut files = RustModuleFiles::default();
+    let mut configured = false;
+    let mut ambiguous = false;
+    for reexport in names
+        .iter()
+        .filter_map(|name| ctx.scopes.rust_reexport(name))
+    {
+        // A file the module tree does not place in the path's crate is not the module it spells.
+        if !ctx.scopes.is_placed_in_crate_of(&reexport.file, placement) {
+            continue;
+        }
+        let reexported = if from_other_crates {
+            &reexport.from_other_crates
+        } else {
+            &reexport.in_crate
+        };
+        match reexported {
+            None => {}
+            Some(RustReexported::Item(item)) => items.push(item.clone()),
+            Some(RustReexported::Alternatives {
+                items: found,
+                files: found_files,
+            }) => {
+                configured = true;
+                items.extend(found.iter().cloned());
+                files.files.extend(found_files.files.iter().cloned());
+                files.unread |= found_files.unread;
+            }
+            Some(RustReexported::Ambiguous(found)) => {
+                ambiguous = true;
+                items.extend(found.iter().cloned());
+            }
+        }
+    }
+    if !ambiguous && !defined.is_empty() {
+        return None;
+    }
+    items.retain(|item| ctx.symbols.get(item).is_some_and(&accept));
+    normalize_symbol_ids(&mut items);
+    if ambiguous {
+        return Some((items, RustModulePathStrategy::ReexportAmbiguous));
+    }
+    if items.is_empty() {
+        return None;
+    }
+    if configured {
+        files.files.sort();
+        files.files.dedup();
+        return Some((items, RustModulePathStrategy::Configured(files)));
+    }
+    Some((items, RustModulePathStrategy::Reexport))
 }
 
 /// How a Rust module path reached its candidates.
@@ -1088,6 +1214,12 @@ enum RustModulePathStrategy {
     /// Items the path reaches from a module in scope whose name is also a crate the caller can
     /// name (#626): which of the two the path starts from is not settled, so it proves nothing.
     ModuleOrCrate(String),
+    /// The item a `use` declaration of the module the path names brings in, through a chain of
+    /// exact steps (#476).
+    Reexport,
+    /// The item the module the path names defines, and another a `use` beside it brings in under
+    /// the same name: either may be the name, so the path proves neither.
+    ReexportAmbiguous,
 }
 
 /// The module a path through a crate name reaches, below the root of the library crate it starts
@@ -1825,11 +1957,14 @@ fn rust_path_type_candidates(
         symbol.kind != SymbolKind::Module && is_type_symbol(&symbol.kind)
     })?;
     let (targets, configured) = match strategy {
-        RustModulePathStrategy::ModuleOrCrate(_) => (Vec::new(), None),
+        RustModulePathStrategy::ModuleOrCrate(_) | RustModulePathStrategy::ReexportAmbiguous => {
+            (Vec::new(), None)
+        }
         RustModulePathStrategy::Configured(files) => (targets, Some(files)),
         RustModulePathStrategy::CrateQualified
         | RustModulePathStrategy::ModuleScope
-        | RustModulePathStrategy::CrateName => (targets, None),
+        | RustModulePathStrategy::CrateName
+        | RustModulePathStrategy::Reexport => (targets, None),
     };
     Some(TypeCandidates {
         targets: targets.into_iter().map(|target| (target, false)).collect(),
@@ -2794,6 +2929,29 @@ mod tests {
         configured: HashMap<String, crate::index::RustConfiguredModules>,
         test: impl FnOnce(&ResolutionContext<'_>) -> T,
     ) -> T {
+        with_rust_reexports(
+            caller,
+            items,
+            (placements, crates),
+            configured,
+            HashMap::new(),
+            test,
+        )
+    }
+
+    /// Placements, or library crates by crate name, by path.
+    type Placements<'a> = Vec<(&'a str, RustModulePlacement)>;
+
+    /// [`with_rust_modules`] with what the names modules bring in with `use` name, by
+    /// qualified name.
+    fn with_rust_reexports<T>(
+        caller: &str,
+        items: &[(&str, &str)],
+        (placements, crates): (Placements<'_>, Placements<'_>),
+        configured: HashMap<String, crate::index::RustConfiguredModules>,
+        reexports: HashMap<String, crate::index::RustReexport>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
         let caller_id = FileId::new(format!("file:{caller}"));
         let mut scopes = ScopeIndex::build(vec![Scope {
             id: ScopeId::new("scope:worker"),
@@ -2815,6 +2973,7 @@ mod tests {
                 .collect(),
         );
         scopes.record_rust_configured_modules(configured);
+        scopes.record_rust_reexports(reexports);
         scopes.record_rust_crate_names(
             [(
                 caller_id.clone(),
@@ -3945,5 +4104,182 @@ mod tests {
         assert_eq!(mounted.0, None);
         assert_eq!(mounted.2, None);
         assert_eq!(mounted.3.as_deref(), Some("sym:worker:f"));
+    }
+
+    /// A crate whose root `src/lib.rs` brings in, with `use`, `issue_token` and the type
+    /// `Engine` from `auth`, `local` beside an item of that name it defines, and `outside` only
+    /// for other crates; `src/ghost.rs`, which the tree does not place, brings in `issue_token`.
+    #[allow(clippy::type_complexity)]
+    fn reexporting_crate() -> (
+        Vec<(&'static str, &'static str)>,
+        Vec<(&'static str, RustModulePlacement)>,
+        HashMap<String, crate::index::RustReexport>,
+    ) {
+        let at = |module: &[&str]| placement("src", &["src::lib"], Some(module));
+        let items = vec![
+            ("src::auth::issue_token", "src/auth.rs"),
+            ("src::auth::outside", "src/auth.rs"),
+            ("src::auth::Engine (type)", "src/auth.rs"),
+            ("src::auth::new @src::auth::Engine", "src/auth.rs"),
+            ("src::lib::local", "src/lib.rs"),
+            ("src::ledger::local", "src/ledger.rs"),
+            ("src::ledger::issue_token", "src/ledger.rs"),
+        ];
+        let placements = vec![
+            ("src/lib.rs", at(&[])),
+            ("src/api.rs", at(&["api"])),
+            ("src/auth.rs", at(&["auth"])),
+            ("src/ledger.rs", at(&["ledger"])),
+            ("src/ghost.rs", placement("src", &["src::lib"], None)),
+        ];
+        let item = |id: &str| Some(RustReexported::Item(SymbolId::new(id)));
+        let reexport = |file: &str, in_crate, from_other_crates| crate::index::RustReexport {
+            file: FileId::new(format!("file:{file}")),
+            in_crate,
+            from_other_crates,
+        };
+        let reexports = HashMap::from([
+            (
+                "src::lib::issue_token".to_string(),
+                reexport(
+                    "src/lib.rs",
+                    item("src::auth::issue_token"),
+                    item("src::auth::issue_token"),
+                ),
+            ),
+            (
+                "src::lib::Engine".to_string(),
+                reexport("src/lib.rs", item("src::auth::Engine"), None),
+            ),
+            (
+                "src::lib::local".to_string(),
+                reexport(
+                    "src/lib.rs",
+                    Some(RustReexported::Ambiguous(vec![
+                        SymbolId::new("src::ledger::local"),
+                        SymbolId::new("src::lib::local"),
+                    ])),
+                    None,
+                ),
+            ),
+            (
+                "src::lib::outside".to_string(),
+                reexport("src/lib.rs", None, item("src::auth::outside")),
+            ),
+            (
+                "src::ghost::issue_token".to_string(),
+                reexport("src/ghost.rs", item("src::ledger::issue_token"), None),
+            ),
+        ]);
+        (items, placements, reexports)
+    }
+
+    #[test]
+    fn rust_crate_paths_reach_what_the_module_brings_in_with_use() {
+        let (items, placements, reexports) = reexporting_crate();
+        with_rust_reexports(
+            "src/api.rs",
+            &items,
+            (placements, Vec::new()),
+            HashMap::new(),
+            reexports,
+            |ctx| {
+                let call = module_path_call("scope:worker", "crate", "issue_token");
+                let ResolutionOutcome::Proven { candidate } =
+                    resolve_module_member_outcome(&call, ctx)
+                else {
+                    panic!("`crate::issue_token()` through the root's `pub use` is proven");
+                };
+                assert_eq!(candidate.target_symbol_id.0, "src::auth::issue_token");
+                let strategies = candidate
+                    .proofs
+                    .iter()
+                    .map(|proof| proof.resolver_strategy.as_str())
+                    .collect::<Vec<_>>();
+                assert!(
+                    strategies.contains(&"rust_reexport_module"),
+                    "{strategies:?}"
+                );
+                assert!(
+                    strategies.contains(&"rust_reexport_member"),
+                    "{strategies:?}"
+                );
+                assert_eq!(
+                    proven_target(
+                        ctx,
+                        &module_path_call("scope:worker", "crate::Engine", "new")
+                    )
+                    .as_deref(),
+                    Some("src::auth::Engine.new"),
+                    "an associated function of a type the root brings in"
+                );
+                assert_eq!(
+                    proven_target(ctx, &module_path_call("scope:worker", "crate", "outside")),
+                    None,
+                    "what the root brings in for other crates alone"
+                );
+                assert_eq!(
+                    proven_target(
+                        ctx,
+                        &module_path_call("scope:worker", "crate::ghost", "issue_token")
+                    ),
+                    None,
+                    "a file the tree does not place is not the module the path spells"
+                );
+                match resolve_module_member_outcome(
+                    &module_path_call("scope:worker", "crate", "local"),
+                    ctx,
+                ) {
+                    ResolutionOutcome::Ambiguous { candidates, .. } => {
+                        let mut targets = candidates
+                            .iter()
+                            .map(|candidate| candidate.target_symbol_id.0.as_str())
+                            .collect::<Vec<_>>();
+                        targets.sort_unstable();
+                        assert_eq!(targets, ["src::ledger::local", "src::lib::local"]);
+                    }
+                    other => {
+                        panic!("a name the root defines and brings in is ambiguous: {other:?}")
+                    }
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn rust_crate_name_paths_reach_only_what_the_library_brings_in_for_other_crates() {
+        let (items, mut placements, reexports) = reexporting_crate();
+        placements.push(("src/main.rs", placement("src", &["src::main"], Some(&[]))));
+        let library = placement("src", &["src::lib"], Some(&[]));
+        with_rust_reexports(
+            "src/main.rs",
+            &items,
+            (placements, vec![("tokens", library)]),
+            HashMap::new(),
+            reexports,
+            |ctx| {
+                assert_eq!(
+                    proven_target(ctx, &module_path_call("scope:worker", "tokens", "outside"))
+                        .as_deref(),
+                    Some("src::auth::outside")
+                );
+                assert_eq!(
+                    proven_target(
+                        ctx,
+                        &module_path_call("scope:worker", "tokens", "issue_token")
+                    )
+                    .as_deref(),
+                    Some("src::auth::issue_token")
+                );
+                assert_eq!(
+                    proven_target(
+                        ctx,
+                        &module_path_call("scope:worker", "tokens::Engine", "new")
+                    ),
+                    None,
+                    "a `use` the library's own crate alone reaches through"
+                );
+            },
+        );
     }
 }

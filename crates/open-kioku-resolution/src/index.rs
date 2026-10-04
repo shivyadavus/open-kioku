@@ -149,6 +149,41 @@ pub struct ScopeIndex {
     /// The Rust files whose crates read a `use` path's first segment in scope (the 2018 edition
     /// and later). In a 2015 crate it is read from the crate root (#632).
     rust_in_scope_use_paths: HashSet<FileId>,
+    /// What each name a Rust module brings in with `use` rather than defines names, by the
+    /// qualified name tree-sitter would give an item of that name in the module's file
+    /// (`src::lib::issue_token` for `pub use auth::issue_token;` in `src/lib.rs`, #476).
+    rust_reexports: HashMap<String, RustReexport>,
+}
+
+/// What a name a Rust module brings in with `use` names, for a path through the module:
+/// `crate::issue_token` after `pub use auth::issue_token;` in the crate root is
+/// `auth::issue_token` (#476). Every step of the chain is exact, or the name is not recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustReexport {
+    /// The file whose `use` declarations bring the name in. A path names it only where the
+    /// module tree places this file in the path's crate.
+    pub file: FileId,
+    /// What a path written in the file's own crate names, through any of its module-level `use`
+    /// declarations.
+    pub in_crate: Option<RustReexported>,
+    /// What a path written in another crate names, through `pub use` declarations alone.
+    pub from_other_crates: Option<RustReexported>,
+}
+
+/// What a re-exported Rust name names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RustReexported {
+    /// One item, reached through a chain of exact steps.
+    Item(SymbolId),
+    /// The items of the name in each file a module configuration selects may hold, none of them
+    /// proven.
+    Alternatives {
+        items: Vec<SymbolId>,
+        files: RustModuleFiles,
+    },
+    /// The module defines an item of the name, and a `use` beside it brings in another, which a
+    /// `cfg` or another namespace may make the name: the items are candidates, none proven.
+    Ambiguous(Vec<SymbolId>),
 }
 
 /// The library crates code of one crate names by crate name: the dependencies its package's
@@ -586,6 +621,17 @@ impl ScopeIndex {
                     .iter()
                     .any(|root| placement.crate_roots.contains(root))
         })
+    }
+
+    /// Records what the names Rust modules bring in with `use` name (#476).
+    pub fn record_rust_reexports(&mut self, reexports: HashMap<String, RustReexport>) {
+        self.rust_reexports.extend(reexports);
+    }
+
+    /// What the name a Rust path spells as `qualified` names through the `use` declarations of
+    /// the module holding it, when that module brings the name in.
+    pub(crate) fn rust_reexport(&self, qualified: &str) -> Option<&RustReexport> {
+        self.rust_reexports.get(qualified)
     }
 
     pub fn get(&self, id: &ScopeId) -> Option<&Scope> {

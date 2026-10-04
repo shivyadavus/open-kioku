@@ -2254,6 +2254,10 @@ pub struct SyntaxFacts {
     pub type_aliases: Vec<TypeAliasSite>,
     #[serde(default)]
     pub package_declaration: Option<PackageDeclarationSite>,
+    /// A Rust file whose top level invokes a macro (`cfg_if! { .. }`, `make_items!();`), which
+    /// may expand to items and `use` declarations no other fact here records.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invokes_item_macro: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

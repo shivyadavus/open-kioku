@@ -703,6 +703,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
         "mod sys;\nuse sys::imp::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
     const CFG_ATTR_ENGINE: &str =
         "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n";
+    const ROOT_REEXPORT: &str = "pub mod api;\npub mod tokens;\n\npub use tokens::target_fn;\n";
     const STRUCT_FIELD_HOLDER: &str = "mod engine;\nuse crate::engine::Engine;\n\npub struct Holder {\n    engine: Engine,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
         "cross_module_item_import" => (
@@ -758,7 +759,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             false,
         ),
         // Crate `a`'s `auth/issue_token.rs` has the module-key text crate `b` imports, and crate
-        // `b` re-exports its own `issue_token`, which the index does not follow.
+        // `b` re-exports its own `issue_token`, which the import reaches through `b`'s `auth`.
         "workspace_cross_crate_import" => (
             vec![
                 ("Cargo.toml", WORKSPACE),
@@ -772,7 +773,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                 ("crates/b/src/helpers.rs", "pub fn issue_token() {}\n"),
                 ("crates/b/src/session.rs", SESSION_B),
             ],
-            false,
+            true,
         ),
         // The same import resolves inside crate `b` when `b` defines the item.
         "workspace_same_crate_import" => (
@@ -821,14 +822,18 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             false,
         ),
         // The block's `use crate::b::target_fn;` shadows the file's `use crate::a::target_fn;` and
-        // resolves through a re-export the index does not follow.
+        // stays unresolved: two globs of `b` each bring in a `target_fn`.
         "block_import_shadowing" => (
             vec![
                 ("Cargo.toml", PACKAGE),
-                ("src/lib.rs", "pub mod a;\npub mod b;\npub mod c;\npub mod caller;\n"),
+                (
+                    "src/lib.rs",
+                    "pub mod a;\npub mod b;\npub mod c;\npub mod caller;\npub mod d;\n",
+                ),
                 ("src/a.rs", "pub fn target_fn() {}\n"),
-                ("src/b.rs", "pub use crate::c::target_fn;\n"),
+                ("src/b.rs", "pub use crate::c::*;\npub use crate::d::*;\n"),
                 ("src/c.rs", "pub fn target_fn() {}\n"),
+                ("src/d.rs", "pub fn target_fn() {}\n"),
                 (
                     "src/caller.rs",
                     "use crate::a::target_fn;\n\npub fn production() {\n    target_fn();\n}\n\npub fn caller_fn() {\n    use crate::b::target_fn;\n    target_fn();\n}\n",
@@ -2836,6 +2841,240 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                 ),
             ],
             true,
+        ),
+        // `use crate::target_fn;` reaches `tokens::target_fn` through the crate root's
+        // `pub use` (#476).
+        "crate_root_reexport_bare_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", ROOT_REEXPORT),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "use crate::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // The same item through the call path `crate::target_fn()` (#476).
+        "crate_root_reexport_path_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", ROOT_REEXPORT),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                ("src/api.rs", "pub fn caller_fn() {\n    crate::target_fn();\n}\n"),
+            ],
+            true,
+        ),
+        // `facade` renames the root's re-export, so the call takes two re-exports (#476).
+        "reexport_chain_alias_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\npub mod facade;\npub mod tokens;\n\npub use tokens::target_fn;\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                ("src/facade.rs", "pub use crate::target_fn as mint;\n"),
+                ("src/api.rs", "pub fn caller_fn() {\n    crate::facade::mint();\n}\n"),
+            ],
+            true,
+        ),
+        // A private `use` of the crate root is visible to the modules below it (#476).
+        "private_root_use_from_child_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\nmod tokens;\n\nuse tokens::target_fn;\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "use crate::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A prelude module re-exports everything of `tokens` by a glob (#476).
+        "prelude_glob_reexport_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\npub mod prelude;\npub mod tokens;\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\npub struct Token;\n"),
+                ("src/prelude.rs", "pub use crate::tokens::*;\n"),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::prelude::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // Two globs of `facade` each bring in a `target_fn` (#476).
+        "ambiguous_glob_reexport_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\npub mod facade;\npub mod ledger;\npub mod tokens;\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                ("src/ledger.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/facade.rs",
+                    "pub use crate::ledger::*;\npub use crate::tokens::*;\n",
+                ),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::facade::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `tokens` defines `target_fn` and a glob beside it brings in `ledger`'s (#476).
+        "glob_reexport_beside_local_item_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod api;\npub mod ledger;\npub mod tokens;\n"),
+                (
+                    "src/tokens.rs",
+                    "pub use crate::ledger::*;\n\npub fn target_fn() {}\n",
+                ),
+                ("src/ledger.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::tokens::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // Two `cfg`-gated re-exports of one name (#476).
+        "duplicate_named_reexport_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\npub mod ledger;\npub mod tokens;\n\n#[cfg(unix)]\npub use ledger::target_fn;\n#[cfg(not(unix))]\npub use tokens::target_fn;\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                ("src/ledger.rs", "pub fn target_fn() {}\n"),
+                ("src/api.rs", "pub fn caller_fn() {\n    crate::target_fn();\n}\n"),
+            ],
+            false,
+        ),
+        // `ring` and `spoke` re-export `target_fn` from each other; `tokens` defines one that
+        // neither reaches (#476).
+        "reexport_cycle_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\npub mod ring;\npub mod spoke;\npub mod tokens;\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                ("src/ring.rs", "pub use crate::spoke::target_fn;\n"),
+                ("src/spoke.rs", "pub use crate::ring::target_fn;\n"),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::ring::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // A macro at the top of `facade` defines a `target_fn` that shadows the glob's (#476).
+        "macro_module_glob_reexport_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "#[macro_export]\nmacro_rules! local_fn {\n    () => {\n        pub fn target_fn() {}\n    };\n}\n\npub mod api;\npub mod facade;\npub mod tokens;\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/facade.rs",
+                    "pub use crate::tokens::*;\n\ncrate::local_fn!();\n",
+                ),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::facade::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `sys`'s `pub use imp::target_fn;` makes no choice of `imp`'s file, so the call path
+        // through it keeps a candidate in each (#476, #615).
+        "cfg_attr_reexport_path_call_alternatives" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod api;\npub mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\npub use imp::target_fn;\n",
+                ),
+                ("src/sys/imp.rs", "pub fn target_fn() {}\n"),
+                ("src/sys/win.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::sys::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // In the 2015 edition `pub use auth::target_fn;` in `api` names the crate root's
+        // `auth`, not the `auth` that `api` declares (#476, #632).
+        "edition_2015_reexport_path_call" => (
+            vec![
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2015\"\n",
+                ),
+                ("src/lib.rs", "pub mod api;\npub mod auth;\npub mod session;\n"),
+                ("src/auth.rs", "pub fn target_fn() {}\n"),
+                ("src/api/mod.rs", "mod auth;\npub use auth::target_fn;\n"),
+                ("src/api/auth.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/session.rs",
+                    "pub fn caller_fn() {\n    crate::api::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A call path through a dependency's crate root reaches the item its glob re-exports
+        // (#476).
+        "workspace_dependency_reexport_path_call" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                ("crates/engine/src/lib.rs", "mod inner;\npub use inner::*;\n"),
+                ("crates/engine/src/inner.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub fn caller_fn() {\n    engine::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A `pub(crate) use` brings nothing in for another crate (#476).
+        "workspace_dependency_crate_visible_reexport" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                (
+                    "crates/engine/src/lib.rs",
+                    "mod inner;\npub(crate) use inner::target_fn;\n",
+                ),
+                ("crates/engine/src/inner.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub fn caller_fn() {\n    engine::target_fn();\n}\n",
+                ),
+            ],
+            false,
         ),
         // `callee.rs` beside `callee/mod.rs` leaves the module file ambiguous. The module is not
         // named `target`: discovery skips any `target/` directory as build output, which would

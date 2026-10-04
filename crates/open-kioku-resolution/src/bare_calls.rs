@@ -151,7 +151,7 @@ pub(crate) fn resolve_bare_call_outcome(
         }) {
             (
                 "rust_reexported_item_import",
-                "bare call candidate from a Rust item import bound through a crate's `pub use` re-export",
+                "bare call candidate from a Rust item import bound through `use` re-exports",
             )
         } else {
             (

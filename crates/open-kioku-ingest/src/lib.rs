@@ -660,10 +660,15 @@ impl Indexer {
         let mut parse_warnings = Vec::new();
         let mut kept_files = Vec::with_capacity(files.len());
         let mut parsed = Vec::with_capacity(files.len());
+        // Rust files whose top level invokes a macro (see `RustModuleTree::with_module_macros`).
+        let mut rust_module_macros = HashSet::new();
         for (file, outcome) in files.into_iter().zip(outcomes) {
             match outcome {
                 Ok((parsed_file, redacted)) => {
                     redacted_files += usize::from(redacted);
+                    if parsed_file.syntax.invokes_item_macro {
+                        rust_module_macros.insert(file.id.clone());
+                    }
                     kept_files.push(file);
                     parsed.push(parsed_file);
                 }
@@ -800,7 +805,10 @@ impl Indexer {
                 .filter(|skipped| skipped.safe_to_show)
                 .map(|skipped| skipped.path.as_path()),
         )
-        .with_import_sites(&import_sites);
+        .with_import_sites(&import_sites)
+        // A macro invoked at the top level of a Rust file may expand to items and `use`
+        // declarations the parser does not see, so its module's `use` sites settle no name.
+        .with_module_macros(rust_module_macros);
         let rust_modules = {
             // Only a file skipped for its size has its `mod` lines read; a path policy's
             // exclusion is never read around. A mounted file read this way can mount another
@@ -841,6 +849,24 @@ impl Indexer {
         scope_index.record_rust_in_scope_use_paths(
             crate::project_model::rust_in_scope_use_path_files(&project_model, &files),
         );
+        // A Rust call path through a module's `use` re-exports (#476) ends in a name some call
+        // writes, as its callee or a segment of its receiver.
+        let rust_call_names = call_sites
+            .iter()
+            .filter(|call| rust_file_ids.contains(&call.file_id))
+            .flat_map(|call| {
+                std::iter::once(call.callee_name.as_str()).chain(
+                    call.receiver
+                        .as_deref()
+                        .into_iter()
+                        .flat_map(|receiver| receiver.split("::").map(str::trim)),
+                )
+            })
+            .collect::<HashSet<_>>();
+        let rust_reexports = rust_modules.reexports(&symbol_index, &scope_index, |name| {
+            rust_call_names.contains(name)
+        });
+        scope_index.record_rust_reexports(rust_reexports);
         let rust_placement_gaps = rust_modules.placement_gaps();
         import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
         // Import bindings and file-level import edges follow the same declared module tree, and
@@ -4809,18 +4835,27 @@ class Util {
             ),
             imp_or_win
         );
-        // A glob binds no call, with or without the choice, and an in-crate path through the
-        // `pub use` is not followed: neither reaches the default file alone.
-        for root in [
-            "mod sys;\nuse crate::sys::imp::*;\npub fn go() {\n    f();\n}\n",
-            "mod sys;\nuse crate::sys::f;\npub fn go() {\n    f();\n}\n",
-        ] {
-            assert_eq!(
-                calls(&format!("{cfg_attr}pub use imp::f;\n"), root, "go"),
-                Vec::new(),
-                "{root}"
-            );
-        }
+        // A glob binds no call, with or without the choice: it does not reach the default file
+        // alone.
+        let reexporting = format!("{cfg_attr}pub use imp::f;\n");
+        assert_eq!(
+            calls(
+                &reexporting,
+                "mod sys;\nuse crate::sys::imp::*;\npub fn go() {\n    f();\n}\n",
+                "go"
+            ),
+            Vec::new()
+        );
+        // An in-crate path through the `pub use`, which makes no choice, reaches every file
+        // (#476).
+        assert_eq!(
+            calls(
+                &reexporting,
+                "mod sys;\nuse crate::sys::f;\npub fn go() {\n    f();\n}\n",
+                "go"
+            ),
+            imp_or_win
+        );
         // Control: with no choice the import proves the placed file.
         assert_eq!(
             calls("pub mod imp;\n", item, "go"),

@@ -96,6 +96,8 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
 
     walk(file, content, tree.root_node(), &mut ctx, &mut out);
     out.package_declaration = package_declaration(file, content, tree.root_node());
+    out.invokes_item_macro =
+        file.language == Language::Rust && invokes_item_macro(tree.root_node());
 
     // Reconcile Rust impl method parent_symbol_id and inheritance sites to the actual struct/trait symbol
     if file.language == Language::Rust {
@@ -783,6 +785,21 @@ fn rust_visibility(node: Node<'_>) -> Visibility {
         // `pub(crate)`, `pub(super)`, `pub(in path)`, and the bare `crate` modifier.
         _ => Visibility::Crate,
     }
+}
+
+/// Whether a Rust file invokes a macro at its top level, as an item: such a macro may expand to
+/// items and `use` declarations the parser does not see. A macro inside a function, an inline
+/// `mod` or another item is not at the top level.
+fn invokes_item_macro(root: Node<'_>) -> bool {
+    let mut cursor = root.walk();
+    let found = root.children(&mut cursor).any(|child| match child.kind() {
+        "macro_invocation" => true,
+        "expression_statement" => child
+            .named_child(0)
+            .is_some_and(|inner| inner.kind() == "macro_invocation"),
+        _ => false,
+    });
+    found
 }
 
 /// The `trait` or `impl` whose body directly holds this item. An item nested deeper, such as a
@@ -3042,6 +3059,33 @@ mod ri3_rust_module_receiver_tests {
 mod ri3_rust_use_import_site_tests {
     use super::{attribute_path_literals, parse_file};
     use open_kioku_core::{File, FileId, ImportSite, ImportedName, Language, RepositoryId};
+
+    #[test]
+    fn rust_files_record_a_macro_invoked_at_their_top_level() {
+        let invokes = |source: &str| {
+            let file = File {
+                id: FileId::new("file:src/facade.rs"),
+                repository_id: RepositoryId::new("repo"),
+                path: "src/facade.rs".into(),
+                language: Language::Rust,
+                size_bytes: 0,
+                content_hash: "hash".into(),
+                is_generated: false,
+                is_vendor: false,
+            };
+            parse_file(&file, source)
+                .expect("Rust macro fixture should parse")
+                .invokes_item_macro
+        };
+        assert!(invokes("pub use crate::store::*;\nmake_items!();\n"));
+        assert!(invokes(
+            "cfg_select! {\n    unix => { pub use unix::*; }\n}\n"
+        ));
+        assert!(invokes("crate::local_fn!();\n"));
+        assert!(!invokes(
+            "macro_rules! m { () => {} }\npub fn f() { println!(\"x\"); }\nmod inner { m!(); }\n"
+        ));
+    }
 
     fn rust_import_sites(source: &str) -> Vec<ImportSite> {
         let file = File {

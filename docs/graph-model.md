@@ -71,7 +71,8 @@ dependency is declared source read by a TOML parser. Packages are keyed by manif
 workspaces with a package of one name are two nodes, and a dependency without a `path` (a
 registry or git dependency) has no edge. A manifest that does not parse states nothing. The import
 resolver reads the same model to follow `use dep::module::Item` into the dependency's library
-module tree and its `pub use` re-exports (import strategy `rust-reexport` when it took one), and
+module tree and its `pub use` re-exports (import strategy `rust-reexport` when it took one; see
+below for re-exports inside one crate), and
 impact reads the stored facts back for Cargo reachability instead of parsing manifests
 (`docs/ranking.md`, `crate_import`).
 
@@ -179,6 +180,30 @@ path is read from the module around it in either edition. A type written as a pa
 through a module whose file configuration selects, each file's type is a candidate, unproven,
 unless the file writing the path is inside one alternative, which reads its own. A type written as
 a crate-name path is looked up by name only.
+
+A Rust path is followed through the `use` declarations of the module it names (#476). After
+`pub use auth::issue_token;` in the crate root, `use crate::issue_token;` binds `auth::issue_token`
+(import rule `RustReexport`, import strategy `rust-reexport` for the file-level `IMPORTS` edge,
+which reaches `src/auth.rs`), and `crate::issue_token()` reaches it too, with strategies
+`rust_reexport_module` and `rust_reexport_member` (`rust_reexport_type` for an associated
+function of a re-exported type) on its `module_or_package_binding` and `qualified_name` proofs.
+Only `use` declarations at the top level of the module's file count, read with the module tree
+and edition rules of any `use` path; each step must reach exactly one module-level item or another
+re-export. Named, grouped and `as` re-exports are followed, and so are globs: a glob brings in a
+name only where it reaches an item it can see (a `pub` one from another crate, one not private to
+its module from the module's own crate), a named `use` shadows a glob, and every `use` that may
+supply the name must agree. A path from the module's own crate follows any of its `use`
+declarations, a private `use` included, since only code below the module can name what one brings
+in; a path from another crate (a crate name the package declares) follows `pub use` alone. Left
+unresolved: two re-exports of one name that disagree, a glob the index cannot follow (another
+crate outside the repository, an enum), a cycle, a chain longer than eight steps, and a name only
+a glob brings into a module whose file invokes a macro at its top level, which may expand to an
+item or a named `use` the parser does not see that shadows the glob. A name the module defines while a `use` beside it brings in
+another item of that name (a `cfg`-gated `use`, or a glob) is reported ambiguous with both as
+candidates (strategies `rust_reexport_ambiguous_module` and `rust_reexport_ambiguous_member`) and
+gets no edge. A re-export through a module whose file configuration selects (`pub use imp::f;`
+beside `#[cfg_attr(windows, path = "win.rs")] mod imp;`) keeps one unproven edge per file, as a
+path into the module does.
 
 A method call through a field of a Rust struct (`self.store.save()`, `entry.store.save()`,
 `self.a.b.m()`) is read through the type the field declares (#630). Each named field of a `struct`
