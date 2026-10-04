@@ -15,16 +15,22 @@
 //!   `conda-meta` (conda). Without either, the walk goes in; a `.venv` is hidden, so its files
 //!   are still skipped, one by one, by the hidden-file policy.
 //! - `target`: pruned when it holds `CACHEDIR.TAG` (Cargo writes one) or sits beside a
-//!   `Cargo.toml`, `pom.xml` or `build.sbt`. A `target` package under `src/main/java` is walked.
-//! - `build`, `dist`: pruned unless a module or package declares them: a `mod.rs`, an
+//!   `Cargo.toml`, `pom.xml`, `build.sbt`, `build.properties` (sbt's `project/`) or
+//!   `project.clj`. A `target` package under `src/main/java` is walked.
+//! - `build`, `dist`: walked when a module or package declares them: a `mod.rs`, an
 //!   `__init__.py` or a `.go` file directly inside; a Rust `<name>.rs` beside them that is not a
 //!   Cargo build script; or a place under a `src/` directory with no build manifest beside
-//!   them. A `CACHEDIR.TAG` always prunes.
+//!   them. Otherwise pruned: as `build_output` when a `CACHEDIR.TAG` is inside or a build
+//!   manifest (`package.json`, `build.gradle`, `setup.py`, ...) sits beside them, and as
+//!   `undeclared_build_dir` when nothing accounts for them either way.
 //!
-//! `build` and `dist` default to pruned because the undeclared case is overwhelmingly
+//! Undeclared `build` and `dist` default to pruned because that case is overwhelmingly
 //! Gradle, setuptools, CMake and bundler output, often larger than the source. What the default
 //! gets wrong stays visible: every pruned directory is recorded by path, and git-tracked source
-//! under a build-output directory is counted as missing (`SkipReason::Pruned`).
+//! under an `undeclared_build_dir` is counted as missing (`SkipReason::Pruned`). Under a
+//! directory pruned on strong evidence (a cache tag, a manifest beside it, `node_modules`, a
+//! marked environment), committed files are listed with their count but never lower coverage:
+//! a committed `dist/` bundle beside a `package.json` is a published artifact, not lost source.
 
 use open_kioku_core::PruneReason;
 use std::path::{Component, Path};
@@ -54,6 +60,16 @@ const BUILD_MANIFESTS: [&str; 11] = [
     "meson.build",
 ];
 
+/// Build manifests whose tools write a `target` beside them: Cargo, Maven, sbt (`build.sbt`,
+/// and `build.properties` for the `project/` meta-build) and Leiningen.
+const TARGET_MANIFESTS: [&str; 5] = [
+    "Cargo.toml",
+    "pom.xml",
+    "build.sbt",
+    "build.properties",
+    "project.clj",
+];
+
 /// The verdict for `path`, a directory entry under `root` (`is_dir` from the walker's file
 /// type, so a symlink is never followed to decide). Only a handful of names are ever pruned,
 /// and a directory with any other name costs one string comparison.
@@ -78,22 +94,21 @@ pub(crate) fn classify(root: &Path, path: &Path, is_dir: bool) -> DirVerdict {
             }
         }
         "target" => {
-            let beside_manifest = path.parent().is_some_and(|parent| {
-                ["Cargo.toml", "pom.xml", "build.sbt"]
-                    .iter()
-                    .any(|manifest| parent.join(manifest).is_file())
-            });
-            if has_cache_tag(path) || beside_manifest {
+            if has_cache_tag(path) || beside_any(path, &TARGET_MANIFESTS) {
                 DirVerdict::Prune(PruneReason::BuildOutput)
             } else {
                 DirVerdict::Walk
             }
         }
         "build" | "dist" => {
-            if !has_cache_tag(path) && declared_as_source(root, path, name) {
-                DirVerdict::Walk
-            } else {
+            if has_cache_tag(path) {
                 DirVerdict::Prune(PruneReason::BuildOutput)
+            } else if declared_as_source(root, path, name) {
+                DirVerdict::Walk
+            } else if beside_any(path, &BUILD_MANIFESTS) {
+                DirVerdict::Prune(PruneReason::BuildOutput)
+            } else {
+                DirVerdict::Prune(PruneReason::UndeclaredBuildDir)
             }
         }
         _ => DirVerdict::Walk,
@@ -117,6 +132,15 @@ pub(crate) fn is_under_pruned_dir(root: &Path, rel: &Path) -> bool {
         }
     }
     false
+}
+
+/// Whether one of `manifests` sits beside `path`.
+fn beside_any(path: &Path, manifests: &[&str]) -> bool {
+    path.parent().is_some_and(|parent| {
+        manifests
+            .iter()
+            .any(|manifest| parent.join(manifest).is_file())
+    })
 }
 
 /// The cache-directory marker (<https://bford.info/cachedir/>) Cargo and other tools write.
@@ -151,10 +175,7 @@ fn declared_as_source(root: &Path, path: &Path, name: &str) -> bool {
                 .components()
                 .any(|component| component.as_os_str() == "src")
         });
-    under_src
-        && !BUILD_MANIFESTS
-            .iter()
-            .any(|manifest| parent.join(manifest).is_file())
+    under_src && !beside_any(path, &BUILD_MANIFESTS)
 }
 
 /// A Go package is a directory of `.go` files; build output never holds one.
@@ -237,6 +258,16 @@ mod tests {
         // Output beside a manifest, under `src/`, is still output.
         write(root, "src/web/package.json");
         write(root, "src/web/dist/bundle.js");
+        // sbt's meta-build and Leiningen write `target` beside these.
+        write(root, "scala/project/build.properties");
+        write(root, "scala/project/target/streams/x");
+        write(root, "clj/project.clj");
+        write(root, "clj/target/classes/x");
+        // A cache tag is strong evidence wherever the directory sits.
+        write(root, "tools/gen/build/CACHEDIR.TAG");
+        // Nothing declares these and no manifest accounts for them: the weak rule.
+        write(root, "tools/build/steps.py");
+        write(root, "packaging/dist/app.js");
 
         for pruned in [
             "target",
@@ -246,8 +277,18 @@ mod tests {
             "dist",
             "java/target",
             "src/web/dist",
+            "scala/project/target",
+            "clj/target",
+            "tools/gen/build",
         ] {
             assert_eq!(verdict(root, pruned), BUILD_OUTPUT, "{pruned}");
+        }
+        for pruned in ["tools/build", "packaging/dist"] {
+            assert_eq!(
+                verdict(root, pruned),
+                DirVerdict::Prune(PruneReason::UndeclaredBuildDir),
+                "{pruned}"
+            );
         }
         assert_eq!(
             verdict(root, "node_modules"),

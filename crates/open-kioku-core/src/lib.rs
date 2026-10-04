@@ -3481,7 +3481,8 @@ pub enum SkipReason {
     Error,
     /// A directory discovery cut from the walk as build output or installed dependencies
     /// (`IndexCoverage::pruned`), or, in coverage, a git-tracked source file under a
-    /// directory pruned as build output, which the index therefore does not hold.
+    /// directory pruned as undeclared build output (`PruneReason::UndeclaredBuildDir`), which the
+    /// index therefore does not hold.
     Pruned,
 }
 
@@ -3650,7 +3651,7 @@ impl SkipReason {
     /// 1,485 hidden `.rs` files read as 24.9% coverage of a fully indexed tree.
     ///
     /// `pruned` is judged: in coverage it counts only git-tracked source under a directory
-    /// pruned as build output, which someone committed and the index still does not hold.
+    /// pruned as undeclared build output, which someone committed and the index still does not hold.
     pub fn is_policy(self) -> bool {
         matches!(
             self,
@@ -3966,9 +3967,15 @@ pub const PRUNED_DIRS_LISTED: usize = 50;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum PruneReason {
-    /// Build output: a `target` beside a `Cargo.toml`, `pom.xml` or `build.sbt`; a `build` or
-    /// `dist` no module or package declares; any of them holding a `CACHEDIR.TAG`.
+    /// Build output on strong evidence: a `target`, `build` or `dist` holding a `CACHEDIR.TAG`
+    /// or sitting beside its project's build manifest (`Cargo.toml`, `pom.xml`, `package.json`,
+    /// ...). Files committed under it are listed, not counted as missing: a committed `dist/`
+    /// bundle beside a `package.json` is still a bundle.
     BuildOutput,
+    /// A `build` or `dist` directory pruned only because no module, package or build manifest
+    /// accounts for it. The weak rule: a source directory it misclassifies is plausible, so
+    /// git-tracked source under it counts as missing (`SkipReason::Pruned`).
+    UndeclaredBuildDir,
     /// Installed packages: `node_modules`.
     Dependencies,
     /// A Python environment: `.venv` or `venv` holding `pyvenv.cfg` or `conda-meta`.
@@ -3980,9 +3987,16 @@ impl PruneReason {
     pub fn label(self) -> &'static str {
         match self {
             Self::BuildOutput => "build-output",
+            Self::UndeclaredBuildDir => "undeclared-build-dir",
             Self::Dependencies => "dependencies",
             Self::VirtualEnv => "virtual-env",
         }
+    }
+
+    /// Whether git-tracked source under a directory pruned for this reason is counted as
+    /// missing from the index. Only the weak rule's guess can hide real source.
+    pub fn counts_tracked_source(self) -> bool {
+        self == Self::UndeclaredBuildDir
     }
 }
 
@@ -4001,12 +4015,14 @@ pub struct PrunedDir {
 /// What discovery found versus what the index holds, for every recognised language.
 ///
 /// `discovered` counts only files the walker visited, plus git-tracked programming-language
-/// files under a directory pruned as build output (each also skipped as `pruned`, so the
-/// index visibly lacks them). Two things the walk cannot see are counted beside the ratio
-/// so it is never read as more than it is: `pruned_dirs`, directories cut from the walk as
-/// build output or dependencies (`.git` and `.ok` are not counted, they are never user
-/// source), named in `pruned`; and `walk_errors`, directory reads that failed, whose files
-/// were never discovered. Untracked build output is never counted against the ratio. Files
+/// files under a `build` or `dist` pruned only because nothing declares it (each also skipped
+/// as `pruned`, so the index visibly lacks them). Two things the walk cannot see are counted
+/// beside the ratio so it is never read as more than it is: `pruned_dirs`, directories cut
+/// from the walk as build output or dependencies (`.git` and `.ok` are not counted, they are
+/// never user source), named in `pruned`; and `walk_errors`, directory reads that failed,
+/// whose files were never discovered. Untracked build output, and anything under a
+/// directory pruned on strong evidence (a cache tag, a build manifest beside it), is never
+/// counted against the ratio. Files
 /// whose language is unknown are not source files and are not counted; their skips remain
 /// in `skip_counts`. Files admitted to the document corpus count as indexed.
 ///
@@ -4026,7 +4042,8 @@ pub struct IndexCoverage {
     /// Directories pruned before discovery as build output or dependencies, listed or not.
     #[serde(default)]
     pub pruned_dirs: usize,
-    /// The pruned directories by path: build output holding tracked source first, then by
+    /// The pruned directories by path: undeclared build directories holding tracked source first,
+    /// then by
     /// path, at most [`PRUNED_DIRS_LISTED`]. Empty on a manifest written before paths were recorded,
     /// where `pruned_dirs` alone says something was pruned.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4132,11 +4149,11 @@ impl IndexCoverage {
     }
 
     /// Record every directory discovery pruned: `listed` by path, `unlisted` (secret-like
-    /// paths) by count. Build-output directories holding tracked source sort first, most
+    /// paths) by count. Undeclared build directories holding tracked source sort first, most
     /// files first, so the cap never hides the ones that matter; the rest follow by path.
     pub fn record_pruned_dirs(&mut self, mut listed: Vec<PrunedDir>, unlisted: usize) {
         let missing_source = |dir: &PrunedDir| {
-            if dir.reason == PruneReason::BuildOutput {
+            if dir.reason.counts_tracked_source() {
                 dir.tracked_source_files.unwrap_or(0)
             } else {
                 0
@@ -4154,17 +4171,17 @@ impl IndexCoverage {
     }
 
     /// Git-tracked programming-language files the index does not hold because a directory
-    /// above them was pruned as build output.
+    /// above them was pruned as undeclared build output.
     pub fn pruned_source_files(&self) -> usize {
         self.skipped.get(&SkipReason::Pruned).copied().unwrap_or(0)
     }
 
-    /// Listed build-output directories that hold tracked source, most first.
+    /// Listed undeclared build directories that hold tracked source, most first.
     pub fn pruned_source_dirs(&self) -> Vec<&PrunedDir> {
         self.pruned
             .iter()
             .filter(|dir| {
-                dir.reason == PruneReason::BuildOutput
+                dir.reason.counts_tracked_source()
                     && dir.tracked_source_files.is_some_and(|count| count > 0)
             })
             .collect()
@@ -4523,7 +4540,7 @@ impl IndexCoverage {
         let source_dirs = self.pruned_source_dirs();
         if self.pruned_source_files() > 0 {
             caveats.push(format!(
-                "{} git-tracked source {} not indexed under pruned build-output {}: {}",
+                "{} git-tracked source {} not indexed under undeclared build {}: {}",
                 group_thousands(self.pruned_source_files()),
                 if self.pruned_source_files() == 1 {
                     "file"

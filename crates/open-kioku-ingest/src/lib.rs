@@ -1920,9 +1920,11 @@ impl ScanLedger {
 impl ScanLedger {
     /// Record the directories the walk pruned: each by path in `skipped_paths` and in coverage,
     /// with the Git-tracked programming-language files under it counted. Tracked source under a
-    /// build-output directory is something a person committed that the index does not hold, so
-    /// each such file is discovered and skipped (`pruned`, or the policy that excludes it
-    /// anyway); untracked output and installed packages never touch the ratio.
+    /// `build` or `dist` pruned only because nothing declares it may be a misclassified source
+    /// directory, so each such file is discovered and skipped (`pruned`, or the policy that
+    /// excludes it anyway). Under a directory pruned on strong evidence (a cache tag, a build
+    /// manifest beside it, installed packages) committed files are a published bundle or
+    /// vendored packages: counted on the directory, never against the ratio.
     fn record_pruned_dirs(
         &mut self,
         root: &Path,
@@ -1967,7 +1969,7 @@ impl ScanLedger {
                 continue;
             }
             tracked_counts[index] += 1;
-            if pruned[index].1 != PruneReason::BuildOutput {
+            if !pruned[index].1.counts_tracked_source() {
                 continue;
             }
             self.discovered(&language);

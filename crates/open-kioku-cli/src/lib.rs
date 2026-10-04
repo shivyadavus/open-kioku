@@ -437,6 +437,21 @@ mod tests {
         assert!(step.is_none());
     }
 
+    /// An `ok.toml` an earlier `ok init` wrote still excludes `**/build/**`: the doctor names
+    /// the stale globs; the defaults written now carry none.
+    #[test]
+    fn doctor_suggests_removing_stale_build_directory_excludes() {
+        let mut config = OkConfig::default();
+        assert!(stale_build_dir_excludes_step(&config).is_none());
+        config.index.exclude.push("**/build/**".into());
+        config.index.exclude.push("**/target/**".into());
+        let step = stale_build_dir_excludes_step(&config).expect("stale globs carry a step");
+        assert!(
+            step.contains("lists `**/build/**`, `**/target/**`, which an earlier `ok init` wrote"),
+            "{step}"
+        );
+    }
+
     /// Pruned build output and installed packages are named and never warn; a pruned
     /// build-output directory holding committed source warns at any count and is named,
     /// because 99.9% of what was walked says nothing about the package that was not (#477).
@@ -461,8 +476,9 @@ mod tests {
         }
         coverage.record_pruned_dirs(
             vec![
-                pruned("target", PruneReason::BuildOutput, 0),
-                // Committed packages are listed, not counted against the source.
+                // A committed bundle beside its `package.json` (strong evidence) and committed
+                // packages are listed with their counts, never counted against the source.
+                pruned("dist", PruneReason::BuildOutput, 60),
                 pruned("web/node_modules", PruneReason::Dependencies, 40),
             ],
             0,
@@ -475,7 +491,7 @@ mod tests {
         );
         assert!(
             check.message.ends_with(
-                "2 directories pruned as build output or dependencies (contents not counted): target/, web/node_modules/"
+                "2 directories pruned as build output or dependencies (contents not counted): dist/, web/node_modules/"
             ),
             "{}",
             check.message
@@ -489,7 +505,7 @@ mod tests {
         coverage.record_pruned_dirs(
             vec![
                 pruned("target", PruneReason::BuildOutput, 0),
-                pruned("tools/build", PruneReason::BuildOutput, 1),
+                pruned("tools/build", PruneReason::UndeclaredBuildDir, 1),
                 pruned("web/node_modules", PruneReason::Dependencies, 40),
             ],
             0,
@@ -503,7 +519,7 @@ mod tests {
         );
         assert!(
             check.message.contains(
-                "1 git-tracked source file not indexed under pruned build-output directory: tools/build/"
+                "1 git-tracked source file not indexed under undeclared build directory: tools/build/"
             ),
             "{}",
             check.message

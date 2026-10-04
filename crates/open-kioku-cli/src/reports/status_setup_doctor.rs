@@ -1522,11 +1522,18 @@ fn doctor_report(repo: &Path) -> DoctorReport {
     let config_path = repo.join("ok.toml");
     if config_path.exists() {
         match OkConfig::load_from_repo(&repo) {
-            Ok(_) => checks.push(DoctorCheck {
-                name: "config",
-                status: CheckStatus::Pass,
-                message: format!("loaded {}", config_path.display()),
-            }),
+            Ok(config) => {
+                let mut message = format!("loaded {}", config_path.display());
+                if let Some(step) = stale_build_dir_excludes_step(&config) {
+                    message.push_str("; `[index] exclude` still lists build-directory globs an earlier `ok init` wrote");
+                    next_steps.push(step);
+                }
+                checks.push(DoctorCheck {
+                    name: "config",
+                    status: CheckStatus::Pass,
+                    message,
+                });
+            }
             Err(err) => {
                 checks.push(DoctorCheck {
                     name: "config",
@@ -1907,6 +1914,34 @@ fn coverage_check(
     )
 }
 
+/// The `[index] exclude` globs `ok init` wrote before discovery judged build directories
+/// itself (#477). They still apply, as anything a user's `ok.toml` lists does, so they now
+/// exclude only what discovery walks: source directories named `build`, `dist` or `target`.
+const STALE_BUILD_DIR_EXCLUDES: [&str; 6] = [
+    "**/build/**",
+    "**/dist/**",
+    "**/target/**",
+    "build/**",
+    "dist/**",
+    "target/**",
+];
+
+/// The next step when `config` still lists any of [`STALE_BUILD_DIR_EXCLUDES`]; `None` when
+/// it lists none. The check is not a warning: the user may mean them.
+fn stale_build_dir_excludes_step(config: &OkConfig) -> Option<String> {
+    let stale = STALE_BUILD_DIR_EXCLUDES
+        .iter()
+        .filter(|pattern| config.index.exclude.iter().any(|listed| listed == *pattern))
+        .map(|pattern| format!("`{pattern}`"))
+        .collect::<Vec<_>>();
+    (!stale.is_empty()).then(|| {
+        format!(
+            "Config: ok.toml `[index] exclude` lists {}, which an earlier `ok init` wrote by default. Discovery now prunes build output itself, so these patterns only exclude source directories with those names (a `src/build/` module, a `com.acme.dist` package); remove them unless that is intended, then run `ok index .`.",
+            stale.join(", ")
+        )
+    })
+}
+
 /// A language git ignore rules mostly set aside: the ratio over what remains can read 100%
 /// while most of that language's source is absent from the index. `git check-ignore`
 /// applies every rule file git reads, so the step cannot name one file.
@@ -1957,7 +1992,7 @@ fn coverage_next_step(coverage: &IndexCoverage) -> String {
             .map(|dir| format!("`{}/`", dir.path))
             .collect::<Vec<_>>();
         return format!(
-            "Coverage: {} git-tracked source file(s) are not indexed because discovery pruned {} as build output; no ok.toml key governs that. Discovery walks a `build`, `dist` or `target` directory that a module or package declares (a `mod.rs`, a `<name>.rs` beside it, an `__init__.py`, Go files, or a place under `src/` with no build manifest beside it); if these files are source, declare the directory that way, otherwise an absence among them is not evidence. The files are listed in `ok --json status --full` `quality.skipped_paths` with reason `pruned`.",
+            "Coverage: {} git-tracked source file(s) are not indexed because discovery pruned {} as build output that nothing declares; no ok.toml key governs that. Discovery walks a `build` or `dist` directory that a module or package declares (a `mod.rs`, a `<name>.rs` beside it, an `__init__.py`, Go files, or a place under `src/` with no build manifest beside it); if these files are source, declare the directory that way, otherwise an absence among them is not evidence. The files are listed in `ok --json status --full` `quality.skipped_paths` with reason `pruned`.",
             group_thousands(coverage.pruned_source_files()),
             if dirs.is_empty() {
                 "their directories".to_owned()

@@ -65,7 +65,7 @@ fn coverage_attributes_every_source_file_to_indexed_or_a_skip_reason() {
         coverage.pruned,
         vec![PrunedDir {
             path: "build".into(),
-            reason: PruneReason::BuildOutput,
+            reason: PruneReason::UndeclaredBuildDir,
             tracked_source_files: None,
         }]
     );
@@ -374,7 +374,7 @@ fn declared_build_and_dist_modules_are_indexed() {
 
 /// The other half of #477: build output and installed packages stay pruned, each one named
 /// with its reason in coverage and in the skipped paths. Untracked output never counts
-/// against coverage; a source file someone committed under a pruned `build/` does.
+/// against coverage; a source file someone committed under an undeclared `build/` does.
 #[test]
 fn build_output_and_dependency_directories_stay_pruned_and_are_named() {
     let dir = tempfile::tempdir().unwrap();
@@ -400,7 +400,10 @@ fn build_output_and_dependency_directories_stay_pruned_and_are_named() {
     );
     write(root, "crates/tool/src/lib.rs", "pub fn tool() {}\n");
     write(root, "crates/tool/target/keep.rs", "pub fn kept() {}\n");
+    // Beside the root `Cargo.toml`: build output on strong evidence.
     write(root, "build/steps.py", "def step():\n    pass\n");
+    // Nothing declares it and no manifest sits beside it: pruned by the weak rule.
+    write(root, "tools/build/plan.py", "def plan():\n    pass\n");
     write(root, "dist/app.js", "export function app() {}\n");
     write(root, "node_modules/pkg/index.js", "module.exports = {};\n");
     write(root, ".venv/pyvenv.cfg", "home = /usr/bin\n");
@@ -432,6 +435,7 @@ fn build_output_and_dependency_directories_stay_pruned_and_are_named() {
         "dist",
         "node_modules",
         "target",
+        "tools/build",
     ];
     for file in &snapshot.files {
         assert!(
@@ -457,9 +461,10 @@ fn build_output_and_dependency_directories_stay_pruned_and_are_named() {
             pruned("dist", PruneReason::BuildOutput, 0),
             pruned("node_modules", PruneReason::Dependencies, 1),
             pruned("target", PruneReason::BuildOutput, 0),
+            pruned("tools/build", PruneReason::UndeclaredBuildDir, 0),
         ]
     );
-    assert_eq!(coverage.pruned_dirs, 6);
+    assert_eq!(coverage.pruned_dirs, 7);
     assert_eq!(coverage.pruned_unlisted, 0);
     assert_eq!(coverage.pruned_source_files(), 0);
     assert!(!coverage.below_warn_threshold());
@@ -478,9 +483,10 @@ fn build_output_and_dependency_directories_stay_pruned_and_are_named() {
         skipped.path == Path::new("vendor/dep/lib.rs") && skipped.reason == SkipReason::Vendor
     }));
 
-    // Committing a file under the undeclared `build/` makes it missing source: counted as
-    // discovered and skipped `pruned`, listed first, and named in the summary.
-    git(root, &["add", "build/steps.py"]);
+    // Committing a file under the undeclared `tools/build/` makes it missing source: counted
+    // as discovered and skipped `pruned`, listed first, and named in the summary. The file
+    // committed under the root `build/` beside `Cargo.toml` is listed on its directory only.
+    git(root, &["add", "build/steps.py", "tools/build/plan.py"]);
     let snapshot = Indexer::default().index_repo(root, &config).unwrap();
     let coverage = snapshot.manifest.quality.coverage.as_ref().unwrap();
     assert_eq!(coverage.pruned_source_files(), 1);
@@ -490,13 +496,20 @@ fn build_output_and_dependency_directories_stay_pruned_and_are_named() {
     assert_eq!(python.percent(), Some(0.0));
     assert_eq!(
         coverage.pruned.first(),
-        Some(&pruned("build", PruneReason::BuildOutput, 1))
+        Some(&pruned("tools/build", PruneReason::UndeclaredBuildDir, 1))
     );
+    assert!(coverage
+        .pruned
+        .contains(&pruned("build", PruneReason::BuildOutput, 1)));
     assert!(snapshot.skipped_paths.iter().any(|skipped| {
-        skipped.path == Path::new("build/steps.py") && skipped.reason == SkipReason::Pruned
+        skipped.path == Path::new("tools/build/plan.py") && skipped.reason == SkipReason::Pruned
     }));
+    assert!(!snapshot
+        .skipped_paths
+        .iter()
+        .any(|skipped| skipped.path == Path::new("build/steps.py")));
     assert!(coverage.summary_line().contains(
-        "1 git-tracked source file not indexed under pruned build-output directory: build/"
+        "1 git-tracked source file not indexed under undeclared build directory: tools/build/"
     ));
     for (language, entry) in &coverage.by_language {
         assert_eq!(
@@ -505,6 +518,58 @@ fn build_output_and_dependency_directories_stay_pruned_and_are_named() {
             "{language}: every discovered file is indexed or skipped"
         );
     }
+}
+
+/// A committed `dist/` bundle beside its `package.json` (a JavaScript action, a published
+/// library) is build output on strong evidence: listed with its tracked files, never counted as
+/// missing source. Counting it read 20 indexed source files as 25% coverage, warned in `ok
+/// doctor`, and capped every plan's confidence through a coverage gap.
+#[test]
+fn a_committed_bundle_beside_its_manifest_is_listed_but_not_missing_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "--quiet"]);
+    write(root, "package.json", "{\"name\":\"ledger\"}\n");
+    for index in 0..20 {
+        write(
+            root,
+            &format!("src/m{index}.js"),
+            &format!("export function entry{index}() {{}}\n"),
+        );
+    }
+    for index in 0..60 {
+        write(
+            root,
+            &format!("dist/m{index}.js"),
+            &format!("export function bundled{index}() {{}}\n"),
+        );
+    }
+    git(root, &["add", "."]);
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let coverage = snapshot.manifest.quality.coverage.as_ref().unwrap();
+
+    assert_eq!(
+        coverage.pruned,
+        vec![PrunedDir {
+            path: "dist".into(),
+            reason: PruneReason::BuildOutput,
+            tracked_source_files: Some(60),
+        }]
+    );
+    assert_eq!(coverage.pruned_source_files(), 0);
+    assert_eq!(coverage.by_language["java_script"].discovered, 20);
+    assert_eq!(coverage.programming_percent(), Some(100.0));
+    assert!(!coverage.below_warn_threshold());
+    assert!(coverage.gaps().is_empty(), "{:?}", coverage.gaps());
+    // The directory is a named skip; no file under it is.
+    assert!(snapshot
+        .skipped_paths
+        .iter()
+        .all(|skipped| skipped.path == Path::new("dist") || !skipped.path.starts_with("dist")));
 }
 
 /// A pruned directory whose path is secret-like is counted, never named.

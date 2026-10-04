@@ -32,10 +32,10 @@ can never drop files silently. `IndexQuality.coverage` (JSON: `quality.coverage`
   `type_script`, ...);
 - `pruned_dirs` and `walk_errors`: what the walk cannot see, counted beside the ratio;
 - `pruned`: the pruned directories by repository-relative path, each with its `reason`
-  (`build_output`, `dependencies`, `virtual_env`) and, in a Git work tree,
-  `tracked_source_files`, the git-tracked programming-language files under it (absent
-  outside Git, where it is unknown). Build-output directories holding tracked source come
-  first, then the rest by path, at most 50; `pruned_unlisted` counts the others, and a
+  (`build_output`, `undeclared_build_dir`, `dependencies`, `virtual_env`) and, in a Git
+  work tree, `tracked_source_files`, the git-tracked programming-language files under it
+  (absent outside Git, where it is unknown). Undeclared build directories holding tracked
+  source come first, then the rest by path, at most 50; `pruned_unlisted` counts the others, and a
   secret-like directory is counted there and never named. Both are absent on a manifest
   written before paths were recorded, which reads as `N directories pruned by name`;
 - `policy_excluded_by_source` and `policy_excluded_dirs`: the files a policy excluded,
@@ -53,10 +53,13 @@ What is counted:
   recognised language. Files under a pruned directory (see "Pruned directories") are
   not discovered; each directory is counted in `pruned_dirs` and named in `pruned`
   (`.git` and `.ok` are pruned but not counted; they are never source). The exception
-  is committed source: a git-tracked programming-language file under a directory
-  pruned as build output is discovered and skipped as `pruned`, an omission the ratio
-  is judged on, because someone committed it and the index does not hold it. Untracked
-  build output and installed packages never count against the ratio.
+  is committed source under a guess: a git-tracked programming-language file under an
+  `undeclared_build_dir` is discovered and skipped as `pruned`, an omission the ratio is
+  judged on, because someone committed it and the rule that pruned it may have
+  misclassified a source directory. Untracked build output never counts against the
+  ratio, and neither do committed files under a directory pruned on strong evidence (a
+  `CACHEDIR.TAG`, a build manifest beside it, `node_modules`, a marked environment): a
+  committed `dist/` bundle beside its `package.json` is listed with its count only.
   A directory the walker could not read is counted in `walk_errors` (also
   `skip_counts.error`); its files were never discovered. Files of unknown language are
   not source files; their skips stay in `skip_counts`, outside coverage.
@@ -118,7 +121,7 @@ the warning; with `allow_hidden_files = true` the same worktree counts as git-ig
 can. Pruned directories (the first three by path, and how many more) and walk errors
 are appended to the summary line whenever nonzero; pruned directories alone do not
 force a warning, since `target/` and `node_modules/` are pruned on nearly every
-repository. Git-tracked source under a directory pruned as build output warns at any
+repository. Git-tracked source under an undeclared build directory warns at any
 count, like a walk error, and the summary line and the doctor's next step name the
 directories: no ratio threshold can say a committed `tools/build/` package was meant
 to vanish. A repository with no
@@ -135,7 +138,7 @@ or 20-file rule, and, when policy left no programming-language source to conside
 language it emptied. Context packs and plans read it from the manifest and price it as the
 `index_coverage` signal (`docs/ranking.md`, "Index coverage gaps"); `ok --json status` and
 MCP `repo_status` list it as `coverage_gaps`. The repository-wide ratio and walk errors stay
-in the doctor's check. Committed source under a pruned build-output directory is an
+in the doctor's check. Committed source under an undeclared build directory is an
 `omitted` gap with reason `pruned` once it crosses those thresholds.
 
 ## Pruned directories
@@ -151,18 +154,23 @@ still read 100%. The rule, by directory name:
 | `.git`, `.ok` | always (a worktree's `.git` file too); never recorded | tooling |
 | `node_modules` | always | `dependencies` |
 | `.venv`, `venv` | it holds `pyvenv.cfg` or `conda-meta` | `virtual_env` |
-| `target` | it holds `CACHEDIR.TAG`, or sits beside `Cargo.toml`, `pom.xml` or `build.sbt` | `build_output` |
-| `build`, `dist` | it holds `CACHEDIR.TAG`, or no module or package declares it | `build_output` |
+| `target` | it holds `CACHEDIR.TAG`, or sits beside `Cargo.toml`, `pom.xml`, `build.sbt`, `build.properties` (sbt's `project/`) or `project.clj` | `build_output` |
+| `build`, `dist` | no module or package declares it, and it holds `CACHEDIR.TAG` or sits beside a build manifest | `build_output` |
+| `build`, `dist` | no module or package declares it, and nothing else accounts for it | `undeclared_build_dir` |
 
 A `build` or `dist` directory is declared, and walked, when it directly holds a `mod.rs`,
 an `__init__.py` or a `.go` file; when a Rust `build.rs`/`dist.rs` module file sits beside
 it in a directory without a `Cargo.toml` (beside one, `build.rs` is the build script); or
 when it lies under a `src/` directory and no build manifest (`Cargo.toml`, `pom.xml`,
 `build.sbt`, `build.gradle(.kts)`, `package.json`, `setup.py`, `pyproject.toml`,
-`CMakeLists.txt`, `go.mod`, `meson.build`) sits beside it. Undeclared `build` and `dist`
-default to pruned because they are overwhelmingly Gradle, setuptools, CMake and bundler
-output, often larger than the source; what that default gets wrong stays visible as
-committed source counted `pruned` (see "Coverage"). An unmarked `target` or `venv` is
+`CMakeLists.txt`, `go.mod`, `meson.build`) sits beside it (a `CACHEDIR.TAG` inside prunes
+it regardless). Undeclared `build` and `dist` default to pruned because they are
+overwhelmingly Gradle, setuptools, CMake and bundler output, often larger than the
+source. The two `build_output` rows are strong evidence; `undeclared_build_dir` is a
+guess, and what it gets wrong stays visible as committed source counted `pruned` (see
+"Coverage"). Committed files under strong evidence are only listed: JavaScript actions and
+published libraries commit their `dist/` bundle beside `package.json`, and counting it
+would read a fully indexed repository as 25% covered and cap every plan's confidence. An unmarked `target` or `venv` is
 walked; a `.venv` without a marker is walked and its files skipped by the hidden-file rule.
 Only directories are pruned: a file named `build` is discovered like any other.
 
@@ -178,5 +186,7 @@ tracked files beneath; nothing else is read under a pruned directory.
 `ok.toml` that `ok init` wrote before this rule listed `**/target/**`, `**/dist/**` and
 `**/build/**`; those patterns are the user's once written and still apply, so such a
 repository keeps excluding a `src/build/` module, now as a visible `config_exclude` skip,
-until they are removed. They are no longer written by `ok init` or added on load.
+until they are removed. They are no longer written by `ok init` or added on load, and
+`ok doctor` names any of them an `ok.toml` still lists, with a next step to remove them
+unless the exclusion is intended.
 
