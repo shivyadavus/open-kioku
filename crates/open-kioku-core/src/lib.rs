@@ -2255,9 +2255,15 @@ pub struct SyntaxFacts {
     #[serde(default)]
     pub package_declaration: Option<PackageDeclarationSite>,
     /// A Rust file whose top level invokes a macro (`cfg_if! { .. }`, `make_items!();`), which
-    /// may expand to items and `use` declarations no other fact here records.
+    /// may expand to items and `use` declarations no other fact here records. Macros that
+    /// declare no name (`compile_error!`, `assert!`, `include_str!`) do not count, and
+    /// `thread_local!` counts only through the names written in it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub invokes_item_macro: bool,
+    /// The names a Rust file's top-level `thread_local!` declares, which it does as items of
+    /// the file's module.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_macro_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

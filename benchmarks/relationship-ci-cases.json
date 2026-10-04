@@ -3133,9 +3133,14 @@
         "selector": "caller_fn",
         "identity": "symbol:rust:calls:glob_reexport_beside_local_item_call:source"
       },
-      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "expected_outcome": "must_emit",
       "scenario": "glob_reexport_beside_local_item_call",
-      "notes": "Regression case (#476): `tokens` defines `target_fn` and a glob beside it brings in `ledger`'s, so the call keeps both as candidates and no authoritative edge."
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:glob_reexport_beside_local_item_call:target"
+      },
+      "notes": "Regression case (#476): `tokens` defines `target_fn`, which shadows the `target_fn` its glob `pub use crate::ledger::*;` brings in, so `crate::tokens::target_fn()` is proven to the local item."
     },
     {
       "id": "ci-rust-calls-151-duplicate_named_reexport_call",
@@ -3258,6 +3263,27 @@
       "expected_outcome": "must_not_emit",
       "scenario": "workspace_dependency_crate_visible_reexport",
       "notes": "Regression case (#476): a `pub(crate) use` brings nothing in for another crate, so `engine::target_fn()` from the dependent package proves nothing."
+    },
+    {
+      "id": "ci-rust-calls-158-block_import_shadowing_reexport",
+      "fixture_id": "ci/ri3/rust/calls/block_import_shadowing_reexport",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:block_import_shadowing_reexport:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "block_import_shadowing_reexport",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::c::target_fn",
+        "identity": "symbol:rust:calls:block_import_shadowing_reexport:target"
+      },
+      "notes": "Regression case (#476): the sibling of case 13. A block `use crate::b::target_fn;` resolves through `b`'s `pub use crate::c::target_fn;` and shadows the file-level `use crate::a::target_fn;`, so the call is proven to `c::target_fn`."
     },
     {
       "id": "ci-rust-references-01-metamorphic_a",

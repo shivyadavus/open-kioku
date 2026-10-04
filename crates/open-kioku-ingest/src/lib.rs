@@ -662,12 +662,24 @@ impl Indexer {
         let mut parsed = Vec::with_capacity(files.len());
         // Rust files whose top level invokes a macro (see `RustModuleTree::with_module_macros`).
         let mut rust_module_macros = HashSet::new();
+        let mut rust_macro_names = HashMap::new();
         for (file, outcome) in files.into_iter().zip(outcomes) {
             match outcome {
                 Ok((parsed_file, redacted)) => {
                     redacted_files += usize::from(redacted);
                     if parsed_file.syntax.invokes_item_macro {
                         rust_module_macros.insert(file.id.clone());
+                    }
+                    if !parsed_file.syntax.item_macro_names.is_empty() {
+                        rust_macro_names.insert(
+                            file.id.clone(),
+                            parsed_file
+                                .syntax
+                                .item_macro_names
+                                .iter()
+                                .cloned()
+                                .collect::<HashSet<_>>(),
+                        );
                     }
                     kept_files.push(file);
                     parsed.push(parsed_file);
@@ -808,7 +820,7 @@ impl Indexer {
         .with_import_sites(&import_sites)
         // A macro invoked at the top level of a Rust file may expand to items and `use`
         // declarations the parser does not see, so its module's `use` sites settle no name.
-        .with_module_macros(rust_module_macros);
+        .with_module_macros(rust_module_macros, rust_macro_names);
         let rust_modules = {
             // Only a file skipped for its size has its `mod` lines read; a path policy's
             // exclusion is never read around. A mounted file read this way can mount another

@@ -198,8 +198,12 @@ in; a path from another crate (a crate name the package declares) follows `pub u
 unresolved: two re-exports of one name that disagree, a glob the index cannot follow (another
 crate outside the repository, an enum), a cycle, a chain longer than eight steps, and a name only
 a glob brings into a module whose file invokes a macro at its top level, which may expand to an
-item or a named `use` the parser does not see that shadows the glob. A name the module defines while a `use` beside it brings in
-another item of that name (a `cfg`-gated `use`, or a glob) is reported ambiguous with both as
+item or a named `use` the parser does not see that shadows the glob. Macros that declare no name
+(`compile_error!`, the `assert!` and `const_assert!` families, `include_str!`, `include_bytes!`,
+`doctest!`) do not count, and a `thread_local!` counts only for the statics written in it;
+`cfg_if!`, `include!` and any other macro do. An item the module defines shadows what a glob
+beside it brings in, as rustc reads it. A name the module defines while a named `use` beside it
+brings in another item of that name (a `cfg`-gated `use`) is reported ambiguous with both as
 candidates (strategies `rust_reexport_ambiguous_module` and `rust_reexport_ambiguous_member`) and
 gets no edge. A re-export through a module whose file configuration selects (`pub use imp::f;`
 beside `#[cfg_attr(windows, path = "win.rs")] mod imp;`) keeps one unproven edge per file, as a

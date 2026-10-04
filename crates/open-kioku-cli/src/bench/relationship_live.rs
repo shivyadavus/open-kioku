@@ -821,6 +821,22 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // The block's `use crate::b::target_fn;` resolves through `b`'s `pub use` and shadows the
+        // file's `use crate::a::target_fn;` (#476).
+        "block_import_shadowing_reexport" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod a;\npub mod b;\npub mod c;\npub mod caller;\n"),
+                ("src/a.rs", "pub fn target_fn() {}\n"),
+                ("src/b.rs", "pub use crate::c::target_fn;\n"),
+                ("src/c.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::a::target_fn;\n\npub fn production() {\n    target_fn();\n}\n\npub fn caller_fn() {\n    use crate::b::target_fn;\n    target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
         // The block's `use crate::b::target_fn;` shadows the file's `use crate::a::target_fn;` and
         // stays unresolved: two globs of `b` each bring in a `target_fn`.
         "block_import_shadowing" => (
@@ -2934,7 +2950,8 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
-        // `tokens` defines `target_fn` and a glob beside it brings in `ledger`'s (#476).
+        // `tokens` defines `target_fn`, which shadows the one its glob brings in from `ledger`
+        // (#476).
         "glob_reexport_beside_local_item_call" => (
             vec![
                 ("Cargo.toml", PACKAGE),
@@ -2949,7 +2966,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
                     "pub fn caller_fn() {\n    crate::tokens::target_fn();\n}\n",
                 ),
             ],
-            false,
+            true,
         ),
         // Two `cfg`-gated re-exports of one name (#476).
         "duplicate_named_reexport_call" => (

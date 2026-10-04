@@ -115,6 +115,9 @@ pub(crate) struct RustModuleTree<'a> {
     /// The Rust files whose top level invokes a macro, which may expand to items and `use`
     /// declarations the parser does not see: no glob of theirs settles a name.
     module_macros: HashSet<FileId>,
+    /// The names a top-level `thread_local!` of each Rust file declares: a glob of the file does
+    /// not settle them either.
+    module_macro_names: HashMap<FileId, HashSet<String>>,
     /// What the `use` sites of a module bring in under a name, as [`RustModuleTree::used_name`]
     /// found it.
     used_names: RefCell<HashMap<UsedNameKey, Rc<UsedName>>>,
@@ -176,16 +179,14 @@ impl UsedName {
 
     /// Whether a `use` may bring in an item of the name other than `item`, which the module
     /// defines: a named `use`, which compiles beside the item only under a `cfg` or in another
-    /// namespace, or a glob that brings in another item of the name. What a macro may expand to
-    /// is not counted: it would collide with the item as a written `use` does, and the index
-    /// has always read an item it sees as the name.
+    /// namespace. A glob never does: an item the module defines shadows what a glob brings in.
+    /// What a macro may expand to is not counted either: it would collide with the item as a
+    /// written `use` does, and the index has always read an item it sees as the name.
     fn may_override(&self, item: &SymbolId) -> bool {
-        !self.named.is_empty()
+        self.named
+            .iter()
+            .any(|target| target.item.as_ref() != Some(item))
             || self.named_unresolved
-            || self
-                .globbed
-                .iter()
-                .any(|target| target.item.as_ref() != Some(item))
     }
 }
 
@@ -491,6 +492,7 @@ impl<'a> RustModuleTree<'a> {
             configured: OnceCell::new(),
             module_uses: HashMap::new(),
             module_macros: HashSet::new(),
+            module_macro_names: HashMap::new(),
             used_names: RefCell::default(),
             used_names_open: RefCell::default(),
             used_name_cuts: Cell::new(0),
@@ -527,10 +529,15 @@ impl<'a> RustModuleTree<'a> {
         self
     }
 
-    /// Records the Rust files whose top level invokes a macro (see
-    /// [`RustModuleTree::module_macros`]).
-    pub(crate) fn with_module_macros(mut self, files: HashSet<FileId>) -> Self {
+    /// Records the Rust files whose top level invokes a macro that may declare anything, and the
+    /// names each file's `thread_local!` declares (see [`RustModuleTree::module_macros`]).
+    pub(crate) fn with_module_macros(
+        mut self,
+        files: HashSet<FileId>,
+        names: HashMap<FileId, HashSet<String>>,
+    ) -> Self {
         self.module_macros = files;
+        self.module_macro_names = names;
         self.used_names = RefCell::default();
         self
     }
@@ -808,9 +815,9 @@ impl<'a> RustModuleTree<'a> {
         }
         let items = rust_module_items(&self.module_stems(path, parent), item_name, symbols);
         match items.as_slice() {
-            // An item defined in the module is the name, unless a `use` beside it may stand for
-            // another: a named one compiles beside it only under a `cfg` or in another namespace,
-            // and a glob bringing in another item of the name is too close to call (#476).
+            // An item defined in the module is the name, shadowing any glob, unless a named `use`
+            // beside it may stand for another, which compiles only under a `cfg` or in another
+            // namespace (#476).
             [item] => (!self
                 .used_name(path, symbols, scopes, walk)
                 .may_override(item))
@@ -1129,7 +1136,11 @@ impl<'a> RustModuleTree<'a> {
                 }
             }
             // A macro may expand to an item or a `use` of the name the parser does not see.
-            found.macro_expanded |= self.module_macros.contains(file);
+            found.macro_expanded |= self.module_macros.contains(file)
+                || self
+                    .module_macro_names
+                    .get(file)
+                    .is_some_and(|names| names.contains(name));
         }
         self.used_names_open.borrow_mut().remove(&key);
         let found = Rc::new(found);
@@ -1238,8 +1249,8 @@ impl<'a> RustModuleTree<'a> {
     /// What each name the `use` sites of a Rust module bring in names, for paths through the
     /// module that the resolver reads (#476), by the qualified name tree-sitter would give an
     /// item of the name in the module's file. Recorded: a name the module brings in and does not
-    /// define, when the `use` sites settle what it is, and a name it defines that a `use` beside
-    /// it may stand for instead, which stays ambiguous. Only files the tree places, with `use`
+    /// define, when the `use` sites settle what it is, and a name it defines that a named `use`
+    /// beside it may stand for instead, which stays ambiguous. Only files the tree places, with `use`
     /// sites at their top level, are read; the names read are those their named `use` sites bind
     /// and those their globs may bring in, that `wanted` admits: a path the resolver reads ends
     /// in a name some call writes.
@@ -1329,7 +1340,7 @@ impl<'a> RustModuleTree<'a> {
                     return None;
                 }
                 let mut candidates = vec![item.clone()];
-                for target in used.named.iter().chain(&used.globbed) {
+                for target in &used.named {
                     candidates.extend(target.item.iter().cloned());
                     if let Some(configured) = &target.configured {
                         candidates.extend(configured.items.iter().cloned());
@@ -6912,7 +6923,19 @@ mod tests {
             .with_module_macros(
                 macros
                     .iter()
+                    .filter(|file| !file.contains(':'))
                     .map(|file| FileId::new(format!("file:{file}")))
+                    .collect(),
+                // `file:name`: `file`'s `thread_local!` declares `name`.
+                macros
+                    .iter()
+                    .filter_map(|entry| entry.split_once(':'))
+                    .map(|(file, name)| {
+                        (
+                            FileId::new(format!("file:{file}")),
+                            HashSet::from([name.to_string()]),
+                        )
+                    })
                     .collect(),
             )
     }
@@ -7146,8 +7169,10 @@ mod tests {
             // Two named re-exports of one name, as two `cfg`s may write them.
             rust_pub_use("src/facade.rs", "crate::store::open", "open"),
             rust_pub_use("src/facade.rs", "crate::ledger::open", "open"),
-            // A glob bringing in `post`, beside a `post` the module defines.
+            // A glob bringing in `post`, beside a `post` the module defines, which shadows it.
             glob("src/store.rs", "crate::ledger::*"),
+            // A `thread_local!` of `ring.rs` declares a `revoke` its glob also brings in.
+            glob("src/ring.rs", "crate::auth::*"),
             // A glob of a crate the index does not hold may bring the name in too.
             glob("src/prelude.rs", "crate::auth::*"),
             glob("src/prelude.rs", "outside::*"),
@@ -7167,6 +7192,8 @@ mod tests {
             rust_use_site("src/api.rs", "crate::prelude::revoke", "revoke", None),
             rust_use_site("src/api.rs", "crate::auth::close", "close", None),
             rust_use_site("src/api.rs", "crate::vault::close", "close_vault", None),
+            rust_use_site("src/api.rs", "crate::ring::revoke", "revoke_ring", None),
+            rust_use_site("src/api.rs", "crate::ring::Token", "Token", None),
         ];
         let mut symbols = reexport_symbols();
         symbols.push(rust_symbol("src/store.rs", "post"));
@@ -7175,19 +7202,16 @@ mod tests {
             reexport_declarations(),
             &sites,
             symbols,
-            &["src/vault.rs"],
+            &["src/vault.rs", "src/ring.rs:revoke"],
         );
         let api = "src/api.rs";
         for (local, why) in [
             ("spin", "a cycle"),
             ("open", "two re-exports of one name"),
-            (
-                "post",
-                "a glob bringing in another item of a name the module defines",
-            ),
             ("revoke", "a glob the index cannot follow"),
             ("close", "a `use` inside a function"),
             ("close_vault", "a module whose top level invokes a macro"),
+            ("revoke_ring", "a name a `thread_local!` declares"),
         ] {
             assert_eq!(bound_with_rule(&registry, api, local), None, "{why}");
         }
@@ -7198,6 +7222,22 @@ mod tests {
                 ImportBindingRule::RustModulePath
             )),
             "an item the module defines, which no `use` beside it may stand for"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "post"),
+            Some((
+                "symbol:src/store.rs:post".into(),
+                ImportBindingRule::RustModulePath
+            )),
+            "an item the module defines shadows what a glob beside it brings in"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "Token"),
+            Some((
+                "symbol:src/auth.rs:Token".into(),
+                ImportBindingRule::RustReexport
+            )),
+            "a `thread_local!` settles the glob's other names"
         );
     }
 
@@ -7289,11 +7329,14 @@ mod tests {
             rust_use_site("src/lib.rs", "crate::store::close", "close", None),
             glob("src/prelude.rs", "crate::ledger::*"),
             glob("src/store.rs", "crate::ledger::*"),
+            // `facade` defines `post` and names `ledger`'s in a `use` too, as a `cfg` may.
+            rust_pub_use("src/facade.rs", "crate::ledger::post", "post"),
         ];
         let files = REEXPORT_FILES.map(source_file);
         let project = rust_project(&[("", None)]);
         let mut symbols = reexport_symbols();
         symbols.push(rust_symbol("src/store.rs", "post"));
+        symbols.push(rust_symbol("src/facade.rs", "post"));
         let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
         let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
         let modules = module_tree_with_uses(
@@ -7320,16 +7363,16 @@ mod tests {
         let post = &table["src::prelude::post"];
         assert_eq!(post.in_crate, item("symbol:src/ledger.rs:post"));
         assert_eq!(
-            table["src::store::post"].in_crate,
+            table["src::facade::post"].in_crate,
             Some(RustReexported::Ambiguous(vec![
+                SymbolId::new("symbol:src/facade.rs:post"),
                 SymbolId::new("symbol:src/ledger.rs:post"),
-                SymbolId::new("symbol:src/store.rs:post"),
             ])),
-            "a name the module defines and a glob beside it brings in"
+            "a name the module defines and a named `use` beside it brings in"
         );
         assert!(
-            !table.contains_key("src::store::close"),
-            "an item no `use` of its module may stand for"
+            !table.contains_key("src::store::post"),
+            "an item the module defines shadows a glob beside it"
         );
     }
 }
