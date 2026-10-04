@@ -326,6 +326,9 @@ copy of the artifact:
   discovery here records it. Under an undeclared build directory it stays a visible
   `pruned` omission; under one pruned on strong evidence it leaves the ratio. Its directory
   is named in `coverage.pruned`, with no tracked count, since the import does not ask Git.
+  An imported index's coverage is therefore an approximation of what `ok index` here would
+  record: every file the import removed under an undeclared build directory counts as
+  missing, committed or not, so it can read lower than a local index.
   Every path the import then serves is one discovery here walks, so the revision check's
   changed-file count, which leaves pruned paths out, misses no served file. Rules that do
   not depend on local configuration — vendor detection, the size limit, symlinks — are not
