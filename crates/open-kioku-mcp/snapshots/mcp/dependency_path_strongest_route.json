@@ -26,13 +26,13 @@
       {
         "edge_type": "CALLS",
         "evidence": {
-          "confidence": "low",
+          "confidence": "exact",
           "file_range": null,
           "id": "",
           "indexed_at": "<indexed_at>",
           "message": "",
-          "source": "",
-          "source_type": "lexical",
+          "source": "open-kioku-resolution",
+          "source_type": "tree_sitter",
           "symbol_id": null
         },
         "from": "symbol:symbol-post",

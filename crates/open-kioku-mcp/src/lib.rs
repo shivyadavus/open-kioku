@@ -3655,11 +3655,19 @@ mod tests {
                     open_kioku_core::RelationshipProofKind::SameScopeDefinition,
                 ],
             };
+            // Resolver evidence, as an indexed proven edge carries; the class comes from the
+            // proofs either way.
             let mut edge = GraphEdge {
                 id: EdgeId::new(id),
                 from: NodeId::new(from),
                 to: NodeId::new(to),
                 edge_type,
+                evidence: open_kioku_core::Evidence {
+                    source: "open-kioku-resolution".into(),
+                    source_type: EvidenceSourceType::TreeSitter,
+                    confidence: Confidence::Exact,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             edge.set_relationship_proofs(

@@ -609,8 +609,11 @@ then the proven call (`authoritative`). The second is returned. Length still com
 longer route is never returned for being stronger. The walk is breadth first and settles each
 node at the first depth it is reached; at that depth it keeps, per node and route state (whether
 the route has crossed a relationship), the route whose weakest hop is strongest, and the first
-one found among equals, with hops read in window order. The SQLite and in-memory stores share
-the walk, so they return the same route.
+one found among equals: kept routes are expanded in the order they were found, and each node's
+hops in window order. Wherever no later route to a node is stronger than the first one found to
+it, that is the route the plain breadth-first walk returned before routes were compared; where a
+stronger route replaced an earlier one, ties among the rest are deterministic but may resolve
+differently. The SQLite and in-memory stores share the walk, so they return the same route.
 
 `ok graph query` and MCP `query_evidence_graph` match every edge whatever its authority, and
 return `paths` beside `rows`, one entry per row:

@@ -456,7 +456,7 @@ pub fn graph_route_authorities(edges: &[GraphEdge]) -> Vec<RelationshipAuthority
 }
 
 /// A route [`strongest_shortest_route`] keeps to one node: the lowest contribution any of its
-/// hops makes ([`graph_route_hop_authority`]), the order it was first kept in, and its edges.
+/// hops makes ([`graph_route_hop_authority`]), when the walk found it, and its edges.
 struct KeptRoute {
     weakest: RelationshipAuthority,
     found: usize,
@@ -482,8 +482,14 @@ struct KeptRoute {
 /// best per node and state is exact: the weakest hop of a whole route is the lower of its
 /// prefix's and its suffix's, and the suffix's depends only on the node and the state.
 ///
-/// With no stronger route anywhere, this returns the route the plain breadth-first walk did:
-/// nodes are expanded in the order they were first reached and edges in `outgoing` order.
+/// Ties are broken by when a route was found. Every candidate route is numbered as the walk
+/// generates it, kept routes are expanded in that order and each node's edges in `outgoing`
+/// order, and a route that replaces a weaker one keeps its own number. So wherever no route to a
+/// node is stronger than the first one found to it at that depth, this returns the route the
+/// plain breadth-first walk returned (the first one found): that walk expands only the first
+/// route to each node, and every other route this walk expands follows the first route to the
+/// same node, which leaves the same edges first. Where a stronger route does replace an earlier
+/// one, ties among the rest are still deterministic but may resolve differently.
 pub fn strongest_shortest_route<E>(
     from: &str,
     to: &str,
@@ -498,54 +504,64 @@ pub fn strongest_shortest_route<E>(
     // Index 0 is a route that has crossed no relationship hop, index 1 one that has.
     type States = [Option<KeptRoute>; 2];
     let mut settled = HashSet::from([from.to_string()]);
-    let mut layer: Vec<(String, States)> = vec![(
+    // The kept routes of one depth, each with its node and state, in the order they were found.
+    let mut layer: Vec<(String, bool, KeptRoute)> = vec![(
         from.to_string(),
-        [
-            Some(KeptRoute {
-                weakest: RelationshipAuthority::Authoritative,
-                found: 0,
-                edges: Vec::new(),
-            }),
-            None,
-        ],
+        false,
+        KeptRoute {
+            weakest: RelationshipAuthority::Authoritative,
+            found: 0,
+            edges: Vec::new(),
+        },
     )];
     let mut found = 0;
     for _ in 0..max_hops {
         let mut next: Vec<(String, States)> = Vec::new();
         let mut slots: HashMap<String, usize> = HashMap::new();
-        for (node, states) in &layer {
-            for edge in outgoing(node)? {
+        // A node kept in both states is expanded twice; its edges are read once and held only
+        // until its second route is expanded.
+        let mut routes_left = HashMap::<&str, usize>::new();
+        for (node, _, _) in &layer {
+            *routes_left.entry(node.as_str()).or_default() += 1;
+        }
+        let mut held = HashMap::<&str, Vec<GraphEdge>>::new();
+        for (node, after_relationship, kept) in &layer {
+            let left = routes_left
+                .get_mut(node.as_str())
+                .expect("every layer node is counted");
+            *left -= 1;
+            let edges = match held.remove(node.as_str()) {
+                Some(edges) => edges,
+                None => outgoing(node)?,
+            };
+            for edge in &edges {
                 let target = edge.to.0.as_str();
                 if settled.contains(target) {
                     continue;
                 }
-                for (crossed, kept) in states.iter().enumerate() {
-                    let Some(kept) = kept else {
-                        continue;
-                    };
-                    let after_relationship = crossed == 1;
-                    let weakest = kept
-                        .weakest
-                        .min(graph_route_hop_authority(&edge, after_relationship));
-                    let crosses = after_relationship || !is_containment_edge_type(&edge.edge_type);
-                    let slot = *slots.entry(target.to_string()).or_insert_with(|| {
-                        next.push((target.to_string(), [None, None]));
-                        next.len() - 1
+                let weakest = kept
+                    .weakest
+                    .min(graph_route_hop_authority(edge, *after_relationship));
+                let crosses = *after_relationship || !is_containment_edge_type(&edge.edge_type);
+                let slot = *slots.entry(target.to_string()).or_insert_with(|| {
+                    next.push((target.to_string(), [None, None]));
+                    next.len() - 1
+                });
+                found += 1;
+                let entry = &mut next[slot].1[usize::from(crosses)];
+                if entry.as_ref().is_none_or(|best| weakest > best.weakest) {
+                    let mut route = Vec::with_capacity(kept.edges.len() + 1);
+                    route.extend_from_slice(&kept.edges);
+                    route.push(edge.clone());
+                    *entry = Some(KeptRoute {
+                        weakest,
+                        found,
+                        edges: route,
                     });
-                    let entry = &mut next[slot].1[usize::from(crosses)];
-                    if entry.as_ref().is_none_or(|best| weakest > best.weakest) {
-                        let mut edges = Vec::with_capacity(kept.edges.len() + 1);
-                        edges.extend_from_slice(&kept.edges);
-                        edges.push(edge.clone());
-                        found += 1;
-                        let first = entry.as_ref().map_or(found, |best| best.found);
-                        *entry = Some(KeptRoute {
-                            weakest,
-                            found: first,
-                            edges,
-                        });
-                    }
                 }
+            }
+            if *left > 0 {
+                held.insert(node.as_str(), edges);
             }
         }
         if let Some(&slot) = slots.get(to) {
@@ -561,7 +577,16 @@ pub fn strongest_shortest_route<E>(
             break;
         }
         settled.extend(slots.into_keys());
-        layer = next;
+        let mut kept = next
+            .into_iter()
+            .flat_map(|(node, [plain, crossed])| {
+                [(false, plain), (true, crossed)]
+                    .into_iter()
+                    .filter_map(move |(state, route)| Some((node.clone(), state, route?)))
+            })
+            .collect::<Vec<_>>();
+        kept.sort_by_key(|(_, _, route)| route.found);
+        layer = kept;
     }
     Ok(Vec::new())
 }
@@ -1251,6 +1276,102 @@ mod tests {
             route_ids(&edges, "f", "x", 12),
             ["f-contains-m", "m-defines-x"]
         );
+    }
+
+    /// `m` is reached through a proven import (tried first) and through parsed containment, and
+    /// both routes on through `m`'s call are authoritative. The plain walk returns the import
+    /// route, the first one found; so must this one, although the containment route sits in the
+    /// first state slot.
+    #[test]
+    fn equally_strong_routes_resolve_to_the_first_one_found() {
+        let edges = [
+            route_hop("f-imports-m", "f", "m", "proven"),
+            route_hop("f-contains-m", "f", "m", "contains"),
+            route_hop("m-calls-t", "m", "t", "proven"),
+        ];
+        assert_eq!(
+            route_ids(&edges, "f", "t", 12),
+            ["f-imports-m", "m-calls-t"]
+        );
+    }
+
+    /// The breadth-first walk `shortest_path` used before routes were compared: the first
+    /// shortest route found, expanding the first route to each node and its edges in window
+    /// order.
+    fn first_found_route(
+        edges: &[GraphEdge],
+        from: &str,
+        to: &str,
+        max_hops: usize,
+    ) -> Vec<String> {
+        use std::collections::{HashSet, VecDeque};
+        let mut queue = VecDeque::from([(from.to_string(), Vec::<String>::new())]);
+        let mut seen = HashSet::new();
+        while let Some((node, path)) = queue.pop_front() {
+            if node == to {
+                return path;
+            }
+            if path.len() >= max_hops || !seen.insert(node.clone()) {
+                continue;
+            }
+            let mut out = edges
+                .iter()
+                .filter(|edge| edge.from.0 == node)
+                .cloned()
+                .collect::<Vec<_>>();
+            sort_graph_edges_for_window(&mut out);
+            for edge in out {
+                let mut next = path.clone();
+                next.push(edge.id.0.clone());
+                queue.push_back((edge.to.0.clone(), next));
+            }
+        }
+        Vec::new()
+    }
+
+    /// Where no route is stronger than another, the walk returns exactly the route the plain
+    /// walk did, on every target of a few thousand small random graphs. Containment leaves only
+    /// the start node, so no containment hop is ever capped and every route is authoritative,
+    /// while nodes are still reached in both route states.
+    #[test]
+    fn with_no_stronger_route_the_first_route_found_is_returned() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        for _ in 0..3_000 {
+            let nodes = 2 + next(6);
+            let mut edges = Vec::new();
+            for index in 0..next(14) {
+                let from = next(nodes);
+                let to = next(nodes);
+                let kind = if from == 0 && next(2) == 0 {
+                    "contains"
+                } else {
+                    "proven"
+                };
+                // Ids that do not follow insertion order, so the window order is exercised.
+                let id = format!("{:02}-{index}", next(100));
+                edges.push(route_hop(&id, &from.to_string(), &to.to_string(), kind));
+            }
+            for to in 0..nodes {
+                let to = to.to_string();
+                for max_hops in [2, 12] {
+                    assert_eq!(
+                        route_ids(&edges, "0", &to, max_hops),
+                        first_found_route(&edges, "0", &to, max_hops),
+                        "0 -> {to} within {max_hops} hops over {:?}",
+                        edges
+                            .iter()
+                            .map(|edge| (&edge.id.0, &edge.from.0, &edge.to.0, &edge.edge_type))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
     }
 
     /// Length comes first: a longer proven route never replaces a shorter heuristic one, and a
