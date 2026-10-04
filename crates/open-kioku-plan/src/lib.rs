@@ -699,7 +699,8 @@ impl<'a> PlanEngine<'a> {
             candidates
                 .extend(selector.for_changed_path_with_evidence(&result.path, MAX_VALIDATION)?);
         }
-        Ok(select_validation_targets(candidates))
+        let paths = validation_target_paths(self.store, &candidates)?;
+        Ok(select_validation_targets(candidates, &paths))
     }
 }
 
@@ -747,13 +748,39 @@ pub struct ValidationSelection {
     pub omitted_by_cap: Vec<TestTarget>,
 }
 
+/// The paths of the files `tests` live in, keyed for [`select_validation_targets`]. A file the
+/// store does not know is left out, and its targets then tie on ids alone.
+pub fn validation_target_paths(
+    store: &dyn MetadataStore,
+    tests: &[TestTarget],
+) -> Result<BTreeMap<FileId, PathBuf>> {
+    let mut paths = BTreeMap::new();
+    for file_id in tests.iter().map(|test| &test.file_id) {
+        if paths.contains_key(file_id) {
+            continue;
+        }
+        if let Some(file) = store.file_by_id(file_id)? {
+            paths.insert(file_id.clone(), file.path);
+        }
+    }
+    Ok(paths)
+}
+
 /// The validation a plan records: plausible targets, the per-file preference for a suite name,
 /// ordered by selection tier before confidence so the cap keeps the best-evidenced targets, and
 /// the plan's bound. This narrowing is the plan's alone. `ok verify` shares the predicate through
 /// [`plausible_validation_targets`] but never these bounds: a capped recommendation would let
 /// exit 0 mean "the first few recommendations were planned". What the bound drops is returned,
 /// not discarded, so the plan can disclose it.
-pub fn select_validation_targets(tests: Vec<TestTarget>) -> ValidationSelection {
+///
+/// Targets that tie on tier, confidence and name are ordered the way the test selector orders
+/// them: by the test file's path (from `paths`), then the target's line range, then file and
+/// target id. Grouping by file id left such ties in file-id order, a path hash, so which of them
+/// the cap kept could not be read off the source tree.
+pub fn select_validation_targets(
+    tests: Vec<TestTarget>,
+    paths: &BTreeMap<FileId, PathBuf>,
+) -> ValidationSelection {
     let mut by_file: BTreeMap<FileId, Vec<TestTarget>> = BTreeMap::new();
     for test in plausible_validation_targets(tests) {
         by_file.entry(test.file_id.clone()).or_default().push(test);
@@ -770,15 +797,20 @@ pub fn select_validation_targets(tests: Vec<TestTarget>) -> ValidationSelection 
         selected.extend(file_tests);
     }
 
+    let position = |test: &TestTarget| {
+        (
+            paths.get(&test.file_id),
+            test.range.as_ref().map(|range| (range.start, range.end)),
+        )
+    };
     selected.sort_by(|left, right| {
-        tier_rank(left).cmp(&tier_rank(right)).then_with(|| {
-            right
-                .confidence
-                .score()
-                .partial_cmp(&left.confidence.score())
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.name.cmp(&right.name))
-        })
+        tier_rank(left)
+            .cmp(&tier_rank(right))
+            .then_with(|| right.confidence.score().total_cmp(&left.confidence.score()))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| position(left).cmp(&position(right)))
+            .then_with(|| left.file_id.0.cmp(&right.file_id.0))
+            .then_with(|| left.id.cmp(&right.id))
     });
     let omitted_by_cap = if selected.len() > MAX_VALIDATION {
         selected.split_off(MAX_VALIDATION)
@@ -4760,7 +4792,8 @@ mod tests {
         let first = registration_test_target("renders the label", "src/Button.test.tsx", false);
         let second = registration_test_target("fires on click", "src/Button.test.tsx", false);
 
-        let selected = select_validation_targets(vec![helper, first, second]).selected;
+        let selected =
+            select_validation_targets(vec![helper, first, second], &BTreeMap::new()).selected;
         let names = selected
             .iter()
             .map(|test| test.name.as_str())
@@ -4781,7 +4814,7 @@ mod tests {
             origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
             ..registration_test_target("rounds", "src/test/java/LedgerTest.java", false)
         };
-        let selected = select_validation_targets(vec![suite, method]).selected;
+        let selected = select_validation_targets(vec![suite, method], &BTreeMap::new()).selected;
         let names = selected
             .iter()
             .map(|test| test.name.as_str())
@@ -4812,7 +4845,7 @@ mod tests {
         candidates.extend([disabled, suite, method]);
 
         // Twelve survive the predicate and the suite preference: eleven cases and the suite.
-        let selection = select_validation_targets(candidates);
+        let selection = select_validation_targets(candidates, &BTreeMap::new());
         assert_eq!(selection.selected.len(), MAX_VALIDATION);
         assert_eq!(selection.omitted_by_cap.len(), 12 - MAX_VALIDATION);
         let omitted = selection
@@ -4835,13 +4868,51 @@ mod tests {
                 registration_test_target(&format!("case {index:02}"), "test/cases_test.ts", false)
             })
             .collect::<Vec<_>>();
-        let selection = select_validation_targets(candidates);
+        let selection = select_validation_targets(candidates, &BTreeMap::new());
         assert_eq!(selection.selected.len(), MAX_VALIDATION);
         assert!(selection.omitted_by_cap.is_empty());
         assert_eq!(validation_cap_reason(0), None);
         assert_eq!(
             validation_cap_reason(1).as_deref(),
             Some("validation selection capped at 8 targets; 1 further plausible target was not planned")
+        );
+    }
+
+    /// Nine targets that tie on tier, confidence and name, one per test file, with file ids that
+    /// sort opposite to their paths. The cap keeps eight, and which eight must follow the paths,
+    /// as the test selector's tiebreak does, not the file ids.
+    #[test]
+    fn tied_targets_past_the_cap_are_cut_by_path_not_file_id() {
+        let mut paths = BTreeMap::new();
+        let candidates = (1..=9)
+            .map(|index| {
+                let file_id = format!("file-{}", 10 - index);
+                paths.insert(
+                    FileId::new(&file_id),
+                    PathBuf::from(format!("tests/ledger_{index}.rs")),
+                );
+                TestTarget {
+                    id: format!("target:{file_id}"),
+                    ..registration_test_target("settles ledger", &file_id, false)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let selection = select_validation_targets(candidates, &paths);
+        let path_of = |test: &TestTarget| paths[&test.file_id].to_string_lossy().into_owned();
+        assert_eq!(
+            selection.selected.iter().map(path_of).collect::<Vec<_>>(),
+            (1..=8)
+                .map(|index| format!("tests/ledger_{index}.rs"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            selection
+                .omitted_by_cap
+                .iter()
+                .map(path_of)
+                .collect::<Vec<_>>(),
+            ["tests/ledger_9.rs"]
         );
     }
 

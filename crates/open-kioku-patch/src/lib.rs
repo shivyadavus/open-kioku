@@ -3995,7 +3995,8 @@ mod tests {
             &[PathBuf::from("src/alpha.rs"), PathBuf::from("src/beta.rs")],
         )
         .unwrap();
-        let selection = open_kioku_plan::select_validation_targets(recommended.clone());
+        let paths = open_kioku_plan::validation_target_paths(&store, &recommended).unwrap();
+        let selection = open_kioku_plan::select_validation_targets(recommended.clone(), &paths);
 
         let mut plan = plan_with_validation_command("cargo test");
         plan.validation = selection.selected;
