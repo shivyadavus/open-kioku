@@ -503,6 +503,68 @@ fn test_mcp_plan_change_snapshot() {
     std::fs::remove_dir_all(&temp).unwrap();
 }
 
+/// `ok plan` names the relevant symbols its allowed files declare. Symbols carry a file id,
+/// not a path, and a boundary that compared the two allowed no symbol in any real plan.
+#[test]
+fn cli_plan_boundary_allows_symbols_declared_in_allowed_files() {
+    let temp = std::env::temp_dir().join(format!("kioku-test-plan-{}", uuid::Uuid::new_v4()));
+    copy_dir_recursive(&fixture_dir("rust-fixture"), &temp);
+    for args in [["init", "."], ["index", "."]] {
+        Command::cargo_bin("ok")
+            .unwrap()
+            .current_dir(&temp)
+            .args(args)
+            .assert()
+            .success();
+    }
+
+    let output = Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["--json", "plan", "add a subtract function next to add"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: serde_json::Value = serde_json::from_slice(&output).expect("plan is JSON");
+    let boundary = &plan["recommended_change_boundary"];
+    let strings = |value: &serde_json::Value| {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let allowed_files = strings(&boundary["allowed_files"]);
+    let allowed_symbols = strings(&boundary["allowed_symbols"]);
+    assert!(
+        allowed_files.contains(&"src/main.rs".to_string()),
+        "{allowed_files:?}"
+    );
+    assert!(
+        allowed_symbols.contains(&"src::main::add".to_string()),
+        "{allowed_symbols:?}"
+    );
+    // Every allowed symbol is one of the plan's relevant symbols: the list names what the plan
+    // expects the edit to touch, not every symbol of an allowed file.
+    let relevant = plan["relevant_symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| symbol["qualified_name"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        allowed_symbols
+            .iter()
+            .all(|symbol| relevant.contains(symbol)),
+        "{allowed_symbols:?} vs {relevant:?}"
+    );
+
+    std::fs::remove_dir_all(&temp).unwrap();
+}
+
 #[test]
 fn test_cli_graph_schema_markdown() {
     let mut cmd = Command::cargo_bin("ok").unwrap();

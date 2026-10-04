@@ -510,9 +510,23 @@ impl<'a> PlanEngine<'a> {
             .take(MAX_SYMBOLS)
             .cloned()
             .collect::<Vec<_>>();
+        // A symbol names its file by id, a path hash; the boundary names files by path. A symbol
+        // whose file the store does not know cannot be placed in the boundary and is left out.
+        let symbol_paths = file_paths_by_id(
+            self.store,
+            relevant_symbols.iter().map(|symbol| &symbol.file_id),
+        )?;
+        let located_symbols = relevant_symbols
+            .iter()
+            .filter_map(|symbol| {
+                symbol_paths
+                    .get(&symbol.file_id)
+                    .map(|path| (path.as_path(), symbol))
+            })
+            .collect::<Vec<_>>();
         let recommended_change_boundary = change_boundary(
             &primary_context,
-            &relevant_symbols,
+            &located_symbols,
             &impact,
             &context.recommended_change_boundary,
         );
@@ -755,8 +769,17 @@ pub fn validation_target_paths(
     store: &dyn MetadataStore,
     tests: &[TestTarget],
 ) -> Result<BTreeMap<FileId, PathBuf>> {
+    file_paths_by_id(store, tests.iter().map(|test| &test.file_id))
+}
+
+/// The store's path for each distinct file id in `file_ids`; an id the store does not know is
+/// left out.
+fn file_paths_by_id<'f>(
+    store: &dyn MetadataStore,
+    file_ids: impl IntoIterator<Item = &'f FileId>,
+) -> Result<BTreeMap<FileId, PathBuf>> {
     let mut paths = BTreeMap::new();
-    for file_id in tests.iter().map(|test| &test.file_id) {
+    for file_id in file_ids {
         if paths.contains_key(file_id) {
             continue;
         }
@@ -1498,9 +1521,11 @@ const MAX_RULE_EVIDENCE_REFS: usize = 10;
 /// fallback `ContractBuilder` uses.
 const MAX_RULE_FALLBACK_EVIDENCE_REFS: usize = 3;
 
+/// `relevant_symbols` pairs each of the plan's relevant symbols with the store path of the file
+/// that declares it.
 fn change_boundary(
     primary_context: &[SearchResult],
-    relevant_symbols: &[Symbol],
+    relevant_symbols: &[(&Path, &Symbol)],
     impact: &ImpactReport,
     context_boundary: &ChangeBoundary,
 ) -> ChangeBoundary {
@@ -1612,17 +1637,32 @@ fn change_boundary(
     }
 }
 
-fn allowed_symbols_for_boundary(symbols: &[Symbol], allowed_files: &[PathBuf]) -> Vec<String> {
-    stable_refs(symbols.iter().filter_map(|symbol| {
-        if allowed_files
+/// The plan's relevant symbols declared in an allowed file: the symbols the plan expects the
+/// edit to touch, not every symbol those files declare. Edits are bounded by file, so a symbol
+/// missing here is not forbidden, and the list is no longer than `relevant_symbols`
+/// (`MAX_SYMBOLS`), so a large allowed file cannot flood it.
+fn allowed_symbols_for_boundary(
+    symbols: &[(&Path, &Symbol)],
+    allowed_files: &[PathBuf],
+) -> Vec<String> {
+    let allowed = allowed_files
+        .iter()
+        .map(|path| boundary_path_key(path))
+        .collect::<BTreeSet<_>>();
+    stable_refs(
+        symbols
             .iter()
-            .any(|path| path.to_string_lossy() == symbol.file_id.0)
-        {
-            Some(symbol.qualified_name.clone())
-        } else {
-            None
-        }
-    }))
+            .filter(|(path, _)| allowed.contains(&boundary_path_key(path)))
+            .map(|(_, symbol)| symbol.qualified_name.clone()),
+    )
+}
+
+/// A path compared by its components without `.` segments, so `./src/a.rs`, `src//a.rs` and
+/// `src/a.rs` name the same file whichever source spelled it.
+fn boundary_path_key(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect()
 }
 
 fn boundary_file_rules(
@@ -3445,6 +3485,62 @@ mod tests {
             .recommended_change_boundary
             .expansion_requirements
             .is_empty());
+    }
+
+    #[test]
+    fn plan_boundary_allows_relevant_symbols_declared_in_allowed_files() {
+        // The store's file id for `src/auth.rs` is `auth`: a boundary that compared allowed
+        // paths with symbol file ids never matched, and allowed no symbol at all.
+        let store = test_store();
+        let report = PlanEngine::new(&store).plan("token", 10).unwrap();
+
+        assert!(report
+            .recommended_change_boundary
+            .allowed_files
+            .contains(&PathBuf::from("src/auth.rs")));
+        assert!(report
+            .relevant_symbols
+            .iter()
+            .any(|symbol| symbol.qualified_name == "src::auth::issue_token"));
+        assert_eq!(
+            report.recommended_change_boundary.allowed_symbols,
+            vec!["src::auth::issue_token".to_string()]
+        );
+    }
+
+    #[test]
+    fn boundary_symbols_match_allowed_files_by_normalised_path() {
+        let symbol = |qualified_name: &str| Symbol {
+            id: SymbolId::new(qualified_name),
+            name: qualified_name.into(),
+            qualified_name: qualified_name.into(),
+            kind: SymbolKind::Function,
+            file_id: FileId::new("unrelated-id"),
+            range: None,
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: open_kioku_core::EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+            alias_of: None,
+        };
+        let entry = symbol("ledger::Entry");
+        let post = symbol("ledger::post");
+        let audit = symbol("audit::record");
+        let located = [
+            (Path::new("./src/ledger.rs"), &post),
+            (Path::new("src/audit.rs"), &audit),
+            (Path::new("src//ledger.rs"), &entry),
+        ];
+
+        assert_eq!(
+            allowed_symbols_for_boundary(&located, &[PathBuf::from("src/ledger.rs")]),
+            vec!["ledger::Entry".to_string(), "ledger::post".to_string()]
+        );
+        assert!(allowed_symbols_for_boundary(&located, &[]).is_empty());
     }
 
     #[test]

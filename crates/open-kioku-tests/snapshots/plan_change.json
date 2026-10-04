@@ -481,7 +481,9 @@
           ]
         }
       ],
-      "allowed_symbols": [],
+      "allowed_symbols": [
+        "src::main::add"
+      ],
       "caution_files": [],
       "caution_rules": [],
       "evidence_refs": [
