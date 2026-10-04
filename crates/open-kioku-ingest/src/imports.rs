@@ -1,3 +1,4 @@
+use crate::cycle_memo::{Begin, CycleMemo};
 use crate::rust_use_path::{
     join_dir, map_rust_crate_name_path, map_rust_module_file, map_rust_use_path, module_name,
     normalize_path, parent_dir, strip_dir, RustCrateTree, RustPackageLayout, RustUsePath,
@@ -19,7 +20,7 @@ pub use open_kioku_semantic_model::{
     ExportBinding, ExportIndex, ImportBinding, ImportBindingRule, ImportIndex, ImportOrigin,
     GLOB_IMPORT_LOCAL_NAME,
 };
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{OnceCell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -120,14 +121,11 @@ pub(crate) struct RustModuleTree<'a> {
     /// not settle them either.
     module_macro_names: HashMap<FileId, HashSet<String>>,
     /// What the `use` sites of a module bring in under a name, as [`RustModuleTree::used_name`]
-    /// found it.
-    used_names: RefCell<HashMap<UsedNameKey, Rc<UsedName>>>,
-    /// The [`RustModuleTree::used_name`] lookups under way, which a cycle of `use` declarations
-    /// returns to.
-    used_names_open: RefCell<HashSet<UsedNameKey>>,
-    /// How many lookups a cycle or [`MAX_REEXPORT_HOPS`] cut short. A lookup that saw one depends
-    /// on where it was entered from, so it is not kept.
-    used_name_cuts: Cell<usize>,
+    /// found it, by the number of `use` declarations followed to reach it. A cycle of `use`
+    /// declarations, or [`MAX_REEXPORT_HOPS`], cuts a lookup short, and one that saw a cut
+    /// depends on where it was entered from: it is kept only for a lookup that would take the
+    /// same path (#659).
+    used_names: RefCell<CycleMemo<UsedNameKey, UsedName>>,
 }
 
 /// A module, a name, whether the path naming it is written in another crate, and the namespace
@@ -150,7 +148,9 @@ struct UsedName {
     named: Vec<RustPathTarget>,
     /// A `use` naming it explicitly that the tree cannot follow.
     named_unresolved: bool,
-    /// What each glob `use` brings in under it.
+    /// What each glob `use` brings in under it. The globs are read only while they may settle
+    /// the name: not beside a named `use` or a macro, which shadow them, and not past one that
+    /// leaves it unsettled (#659), so the list may stop short then.
     globbed: Vec<RustPathTarget>,
     /// A glob `use` the tree cannot follow, which may bring it in too.
     glob_unresolved: bool,
@@ -530,8 +530,6 @@ impl<'a> RustModuleTree<'a> {
             module_macros: HashSet::new(),
             module_macro_names: HashMap::new(),
             used_names: RefCell::default(),
-            used_names_open: RefCell::default(),
-            used_name_cuts: Cell::new(0),
         }
     }
 
@@ -1427,28 +1425,28 @@ impl<'a> RustModuleTree<'a> {
             return Rc::new(UsedName::unknown());
         }
         let module = self.module_at(path, parent, symbols, scopes);
-        let key = (module, name.clone(), walk.from_other_crate, walk.namespace);
-        if let Some(found) = self.used_names.borrow().get(&key) {
-            return Rc::clone(found);
-        }
-        if walk.hops >= MAX_REEXPORT_HOPS || !self.used_names_open.borrow_mut().insert(key.clone())
-        {
-            self.used_name_cuts.set(self.used_name_cuts.get() + 1);
-            return Rc::new(UsedName::unknown());
-        }
-        let cuts = self.used_name_cuts.get();
-        let found = match &key.0 {
+        let key = (
+            module.clone(),
+            name.clone(),
+            walk.from_other_crate,
+            walk.namespace,
+        );
+        let begun =
+            self.used_names
+                .borrow_mut()
+                .begin(key, walk.hops, walk.hops >= MAX_REEXPORT_HOPS);
+        let reading = match begun {
+            Begin::Found(found) => return found,
+            Begin::Cut => return Rc::new(UsedName::unknown()),
+            Begin::Read(reading) => reading,
+        };
+        let found = match &module {
             ModuleAt::Files(stems) => self.module_used_name(stems, name, symbols, scopes, walk),
             ModuleAt::Inline(file, block) => {
                 self.block_used_name((file, block), name, symbols, scopes, walk)
             }
         };
-        self.used_names_open.borrow_mut().remove(&key);
-        let found = Rc::new(found);
-        if self.used_name_cuts.get() == cuts {
-            self.used_names.borrow_mut().insert(key, Rc::clone(&found));
-        }
-        found
+        self.used_names.borrow_mut().finish(reading, found)
     }
 
     /// What the `use` sites written directly in the inline `mod` block `block` of `file` bring
@@ -1520,64 +1518,21 @@ impl<'a> RustModuleTree<'a> {
         walk: ReexportWalk,
     ) -> UsedName {
         let mut found = UsedName::default();
-        for file in stems.iter().filter_map(|stem| self.files_by_stem.get(stem)) {
-            let Some(importer) = self.files.get(file) else {
-                continue;
-            };
-            let sites = self
-                .module_uses
+        let files = stems
+            .iter()
+            .filter_map(|stem| self.files_by_stem.get(stem))
+            .filter_map(|file| Some((file, self.files.get(file)?)))
+            .collect::<Vec<_>>();
+        let sites = |file: &FileId| {
+            self.module_uses
                 .get(file)
                 .into_iter()
                 .flatten()
                 .filter(|site| is_module_level(site.scope_id.as_ref(), scopes))
-                .filter(|site| !walk.from_other_crate || site.reexported);
-            for site in sites {
-                if site.is_glob {
-                    let Some(prefix) = site.source.strip_suffix("::*") else {
-                        found.glob_unresolved = true;
-                        continue;
-                    };
-                    let source = format!("{prefix}::{name}");
-                    let target = self.reexport_source_target(
-                        (file, importer),
-                        site.scope_id.as_ref(),
-                        &source,
-                        name,
-                        (symbols, scopes),
-                        walk,
-                    );
-                    match target {
-                        Some(target) if glob_brings_in(&target, walk, symbols, scopes) => {
-                            found.globbed.push(target);
-                        }
-                        // A module file, as a type, when its `mod` item is visible (#654).
-                        Some(target)
-                            if walk.namespace == Some(RustNamespace::Type)
-                                && target.item.is_none()
-                                && target.configured.is_none()
-                                && target.module_file.is_some()
-                                && self.glob_module_is_visible(
-                                    (file, importer),
-                                    site,
-                                    name,
-                                    (symbols, scopes),
-                                    walk,
-                                ) =>
-                        {
-                            found.globbed.push(target);
-                        }
-                        // A module the glob opens that holds nothing of the name brings none in.
-                        None if self.glob_lacks_name(
-                            (file, importer),
-                            site,
-                            name,
-                            (symbols, scopes),
-                            walk,
-                        ) => {}
-                        _ => found.glob_unresolved = true,
-                    }
-                    continue;
-                }
+                .filter(|site| !walk.from_other_crate || site.reexported)
+        };
+        for &(file, importer) in &files {
+            for site in sites(file).filter(|site| !site.is_glob) {
                 for binding in site
                     .bindings
                     .iter()
@@ -1602,6 +1557,63 @@ impl<'a> RustModuleTree<'a> {
                     .module_macro_names
                     .get(file)
                     .is_some_and(|names| names.contains(name));
+        }
+        // A named `use` shadows the globs, and a macro may shadow them too, so neither leaves
+        // anything a glob brings in to read: see [`UsedName::target`]. A glob that cannot be
+        // followed leaves the name unsettled whatever the others bring in. Reading the globs
+        // past either would only walk `use` cycles to no effect (#659).
+        if !found.named.is_empty() || found.named_unresolved || found.macro_expanded {
+            return found;
+        }
+        for &(file, importer) in &files {
+            for site in sites(file).filter(|site| site.is_glob) {
+                if found.glob_unresolved {
+                    return found;
+                }
+                let Some(prefix) = site.source.strip_suffix("::*") else {
+                    found.glob_unresolved = true;
+                    continue;
+                };
+                let source = format!("{prefix}::{name}");
+                let target = self.reexport_source_target(
+                    (file, importer),
+                    site.scope_id.as_ref(),
+                    &source,
+                    name,
+                    (symbols, scopes),
+                    walk,
+                );
+                match target {
+                    Some(target) if glob_brings_in(&target, walk, symbols, scopes) => {
+                        found.globbed.push(target);
+                    }
+                    // A module file, as a type, when its `mod` item is visible (#654).
+                    Some(target)
+                        if walk.namespace == Some(RustNamespace::Type)
+                            && target.item.is_none()
+                            && target.configured.is_none()
+                            && target.module_file.is_some()
+                            && self.glob_module_is_visible(
+                                (file, importer),
+                                site,
+                                name,
+                                (symbols, scopes),
+                                walk,
+                            ) =>
+                    {
+                        found.globbed.push(target);
+                    }
+                    // A module the glob opens that holds nothing of the name brings none in.
+                    None if self.glob_lacks_name(
+                        (file, importer),
+                        site,
+                        name,
+                        (symbols, scopes),
+                        walk,
+                    ) => {}
+                    _ => found.glob_unresolved = true,
+                }
+            }
         }
         found
     }
@@ -8316,5 +8328,62 @@ mod tests {
             !table.contains_key("src::store::post"),
             "an item the module defines shadows a glob beside it"
         );
+    }
+
+    /// The reexport table of a crate whose `modules` each define one function `f<n>` and glob
+    /// every other with a private `use crate::<other>::*;`, and how many `use` lookups it read
+    /// afresh.
+    fn glob_clique_reexports(modules: usize) -> (HashMap<String, RustReexport>, usize) {
+        let names = (0..modules).map(|at| format!("m{at}")).collect::<Vec<_>>();
+        let mut paths = vec!["src/lib.rs".to_string()];
+        paths.extend(names.iter().map(|name| format!("src/{name}.rs")));
+        let paths = paths.iter().map(String::as_str).collect::<Vec<_>>();
+        let files = paths.iter().copied().map(source_file).collect::<Vec<_>>();
+        let declarations = names
+            .iter()
+            .map(|name| mod_decl("src/lib.rs", name))
+            .collect::<Vec<_>>();
+        let mut sites = Vec::new();
+        let mut symbols = Vec::new();
+        for (at, name) in names.iter().enumerate() {
+            let importer = format!("src/{name}.rs");
+            symbols.push(rust_symbol(&importer, &format!("f{at}")));
+            for other in names.iter().filter(|other| *other != name) {
+                sites.push(rust_glob_site(
+                    &importer,
+                    &format!("crate::{other}::*"),
+                    None,
+                ));
+            }
+        }
+        let project = rust_project(&[("", None)]);
+        let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let tree = module_tree_with_uses(&files, &project, &declarations, &sites, &[], &scopes);
+        let table = tree.reexports(&symbols, &scopes, |_, _| true);
+        let reads = tree.used_names.borrow().reads();
+        (table, reads)
+    }
+
+    #[test]
+    fn rust_glob_cycles_are_not_walked_once_per_path() {
+        // Two modules globbing each other bring in each other's function.
+        let (table, _) = glob_clique_reexports(2);
+        let mut keys = table.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, ["src::m0::f1", "src::m1::f0"]);
+        // With three or more, every glob reaches the name through a cycle as well, which cuts
+        // the lookup short and leaves the glob unresolved, so nothing is settled.
+        for modules in 3..=8 {
+            let (table, reads) = glob_clique_reexports(modules);
+            assert!(table.is_empty(), "{table:?}");
+            // A lookup that saw a cut used not to be kept, and every glob was read past one that
+            // left the name unsettled, so each lookup walked every path through the clique to
+            // `MAX_REEXPORT_HOPS`: 321 reads for three modules, 41,935 for five (#659).
+            assert!(
+                reads <= 8 * modules * modules,
+                "{modules} modules: {reads} reads"
+            );
+        }
     }
 }
