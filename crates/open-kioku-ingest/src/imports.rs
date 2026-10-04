@@ -9,7 +9,8 @@ use open_kioku_core::{
 };
 use open_kioku_resolution::{
     RustConfiguredModules, RustConfiguredRead, RustCrateNames, RustModuleFiles,
-    RustModulePlacement, RustModuleRoute, RustReexport, RustReexported,
+    RustModulePlacement, RustModuleRoute, RustNamespace, RustReexport, RustReexportNamespaces,
+    RustReexported,
 };
 use open_kioku_semantic_model::{
     CargoImporter, ConfiguredImportTargets, ProjectModel, ProjectRoot,
@@ -129,9 +130,18 @@ pub(crate) struct RustModuleTree<'a> {
     used_name_cuts: Cell<usize>,
 }
 
-/// A module, by the extension-less paths of the files that may hold it, a name, and whether the
-/// path naming it is written in another crate.
-type UsedNameKey = (Vec<String>, String, bool);
+/// A module, a name, whether the path naming it is written in another crate, and the namespace
+/// it is read in (`None` for a `use`, which brings in every namespace's item of the name).
+type UsedNameKey = (ModuleAt, String, bool, Option<RustNamespace>);
+
+/// Where the module a Rust path's parent names is, for [`RustModuleTree::used_name`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ModuleAt {
+    /// The extension-less paths of the files that may hold a module of the tree.
+    Files(Vec<String>),
+    /// An inline `mod name { .. }` block of one file, by the file and the block's scope (#641).
+    Inline(FileId, ScopeId),
+}
 
 /// What the `use` sites at the top level of a module bring in under one name.
 #[derive(Debug, Clone, Default)]
@@ -198,15 +208,38 @@ struct ReexportWalk {
     from_other_crate: bool,
     /// How many `use` declarations it has been followed through.
     hops: usize,
+    /// The namespace the path reads its last segment in (#643): a call path reads a value and a
+    /// path to a type a type. `None` for a `use` path, which brings in the name's item of every
+    /// namespace and is read as one item, as before namespaces were told apart.
+    namespace: Option<RustNamespace>,
 }
 
 impl ReexportWalk {
-    /// A path written in a file, through a crate name or not.
+    /// A `use` path written in a file, through a crate name or not.
     fn start(crate_name: bool) -> Self {
         Self {
             from_other_crate: crate_name,
             hops: 0,
+            namespace: None,
         }
+    }
+
+    /// The walk reading its name in `namespace`.
+    fn in_namespace(self, namespace: RustNamespace) -> Self {
+        Self {
+            namespace: Some(namespace),
+            ..self
+        }
+    }
+
+    /// Whether `symbol` is an item of the namespace the walk reads, as `scopes` tells.
+    fn admits(
+        &self,
+        symbol: &open_kioku_core::Symbol,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> bool {
+        self.namespace
+            .is_none_or(|namespace| scopes.rust_in_namespace(symbol, namespace))
     }
 }
 
@@ -241,6 +274,9 @@ struct RustPathTarget {
     /// What the path names in each file of a module whose file configuration selects, when it
     /// passes through one the file writing it is not below (#615).
     configured: Option<ConfiguredImportTargets>,
+    /// The variant of the enum `item` the path names (`Shape::Circle`, or `Circle` through
+    /// `pub use Shape::*;`, #641), which is no item the index records.
+    variant: Option<String>,
 }
 
 /// What a Rust `use` path names once modules whose file configuration selects are read.
@@ -604,7 +640,9 @@ impl<'a> RustModuleTree<'a> {
     /// A site that records no scope is read as written at the top level, and a file-backed
     /// `mod first;` the module tree holds stands for the item when the index holds no symbol of
     /// the name there. A path written inside an inline `mod` block, or at a scope the index does
-    /// not hold, is not read.
+    /// not hold, is not read. The path may be the module alone (`pub use inner as facade;`), and
+    /// an `enum` that is the one item of the name starts a path to its variants
+    /// (`pub use Shape::*;`, #641).
     ///
     /// When the index cannot read the edition, only a path written in a crate root is read, where
     /// the crate root and the module in scope are the same module.
@@ -616,10 +654,8 @@ impl<'a> RustModuleTree<'a> {
         symbols: &open_kioku_resolution::SymbolIndex,
         scopes: &open_kioku_resolution::ScopeIndex,
     ) -> UsePathStart {
-        let Some((first, _)) = source.split_once("::") else {
-            return UsePathStart::Elsewhere;
-        };
-        let first = first.trim();
+        // A one-segment path names the module itself: `pub use inner as facade;` (#641).
+        let first = source.split("::").next().unwrap_or_default().trim();
         if matches!(first, "" | "crate" | "self" | "super" | "Self") {
             return UsePathStart::Elsewhere;
         }
@@ -709,16 +745,18 @@ impl<'a> RustModuleTree<'a> {
                     )
             })
             .collect::<Vec<_>>();
-        let declared = if items.is_empty() {
-            self.files
+        let declared = match items.as_slice() {
+            [] => self
+                .files
                 .get(file)
                 .and_then(|path| rust_file_stem(path))
                 .is_some_and(|stem| {
                     self.file_modules
                         .contains(&(stem, module_name(first).to_string()))
-                })
-        } else {
-            items.iter().all(|item| item.kind == SymbolKind::Module)
+                }),
+            // An enum of the module starts a path to its variants (`pub use Shape::*;`, #641).
+            [only] if scopes.rust_enum_variants(&only.id).is_some() => source.contains("::"),
+            _ => items.iter().all(|item| item.kind == SymbolKind::Module),
         };
         if !declared {
             return UsePathStart::Elsewhere;
@@ -802,22 +840,84 @@ impl<'a> RustModuleTree<'a> {
         scopes: &open_kioku_resolution::ScopeIndex,
     ) -> Option<RustPathTarget> {
         let (item_name, parent) = path.segments.split_last()?;
-        if let Some(module_file) = self.module_file(path, &path.segments) {
-            return Some(RustPathTarget {
-                module_file: Some(module_file),
-                item: None,
-                reexport: false,
-                configured: None,
-            });
+        // A module is a type: a value of its name is another item (#643).
+        if walk.namespace != Some(RustNamespace::Value) {
+            if let Some(module_file) = self.module_file(path, &path.segments) {
+                return Some(RustPathTarget {
+                    module_file: Some(module_file),
+                    item: None,
+                    reexport: false,
+                    configured: None,
+                    variant: None,
+                });
+            }
         }
         if !self.declares_file_modules(path, parent) {
+            // A `mod name;` the tree does not declare as a plain file (a `path` attribute, a
+            // configuration choice) is no enum, block or renamed module.
+            if self.passes_mounted_module(path, parent, symbols, scopes) {
+                return None;
+            }
+            // A path through a name that is not a module the tree declares: an enum's variant,
+            // a block of an inline `mod`, or a module a `use` brings in under a name (#641).
+            return self
+                .enum_variant_target(path, walk, symbols, scopes)
+                .or_else(|| self.inline_path_target(path, walk, symbols, scopes))
+                .or_else(|| self.aliased_path_target(path, walk, symbols, scopes));
+        }
+        let stems = self.module_stems(path, parent);
+        // An inline `mod` of the name is the type the path names, which no edge reaches.
+        if walk.namespace == Some(RustNamespace::Type)
+            && !rust_module_symbols(&stems, item_name, symbols).is_empty()
+        {
             return None;
         }
-        let items = rust_module_items(&self.module_stems(path, parent), item_name, symbols);
-        match items.as_slice() {
-            // An item defined in the module is the name, shadowing any glob, unless a named `use`
-            // beside it may stand for another, which compiles only under a `cfg` or in another
-            // namespace (#476).
+        let items = rust_module_items(&stems, item_name, symbols)
+            .into_iter()
+            .filter(|item| {
+                symbols
+                    .get(item)
+                    .is_some_and(|symbol| walk.admits(symbol, scopes))
+            })
+            .collect::<Vec<_>>();
+        self.defined_or_used_target(path, &items, walk, symbols, scopes)
+    }
+
+    /// Whether the first module on `parent` the tree does not declare as a file is named by a
+    /// `mod` item with no body, or one the index cannot tell a block from, in the module above
+    /// it: a `path` attribute or a configuration choice places that module, and no `use`, block
+    /// or enum of the name stands for it.
+    fn passes_mounted_module(
+        &self,
+        path: &RustUsePath,
+        parent: &[String],
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> bool {
+        let Some(at) =
+            (0..parent.len()).find(|&end| !self.declares_file_modules(path, &parent[..=end]))
+        else {
+            return false;
+        };
+        let stems = self.module_stems(path, &parent[..at]);
+        rust_module_symbols(&stems, &parent[at], symbols)
+            .iter()
+            .any(|module| scopes.inline_module_body(module).is_none())
+    }
+
+    /// What the last segment of `path` names given `items`, the items of its name its module
+    /// defines in the namespace `walk` reads: the one defined item, shadowing any glob, unless a
+    /// named `use` beside it may stand for another, which compiles only under a `cfg` or in
+    /// another namespace (#476); with none, what the module's `use` sites bring in.
+    fn defined_or_used_target(
+        &self,
+        path: &RustUsePath,
+        items: &[SymbolId],
+        walk: ReexportWalk,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> Option<RustPathTarget> {
+        match items {
             [item] => (!self
                 .used_name(path, symbols, scopes, walk)
                 .may_override(item))
@@ -826,9 +926,233 @@ impl<'a> RustModuleTree<'a> {
                 item: Some(item.clone()),
                 reexport: false,
                 configured: None,
+                variant: None,
             }),
             [] => self.reexported_target(path, symbols, scopes, walk),
             _ => None,
+        }
+    }
+
+    /// What `path` names when its parent names a Rust `enum` (#641): the variant of the
+    /// enum its last segment names, `Shape::Circle`. The enum is read as a type, and a path
+    /// through a module whose file configuration selects is left to that module's reading.
+    fn enum_variant_target(
+        &self,
+        path: &RustUsePath,
+        walk: ReexportWalk,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> Option<RustPathTarget> {
+        let (variant, parent) = path.segments.split_last()?;
+        let enum_item = self.enum_at(path, parent, walk, symbols, scopes)?;
+        let variants = scopes.rust_enum_variants(&enum_item.item)?;
+        variants
+            .iter()
+            .any(|declared| declared == variant)
+            .then(|| RustPathTarget {
+                module_file: None,
+                item: Some(enum_item.item.clone()),
+                reexport: enum_item.reexport,
+                configured: None,
+                variant: Some(variant.clone()),
+            })
+    }
+
+    /// The `enum` the module path `parent` of `path` names, read as a type, and whether it was
+    /// reached through a `use`. `None` for anything else, and for a path through a module whose
+    /// file configuration selects.
+    fn enum_at(
+        &self,
+        path: &RustUsePath,
+        parent: &[String],
+        walk: ReexportWalk,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> Option<EnumAt> {
+        if parent.is_empty() || self.configured_choice(path, None, parent).is_some() {
+            return None;
+        }
+        let enum_path = RustUsePath {
+            segments: parent.to_vec(),
+            ..path.clone()
+        };
+        let target = self.placed_path_target(
+            &enum_path,
+            walk.in_namespace(RustNamespace::Type),
+            symbols,
+            scopes,
+        )?;
+        let item = match target {
+            RustPathTarget {
+                module_file: None,
+                item: Some(item),
+                configured: None,
+                variant: None,
+                ..
+            } => item,
+            _ => return None,
+        };
+        scopes.rust_enum_variants(&item)?;
+        Some(EnumAt {
+            item,
+            reexport: target.reexport,
+        })
+    }
+
+    /// What `path` names when its parent ends in blocks of inline `mod name { .. }` items of
+    /// a file the tree places (#641): an item a block defines, or else what the `use` sites
+    /// written directly in the block bring in, read as [`RustModuleTree::used_name`] reads a
+    /// module's. A path through a module whose file configuration selects is not read.
+    fn inline_path_target(
+        &self,
+        path: &RustUsePath,
+        walk: ReexportWalk,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> Option<RustPathTarget> {
+        let (name, parent) = path.segments.split_last()?;
+        let ModuleAt::Inline(file, block) = self.module_at(path, parent, symbols, scopes) else {
+            return None;
+        };
+        if self.configured_choice(path, None, parent).is_some() {
+            return None;
+        }
+        let defined = symbols
+            .lookup_file_scope_name(&file, &block, name)
+            .iter()
+            .filter_map(|id| symbols.get(id))
+            .filter(|symbol| symbol.language == Language::Rust)
+            .collect::<Vec<_>>();
+        // A nested `mod` of the name is the type the path names, which no edge reaches.
+        if walk.namespace != Some(RustNamespace::Value)
+            && defined
+                .iter()
+                .any(|symbol| symbol.kind == SymbolKind::Module)
+        {
+            return None;
+        }
+        let items = defined
+            .iter()
+            .filter(|symbol| symbol.kind != SymbolKind::Module && walk.admits(symbol, scopes))
+            .map(|symbol| symbol.id.clone())
+            .collect::<Vec<_>>();
+        self.defined_or_used_target(path, &items, walk, symbols, scopes)
+    }
+
+    /// What `path` names when a module on it is one a `use` brings in under a name the tree
+    /// declares no module of (#641): `crate::facade::f` after `pub use inner as facade;` in the
+    /// crate root is `crate::inner::f`. The `use` is read as any other in the module holding
+    /// the name, and the path continues from the module file it names, in the same crate, with
+    /// the walk one step longer. A module of the name the holding module defines, and a path
+    /// through a module whose file configuration selects, are not read.
+    fn aliased_path_target(
+        &self,
+        path: &RustUsePath,
+        walk: ReexportWalk,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> Option<RustPathTarget> {
+        if walk.hops >= MAX_REEXPORT_HOPS {
+            return None;
+        }
+        let (_, parent) = path.segments.split_last()?;
+        let at =
+            (0..parent.len()).find(|&end| !self.declares_file_modules(path, &parent[..=end]))?;
+        let (holder, alias) = (&parent[..at], &parent[at]);
+        if self.configured_choice(path, None, holder).is_some() {
+            return None;
+        }
+        let stems = self.module_stems(path, holder);
+        if !rust_module_symbols(&stems, alias, symbols).is_empty()
+            || rust_module_items(&stems, alias, symbols)
+                .iter()
+                .filter_map(|item| symbols.get(item))
+                .any(|symbol| scopes.rust_in_namespace(symbol, RustNamespace::Type))
+        {
+            return None;
+        }
+        let alias_path = RustUsePath {
+            segments: parent[..=at].to_vec(),
+            ..path.clone()
+        };
+        let target = self
+            .used_name(
+                &alias_path,
+                symbols,
+                scopes,
+                walk.in_namespace(RustNamespace::Type),
+            )
+            .target()?;
+        let module_file = match target {
+            RustPathTarget {
+                module_file: Some(module_file),
+                item: None,
+                configured: None,
+                variant: None,
+                ..
+            } => module_file,
+            _ => return None,
+        };
+        let module_path = self.files.get(&module_file)?;
+        let tree = self.crate_tree(module_path)?;
+        if tree != path.tree {
+            return None;
+        }
+        let rest = path.segments[at + 1..].join("::");
+        let mapped = map_rust_use_path(&tree, module_path, &format!("self::{rest}"))?;
+        if !self.declares_file_modules(&mapped, &mapped.importer_module)
+            || self
+                .configured_choice(&mapped, None, &mapped.importer_module)
+                .is_some()
+        {
+            return None;
+        }
+        let walk = ReexportWalk {
+            hops: walk.hops + 1,
+            ..walk
+        };
+        let found = self.placed_path_target(&mapped, walk, symbols, scopes)?;
+        // What the path reaches below the module is read there; a configuration choice below it
+        // is not.
+        if found.configured.is_some()
+            || self
+                .configured_choice(&mapped, None, &mapped.segments)
+                .is_some()
+        {
+            return None;
+        }
+        Some(RustPathTarget {
+            reexport: true,
+            ..found
+        })
+    }
+
+    /// Where the module `parent` of `path` is: the files of a module the tree declares, or a
+    /// block of inline `mod` items in the one file of the deepest module on the path the tree
+    /// declares, when each remaining segment names one such block of the block above it.
+    fn module_at(
+        &self,
+        path: &RustUsePath,
+        parent: &[String],
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> ModuleAt {
+        let files = || ModuleAt::Files(self.module_stems(path, parent));
+        if parent.is_empty() || self.declares_file_modules(path, parent) {
+            return files();
+        }
+        let Some(declared) = (0..parent.len())
+            .rev()
+            .find(|&end| end == 0 || self.declares_file_modules(path, &parent[..end]))
+        else {
+            return files();
+        };
+        let Some(file) = self.module_or_root_file(path, &parent[..declared]) else {
+            return files();
+        };
+        match inline_block(&file, &parent[declared..], symbols, scopes) {
+            Some(block) => ModuleAt::Inline(file, block),
+            None => files(),
         }
     }
 
@@ -852,7 +1176,12 @@ impl<'a> RustModuleTree<'a> {
         let Some((item_name, parent)) = path.segments.split_last() else {
             return ConfiguredPath::Alternatives(placed);
         };
-        if item_name == "*" {
+        // A variant is reached only outside any configuration choice (#641).
+        if item_name == "*"
+            || placed
+                .as_ref()
+                .is_some_and(|placed| placed.variant.is_some())
+        {
             return ConfiguredPath::Alternatives(placed);
         }
         let mut found = ConfiguredImportTargets::default();
@@ -887,12 +1216,14 @@ impl<'a> RustModuleTree<'a> {
                     item: None,
                     reexport: false,
                     configured: None,
+                    variant: None,
                 }),
                 ([], [item]) => Some(RustPathTarget {
                     module_file: None,
                     item: Some(item.clone()),
                     reexport: false,
                     configured: None,
+                    variant: None,
                 }),
                 // Not declared in that file, or through its `pub use`, which is not followed
                 // there: what the placed tree reached is in a file never compiled with this one.
@@ -923,6 +1254,7 @@ impl<'a> RustModuleTree<'a> {
             item: None,
             reexport: false,
             configured: None,
+            variant: None,
         });
         // The placed tree's own target stays on the binding only where a build compiling the
         // writer may compile it.
@@ -1063,8 +1395,8 @@ impl<'a> RustModuleTree<'a> {
         if name == "*" {
             return Rc::new(UsedName::unknown());
         }
-        let stems = self.module_stems(path, parent);
-        let key = (stems, name.clone(), walk.from_other_crate);
+        let module = self.module_at(path, parent, symbols, scopes);
+        let key = (module, name.clone(), walk.from_other_crate, walk.namespace);
         if let Some(found) = self.used_names.borrow().get(&key) {
             return Rc::clone(found);
         }
@@ -1074,8 +1406,90 @@ impl<'a> RustModuleTree<'a> {
             return Rc::new(UsedName::unknown());
         }
         let cuts = self.used_name_cuts.get();
+        let found = match &key.0 {
+            ModuleAt::Files(stems) => self.module_used_name(stems, name, symbols, scopes, walk),
+            ModuleAt::Inline(file, block) => {
+                self.block_used_name((file, block), name, symbols, scopes, walk)
+            }
+        };
+        self.used_names_open.borrow_mut().remove(&key);
+        let found = Rc::new(found);
+        if self.used_name_cuts.get() == cuts {
+            self.used_names.borrow_mut().insert(key, Rc::clone(&found));
+        }
+        found
+    }
+
+    /// What the `use` sites written directly in the inline `mod` block `block` of `file` bring
+    /// in under `name` (#641), each path read from the file's top level as
+    /// [`inline_use_source`] rewrites it. Only named `use` sites are followed: a macro the block
+    /// invokes, which the parser does not record, may expand to an item that shadows a glob, so
+    /// no glob of a block settles a name.
+    fn block_used_name(
+        &self,
+        (file, block): (&FileId, &ScopeId),
+        name: &str,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+        walk: ReexportWalk,
+    ) -> UsedName {
         let mut found = UsedName::default();
-        for file in key.0.iter().filter_map(|stem| self.files_by_stem.get(stem)) {
+        let (Some(importer), Some(chain)) =
+            (self.files.get(file), inline_chain(block, symbols, scopes))
+        else {
+            return UsedName::unknown();
+        };
+        let sites = self
+            .module_uses
+            .get(file)
+            .into_iter()
+            .flatten()
+            .filter(|site| site.scope_id.as_ref() == Some(block))
+            .filter(|site| !walk.from_other_crate || site.reexported);
+        for site in sites {
+            if site.is_glob {
+                found.glob_unresolved = true;
+                continue;
+            }
+            for binding in site.bindings.iter().filter(|binding| binding.local == name) {
+                let target = inline_use_source(&site.source, &chain).and_then(|source| {
+                    // A path rewritten from the file's top level is read there; any other is
+                    // read where it is written, which sees no module of the file around it.
+                    let scope = if source == site.source {
+                        Some(block)
+                    } else {
+                        None
+                    };
+                    self.reexport_source_target(
+                        (file, importer),
+                        scope,
+                        &source,
+                        &binding.imported,
+                        (symbols, scopes),
+                        walk,
+                    )
+                });
+                match target {
+                    Some(target) => found.named.push(target),
+                    None => found.named_unresolved = true,
+                }
+            }
+        }
+        found
+    }
+
+    /// What the `use` sites at the top level of the files at `stems` bring in under `name`: see
+    /// [`RustModuleTree::used_name`].
+    fn module_used_name(
+        &self,
+        stems: &[String],
+        name: &str,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+        walk: ReexportWalk,
+    ) -> UsedName {
+        let mut found = UsedName::default();
+        for file in stems.iter().filter_map(|stem| self.files_by_stem.get(stem)) {
             let Some(importer) = self.files.get(file) else {
                 continue;
             };
@@ -1102,7 +1516,7 @@ impl<'a> RustModuleTree<'a> {
                         walk,
                     );
                     match target {
-                        Some(target) if glob_brings_in(&target, walk, symbols) => {
+                        Some(target) if glob_brings_in(&target, walk, symbols, scopes) => {
                             found.globbed.push(target);
                         }
                         // A module the glob opens that holds nothing of the name brings none in.
@@ -1142,11 +1556,6 @@ impl<'a> RustModuleTree<'a> {
                     .get(file)
                     .is_some_and(|names| names.contains(name));
         }
-        self.used_names_open.borrow_mut().remove(&key);
-        let found = Rc::new(found);
-        if self.used_name_cuts.get() == cuts {
-            self.used_names.borrow_mut().insert(key, Rc::clone(&found));
-        }
         found
     }
 
@@ -1178,8 +1587,17 @@ impl<'a> RustModuleTree<'a> {
             return false;
         };
         let module = module.to_vec();
+        let walk = ReexportWalk {
+            from_other_crate: walk.from_other_crate || crate_name,
+            hops: walk.hops + 1,
+            ..walk
+        };
         if !self.declares_file_modules(&path, &module) {
-            return false;
+            // A glob of an enum brings in its variants alone (#641).
+            return self
+                .enum_at(&path, &module, walk, symbols, scopes)
+                .and_then(|found| scopes.rust_enum_variants(&found.item))
+                .is_some_and(|variants| !variants.iter().any(|variant| variant == name));
         }
         let writer = (!crate_name).then_some(importer.1);
         if self.configured_choice(&path, writer, &module).is_some() {
@@ -1203,10 +1621,6 @@ impl<'a> RustModuleTree<'a> {
         if defined || self.module_file(&path, &path.segments).is_some() {
             return false;
         }
-        let walk = ReexportWalk {
-            from_other_crate: walk.from_other_crate || crate_name,
-            hops: walk.hops + 1,
-        };
         let used = self.used_name(&path, symbols, scopes, walk);
         used.named.is_empty()
             && !used.named_unresolved
@@ -1242,6 +1656,7 @@ impl<'a> RustModuleTree<'a> {
         let walk = ReexportWalk {
             from_other_crate: walk.from_other_crate || crate_name,
             hops: walk.hops + 1,
+            ..walk
         };
         self.rust_path_target(&path, writer, walk, symbols, scopes)
     }
@@ -1252,14 +1667,22 @@ impl<'a> RustModuleTree<'a> {
     /// define, when the `use` sites settle what it is, and a name it defines that a named `use`
     /// beside it may stand for instead, which stays ambiguous. Only files the tree places, with `use`
     /// sites at their top level, are read; the names read are those their named `use` sites bind
-    /// and those their globs may bring in, that `wanted` admits: a path the resolver reads ends
-    /// in a name some call writes.
+    /// and those their globs may bring in, that `wanted` admits in some namespace: a path the
+    /// resolver reads ends in a name some call writes, as its callee, read as a value, or as a
+    /// segment of its receiver, read as a type (#643). Each name is read in the namespaces
+    /// `wanted` admits it in.
     pub(crate) fn reexports(
         &self,
         symbols: &open_kioku_resolution::SymbolIndex,
         scopes: &open_kioku_resolution::ScopeIndex,
-        wanted: impl Fn(&str) -> bool,
+        wanted: impl Fn(&str, RustNamespace) -> bool,
     ) -> HashMap<String, RustReexport> {
+        let namespaces = |name: &str| {
+            [RustNamespace::Type, RustNamespace::Value]
+                .into_iter()
+                .filter(|namespace| wanted(name, *namespace))
+                .collect::<Vec<_>>()
+        };
         let names = self.module_use_names(symbols, scopes);
         let mut reexports = HashMap::new();
         let mut files = names.keys().collect::<Vec<_>>();
@@ -1277,65 +1700,142 @@ impl<'a> RustModuleTree<'a> {
                 .into_iter()
                 .flatten()
                 .any(|site| site.reexported && is_module_level(site.scope_id.as_ref(), scopes));
-            for name in names[file].iter().filter(|name| wanted(name)) {
-                let read = |walk| self.reexport_of((file, importer), name, walk, symbols, scopes);
-                let in_crate = read(ReexportWalk::start(false));
-                let from_other_crates = if exports {
-                    read(ReexportWalk::start(true))
-                } else {
-                    None
-                };
-                if in_crate.is_none() && from_other_crates.is_none() {
+            for name in &names[file] {
+                let read = namespaces(name);
+                if read.is_empty() {
                     continue;
                 }
-                reexports.insert(
-                    format!("{}::{name}", stem.replace('/', "::")),
-                    RustReexport {
-                        file: file.clone(),
-                        in_crate,
-                        from_other_crates,
-                    },
-                );
+                let Some((path, _)) = self.rust_path(
+                    (file, importer),
+                    None,
+                    &format!("self::{name}"),
+                    symbols,
+                    scopes,
+                ) else {
+                    continue;
+                };
+                if let Some(reexport) =
+                    self.reexport_entry(file, &path, (exports, &read), symbols, scopes)
+                {
+                    reexports.insert(format!("{}::{name}", stem.replace('/', "::")), reexport);
+                }
+            }
+        }
+        // Paths through a module a `use` renames and through inline `mod` blocks, by the names
+        // the resolver spells for them from the module path (#641).
+        for (key, file, path) in self.renamed_and_inline_paths(&names, symbols, scopes, &wanted) {
+            let Some(name) = path.segments.last() else {
+                continue;
+            };
+            let read = namespaces(name);
+            if let Some(reexport) =
+                self.reexport_entry(&file, &path, (true, &read), symbols, scopes)
+            {
+                reexports.entry(key).or_insert(reexport);
             }
         }
         reexports
     }
 
-    /// What `name` is in the module of `file` through its `use` sites, as `walk` follows them:
-    /// see [`RustModuleTree::reexports`].
-    fn reexport_of(
+    /// What the name `path` ends in, written from `file`, is through the `use` sites of the
+    /// module holding it, in each of `namespaces`, from the module's own crate and, when
+    /// `exports`, from another: see [`RustModuleTree::reexports`]. `None` when nothing is
+    /// recorded.
+    fn reexport_entry(
         &self,
-        file: (&FileId, &Path),
-        name: &str,
+        file: &FileId,
+        path: &RustUsePath,
+        (exports, namespaces): (bool, &[RustNamespace]),
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> Option<RustReexport> {
+        let read = |from_other_crate: bool| {
+            let walk = ReexportWalk::start(from_other_crate);
+            let read_in = |namespace: RustNamespace| {
+                namespaces
+                    .contains(&namespace)
+                    .then(|| self.reexport_at(path, walk.in_namespace(namespace), symbols, scopes))
+                    .flatten()
+            };
+            RustReexportNamespaces {
+                types: read_in(RustNamespace::Type),
+                values: read_in(RustNamespace::Value),
+            }
+        };
+        let in_crate = read(false);
+        let from_other_crates = if exports {
+            read(true)
+        } else {
+            RustReexportNamespaces::default()
+        };
+        if in_crate.is_empty() && from_other_crates.is_empty() {
+            return None;
+        }
+        Some(RustReexport {
+            file: file.clone(),
+            in_crate,
+            from_other_crates,
+        })
+    }
+
+    /// What the name `path` ends in is through the `use` sites of the module holding it, as
+    /// `walk` follows them and in the namespace it reads (#643): when the module defines no item
+    /// of the name there, what a `use` brings in, and when it defines one that a named `use`
+    /// beside it may stand for instead, both, ambiguous. A path through a module a `use`
+    /// renames is what it names through that module (#641). See [`RustModuleTree::reexports`].
+    fn reexport_at(
+        &self,
+        path: &RustUsePath,
         walk: ReexportWalk,
         symbols: &open_kioku_resolution::SymbolIndex,
         scopes: &open_kioku_resolution::ScopeIndex,
     ) -> Option<RustReexported> {
-        let (path, _) = self.rust_path(file, None, &format!("self::{name}"), symbols, scopes)?;
-        if self.module_file(&path, &path.segments).is_some() {
+        let (name, parent) = path.segments.split_last()?;
+        let is_type = walk.namespace != Some(RustNamespace::Value);
+        if is_type && self.module_file(path, &path.segments).is_some() {
             return None;
         }
-        let (_, parent) = path.segments.split_last()?;
-        let items = rust_module_items(&self.module_stems(&path, parent), name, symbols);
-        match items.as_slice() {
-            [] => {
-                let target = self.reexported_target(&path, symbols, scopes, walk)?;
-                match (target.configured, target.item) {
-                    (Some(configured), _) if !configured.items.is_empty() => {
-                        Some(RustReexported::Alternatives {
-                            items: configured.items,
-                            files: RustModuleFiles {
-                                files: configured.files,
-                                unread: configured.unread,
-                            },
-                        })
-                    }
-                    (None, Some(item)) => Some(RustReexported::Item(item)),
-                    _ => None,
+        let admitted = |symbol: &open_kioku_core::Symbol| walk.admits(symbol, scopes);
+        let items = match self.module_at(path, parent, symbols, scopes) {
+            ModuleAt::Files(stems)
+                if parent.is_empty() || self.declares_file_modules(path, parent) =>
+            {
+                if is_type && !rust_module_symbols(&stems, name, symbols).is_empty() {
+                    return None;
                 }
+                rust_module_items(&stems, name, symbols)
+                    .into_iter()
+                    .filter(|item| symbols.get(item).is_some_and(admitted))
+                    .collect::<Vec<_>>()
             }
+            ModuleAt::Inline(file, block) => {
+                let defined = symbols
+                    .lookup_file_scope_name(&file, &block, name)
+                    .iter()
+                    .filter_map(|id| symbols.get(id))
+                    .filter(|symbol| symbol.language == Language::Rust)
+                    .collect::<Vec<_>>();
+                if is_type
+                    && defined
+                        .iter()
+                        .any(|symbol| symbol.kind == SymbolKind::Module)
+                {
+                    return None;
+                }
+                defined
+                    .into_iter()
+                    .filter(|symbol| symbol.kind != SymbolKind::Module && admitted(symbol))
+                    .map(|symbol| symbol.id.clone())
+                    .collect()
+            }
+            ModuleAt::Files(_) => {
+                return reexported_value(self.aliased_path_target(path, walk, symbols, scopes)?);
+            }
+        };
+        match items.as_slice() {
+            [] => reexported_value(self.reexported_target(path, symbols, scopes, walk)?),
             [item] => {
-                let used = self.used_name(&path, symbols, scopes, walk);
+                let used = self.used_name(path, symbols, scopes, walk);
                 if !used.may_override(item) {
                     return None;
                 }
@@ -1352,6 +1852,117 @@ impl<'a> RustModuleTree<'a> {
             }
             _ => None,
         }
+    }
+
+    /// The paths the resolver may read through a module a `use` renames, or through a block of
+    /// inline `mod` items, keyed by the qualified name it spells for each from the module path
+    /// (`src::facade::f` for `crate::facade::f()` after `pub use inner as facade;` in
+    /// `src/lib.rs`), with the file whose `use` sites settle it (#641). A renamed module is
+    /// read for the names its file defines or brings in, a block for the names its named `use`
+    /// sites bind; only names `wanted` admits are read, through a renamed module some call writes in
+    /// its receiver, and only from files the tree places.
+    fn renamed_and_inline_paths(
+        &self,
+        names: &HashMap<FileId, BTreeSet<String>>,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+        wanted: &impl Fn(&str, RustNamespace) -> bool,
+    ) -> Vec<(String, FileId, RustUsePath)> {
+        let wants =
+            |name: &str| wanted(name, RustNamespace::Type) || wanted(name, RustNamespace::Value);
+        let mut found = Vec::new();
+        let mut files = self.module_uses.keys().collect::<Vec<_>>();
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        for file in files {
+            let Some(importer) = self.files.get(file) else {
+                continue;
+            };
+            let path_to = |segments: &[&str]| {
+                let source = std::iter::once("self")
+                    .chain(segments.iter().copied())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                self.rust_path((file, importer), None, &source, symbols, scopes)
+                    .map(|(path, _)| path)
+            };
+            let mut renamed = BTreeSet::new();
+            let mut blocks = BTreeMap::<Vec<String>, BTreeSet<String>>::new();
+            for site in self.module_uses[file].iter().filter(|site| !site.is_glob) {
+                let locals = site.bindings.iter().map(|binding| binding.local.clone());
+                if is_module_level(site.scope_id.as_ref(), scopes) {
+                    renamed.extend(locals);
+                    continue;
+                }
+                let Some(chain) = site
+                    .scope_id
+                    .as_ref()
+                    .filter(|scope| {
+                        scopes
+                            .get(scope)
+                            .is_some_and(|scope| scope.kind == ScopeKind::Module)
+                    })
+                    .and_then(|scope| inline_chain(scope, symbols, scopes))
+                else {
+                    continue;
+                };
+                blocks
+                    .entry(chain)
+                    .or_default()
+                    .extend(locals.filter(|name| wants(name)));
+            }
+            for alias in renamed
+                .into_iter()
+                .filter(|alias| wanted(alias, RustNamespace::Type))
+            {
+                let Some(alias_path) = path_to(&[alias.as_str()]) else {
+                    continue;
+                };
+                let Some(module_file) = self
+                    .used_name(
+                        &alias_path,
+                        symbols,
+                        scopes,
+                        ReexportWalk::start(false).in_namespace(RustNamespace::Type),
+                    )
+                    .target()
+                    .and_then(|target| target.module_file)
+                else {
+                    continue;
+                };
+                // What the renamed module's file defines and brings in.
+                let mut reached = names.get(&module_file).cloned().unwrap_or_default();
+                reached.extend(
+                    symbols
+                        .by_file
+                        .get(&module_file)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| symbols.get(id))
+                        .filter(|symbol| {
+                            symbol.language == Language::Rust && symbol.parent_symbol_id.is_none()
+                        })
+                        .map(|symbol| symbol.name.clone()),
+                );
+                for name in reached.iter().filter(|name| wants(name)) {
+                    if let Some(path) = path_to(&[alias.as_str(), name.as_str()]) {
+                        found.push((resolver_qualified_name(&path), file.clone(), path));
+                    }
+                }
+            }
+            for (chain, names) in blocks {
+                for name in names {
+                    let segments = chain
+                        .iter()
+                        .map(String::as_str)
+                        .chain(std::iter::once(name.as_str()))
+                        .collect::<Vec<_>>();
+                    if let Some(path) = path_to(&segments) {
+                        found.push((resolver_qualified_name(&path), file.clone(), path));
+                    }
+                }
+            }
+        }
+        found
     }
 
     /// The names each Rust file's top-level `use` sites may bring in: those its named sites bind,
@@ -2914,13 +3525,17 @@ fn rust_import_target(
     // A path through a crate name is written in another crate, where no choice of that crate's
     // configuration-selected modules is made.
     let writer = (!crate_name).then_some(importer);
-    modules.rust_path_target(
-        &path,
-        writer,
-        ReexportWalk::start(crate_name),
-        symbols,
-        scopes,
-    )
+    modules
+        .rust_path_target(
+            &path,
+            writer,
+            ReexportWalk::start(crate_name),
+            symbols,
+            scopes,
+        )
+        // An enum's variant is no item to bind (#641); its `IMPORTS` edge reaches the enum's
+        // file all the same.
+        .filter(|target| target.variant.is_none())
 }
 
 /// The module-level Rust items named `item` in the files at `module_stems`.
@@ -2949,6 +3564,174 @@ fn rust_module_items(
     targets.sort_by(|left, right| left.0.cmp(&right.0));
     targets.dedup();
     targets
+}
+
+/// The module-level Rust `mod` items named `name` in the files at `module_stems`, which an inline
+/// block of the name declares beside them as well as `mod name;` does.
+fn rust_module_symbols(
+    module_stems: &[String],
+    name: &str,
+    symbols: &open_kioku_resolution::SymbolIndex,
+) -> Vec<SymbolId> {
+    module_stems
+        .iter()
+        .filter_map(|stem| {
+            symbols
+                .by_qualified
+                .get(&format!("{}::{name}", stem.replace('/', "::")))
+        })
+        .flatten()
+        .filter(|id| {
+            symbols.get(id).is_some_and(|symbol| {
+                symbol.language == Language::Rust
+                    && symbol.parent_symbol_id.is_none()
+                    && symbol.kind == SymbolKind::Module
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// The scope of the block of inline `mod` items `chain` names in `file`, from its top level
+/// down: `["n", "inner"]` for `mod n { mod inner { .. } }`. `None` unless each segment names
+/// exactly one `mod` item of the block above it, and that item has a body.
+fn inline_block(
+    file: &FileId,
+    chain: &[String],
+    symbols: &open_kioku_resolution::SymbolIndex,
+    scopes: &open_kioku_resolution::ScopeIndex,
+) -> Option<ScopeId> {
+    let mut block: Option<ScopeId> = None;
+    for segment in chain {
+        let found = symbols
+            .lookup_file_name(file, module_name(segment))
+            .iter()
+            .filter_map(|id| symbols.get(id))
+            .filter(|symbol| {
+                symbol.kind == SymbolKind::Module
+                    && match &block {
+                        Some(block) => symbol.scope_id.as_ref() == Some(block),
+                        None => symbol
+                            .scope_id
+                            .as_ref()
+                            .and_then(|scope| scopes.get(scope))
+                            .is_some_and(|scope| scope.kind == ScopeKind::File),
+                    }
+            })
+            .collect::<Vec<_>>();
+        let [module] = found.as_slice() else {
+            return None;
+        };
+        block = Some(scopes.inline_module_body(&module.id)?.id.clone());
+    }
+    block
+}
+
+/// The names of the inline `mod` blocks from the top level of a file down to `block`, `None`
+/// for a scope inside a function or another non-module scope.
+fn inline_chain(
+    block: &ScopeId,
+    symbols: &open_kioku_resolution::SymbolIndex,
+    scopes: &open_kioku_resolution::ScopeIndex,
+) -> Option<Vec<String>> {
+    let mut chain = Vec::new();
+    let mut current = scopes.get(block)?;
+    for _ in 0..=scopes.scopes.len() {
+        match current.kind {
+            ScopeKind::File => {
+                chain.reverse();
+                return Some(chain);
+            }
+            ScopeKind::Module => {
+                let owner = symbols.get(current.owner_symbol_id.as_ref()?)?;
+                chain.push(owner.name.clone());
+                current = scopes.get(current.parent_id.as_ref()?)?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// A `use` path written directly in the inline `mod` block `chain` names, read from the top level
+/// of its file instead (#641): `super::m::g` in `mod n` is `self::m::g`, and `self::x` there is
+/// `self::n::x`. A path that does not start with `self` or `super` is returned as written, and
+/// `None` for one that names a block itself.
+fn inline_use_source(source: &str, chain: &[String]) -> Option<String> {
+    let mut segments = source.split("::").map(str::trim).peekable();
+    let climbs = match segments.peek().copied() {
+        Some("self") => 0,
+        Some("super") => {
+            let mut climbs = 0;
+            while segments.peek() == Some(&"super") {
+                segments.next();
+                climbs += 1;
+            }
+            climbs
+        }
+        _ => return Some(source.to_string()),
+    };
+    if climbs == 0 {
+        segments.next();
+    }
+    let rest = segments.collect::<Vec<_>>();
+    if rest.is_empty() {
+        return None;
+    }
+    let prefix = match chain.len().checked_sub(climbs) {
+        Some(kept) => std::iter::once("self")
+            .chain(chain[..kept].iter().map(String::as_str))
+            .collect::<Vec<_>>(),
+        None => vec!["super"; climbs - chain.len()],
+    };
+    Some(
+        prefix
+            .into_iter()
+            .chain(rest)
+            .collect::<Vec<_>>()
+            .join("::"),
+    )
+}
+
+/// What the resolver reads off `target`, a name a Rust module brings in with `use`: one item,
+/// or the items of each file a module configuration selects. An enum's variant is no item the
+/// index records, and is not recorded (#641).
+fn reexported_value(target: RustPathTarget) -> Option<RustReexported> {
+    if target.variant.is_some() {
+        return None;
+    }
+    match (target.configured, target.item) {
+        (Some(configured), _) if !configured.items.is_empty() => {
+            Some(RustReexported::Alternatives {
+                items: configured.items,
+                files: RustModuleFiles {
+                    files: configured.files,
+                    unread: configured.unread,
+                },
+            })
+        }
+        (None, Some(item)) => Some(RustReexported::Item(item)),
+        _ => None,
+    }
+}
+
+/// The qualified name the resolver spells for a Rust path from its crate's module directory
+/// and the modules on it (`src::facade::f` for `crate::facade::f` in a crate at `src/`), as it
+/// does for a module the tree does not declare as a file.
+fn resolver_qualified_name(path: &RustUsePath) -> String {
+    path.tree
+        .module_dir
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .chain(path.segments.iter().map(|segment| module_name(segment)))
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// The enum a Rust path names, and whether it was reached through a `use`.
+struct EnumAt {
+    item: SymbolId,
+    reexport: bool,
 }
 
 /// Where each Rust `use` path in a file points, for that file's `IMPORTS` edge.
@@ -3289,19 +4072,22 @@ fn is_module_level(scope: Option<&ScopeId>, scopes: &open_kioku_resolution::Scop
 /// item visible where the glob is, from another crate a `pub` one and from the module's own crate
 /// one not private to its module, or the items a module configuration selects, none proven. A
 /// module, and a private item, whose visibility the glob's module may or may not have, are not
-/// settled.
+/// settled. An item is one of the namespace `walk` reads, or a variant of an enum, which is as
+/// visible as its enum (#641, #643).
 fn glob_brings_in(
     target: &RustPathTarget,
     walk: ReexportWalk,
     symbols: &open_kioku_resolution::SymbolIndex,
+    scopes: &open_kioku_resolution::ScopeIndex,
 ) -> bool {
     match &target.item {
         Some(item) => symbols.get(item).is_some_and(|symbol| {
-            if walk.from_other_crate {
+            let visible = if walk.from_other_crate {
                 symbol.visibility == Visibility::Public
             } else {
                 symbol.visibility != Visibility::Private
-            }
+            };
+            visible && (target.variant.is_some() || walk.admits(symbol, scopes))
         }),
         None => target.module_file.is_none() && target.configured.is_some(),
     }
@@ -7347,13 +8133,14 @@ mod tests {
             &[],
             &scopes,
         );
-        let table = modules.reexports(&symbols, &scopes, |name| name != "close");
+        let table = modules.reexports(&symbols, &scopes, |name, _| name != "close");
         let item = |id: &str| Some(RustReexported::Item(SymbolId::new(id)));
         let root = &table["src::lib::issue_token"];
         assert_eq!(root.file, FileId::new("file:src/lib.rs"));
-        assert_eq!(root.in_crate, item("symbol:src/auth.rs:issue_token"));
+        assert_eq!(root.in_crate.values, item("symbol:src/auth.rs:issue_token"));
+        assert_eq!(root.in_crate.types, None, "a function is no type");
         assert_eq!(
-            root.from_other_crates,
+            root.from_other_crates.values,
             item("symbol:src/auth.rs:issue_token")
         );
         assert!(
@@ -7361,9 +8148,9 @@ mod tests {
             "a name no call writes is not read"
         );
         let post = &table["src::prelude::post"];
-        assert_eq!(post.in_crate, item("symbol:src/ledger.rs:post"));
+        assert_eq!(post.in_crate.values, item("symbol:src/ledger.rs:post"));
         assert_eq!(
-            table["src::facade::post"].in_crate,
+            table["src::facade::post"].in_crate.values,
             Some(RustReexported::Ambiguous(vec![
                 SymbolId::new("symbol:src/facade.rs:post"),
                 SymbolId::new("symbol:src/ledger.rs:post"),

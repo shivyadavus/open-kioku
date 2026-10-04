@@ -15,7 +15,8 @@ pub use context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 pub use evidence::{ResolutionEvidence, ResolutionEvidenceKind, ResolvedRelationship};
 pub use index::{
     BindingIndex, RustConfiguredModules, RustConfiguredRead, RustCrateNames, RustModuleFiles,
-    RustModulePlacement, RustModuleRoute, RustReexport, RustReexported, ScopeIndex, SymbolIndex,
+    RustModulePlacement, RustModuleRoute, RustNamespace, RustReexport, RustReexportNamespaces,
+    RustReexported, ScopeIndex, SymbolIndex,
 };
 pub use inheritance::InheritanceIndex;
 pub use language_capabilities::{

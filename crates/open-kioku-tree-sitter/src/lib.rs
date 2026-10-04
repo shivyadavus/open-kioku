@@ -1,8 +1,8 @@
 use open_kioku_core::{
     Binding, BindingId, CallSite, CallSiteId, Confidence, EvidenceSourceType, ExportSite, File,
     ImportSite, ImportedName, InheritanceKind, InheritanceSite, Language, LineRange,
-    ModuleDeclarationSite, PackageDeclarationSite, ReceiverKind, Scope, ScopeId, ScopeKind,
-    SourceRange, Symbol, SymbolId, SymbolKind, SyntaxFacts, TypeAliasSite, Visibility,
+    ModuleDeclarationSite, PackageDeclarationSite, ReceiverKind, RustEnumVariants, Scope, ScopeId,
+    ScopeKind, SourceRange, Symbol, SymbolId, SymbolKind, SyntaxFacts, TypeAliasSite, Visibility,
 };
 use open_kioku_errors::{OkError, Result};
 use sha2::{Digest, Sha256};
@@ -480,6 +480,9 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
                 };
 
                 out.symbols.push(symbol);
+                if file.language == Language::Rust {
+                    record_rust_type_item(content.as_bytes(), node, &symbol_id, out);
+                }
                 if file.language == Language::Go && node.kind() == "type_alias" {
                     out.type_aliases
                         .push(go_type_alias_site(content, node, symbol_id.clone()));
@@ -828,6 +831,50 @@ fn top_level_item_macros(source: &[u8], root: Node<'_>) -> (bool, Vec<String>) {
     names.sort();
     names.dedup();
     (opaque, names)
+}
+
+/// What the Rust type item `node`, the symbol `symbol_id`, declares beyond a type (#641, #643):
+/// a braced struct, an enum, a union and a type alias are types alone, and an enum's variants
+/// are what a glob `use` of it brings in. A tuple or unit struct is also the value its
+/// constructor is, and is recorded as neither.
+fn record_rust_type_item(
+    source: &[u8],
+    node: Node<'_>,
+    symbol_id: &SymbolId,
+    out: &mut SyntaxFacts,
+) {
+    let type_only = match node.kind() {
+        "struct_item" => node
+            .child_by_field_name("body")
+            .is_some_and(|body| body.kind() == "field_declaration_list"),
+        "enum_item" | "union_item" | "type_item" => true,
+        _ => false,
+    };
+    if type_only {
+        out.rust_type_only_items.push(symbol_id.clone());
+    }
+    if node.kind() != "enum_item" {
+        return;
+    }
+    let mut variants = Vec::new();
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for variant in body
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "enum_variant")
+        {
+            if let Some(name) = variant
+                .child_by_field_name("name")
+                .and_then(|name| name.utf8_text(source).ok())
+            {
+                variants.push(name.to_string());
+            }
+        }
+    }
+    out.rust_enum_variants.push(RustEnumVariants {
+        enum_symbol_id: symbol_id.clone(),
+        variants,
+    });
 }
 
 /// A macro that expands to no item a path can name.
@@ -3155,6 +3202,60 @@ mod ri3_rust_use_import_site_tests {
             invokes("std::thread_local! {\n    static X: u8 = 0;\n    pub static Y: u8 = 1;\n}\n"),
             (false, vec!["X".to_string(), "Y".to_string()]),
             "`thread_local!` declares the statics written in it"
+        );
+    }
+
+    #[test]
+    fn rust_files_record_type_only_items_and_enum_variants() {
+        let file = File {
+            id: FileId::new("file:src/shapes.rs"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/shapes.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "pub struct Braced {\n    pub x: u8,\n}\npub struct Empty {}\npub struct Tuple(pub u8);\npub struct Unit;\npub enum Shape {\n    Circle(u8),\n    #[cfg(unix)]\n    Square { side: u8 },\n    Dot,\n}\npub union Bits {\n    a: u8,\n}\npub type Alias = Tuple;\npub fn Tuple2() {}\npub trait Draw {}\n",
+        )
+        .expect("Rust type fixture should parse");
+        let name_of = |id: &open_kioku_core::SymbolId| {
+            facts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.id == *id)
+                .map(|symbol| symbol.name.clone())
+                .unwrap_or_default()
+        };
+        let mut type_only = facts
+            .rust_type_only_items
+            .iter()
+            .map(name_of)
+            .collect::<Vec<_>>();
+        type_only.sort();
+        assert_eq!(
+            type_only,
+            ["Alias", "Bits", "Braced", "Empty", "Shape"],
+            "a tuple or unit struct is also a value, and a function or trait is not a type item"
+        );
+        let variants = facts
+            .rust_enum_variants
+            .iter()
+            .map(|found| (name_of(&found.enum_symbol_id), found.variants.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            variants,
+            [(
+                "Shape".to_string(),
+                vec![
+                    "Circle".to_string(),
+                    "Square".to_string(),
+                    "Dot".to_string()
+                ]
+            )]
         );
     }
 

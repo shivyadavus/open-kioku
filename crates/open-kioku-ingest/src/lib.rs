@@ -663,10 +663,17 @@ impl Indexer {
         // Rust files whose top level invokes a macro (see `RustModuleTree::with_module_macros`).
         let mut rust_module_macros = HashSet::new();
         let mut rust_macro_names = HashMap::new();
+        // Rust type items that are not also values, and enum variants (#641, #643).
+        let mut rust_type_only_items = Vec::new();
+        let mut rust_enum_variants = Vec::new();
         for (file, outcome) in files.into_iter().zip(outcomes) {
             match outcome {
                 Ok((parsed_file, redacted)) => {
                     redacted_files += usize::from(redacted);
+                    rust_type_only_items
+                        .extend(parsed_file.syntax.rust_type_only_items.iter().cloned());
+                    rust_enum_variants
+                        .extend(parsed_file.syntax.rust_enum_variants.iter().cloned());
                     if parsed_file.syntax.invokes_item_macro {
                         rust_module_macros.insert(file.id.clone());
                     }
@@ -803,6 +810,7 @@ impl Indexer {
 
         let mut scope_index = open_kioku_resolution::ScopeIndex::build(scopes.clone());
         scope_index.record_module_declarations(&module_declarations);
+        scope_index.record_rust_type_items(rust_type_only_items, rust_enum_variants);
         let rust_modules = imports::RustModuleTree::new(
             &files,
             &project_model,
@@ -862,22 +870,27 @@ impl Indexer {
             crate::project_model::rust_in_scope_use_path_files(&project_model, &files),
         );
         // A Rust call path through a module's `use` re-exports (#476) ends in a name some call
-        // writes, as its callee or a segment of its receiver.
-        let rust_call_names = call_sites
+        // writes: its callee, read as a value, or a segment of its receiver, read as a type, as
+        // in `Engine::new()` (#643).
+        let rust_calls = call_sites
             .iter()
-            .filter(|call| rust_file_ids.contains(&call.file_id))
-            .flat_map(|call| {
-                std::iter::once(call.callee_name.as_str()).chain(
-                    call.receiver
-                        .as_deref()
-                        .into_iter()
-                        .flat_map(|receiver| receiver.split("::").map(str::trim)),
-                )
-            })
+            .filter(|call| rust_file_ids.contains(&call.file_id));
+        let rust_callee_names = rust_calls
+            .clone()
+            .map(|call| call.callee_name.as_str())
             .collect::<HashSet<_>>();
-        let rust_reexports = rust_modules.reexports(&symbol_index, &scope_index, |name| {
-            rust_call_names.contains(name)
-        });
+        let rust_receiver_names = rust_calls
+            .filter_map(|call| call.receiver.as_deref())
+            .flat_map(|receiver| receiver.split("::").map(str::trim))
+            .collect::<HashSet<_>>();
+        let rust_reexports = rust_modules.reexports(
+            &symbol_index,
+            &scope_index,
+            |name, namespace| match namespace {
+                open_kioku_resolution::RustNamespace::Value => rust_callee_names.contains(name),
+                open_kioku_resolution::RustNamespace::Type => rust_receiver_names.contains(name),
+            },
+        );
         scope_index.record_rust_reexports(rust_reexports);
         let rust_placement_gaps = rust_modules.placement_gaps();
         import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
@@ -4970,6 +4983,101 @@ class Util {
                 ("src/other.rs".to_string(), true, Vec::new()),
                 ("src/other.rs".to_string(), true, Vec::new()),
             ]
+        );
+    }
+
+    /// The `CALLS` edges from `go`, whose body is `body`, in a package where `b` holds a glob
+    /// of `a` beside items of the names `a` defines, in other namespaces (#643).
+    fn calls_into_namespaces(body: &str) -> Vec<(String, bool, Vec<String>)> {
+        // `a`: a `fn S`, a `fn T`, a unit `struct U` with `new`, a `fn K` and a `fn Q`. `b`: the
+        // glob, a braced `struct S`, a tuple `struct T`, a `fn U`, an `enum K` and a `trait Q`.
+        rust_calls_from(
+            &[
+                ("src/lib.rs", &format!("mod a;\nmod b;\n\npub fn go() {{\n    {body}\n}}\n")),
+                (
+                    "src/a.rs",
+                    "#![allow(non_snake_case)]\npub fn S() {}\npub fn T(_: u8) {}\npub struct U;\nimpl U {\n    pub fn new() -> Self {\n        U\n    }\n}\npub fn K() {}\npub fn Q() {}\n",
+                ),
+                (
+                    "src/b.rs",
+                    "#![allow(non_snake_case)]\npub use crate::a::*;\npub struct S {\n    pub x: u8,\n}\npub struct T(pub u8);\npub fn U() {}\npub enum K {\n    X,\n}\npub trait Q {}\n",
+                ),
+            ],
+            "go",
+        )
+    }
+
+    #[test]
+    fn a_rust_path_reads_a_name_in_the_namespace_it_uses_it_in() {
+        let exact = |file: &str| vec![(file.to_string(), true, Vec::new())];
+        for (body, file, why) in [
+            (
+                "crate::b::S();",
+                "src/a.rs",
+                "a call names the glob's function: the braced struct is a type alone",
+            ),
+            ("crate::b::K();", "src/a.rs", "an enum is a type alone"),
+            ("crate::b::Q();", "src/a.rs", "a trait is a type alone"),
+            (
+                "let _ = crate::b::U::new();",
+                "src/a.rs",
+                "a type path names the glob's struct: the local function is a value alone",
+            ),
+            (
+                "let _ = crate::b::T(1);",
+                "src/b.rs",
+                "a tuple struct is a value too, and shadows the glob's function",
+            ),
+            (
+                "crate::b::U();",
+                "src/b.rs",
+                "the local function is the value",
+            ),
+        ] {
+            assert_eq!(calls_into_namespaces(body), exact(file), "{why}: {body}");
+        }
+    }
+
+    #[test]
+    fn a_rust_path_follows_enum_globs_renamed_modules_and_inline_blocks() {
+        // `shapes` re-exports its enum's variants and `tokens`' items; `facade` renames `m`;
+        // the inline `n` re-exports `m::g` and `n::all` globs `m` (#641).
+        let calls = |body: &str| {
+            rust_calls_from(
+                &[
+                    (
+                        "src/lib.rs",
+                        &format!(
+                            "mod m;\nmod shapes;\nmod tokens;\nuse m as facade;\npub mod n {{\n    pub use super::m::g;\n    pub mod all {{\n        pub use crate::m::*;\n    }}\n}}\n\npub fn go() {{\n    {body}\n}}\n"
+                        ),
+                    ),
+                    ("src/m.rs", "pub fn g() {}\n"),
+                    (
+                        "src/shapes.rs",
+                        "pub enum Shape {\n    Circle(u8),\n}\npub use Shape::*;\npub use crate::tokens::*;\n",
+                    ),
+                    ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                ],
+                "go",
+            )
+        };
+        let exact = |file: &str| vec![(file.to_string(), true, Vec::new())];
+        assert_eq!(
+            calls("crate::shapes::target_fn();"),
+            exact("src/tokens.rs"),
+            "a glob of an enum brings in its variants alone"
+        );
+        assert_eq!(calls("crate::facade::g();"), exact("src/m.rs"));
+        assert_eq!(calls("crate::n::g();"), exact("src/m.rs"));
+        assert_eq!(
+            calls("crate::n::all::g();"),
+            Vec::new(),
+            "a glob of an inline block is not followed"
+        );
+        assert_eq!(
+            calls("let _ = crate::shapes::Circle(1);"),
+            Vec::new(),
+            "a variant is no item the index records"
         );
     }
 

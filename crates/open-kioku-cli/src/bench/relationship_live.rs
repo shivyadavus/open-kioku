@@ -3109,6 +3109,210 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             false,
         ),
+        // `tokens` defines a braced struct `target_fn`, a type alone, and its glob brings in
+        // `ledger`'s function, the value the call names (#643).
+        "braced_struct_beside_glob_function_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod api;\npub mod ledger;\npub mod tokens;\n"),
+                ("src/ledger.rs", "pub fn target_fn() {}\n"),
+                ("src/tokens.rs", NAMESPACE_BRACED_TOKENS),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::tokens::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `tokens` defines a tuple struct `target_fn`, a value too, which shadows the
+        // function `ledger`'s glob brings in (#643).
+        "tuple_struct_beside_glob_function_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod api;\npub mod ledger;\npub mod tokens;\n"),
+                ("src/ledger.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/tokens.rs",
+                    "pub use crate::ledger::*;\n\n#[allow(non_camel_case_types)]\npub struct target_fn(pub u8);\n",
+                ),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    let _ = crate::tokens::target_fn(1);\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `tokens` defines a function `Engine`, a value alone, and its glob brings in
+        // `ledger`'s struct, the type the path names (#643).
+        "glob_struct_beside_local_function_type_path_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod api;\npub mod ledger;\npub mod tokens;\n"),
+                (
+                    "src/ledger.rs",
+                    "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn() {}\n}\n",
+                ),
+                (
+                    "src/tokens.rs",
+                    "pub use crate::ledger::*;\n\n#[allow(non_snake_case)]\npub fn Engine() {}\n",
+                ),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::tokens::Engine::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A glob of a crate the index does not hold may bring in the value `target_fn()` names;
+        // the braced struct beside it is a type alone (#643).
+        "braced_struct_beside_unread_glob_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod api;\npub mod tokens;\n"),
+                (
+                    "src/tokens.rs",
+                    "pub use outside::*;\n\n#[allow(non_camel_case_types)]\npub struct target_fn {\n    pub x: u8,\n}\n",
+                ),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::tokens::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // A glob of `shapes`' own enum brings in its variants alone, so `tokens`' glob settles
+        // `target_fn` (#641).
+        "enum_variant_glob_beside_glob_reexport_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\npub mod shapes;\npub mod tokens;\n",
+                ),
+                ("src/shapes.rs", SHAPES_WITH_VARIANT_GLOB),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::shapes::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `target_fn` is a variant the enum glob brings in, no item the index records (#641).
+        "enum_variant_glob_variant_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\npub mod shapes;\npub mod tokens;\n",
+                ),
+                (
+                    "src/shapes.rs",
+                    "#[allow(non_camel_case_types)]\npub enum Shape {\n    target_fn(u8),\n}\npub use Shape::*;\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    let _ = crate::shapes::target_fn(1);\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `pub use tokens as facade;` renames a module: a path through it continues in
+        // `tokens` (#641).
+        "renamed_module_reexport_path_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", RENAMED_TOKENS_ROOT),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::facade::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // The same item through an import of the renamed module's path (#641).
+        "renamed_module_reexport_bare_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", RENAMED_TOKENS_ROOT),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "use crate::facade::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // `facade` renames a crate the index does not hold, not `tokens` (#641).
+        "renamed_outside_crate_path_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\npub mod tokens;\n\npub use outside as facade;\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::facade::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // A `pub use` written inside the inline `pub mod facade { .. }` (#641).
+        "inline_module_reexport_path_call" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod api;\nmod tokens;\n\npub mod facade {\n    pub use super::tokens::target_fn;\n}\n",
+                ),
+                ("src/tokens.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/api.rs",
+                    "pub fn caller_fn() {\n    crate::facade::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // The dependency's inline `pub mod n` re-exports its item for other crates (#641).
+        "workspace_dependency_inline_reexport_path_call" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                (
+                    "crates/engine/src/lib.rs",
+                    "mod inner;\n\npub mod n {\n    pub use super::inner::target_fn;\n}\n",
+                ),
+                ("crates/engine/src/inner.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub fn caller_fn() {\n    engine::n::target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A private `use` in the dependency's inline block is not the other crate's (#641).
+        "workspace_dependency_inline_private_use_path_call" => (
+            vec![
+                ("Cargo.toml", DEPENDENCY_WORKSPACE),
+                ("crates/engine/Cargo.toml", ENGINE),
+                (
+                    "crates/engine/src/lib.rs",
+                    "mod inner;\n\npub mod n {\n    #[allow(unused_imports)]\n    use super::inner::target_fn;\n}\n",
+                ),
+                ("crates/engine/src/inner.rs", "pub fn target_fn() {}\n"),
+                ("crates/app/Cargo.toml", APP_INHERITS_ENGINE),
+                (
+                    "crates/app/src/lib.rs",
+                    "pub fn caller_fn() {\n    engine::n::target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
         _ => return None,
     };
     let fixture = files
@@ -3117,6 +3321,14 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
         .collect();
     Some((fixture, must_emit))
 }
+
+/// `tokens` of the namespace cases (#643): a braced struct `target_fn` beside a glob of `ledger`.
+const NAMESPACE_BRACED_TOKENS: &str = "pub use crate::ledger::*;\n\n#[allow(non_camel_case_types)]\npub struct target_fn {\n    pub x: u8,\n}\n";
+/// `shapes` of the enum-variant cases (#641): a glob of its own enum and of `tokens`.
+const SHAPES_WITH_VARIANT_GLOB: &str =
+    "pub enum Shape {\n    Circle(u8),\n}\npub use Shape::*;\npub use crate::tokens::*;\n";
+/// A crate root renaming `tokens` to `facade` (#641).
+const RENAMED_TOKENS_ROOT: &str = "pub mod api;\npub mod tokens;\n\npub use tokens as facade;\n";
 
 /// A Rust source file discovery skipped would let a negative case pass for the wrong reason, as a
 /// module named `target/` once did.
@@ -3500,6 +3712,29 @@ fn rust_import_edge_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
                 "use engine::issue_token;\n\npub fn open_session() {\n    issue_token();\n}\n",
             ),
             ("crates/app/src/lib.rs", "pub mod session;\n"),
+        ],
+        // A path to an enum's variant names the file declaring the enum (#641).
+        "enum_variant_path_import" => vec![
+            ("Cargo.toml", PACKAGE),
+            ("src/lib.rs", "pub mod session;\npub mod shapes;\n"),
+            ("src/shapes.rs", "pub enum Shape {\n    Circle(u8),\n}\n"),
+            (
+                "src/session.rs",
+                "use crate::shapes::Shape::Circle;\n\npub fn open_session() -> crate::shapes::Shape {\n    Circle(1)\n}\n",
+            ),
+        ],
+        // The same variant through `shapes`' glob of its own enum (#641).
+        "enum_variant_glob_reexport_import" => vec![
+            ("Cargo.toml", PACKAGE),
+            ("src/lib.rs", "pub mod session;\npub mod shapes;\n"),
+            (
+                "src/shapes.rs",
+                "pub enum Shape {\n    Circle(u8),\n}\npub use Shape::*;\n",
+            ),
+            (
+                "src/session.rs",
+                "use crate::shapes::Circle;\n\npub fn open_session() -> crate::shapes::Shape {\n    Circle(1)\n}\n",
+            ),
         ],
         // A crate root's `pub use` whose path starts at a module it declares names that
         // module's file (#632).
