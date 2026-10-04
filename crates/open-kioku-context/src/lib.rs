@@ -1773,17 +1773,18 @@ struct ContextConfidenceInputs<'a> {
 }
 
 /// Language keys (`rust`, `python`) of `selected`, sorted and deduplicated, for the coverage-gap
-/// caps in [`ConfidenceBreakdown::from_signals`]. Only a majority coverage gap reads them, so
-/// without one nothing is looked up. A selection whose symbol carries its language uses it;
-/// any other is resolved from its indexed file record, read by path once per distinct path, so
-/// the work is bounded by the selection rather than the index. Plans call this too, so both
+/// caps in [`ConfidenceBreakdown::from_signals`]. Only a gap that can cap reads them
+/// ([`CoverageGap::is_source_majority`]), so without one nothing is looked up. A selection
+/// whose symbol carries its language uses it; any other is resolved from its indexed file
+/// record, read by path once per distinct path, so the work is bounded by the selection rather
+/// than the index. Plans call this too, so both
 /// surfaces compare a gap with the same languages.
 pub fn primary_language_keys(
     store: &dyn OkStore,
     coverage_gaps: &[CoverageGap],
     selected: &[SearchResult],
 ) -> Result<Vec<String>> {
-    if !coverage_gaps.iter().any(CoverageGap::is_majority) {
+    if !coverage_gaps.iter().any(CoverageGap::is_source_majority) {
         return Ok(Vec::new());
     }
     let mut keys = std::collections::BTreeSet::new();
@@ -7398,7 +7399,7 @@ mod tests {
         assert!(
             coverage
                 .reason
-                .contains("25 of 27 rust source files (92.6%) are not indexed (git-ignore)"),
+                .contains("25 of 27 rust source files (92.6%) are not indexed (git-ignore: src/ (25 unclassified))"),
             "{}",
             coverage.reason
         );
@@ -7431,10 +7432,8 @@ mod tests {
             .iter()
             .any(|caveat| caveat.starts_with("index coverage: 25 of 27 rust source files")));
         assert!(
-            breakdown
-                .blockers
-                .iter()
-                .any(|blocker| blocker.contains("rust (25 of 27 files, git-ignore)")),
+            breakdown.blockers.iter().any(|blocker| blocker
+                .contains("rust (25 of 27 files, git-ignore: src/ (25 unclassified))")),
             "{:?}",
             breakdown.blockers
         );

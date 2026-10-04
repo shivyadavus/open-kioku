@@ -288,6 +288,14 @@ pub fn redact_recorded_skips(quality: &mut IndexQuality, config: &OkConfig) -> u
             .policy_excluded_dirs
             .retain(|dir, _| !open_kioku_core::is_secret_like_path(Path::new(dir)));
         withheld += before - coverage.policy_excluded_dirs.len();
+        for dirs in coverage.policy_excluded_dirs_by_language.values_mut() {
+            let before = dirs.len();
+            dirs.retain(|dir, _| !open_kioku_core::is_secret_like_path(Path::new(dir)));
+            withheld += before - dirs.len();
+        }
+        coverage
+            .policy_excluded_dirs_by_language
+            .retain(|_, dirs| !dirs.is_empty());
         // A pruned directory stays counted in `pruned_dirs`; only its name is withheld.
         let before = coverage.pruned.len();
         coverage

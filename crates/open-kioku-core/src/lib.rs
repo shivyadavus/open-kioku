@@ -1076,9 +1076,13 @@ impl ConfidenceBreakdown {
         // code, and an answer found in indexed code is still found. A majority gap lowers
         // confidence only beside a symptom it could explain.
         let gaps = input.coverage.gaps();
+        // Majority by possibly-first-party source: a gap that is mostly installed dependencies
+        // is reported below like any other, but those files hold no caller of the code under
+        // edit and are never the file to change, so it caps nothing. Unclassified files count
+        // as source.
         let majority_gaps = gaps
             .iter()
-            .filter(|gap| gap.is_majority())
+            .filter(|gap| gap.is_source_majority())
             .collect::<Vec<_>>();
         // The absence symptom: a named identifier the selected context does not spell, or no
         // primary context. A hyphenated word may be prose, so it is not one.
@@ -1262,7 +1266,7 @@ impl ConfidenceBreakdown {
                 .collect::<Vec<_>>();
             let indexed_share = matched
                 .iter()
-                .map(|gap| 1.0 - gap.missing_share())
+                .map(|gap| 1.0 - gap.source_missing_share())
                 .fold(1.0_f64, f64::min) as f32;
             components.push(ScoreComponent::new(
                 COVERAGE_SELECTED_LANGUAGE_SIGNAL,
@@ -3767,12 +3771,13 @@ impl LanguageCoverage {
 }
 
 /// A coverage gap whose missing files are at least this share of its language's judged files
-/// is a majority gap: most of that language's source is absent from the index. A majority gap
+/// is a majority gap: most of that language's source is absent from the index. A gap whose
+/// possibly-first-party files are a majority by the same share ([`CoverageGap::is_source_majority`])
 /// lowers a pack or plan only beside a symptom it could explain: 0.50 with a named task
-/// identifier the selected context does not spell or no primary context, 0.74 when a task
-/// naming no identifier selected context in the gap's language. Any other gap is reported and
-/// changes no score: most repositories git-ignore a virtualenv or emitted code, and an answer
-/// found in indexed code is still found.
+/// identifier the selected context does not spell or no primary context, 0.74 when the
+/// selected context is in the gap's language. Any other gap, one made of installed
+/// dependencies included, is reported and changes no score: most repositories git-ignore a
+/// virtualenv or emitted code, and an answer found in indexed code is still found.
 pub const COVERAGE_GAP_MAJORITY_SHARE: f64 = 0.5;
 
 /// Every rule file git reads; ingest attributes all of them to [`SkipSource::GitIgnore`] in a
@@ -3827,6 +3832,134 @@ pub struct CoverageGap {
     /// The setting that governs `reason`, when one does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governing_setting: Option<String>,
+    /// Of `missing_files`, those under a directory that evidence shows holds installed
+    /// third-party packages ([`DependencyEvidence`]), across every directory, listed or not.
+    /// Zero on a manifest written before directories were recorded per language, which prices
+    /// every missing file as first-party source.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub dependency_files: usize,
+    /// The directories holding the most missing files, at most [`COVERAGE_GAP_DIRS_LISTED`] of
+    /// each class, most files first. Empty for an `omitted` gap, whose files were considered,
+    /// and on a manifest written before directories were recorded per language.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_dirs: Vec<CoverageGapDir>,
+}
+
+/// At most this many directories of each [`ExcludedDirClass`] are named on a [`CoverageGap`].
+pub const COVERAGE_GAP_DIRS_LISTED: usize = 3;
+
+/// One directory behind a [`CoverageGap`]'s missing files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CoverageGapDir {
+    /// `/`-separated, relative to the repository root: the directory holding installed packages
+    /// for a `dependencies` entry, the top-level directory otherwise (`.` for the root).
+    pub path: String,
+    /// Missing files of the gap's language under it, for the gap's cause.
+    pub files: usize,
+    pub class: ExcludedDirClass,
+    /// What showed the directory holds installed packages; absent when `class` is
+    /// `unclassified`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<DependencyEvidence>,
+}
+
+impl CoverageGapDir {
+    /// `generated/ (40 unclassified)`, `env/ (340 dependencies: python-environment)`
+    pub fn label(&self) -> String {
+        let files = group_thousands(self.files);
+        match self.evidence {
+            Some(evidence) => format!(
+                "{}/ ({files} dependencies: {})",
+                self.path,
+                evidence.label()
+            ),
+            None => format!("{}/ ({files} {})", self.path, self.class.label()),
+        }
+    }
+}
+
+/// What a directory of policy-excluded files is, as far as evidence shows.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ExcludedDirClass {
+    /// Installed third-party packages, on [`DependencyEvidence`]. Such files cannot hold callers
+    /// of this repository's code, and are never the file a task edits.
+    Dependencies,
+    /// No evidence either way. Priced as first-party source: a directory's name is not evidence,
+    /// and a git-ignored `generated/` tree of first-party code plausibly holds callers.
+    Unclassified,
+}
+
+impl ExcludedDirClass {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dependencies => "dependencies",
+            Self::Unclassified => "unclassified",
+        }
+    }
+}
+
+/// The on-disk evidence that a directory holds installed third-party packages. Each is a file
+/// a package manager writes; none is a directory name on its own.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyEvidence {
+    /// The directory holds `pyvenv.cfg` (venv, virtualenv 20+) or `conda-meta/` (conda): a
+    /// Python environment, whatever it is named.
+    PythonEnvironment,
+    /// A `site-packages` or `dist-packages` directory holding installed-distribution metadata
+    /// (`*.dist-info`, `*.egg-info`), as pip and setuptools write it.
+    SitePackages,
+    /// A `vendor` directory holding `modules.txt`, which `go mod vendor` writes.
+    GoVendor,
+    /// A `vendor` directory holding `composer/installed.json`, which Composer writes.
+    ComposerVendor,
+}
+
+impl DependencyEvidence {
+    /// Label for summaries (`python-environment`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PythonEnvironment => "python-environment",
+            Self::SitePackages => "site-packages",
+            Self::GoVendor => "go-vendor",
+            Self::ComposerVendor => "composer-vendor",
+        }
+    }
+}
+
+/// Policy-excluded files of one language under one directory, from
+/// [`IndexCoverage::policy_excluded_dirs_by_language`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExcludedDir {
+    /// Files by the rule that excluded them.
+    pub by_source: BTreeMap<SkipSource, usize>,
+    /// Set when the directory holds installed third-party packages; absent when nothing shows
+    /// it does, which prices its files as first-party source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency: Option<DependencyEvidence>,
+}
+
+impl ExcludedDir {
+    pub fn class(&self) -> ExcludedDirClass {
+        if self.dependency.is_some() {
+            ExcludedDirClass::Dependencies
+        } else {
+            ExcludedDirClass::Unclassified
+        }
+    }
+
+    /// Files excluded by `source`, or by any source when `None`.
+    fn files(&self, source: Option<SkipSource>) -> usize {
+        match source {
+            Some(source) => self.by_source.get(&source).copied().unwrap_or(0),
+            None => self.by_source.values().sum(),
+        }
+    }
 }
 
 impl CoverageGap {
@@ -3838,38 +3971,100 @@ impl CoverageGap {
         (self.missing_files as f64 / self.language_files as f64).min(1.0)
     }
 
-    /// See [`COVERAGE_GAP_MAJORITY_SHARE`].
+    /// See [`COVERAGE_GAP_MAJORITY_SHARE`]. Decides what is reported; the caps are decided by
+    /// [`Self::is_source_majority`].
     pub fn is_majority(&self) -> bool {
         self.missing_share() >= COVERAGE_GAP_MAJORITY_SHARE
     }
 
+    /// Missing files not shown to be installed dependencies: those that may be first-party
+    /// source, unclassified files included.
+    pub fn source_missing_files(&self) -> usize {
+        self.missing_files.saturating_sub(self.dependency_files)
+    }
+
+    /// [`Self::source_missing_files`] over the language's files less its installed
+    /// dependencies, in 0..=1: how much of what may be first-party source is missing. Equal to
+    /// [`Self::missing_share`] when no dependency tree was shown.
+    pub fn source_missing_share(&self) -> f64 {
+        let dependency_files = self.dependency_files.min(self.missing_files);
+        let source_files = self.language_files.saturating_sub(dependency_files);
+        if source_files == 0 {
+            return 0.0;
+        }
+        (self.source_missing_files() as f64 / source_files as f64).min(1.0)
+    }
+
+    /// Whether most of the language's possibly-first-party source is missing: the test the
+    /// 0.50 and 0.74 caps apply. A gap made of installed dependencies is a majority gap and is
+    /// reported, but those files cannot hold callers of the code under edit, so it does not
+    /// cap. Only evidence moves a file out of the source count; an unclassified directory
+    /// stays in it.
+    pub fn is_source_majority(&self) -> bool {
+        self.source_missing_files() > 0
+            && self.source_missing_share() >= COVERAGE_GAP_MAJORITY_SHARE
+    }
+
     /// `coverage:<language>:<cause>`: names the manifest coverage entries the gap is derived
-    /// from, `by_language.<language>` and `policy_excluded_by_language.<language>`, which
-    /// `repo_status` and `ok --json status` report.
+    /// from, `by_language.<language>`, `policy_excluded_by_language.<language>` and
+    /// `policy_excluded_dirs_by_language.<language>`, which `repo_status` and
+    /// `ok --json status` report.
     pub fn evidence_id(&self) -> String {
         format!("coverage:{}:{}", self.language, self.cause.key())
     }
 
-    /// `rust (25 of 27 files, git-ignore)`
+    /// `git-ignore`, or `git-ignore: env/ (340 dependencies: python-environment), generated/ (40
+    /// unclassified)` when the directories are known.
+    fn reason_detail(&self) -> String {
+        if self.excluded_dirs.is_empty() {
+            return self.reason.clone();
+        }
+        format!(
+            "{}: {}",
+            self.reason,
+            self.excluded_dirs
+                .iter()
+                .map(CoverageGapDir::label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    /// `rust (25 of 27 files, git-ignore)`, with the main directories when they are known.
     pub fn summary(&self) -> String {
         format!(
             "{} ({} of {} files, {})",
             self.language,
             group_thousands(self.missing_files),
             group_thousands(self.language_files),
-            self.reason
+            self.reason_detail()
         )
     }
 
-    /// The confidence caveat: the excluded share and the reason category.
+    /// The confidence caveat: the excluded share, the reason category, the main directories
+    /// and, when some are installed dependencies, how much of the rest may be source.
     pub fn caveat(&self) -> String {
+        let dependencies = if self.dependency_files > 0 {
+            format!(
+                "; {} are installed dependencies, so {} of {} possibly first-party files ({:.1}%) are missing",
+                group_thousands(self.dependency_files.min(self.missing_files)),
+                group_thousands(self.source_missing_files()),
+                group_thousands(
+                    self.language_files
+                        .saturating_sub(self.dependency_files.min(self.missing_files))
+                ),
+                self.source_missing_share() * 100.0
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "index coverage: {} of {} {} source files ({:.1}%) are not indexed ({}); an absence among them is not evidence",
+            "index coverage: {} of {} {} source files ({:.1}%) are not indexed ({}){dependencies}; an absence among them is not evidence",
             group_thousands(self.missing_files),
             group_thousands(self.language_files),
             self.language,
             self.missing_share() * 100.0,
-            self.reason
+            self.reason_detail()
         )
     }
 
@@ -4098,6 +4293,15 @@ pub struct IndexCoverage {
     /// data rather than as nothing excluded.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub policy_excluded_by_language: BTreeMap<String, BTreeMap<SkipSource, usize>>,
+    /// Policy-excluded source files per language key and directory, so a gap can name what was
+    /// excluded and price installed dependencies apart from first-party source. A file under a
+    /// directory evidence shows holds installed packages counts under that directory (`env`,
+    /// `svc/lib/python3.12/site-packages`) with its [`DependencyEvidence`]; any other file under
+    /// its top-level directory, unclassified. Redacted paths are not recorded. Empty on
+    /// manifests written before it was recorded, which read as no per-language directory data:
+    /// every missing file is priced as first-party source, as before.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub policy_excluded_dirs_by_language: BTreeMap<String, BTreeMap<String, ExcludedDir>>,
 }
 
 impl IndexCoverage {
@@ -4164,6 +4368,21 @@ impl IndexCoverage {
         source: SkipSource,
         top_dir: Option<&str>,
     ) {
+        self.record_classified_policy_exclusion(language, source, top_dir, None);
+    }
+
+    /// [`Self::record_policy_exclusion`] for a file that lies under `dependency`, the directory
+    /// evidence shows holds installed packages (repository-relative, `/`-separated), when it
+    /// does. The file counts under that directory instead of its top-level one in
+    /// `policy_excluded_dirs_by_language`; `policy_excluded_dirs` stays by top-level directory.
+    /// Nothing is recorded per directory for a redacted path (`top_dir` `None`).
+    pub fn record_classified_policy_exclusion(
+        &mut self,
+        language: &Language,
+        source: SkipSource,
+        top_dir: Option<&str>,
+        dependency: Option<(&str, DependencyEvidence)>,
+    ) {
         *self.policy_excluded_by_source.entry(source).or_default() += 1;
         *self
             .policy_excluded_by_language
@@ -4171,9 +4390,79 @@ impl IndexCoverage {
             .or_default()
             .entry(source)
             .or_default() += 1;
-        if let Some(dir) = top_dir {
-            *self.policy_excluded_dirs.entry(dir.to_owned()).or_default() += 1;
+        let Some(top_dir) = top_dir else {
+            return;
+        };
+        *self
+            .policy_excluded_dirs
+            .entry(top_dir.to_owned())
+            .or_default() += 1;
+        let (dir, evidence) = match dependency {
+            Some((dir, evidence)) => (dir, Some(evidence)),
+            None => (top_dir, None),
+        };
+        let dirs = self
+            .policy_excluded_dirs_by_language
+            .entry(language.key().to_owned())
+            .or_default();
+        let entry = match dirs.get_mut(dir) {
+            Some(entry) => {
+                // One file without the evidence makes the directory unclassified: a class is
+                // claimed only for a directory every recorded file agrees on.
+                if entry.dependency != evidence {
+                    entry.dependency = None;
+                }
+                entry
+            }
+            None => dirs.entry(dir.to_owned()).or_insert(ExcludedDir {
+                by_source: BTreeMap::new(),
+                dependency: evidence,
+            }),
+        };
+        *entry.by_source.entry(source).or_default() += 1;
+    }
+
+    /// The directories behind `language`'s excluded files for `source` (any source when
+    /// `None`): at most [`COVERAGE_GAP_DIRS_LISTED`] of each class, so a large dependency tree
+    /// never hides the source directory that prices the gap, most files first; with the files
+    /// under installed dependencies counted across every directory.
+    fn gap_dirs(&self, language: &str, source: Option<SkipSource>) -> (Vec<CoverageGapDir>, usize) {
+        let Some(dirs) = self.policy_excluded_dirs_by_language.get(language) else {
+            return (Vec::new(), 0);
+        };
+        let mut all = dirs
+            .iter()
+            .map(|(path, dir)| CoverageGapDir {
+                path: path.clone(),
+                files: dir.files(source),
+                class: dir.class(),
+                evidence: dir.dependency,
+            })
+            .filter(|dir| dir.files > 0)
+            .collect::<Vec<_>>();
+        let dependency_files = all
+            .iter()
+            .filter(|dir| dir.class == ExcludedDirClass::Dependencies)
+            .map(|dir| dir.files)
+            .sum();
+        let by_files = |a: &CoverageGapDir, b: &CoverageGapDir| {
+            b.files.cmp(&a.files).then(a.path.cmp(&b.path))
+        };
+        all.sort_by(by_files);
+        let mut listed = Vec::new();
+        for class in [
+            ExcludedDirClass::Unclassified,
+            ExcludedDirClass::Dependencies,
+        ] {
+            listed.extend(
+                all.iter()
+                    .filter(|dir| dir.class == class)
+                    .take(COVERAGE_GAP_DIRS_LISTED)
+                    .cloned(),
+            );
         }
+        listed.sort_by(by_files);
+        (listed, dependency_files)
     }
 
     /// Record every directory discovery pruned: `listed` by path, `unlisted` (secret-like
@@ -4485,19 +4774,25 @@ impl IndexCoverage {
                     SkipSource::GitIgnore => Some(GIT_IGNORE_RULES),
                     other => other.governing_setting(),
                 });
+                let missing_files = coverage.excluded_by_policy();
+                let (excluded_dirs, dependency_files) = self.gap_dirs(language, None);
                 gaps.push(CoverageGap {
                     language: language.clone(),
                     cause: CoverageGapCause::ExcludedByPolicy,
-                    missing_files: coverage.excluded_by_policy(),
+                    missing_files,
                     language_files: coverage.discovered,
                     reason,
                     governing_setting: governing_setting.map(str::to_owned),
+                    dependency_files: dependency_files.min(missing_files),
+                    excluded_dirs,
                 });
             }
         } else {
             for (language, excluded, considered) in
                 self.languages_mostly_excluded_by(SkipSource::GitIgnore)
             {
+                let (excluded_dirs, dependency_files) =
+                    self.gap_dirs(language, Some(SkipSource::GitIgnore));
                 gaps.push(CoverageGap {
                     language: language.to_owned(),
                     cause: CoverageGapCause::GitIgnore,
@@ -4505,6 +4800,8 @@ impl IndexCoverage {
                     language_files: excluded + considered,
                     reason: SkipSource::GitIgnore.label().to_owned(),
                     governing_setting: Some(GIT_IGNORE_RULES.to_owned()),
+                    dependency_files: dependency_files.min(excluded),
+                    excluded_dirs,
                 });
             }
             for (language, _, missing) in self.languages_below_warn_threshold() {
@@ -4525,6 +4822,10 @@ impl IndexCoverage {
                         .then(|| SkipSource::SizeLimit.governing_setting())
                         .flatten()
                         .map(str::to_owned),
+                    // Considered files the index failed to hold: no exclusion rule chose them,
+                    // so there is no excluded directory to name.
+                    dependency_files: 0,
+                    excluded_dirs: Vec::new(),
                 });
             }
         }
@@ -6629,10 +6930,13 @@ mod tests {
         );
         assert!(gap.is_majority());
         assert_eq!(gap.evidence_id(), "coverage:rust:git_ignore");
-        assert_eq!(gap.summary(), "rust (25 of 27 files, git-ignore)");
+        assert_eq!(
+            gap.summary(),
+            "rust (25 of 27 files, git-ignore: src/ (25 unclassified))"
+        );
         assert_eq!(
             gap.caveat(),
-            "index coverage: 25 of 27 rust source files (92.6%) are not indexed (git-ignore); an absence among them is not evidence"
+            "index coverage: 25 of 27 rust source files (92.6%) are not indexed (git-ignore: src/ (25 unclassified)); an absence among them is not evidence"
         );
         let probe = gap.next_probe();
         assert!(
@@ -6705,6 +7009,200 @@ mod tests {
         assert_eq!(value["missing_files"], 25);
     }
 
+    /// `considered` indexed Python files beside git-ignored ones: `dependencies` under `env`, a
+    /// Python environment, and `generated` under `generated`, which nothing classifies.
+    fn git_ignored_python(
+        considered: usize,
+        dependencies: usize,
+        generated: usize,
+    ) -> IndexCoverage {
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..considered {
+            coverage.record_discovered(&Language::Python);
+            coverage.record_indexed(&Language::Python, false);
+        }
+        for (count, top_dir, dependency) in [
+            (
+                dependencies,
+                "env",
+                Some(("env", super::DependencyEvidence::PythonEnvironment)),
+            ),
+            (generated, "generated", None),
+        ] {
+            for _ in 0..count {
+                coverage.record_discovered(&Language::Python);
+                coverage.record_skipped(&Language::Python, SkipReason::Ignored);
+                coverage.record_classified_policy_exclusion(
+                    &Language::Python,
+                    SkipSource::GitIgnore,
+                    Some(top_dir),
+                    dependency,
+                );
+            }
+        }
+        coverage
+    }
+
+    /// #503: a gap names the directories behind it with their class, and only files that may
+    /// be first-party source decide the caps. Installed dependencies are reported, never hidden.
+    #[test]
+    fn coverage_gaps_name_their_directories_and_price_installed_dependencies_apart() {
+        use super::{CoverageGap, CoverageGapDir, DependencyEvidence, ExcludedDirClass};
+
+        let mixed = git_ignored_python(30, 340, 40).gaps();
+        assert_eq!(mixed.len(), 1, "{mixed:?}");
+        let gap = &mixed[0];
+        assert_eq!((gap.missing_files, gap.language_files), (380, 410));
+        assert_eq!(gap.dependency_files, 340);
+        assert_eq!(
+            gap.excluded_dirs,
+            vec![
+                CoverageGapDir {
+                    path: "env".into(),
+                    files: 340,
+                    class: ExcludedDirClass::Dependencies,
+                    evidence: Some(DependencyEvidence::PythonEnvironment),
+                },
+                CoverageGapDir {
+                    path: "generated".into(),
+                    files: 40,
+                    class: ExcludedDirClass::Unclassified,
+                    evidence: None,
+                },
+            ]
+        );
+        assert_eq!(
+            gap.summary(),
+            "python (380 of 410 files, git-ignore: env/ (340 dependencies: python-environment), generated/ (40 unclassified))"
+        );
+        assert_eq!(
+            gap.caveat(),
+            "index coverage: 380 of 410 python source files (92.7%) are not indexed (git-ignore: env/ (340 dependencies: python-environment), generated/ (40 unclassified)); 340 are installed dependencies, so 40 of 70 possibly first-party files (57.1%) are missing; an absence among them is not evidence"
+        );
+        // 40 of the 70 files that may be source are missing: still a majority, so it caps.
+        assert!(gap.is_majority() && gap.is_source_majority());
+        let value = serde_json::to_value(gap).unwrap();
+        assert_eq!(value["dependency_files"], 340);
+        assert_eq!(value["excluded_dirs"][0]["class"], "dependencies");
+        assert_eq!(value["excluded_dirs"][0]["evidence"], "python_environment");
+        assert_eq!(value["excluded_dirs"][1]["class"], "unclassified");
+        assert!(value["excluded_dirs"][1].get("evidence").is_none());
+
+        // Only installed dependencies: still a reported majority gap, but nothing to cap on.
+        let dependencies = git_ignored_python(30, 340, 0).gaps().remove(0);
+        assert!(dependencies.is_majority());
+        assert!(!dependencies.is_source_majority());
+        assert_eq!(dependencies.source_missing_share(), 0.0);
+        // Only an unclassified tree of the same size: priced exactly as before #503.
+        let generated = git_ignored_python(30, 0, 340).gaps().remove(0);
+        assert!(generated.is_source_majority());
+        assert_eq!(generated.dependency_files, 0);
+        assert_eq!(
+            generated.excluded_dirs[0].class,
+            ExcludedDirClass::Unclassified
+        );
+
+        let selection = ConfidenceSignalInput {
+            primary_file_count: 3,
+            evidence_count: 12,
+            exact_reference_count: 2,
+            validation_count: 3,
+            validation_with_command_count: 3,
+            allowed_file_count: 3,
+            runtime_signal_count: 1,
+            task_relevance: 1.0,
+            primary_language_keys: vec!["python".into()],
+            ..Default::default()
+        };
+        let price = |gap: &CoverageGap, unmatched: bool| {
+            ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+                coverage: CoverageInput::Recorded(vec![gap.clone()]),
+                named_anchor_count: usize::from(unmatched) * 2,
+                unmatched_anchors: if unmatched {
+                    vec!["LedgerEntry".into()]
+                } else {
+                    Vec::new()
+                },
+                ..selection.clone()
+            })
+        };
+        let has_language_signal = |breakdown: &ConfidenceBreakdown| {
+            breakdown
+                .components
+                .iter()
+                .any(|component| component.signal == COVERAGE_SELECTED_LANGUAGE_SIGNAL)
+        };
+        for unmatched in [false, true] {
+            let source = price(&generated, unmatched);
+            let installed = price(&dependencies, unmatched);
+            let both = price(gap, unmatched);
+            // The source gap caps; the same share of installed packages does not.
+            let cap = if unmatched { 0.50 } else { 0.74 };
+            assert!(source.overall_score <= cap, "{source:?}");
+            assert!(both.overall_score <= cap, "{both:?}");
+            assert!(installed.overall_score > cap, "{installed:?}");
+            assert!(
+                !installed
+                    .blockers
+                    .iter()
+                    .any(|blocker| blocker.contains("index")),
+                "{installed:?}"
+            );
+            assert_eq!(has_language_signal(&source), !unmatched);
+            assert!(!has_language_signal(&installed));
+            // ... and is reported all the same: its caveat, naming the directory and class,
+            // and the `index_coverage` component carrying its evidence id.
+            assert!(
+                installed.caveats.contains(&dependencies.caveat()),
+                "{installed:?}"
+            );
+            assert!(dependencies
+                .caveat()
+                .contains("env/ (340 dependencies: python-environment)"));
+            let component = installed
+                .components
+                .iter()
+                .find(|component| component.signal == "index_coverage")
+                .expect("index_coverage component");
+            assert_eq!(component.evidence_ids, vec!["coverage:python:git_ignore"]);
+        }
+        let both = price(gap, false);
+        assert!(both
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("generated/ (40 unclassified)")));
+
+        // A directory one file shows no evidence for is unclassified, whatever the rest showed.
+        let mut disagreeing = git_ignored_python(2, 25, 0);
+        disagreeing.record_classified_policy_exclusion(
+            &Language::Python,
+            SkipSource::GitIgnore,
+            Some("env"),
+            None,
+        );
+        let dirs = &disagreeing.policy_excluded_dirs_by_language["python"];
+        assert_eq!(dirs["env"].dependency, None);
+        assert_eq!(dirs["env"].by_source[&SkipSource::GitIgnore], 26);
+
+        // A manifest written before directories were recorded per language: same verdict and
+        // price as before, every missing file counted as source.
+        let mut legacy = serde_json::to_value(git_ignored_python(30, 340, 0)).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("policy_excluded_dirs_by_language")
+            .expect("the field is serialized when recorded");
+        let legacy: IndexCoverage = serde_json::from_value(legacy).unwrap();
+        let legacy_gap = legacy.gaps().remove(0);
+        assert!(legacy_gap.excluded_dirs.is_empty());
+        assert_eq!(legacy_gap.dependency_files, 0);
+        assert!(legacy_gap.is_source_majority());
+        assert_eq!(
+            legacy_gap.summary(),
+            "python (340 of 370 files, git-ignore)"
+        );
+    }
+
     #[test]
     fn coverage_gaps_are_always_reported_and_lower_confidence_only_beside_a_symptom() {
         let complete = ConfidenceSignalInput {
@@ -6762,7 +7260,7 @@ mod tests {
         assert_eq!(
             in_language.blockers,
             vec![
-                "the selected context is in a language the index mostly excluded: rust (25 of 27 files, git-ignore)"
+                "the selected context is in a language the index mostly excluded: rust (25 of 27 files, git-ignore: src/ (25 unclassified))"
                     .to_string()
             ]
         );
@@ -6834,7 +7332,7 @@ mod tests {
         assert_eq!(with_gap.overall_enum, Confidence::Low);
         assert!(with_gap.overall_score <= 0.50, "{with_gap:?}");
         assert!(with_gap.blockers.iter().any(|blocker| blocker
-            == "the task may name code in source the index excluded: rust (25 of 27 files, git-ignore)"));
+            == "the task may name code in source the index excluded: rust (25 of 27 files, git-ignore: src/ (25 unclassified))"));
         // No primary context is the same symptom.
         let empty = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
             coverage: CoverageInput::Recorded(vec![git_ignore_gap.clone()]),

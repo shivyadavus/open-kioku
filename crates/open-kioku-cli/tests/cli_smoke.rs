@@ -7279,7 +7279,7 @@ fn git_ignored_source_reaches_context_plan_and_status_on_cli_and_mcp() {
                 item["reason"]
                     .as_str()
                     .unwrap()
-                    .contains("25 of 27 rust source files (92.6%) are not indexed (git-ignore)"),
+                    .contains("25 of 27 rust source files (92.6%) are not indexed (git-ignore: src/ (25 unclassified))"),
                 "{label}: {item}"
             );
             assert!(
@@ -7398,8 +7398,15 @@ fn complete_coverage_adds_no_coverage_signal_on_cli_or_mcp() {
 /// holds 30 site-packages modules, more than `src/` holds. Discovery descends into git-ignored
 /// directories and records each file as `git_ignore`, so that is a coverage gap; only
 /// name-pruned directories (`.venv`, `build`, `dist`, `node_modules`, `target`) count as one
-/// pruned directory instead.
+/// pruned directory instead. Its `site-packages` holds no installed-distribution metadata, so
+/// nothing shows it is installed packages: the tree is unclassified and priced as source.
 fn python_venv_fixture(with_venv: bool) -> tempfile::TempDir {
+    python_venv_fixture_with(with_venv, false)
+}
+
+/// [`python_venv_fixture`], with `installed` writing the `*.dist-info` metadata pip leaves
+/// beside each package: evidence that the git-ignored tree is installed dependencies.
+fn python_venv_fixture_with(with_venv: bool, installed: bool) -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
     fs::create_dir_all(repo.join("src")).unwrap();
@@ -7428,6 +7435,17 @@ fn python_venv_fixture(with_venv: bool) -> tempfile::TempDir {
                 format!("def helper_{index}():\n    return {index}\n"),
             )
             .unwrap();
+            if installed {
+                let metadata = repo.join(format!(
+                    "venv/lib/python3.12/site-packages/package_{index}-1.0.dist-info"
+                ));
+                fs::create_dir_all(&metadata).unwrap();
+                fs::write(
+                    metadata.join("METADATA"),
+                    format!("Name: package-{index}\n"),
+                )
+                .unwrap();
+            }
         }
     }
     for step in ["init", "index"] {
@@ -7593,6 +7611,84 @@ fn a_git_ignored_venv_caps_a_python_answer_and_leaves_a_rust_answer_alone() {
     }
 }
 
+/// #503: the same git-ignored `venv/`, with the `*.dist-info` metadata pip writes, is installed
+/// dependencies. The gap is still reported on every surface and names the directory with its
+/// class and evidence, but those files hold no caller of `src/`, so a Python answer is not
+/// capped and preflight starts safely. Paired with the test above, which differs only in the
+/// metadata, this fails if the pricing ignored the classification or the classification were
+/// guessed from the directory name.
+#[test]
+fn a_git_ignored_tree_of_installed_packages_is_reported_without_capping() {
+    let python_task = "fix refresh_session_token expiry handling";
+    let installed = python_venv_fixture_with(true, true);
+    let site = "venv/lib/python3.12/site-packages";
+
+    let (cli, mcp) = coverage_surfaces(installed.path(), python_task);
+    for (surface, reports) in [("cli", &cli), ("mcp", &mcp)] {
+        let gaps = &reports[2]["coverage_gaps"];
+        assert_eq!(gaps.as_array().map(Vec::len), Some(1), "{surface}: {gaps}");
+        assert_eq!(gaps[0]["language"], "python");
+        assert_eq!(gaps[0]["missing_files"], 30);
+        assert_eq!(gaps[0]["dependency_files"], 30);
+        assert_eq!(gaps[0]["excluded_dirs"][0]["path"], site);
+        assert_eq!(gaps[0]["excluded_dirs"][0]["class"], "dependencies");
+        assert_eq!(gaps[0]["excluded_dirs"][0]["evidence"], "site_packages");
+        assert_eq!(
+            reports[2]["coverage"]["policy_excluded_dirs_by_language"]["python"][site]
+                ["dependency"],
+            "site_packages",
+            "{surface}"
+        );
+        for (index, kind) in [(0, "context"), (1, "plan")] {
+            let label = format!("{surface} {kind}");
+            let report = &reports[index];
+            let item = coverage_negative_evidence(report)
+                .unwrap_or_else(|| panic!("{label}: the gap is reported: {report}"));
+            assert!(
+                item["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason
+                        .contains(&format!("{site}/ (30 dependencies: site-packages)"))),
+                "{label}: {item}"
+            );
+            let confidence = &report["confidence_breakdown"];
+            assert!(
+                confidence["blockers"]
+                    .as_array()
+                    .expect("blockers")
+                    .iter()
+                    .all(|blocker| !blocker.as_str().unwrap_or("").contains("index")),
+                "{label}: {confidence}"
+            );
+            assert!(
+                confidence["components"]
+                    .as_array()
+                    .expect("components")
+                    .iter()
+                    .all(|component| component["signal"] != "index_coverage_selected_language"),
+                "{label}: {confidence}"
+            );
+            assert!(
+                confidence["overall_score"].as_f64().unwrap() > 0.74 + 1e-6,
+                "{label}: {confidence}"
+            );
+        }
+    }
+    let out = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(installed.path())
+            .arg("preflight")
+            .arg(python_task)
+            .arg("--format")
+            .arg("json");
+        command
+    });
+    let value: serde_json::Value = serde_json::from_str(&out).expect("preflight json");
+    assert_eq!(value["verdict"], "safe_to_start", "{value}");
+}
+
 /// The human surfaces print the gap beside the coverage summary. Without this, a refactor
 /// collapsing the coverage print back into a single `summary_line()` call passes fmt, clippy,
 /// every test and every snapshot family, and the defect returns silently: the summary ratio is
@@ -7602,7 +7698,7 @@ fn a_git_ignored_venv_caps_a_python_answer_and_leaves_a_rust_answer_alone() {
 fn coverage_gaps_are_printed_by_index_status_and_markdown() {
     let gapped = coverage_gap_fixture(true);
     let sentence =
-        "index coverage: 25 of 27 rust source files (92.6%) are not indexed (git-ignore)";
+        "index coverage: 25 of 27 rust source files (92.6%) are not indexed (git-ignore: src/ (25 unclassified))";
 
     let indexed = run({
         let mut command = ok();

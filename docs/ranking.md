@@ -186,8 +186,8 @@ in `open-kioku-core` computes it from typed inputs (weights in parentheses):
 - `test_coverage` (0.10): 1.0 when a selected target carries a runnable command, 0.6 when targets need manual commands, 0.2 with none.
 - `negative_evidence` (0.15): 1.0 with no counted negative evidence, 0.3 with one or two items, 0.1 beyond. Counted items are the pack's `negative_evidence` entries in the `primary_context` and `anchor` scopes; `exact_references`, `validation`, and `runtime` absence is priced by the components above; `history` and `boundary` items are reported but not priced; and the `coverage` item is priced by the `index_coverage` caps rather than counted.
 - `boundary_tightness` (0.15) and `runtime_corroboration` (0.05): the allowed-file bound and the typed `runtime_corroboration` score component on selected results.
-- `index_coverage` (weight 0; present only with a coverage gap): the lowest indexed share among the languages `IndexCoverage::gaps` returns for the manifest the pack or plan read, carrying one evidence id per gap, `coverage:<language>:<cause>` (`coverage:rust:git_ignore`). The id names the `coverage.by_language` and `coverage.policy_excluded_by_language` entries that `repo_status` and `ok --json status` report, so the signal traces to the persisted manifest. Caps price it, not weight; see "Index coverage gaps".
-- `index_coverage_selected_language` (weight 0; present only when the 0.74 cap applies): a majority coverage gap whose language matches the selected context's, carrying the matching gaps' evidence ids. `ok preflight` and MCP `plan_change {detail: "preflight"}` read this signal to withhold `safe_to_start`; see "Index coverage gaps".
+- `index_coverage` (weight 0; present only with a coverage gap): the lowest indexed share among the languages `IndexCoverage::gaps` returns for the manifest the pack or plan read, carrying one evidence id per gap, `coverage:<language>:<cause>` (`coverage:rust:git_ignore`). The id names the `coverage.by_language`, `coverage.policy_excluded_by_language` and `coverage.policy_excluded_dirs_by_language` entries that `repo_status` and `ok --json status` report, so the signal traces to the persisted manifest. Caps price it, not weight; see "Index coverage gaps".
+- `index_coverage_selected_language` (weight 0; present only when the 0.74 cap applies): a coverage gap whose possibly-first-party files are mostly missing and whose language matches the selected context's, carrying the matching gaps' evidence ids; its value is the indexed share of those files. `ok preflight` and MCP `plan_change {detail: "preflight"}` read this signal to withhold `safe_to_start`; see "Index coverage gaps".
 
 Caps apply after the weighted sum, in this order: 0.35 with no primary context; 0.55 when
 exact references, validation targets, and runtime signals are all absent; 0.74 without exact
@@ -236,10 +236,35 @@ skipped as `pruned`, an omission, so enough of it is an `omitted` gap. Committed
 a directory pruned on strong evidence (a cache tag, a build manifest beside it) never are: a
 `dist/` bundle committed beside `package.json` caps no confidence (`docs/indexing-pipeline.md`, "Pruned directories").
 
+A gap names the directories its missing files came from (`excluded_dirs`, at most
+`COVERAGE_GAP_DIRS_LISTED` (3) of each class, most files first) and counts the missing files
+under installed dependencies (`dependency_files`, across every directory). Both come from
+`coverage.policy_excluded_dirs_by_language`, which ingest records per excluded file with no
+extra walk. A file counts under the outermost directory above it that evidence shows holds
+installed third-party packages, classed `dependencies` with that evidence; any other file
+counts under its top-level directory, classed `unclassified`. The evidence is a file a
+package tool writes, never a directory name:
+
+| `evidence` | The directory holds |
+| --- | --- |
+| `python_environment` | `pyvenv.cfg` (venv, virtualenv 20+) or `conda-meta/` (conda), whatever the directory is called |
+| `site_packages` | `*.dist-info` or `*.egg-info` metadata, and is named `site-packages` or `dist-packages` |
+| `go_vendor` | `modules.txt`, and is named `vendor` (`go mod vendor`) |
+| `composer_vendor` | `composer/installed.json`, and is named `vendor` (Composer) |
+
+A directory where any recorded file lacks the evidence is `unclassified`. `node_modules`, and
+a `.venv` or `venv` holding a marker, never appear: discovery prunes them before any file is
+seen. An `omitted` gap names no directory, because no exclusion rule chose its files. A
+manifest written before directories were recorded per language yields gaps with neither
+field, priced as before.
+
 A gap is always reported, and by itself changes no score or label:
 
-- a caveat naming the share and the reason category, `index coverage: 25 of 27 rust source
-  files (92.6%) are not indexed (git-ignore); an absence among them is not evidence`. Coverage
+- a caveat naming the share, the reason category and the main directories, `index coverage:
+  25 of 27 rust source files (92.6%) are not indexed (git-ignore: src/ (25 unclassified)); an
+  absence among them is not evidence`. When some are installed dependencies it adds how many,
+  and how many of the possibly-first-party files are missing (`; 340 are installed
+  dependencies, so 40 of 70 possibly first-party files (57.1%) are missing`). Coverage
   caveats are exempt from the 0.94 any-caveat cap, including when a plan attaches caveats
   after scoring;
 - the `index_coverage` component;
@@ -274,12 +299,18 @@ manifest and still fails on that state.
 
 A majority gap is one whose missing files are at least `COVERAGE_GAP_MAJORITY_SHARE` (half)
 of its `language_files`. Every `git_ignore` and `excluded_by_policy` gap is a majority gap;
-an `omitted` gap usually is not. A majority gap lowers confidence only beside a symptom it
-could explain, and at most one cap applies:
+an `omitted` gap usually is not. The caps ask a narrower question
+(`CoverageGap::is_source_majority`): are most of the files that may be first-party source
+missing? Installed dependencies hold no caller of the code under edit and are never the file
+a task changes, so they leave both sides of the share: `source_missing_files` is
+`missing_files - dependency_files` and the share is taken over `language_files -
+dependency_files`. Unclassified files stay in both. With no dependency tree shown the two
+tests agree. A gap that passes lowers confidence only beside a symptom it could explain, and
+at most one cap applies:
 
 - **Absence symptom: cap 0.50 (`Low`).** A named task identifier is unmatched by the selected
   context, or no primary context matched. The blocker `the task may name code in source the
-  index excluded: rust (25 of 27 files, git-ignore)` is added, the `anchor` item's next probe
+  index excluded: rust (25 of 27 files, git-ignore: src/ (25 unclassified))` is added, the `anchor` item's next probe
   points at the `coverage` item instead of saying the name does not exist in this
   repository, and a plan adds the risk reason `low confidence: named task anchor(s) … may be
   defined in source the index excluded: …`. An unmatched hyphenated task word is not a
@@ -292,22 +323,26 @@ could explain, and at most one cap applies:
   index holds, not how the task was phrased. `Exact` is therefore unreachable for a selection
   in a language the index read a minority of.
 
-Otherwise the gap changes nothing: a gap in a language the selection does not use, or one
-below the majority share, is reported and priced at zero. On a Python repository that
-git-ignores a `venv/` larger than `src/`, a task answered from `src/` reports the gap and
-stops below `High`, because the excluded files are Python too and the index cannot say what
-they hold. A Rust task on that same repository is unaffected.
+Otherwise the gap changes nothing: a gap in a language the selection does not use, one below
+the majority share, or one made mostly of installed dependencies is reported and priced at
+zero. On a Python repository that git-ignores a `venv/` larger than `src/`, the venv's
+`site-packages` (holding `*.dist-info`) is `dependencies`: a task answered from `src/`
+reports the gap, its caveat naming the directory, and is not capped. If the same repository
+also git-ignores a `generated/` tree of its own Python larger than what `src/` holds, most of
+its possibly-first-party Python is missing and the 0.74 cap applies, its blocker naming
+`generated/ (… unclassified)`. A Rust task on that repository is unaffected either way.
 
-The cap is deliberately blunt about *what* was excluded. A git-ignored `venv/` is a
-third-party dependency tree and a git-ignored `generated/` is first-party source, and only
-the second plausibly holds callers of the code under edit — but `policy_excluded_dirs` is
-recorded repository-wide rather than per language, so a `python` gap cannot be attributed to
-one or the other today. Until that is recorded per language, the conservative rule applies to
-both.
+The anchor item's next probe still points at the `coverage` item for any majority gap,
+dependencies included: an unmatched name may be defined in an installed package, and saying
+so is not a cap.
 
-The languages are looked up only when a majority gap exists: a selection's symbol supplies
-its language when it has one, and otherwise its file record is read by path, once per
-distinct primary path. A pack over an index without a majority gap reads nothing extra.
+The classification is conservative by construction. Only the evidence in the table above
+moves a file out of the source count; a `vendor/` nothing accounts for, a `third_party/`, or
+a `lib/` of copied code is `unclassified` and priced as first-party source.
+
+The languages are looked up only when a gap that can cap exists: a selection's symbol
+supplies its language when it has one, and otherwise its file record is read by path, once
+per distinct primary path. A pack over an index without one reads nothing extra.
 
 Use `ok search --explain-ranking "query"` to inspect dominant signals for each
 result. Use `ok eval` to compare baseline ranking, fused ranking, and signal

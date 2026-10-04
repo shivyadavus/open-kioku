@@ -833,6 +833,167 @@ fn a_kept_directory_does_not_bypass_the_secret_path_policy() {
         .any(|chunk| chunk.text.contains("PRIVATE KEY") || chunk.text.contains("abc123")));
 }
 
+/// A Python repository with `app/` indexed and up to three git-ignored trees: a `venv/` that
+/// holds no `pyvenv.cfg` (so discovery walks it) but installed packages under `site-packages`,
+/// an `env/` Python environment, and a `generated/` tree of first-party code.
+fn python_repo(root: &Path, venv: bool, env: bool, generated: bool) {
+    let mut ignored = String::new();
+    for index in 0..5 {
+        write(
+            root,
+            &format!("app/ledger{index}.py"),
+            "def post_entry():\n    pass\n",
+        );
+    }
+    if venv {
+        ignored.push_str("venv/\n");
+        let site = "venv/lib/python3.11/site-packages";
+        write(
+            root,
+            &format!("{site}/ledger_client-1.0.dist-info/METADATA"),
+            "Name: ledger-client\n",
+        );
+        for index in 0..25 {
+            write(
+                root,
+                &format!("{site}/ledger_client/m{index}.py"),
+                "def fetch():\n    pass\n",
+            );
+        }
+    }
+    if env {
+        ignored.push_str("env/\n");
+        write(root, "env/pyvenv.cfg", "home = /usr/bin\n");
+        for index in 0..10 {
+            write(
+                root,
+                &format!("env/lib/python3.12/site-packages/store/s{index}.py"),
+                "def put():\n    pass\n",
+            );
+        }
+    }
+    if generated {
+        ignored.push_str("generated/\n");
+        for index in 0..25 {
+            write(
+                root,
+                &format!("generated/ledger_pb{index}.py"),
+                "from app.ledger0 import post_entry\n",
+            );
+        }
+    }
+    write(root, ".gitignore", &ignored);
+}
+
+fn python_gap(venv: bool, env: bool, generated: bool) -> open_kioku_core::CoverageGap {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    python_repo(root, venv, env, generated);
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let mut gaps = snapshot.manifest.quality.coverage.as_ref().unwrap().gaps();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    gaps.remove(0)
+}
+
+/// #503: a git-ignored tree of installed packages and a git-ignored tree of first-party source
+/// in the same language were one `python` gap, named by language alone and capped alike. The
+/// gap now names each directory with its class, on evidence the package tools wrote, and only
+/// the files that may be first-party source cap a selection in the language.
+#[test]
+fn coverage_gap_names_excluded_dependency_and_source_trees_and_prices_them_apart() {
+    use open_kioku_core::{
+        ConfidenceBreakdown, ConfidenceSignalInput, CoverageGap, CoverageGapDir, CoverageInput,
+        DependencyEvidence, ExcludedDirClass, COVERAGE_SELECTED_LANGUAGE_SIGNAL,
+    };
+
+    let mixed = python_gap(true, true, true);
+    assert_eq!((mixed.missing_files, mixed.language_files), (60, 65));
+    assert_eq!(mixed.dependency_files, 35);
+    assert_eq!(
+        mixed.excluded_dirs,
+        vec![
+            CoverageGapDir {
+                path: "generated".into(),
+                files: 25,
+                class: ExcludedDirClass::Unclassified,
+                evidence: None,
+            },
+            CoverageGapDir {
+                path: "venv/lib/python3.11/site-packages".into(),
+                files: 25,
+                class: ExcludedDirClass::Dependencies,
+                evidence: Some(DependencyEvidence::SitePackages),
+            },
+            CoverageGapDir {
+                path: "env".into(),
+                files: 10,
+                class: ExcludedDirClass::Dependencies,
+                evidence: Some(DependencyEvidence::PythonEnvironment),
+            },
+        ]
+    );
+    let caveat = mixed.caveat();
+    assert!(
+        caveat.contains("generated/ (25 unclassified)")
+            && caveat
+                .contains("venv/lib/python3.11/site-packages/ (25 dependencies: site-packages)")
+            && caveat.contains("env/ (10 dependencies: python-environment)"),
+        "{caveat}"
+    );
+
+    let dependencies_only = python_gap(true, true, false);
+    assert_eq!(
+        dependencies_only.dependency_files,
+        dependencies_only.missing_files
+    );
+    assert!(dependencies_only.is_majority());
+    let source_only = python_gap(false, false, true);
+    assert_eq!(source_only.dependency_files, 0);
+
+    // A selection in `app/`, a Python file, with complete evidence otherwise.
+    let price = |gap: &CoverageGap| {
+        ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            primary_file_count: 2,
+            evidence_count: 8,
+            exact_reference_count: 2,
+            validation_count: 2,
+            validation_with_command_count: 2,
+            allowed_file_count: 2,
+            runtime_signal_count: 1,
+            task_relevance: 1.0,
+            primary_language_keys: vec!["python".into()],
+            coverage: CoverageInput::Recorded(vec![gap.clone()]),
+            ..Default::default()
+        })
+    };
+    let capped = |breakdown: &ConfidenceBreakdown| {
+        breakdown
+            .components
+            .iter()
+            .any(|component| component.signal == COVERAGE_SELECTED_LANGUAGE_SIGNAL)
+    };
+    // First-party source is missing: capped below `High`, as before.
+    for gap in [&mixed, &source_only] {
+        let breakdown = price(gap);
+        assert!(breakdown.overall_score <= 0.74, "{breakdown:?}");
+        assert_eq!(breakdown.overall_enum, Confidence::Medium);
+        assert!(capped(&breakdown));
+    }
+    // Only installed packages are missing: reported, and not capped.
+    let breakdown = price(&dependencies_only);
+    assert!(breakdown.overall_score > 0.74, "{breakdown:?}");
+    assert!(!capped(&breakdown));
+    assert!(breakdown.caveats.contains(&dependencies_only.caveat()));
+    assert!(breakdown
+        .components
+        .iter()
+        .any(|component| component.signal == "index_coverage"
+            && component.evidence_ids == vec!["coverage:python:git_ignore".to_string()]));
+}
+
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")

@@ -49,6 +49,20 @@ can never drop files silently. `IndexQuality.coverage` (JSON: `quality.coverage`
 - `policy_excluded_by_language`: the same source counts per language key
   (`{"rust": {"git_ignore": 640, "hidden_policy": 30}}`). Empty on a manifest written
   before it was recorded, which reads as no per-language data and never warns.
+- `policy_excluded_dirs_by_language`: the same files per language key and directory, each
+  directory with its counts by source and, when evidence shows it holds installed
+  third-party packages, its `dependency` evidence
+  (`{"python": {"env": {"by_source": {"git_ignore": 340}, "dependency": "python_environment"},
+  "generated": {"by_source": {"git_ignore": 40}}}}`). A file under such a directory counts
+  under the outermost one (`env`, `svc/lib/python3.12/site-packages`); any other file under
+  its top-level directory. Ingest probes only the ancestors of excluded programming-language
+  files, each directory once per scan: `pyvenv.cfg` or `conda-meta/` in any directory,
+  `*.dist-info`/`*.egg-info` in a `site-packages` or `dist-packages`, `modules.txt` or
+  `composer/installed.json` in a `vendor`. Redacted paths are not recorded, and secret-like
+  directories are withheld like `policy_excluded_dirs`. Coverage gaps name their directories
+  and price installed dependencies apart from it (`docs/ranking.md`, "Index coverage gaps").
+  Empty on a manifest written before it was recorded, which prices every missing file as
+  first-party source.
 
 What is counted:
 
@@ -143,7 +157,8 @@ confidence. It lists a language git ignore rules mostly excluded, a language und
 or 20-file rule, and, when policy left no programming-language source to consider, every
 language it emptied. Context packs and plans read it from the manifest and price it as the
 `index_coverage` signal (`docs/ranking.md`, "Index coverage gaps"); `ok --json status` and
-MCP `repo_status` list it as `coverage_gaps`. The repository-wide ratio and walk errors stay
+MCP `repo_status` list it as `coverage_gaps`, each gap naming the directories behind its missing
+files and counting those under installed dependencies. The repository-wide ratio and walk errors stay
 in the doctor's check. Committed source under an undeclared build directory is an
 `omitted` gap with reason `pruned` once it crosses those thresholds.
 
