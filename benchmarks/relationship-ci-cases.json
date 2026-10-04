@@ -170,9 +170,14 @@
         "selector": "caller_fn",
         "identity": "symbol:rust:calls:workspace_cross_crate_import:source"
       },
-      "expected_outcome": "must_not_emit",
+      "expected_outcome": "must_emit",
       "scenario": "workspace_cross_crate_import",
-      "notes": "Regression case: `use crate::auth::issue_token;` in workspace member `b` must never bind to member `a`'s `auth/issue_token.rs`, whose path gives the same module-key text."
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "crates::b::src::helpers::issue_token",
+        "identity": "symbol:rust:calls:workspace_cross_crate_import:target"
+      },
+      "notes": "Regression case: `use crate::auth::issue_token;` in workspace member `b` must never bind to member `a`'s `auth/issue_token.rs`, whose path gives the same module-key text; it reaches `b`'s own item through `b`'s `pub use crate::helpers::issue_token;` (#476)."
     },
     {
       "id": "ci-rust-calls-10-workspace_same_crate_import",
@@ -246,7 +251,7 @@
       },
       "expected_outcome": "must_not_emit",
       "scenario": "block_import_shadowing",
-      "notes": "Regression case: a block `use crate::b::target_fn;` shadows the file-level `use crate::a::target_fn;`; when the block import is unresolved, the call must not fall back to `a::target_fn`."
+      "notes": "Regression case: a block `use crate::b::target_fn;` shadows the file-level `use crate::a::target_fn;`; when the block import is unresolved, here because two globs of `b` bring in a `target_fn`, the call must not fall back to `a::target_fn`."
     },
     {
       "id": "ci-rust-calls-14-path_attribute_stale_module",
@@ -2996,6 +3001,291 @@
       "notes": "Regression case (#630): A field `engine: Box<Engine>` is a `Box` to the receiver logic, as a local of that type is, so no method of `Engine` is proven."
     },
     {
+      "id": "ci-rust-calls-144-crate_root_reexport_bare_call",
+      "fixture_id": "ci/ri3/rust/calls/crate_root_reexport_bare_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:crate_root_reexport_bare_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "crate_root_reexport_bare_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:crate_root_reexport_bare_call:target"
+      },
+      "notes": "Regression case (#476): `use crate::target_fn;` reaches `tokens::target_fn` through the crate root's `pub use tokens::target_fn;`, so the bare call is proven."
+    },
+    {
+      "id": "ci-rust-calls-145-crate_root_reexport_path_call",
+      "fixture_id": "ci/ri3/rust/calls/crate_root_reexport_path_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:crate_root_reexport_path_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "crate_root_reexport_path_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:crate_root_reexport_path_call:target"
+      },
+      "notes": "Regression case (#476): `crate::target_fn()` reaches the same item through the crate root's `pub use`."
+    },
+    {
+      "id": "ci-rust-calls-146-reexport_chain_alias_call",
+      "fixture_id": "ci/ri3/rust/calls/reexport_chain_alias_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:reexport_chain_alias_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "reexport_chain_alias_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:reexport_chain_alias_call:target"
+      },
+      "notes": "Regression case (#476): `crate::facade::mint()` follows `facade`'s `pub use crate::target_fn as mint;` and then the crate root's `pub use`."
+    },
+    {
+      "id": "ci-rust-calls-147-private_root_use_from_child_call",
+      "fixture_id": "ci/ri3/rust/calls/private_root_use_from_child_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:private_root_use_from_child_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "private_root_use_from_child_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:private_root_use_from_child_call:target"
+      },
+      "notes": "Regression case (#476): a private `use tokens::target_fn;` in the crate root is visible to `api` below it, so `use crate::target_fn;` reaches the item."
+    },
+    {
+      "id": "ci-rust-calls-148-prelude_glob_reexport_call",
+      "fixture_id": "ci/ri3/rust/calls/prelude_glob_reexport_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:prelude_glob_reexport_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "prelude_glob_reexport_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:prelude_glob_reexport_call:target"
+      },
+      "notes": "Regression case (#476): `crate::prelude::target_fn()` reaches the item through the prelude's glob `pub use crate::tokens::*;`, the only `use` that brings the name in."
+    },
+    {
+      "id": "ci-rust-calls-149-ambiguous_glob_reexport_call",
+      "fixture_id": "ci/ri3/rust/calls/ambiguous_glob_reexport_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:ambiguous_glob_reexport_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "ambiguous_glob_reexport_call",
+      "notes": "Regression case (#476): two globs of `facade` each bring in a `target_fn`, so `crate::facade::target_fn()` proves neither."
+    },
+    {
+      "id": "ci-rust-calls-150-glob_reexport_beside_local_item_call",
+      "fixture_id": "ci/ri3/rust/calls/glob_reexport_beside_local_item_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:glob_reexport_beside_local_item_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "glob_reexport_beside_local_item_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::tokens::target_fn",
+        "identity": "symbol:rust:calls:glob_reexport_beside_local_item_call:target"
+      },
+      "notes": "Regression case (#476): `tokens` defines `target_fn`, which shadows the `target_fn` its glob `pub use crate::ledger::*;` brings in, so `crate::tokens::target_fn()` is proven to the local item."
+    },
+    {
+      "id": "ci-rust-calls-151-duplicate_named_reexport_call",
+      "fixture_id": "ci/ri3/rust/calls/duplicate_named_reexport_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:duplicate_named_reexport_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "duplicate_named_reexport_call",
+      "notes": "Regression case (#476): two `cfg`-gated `pub use` declarations of `target_fn` in the crate root name different items, so `crate::target_fn()` proves neither."
+    },
+    {
+      "id": "ci-rust-calls-152-reexport_cycle_call",
+      "fixture_id": "ci/ri3/rust/calls/reexport_cycle_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:reexport_cycle_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "reexport_cycle_call",
+      "notes": "Regression case (#476): `ring` and `spoke` re-export `target_fn` from each other, a cycle that stays unresolved; `tokens::target_fn` is not reached."
+    },
+    {
+      "id": "ci-rust-calls-153-macro_module_glob_reexport_call",
+      "fixture_id": "ci/ri3/rust/calls/macro_module_glob_reexport_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:macro_module_glob_reexport_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "macro_module_glob_reexport_call",
+      "notes": "Regression case (#476): a macro invoked at the top of `facade` may define the name its glob brings in, so the glob's `target_fn` is not proven."
+    },
+    {
+      "id": "ci-rust-calls-154-cfg_attr_reexport_path_call_alternatives",
+      "fixture_id": "ci/ri3/rust/calls/cfg_attr_reexport_path_call_alternatives",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cfg_attr_reexport_path_call_alternatives:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "cfg_attr_reexport_path_call_alternatives",
+      "notes": "Regression case (#476, #615): `crate::sys::target_fn()` reaches `target_fn` through `sys`'s `pub use imp::target_fn;`, which makes no choice of `imp`'s file, so the call keeps a candidate in each and no authoritative edge."
+    },
+    {
+      "id": "ci-rust-calls-155-edition_2015_reexport_path_call",
+      "fixture_id": "ci/ri3/rust/calls/edition_2015_reexport_path_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:edition_2015_reexport_path_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "edition_2015_reexport_path_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::auth::target_fn",
+        "identity": "symbol:rust:calls:edition_2015_reexport_path_call:target"
+      },
+      "notes": "Regression case (#476, #632): in the 2015 edition `pub use auth::target_fn;` in `api` starts at the crate root, so `crate::api::target_fn()` reaches the crate root's `auth`, not the `auth` that `api` declares."
+    },
+    {
+      "id": "ci-rust-calls-156-workspace_dependency_reexport_path_call",
+      "fixture_id": "ci/ri3/rust/calls/workspace_dependency_reexport_path_call",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:workspace_dependency_reexport_path_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "workspace_dependency_reexport_path_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "crates::engine::src::inner::target_fn",
+        "identity": "symbol:rust:calls:workspace_dependency_reexport_path_call:target"
+      },
+      "notes": "Regression case (#476): `engine::target_fn()` reaches the item through the dependency crate root's glob `pub use inner::*;`."
+    },
+    {
+      "id": "ci-rust-calls-157-workspace_dependency_crate_visible_reexport",
+      "fixture_id": "ci/ri3/rust/calls/workspace_dependency_crate_visible_reexport",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:workspace_dependency_crate_visible_reexport:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "workspace_dependency_crate_visible_reexport",
+      "notes": "Regression case (#476): a `pub(crate) use` brings nothing in for another crate, so `engine::target_fn()` from the dependent package proves nothing."
+    },
+    {
+      "id": "ci-rust-calls-158-block_import_shadowing_reexport",
+      "fixture_id": "ci/ri3/rust/calls/block_import_shadowing_reexport",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:block_import_shadowing_reexport:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "block_import_shadowing_reexport",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::c::target_fn",
+        "identity": "symbol:rust:calls:block_import_shadowing_reexport:target"
+      },
+      "notes": "Regression case (#476): the sibling of case 13. A block `use crate::b::target_fn;` resolves through `b`'s `pub use crate::c::target_fn;` and shadows the file-level `use crate::a::target_fn;`, so the call is proven to `c::target_fn`."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
@@ -3376,9 +3666,14 @@
         "selector": "src/api.rs",
         "identity": "file:rust:imports:crate_root_reexport_fallback:source"
       },
-      "expected_outcome": "must_not_emit",
+      "expected_outcome": "must_emit",
       "scenario": "crate_root_reexport_fallback",
-      "notes": "Regression case: `use crate::issue_token;` reaches the item only through the crate root's `pub use`, which no module declaration proves; the crate root must not absorb the edge."
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/auth.rs",
+        "identity": "file:rust:imports:crate_root_reexport_fallback:target"
+      },
+      "notes": "Regression case: `use crate::issue_token;` reaches the item only through the crate root's `pub use`; the crate root must not absorb the edge, which reaches `src/auth.rs`, the file declaring the item (#476)."
     },
     {
       "id": "ci-rust-imports-05-workspace_dependency_reexport",

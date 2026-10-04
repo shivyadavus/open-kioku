@@ -96,6 +96,11 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
 
     walk(file, content, tree.root_node(), &mut ctx, &mut out);
     out.package_declaration = package_declaration(file, content, tree.root_node());
+    if file.language == Language::Rust {
+        let (opaque, names) = top_level_item_macros(content.as_bytes(), tree.root_node());
+        out.invokes_item_macro = opaque;
+        out.item_macro_names = names;
+    }
 
     // Reconcile Rust impl method parent_symbol_id and inheritance sites to the actual struct/trait symbol
     if file.language == Language::Rust {
@@ -783,6 +788,72 @@ fn rust_visibility(node: Node<'_>) -> Visibility {
         // `pub(crate)`, `pub(super)`, `pub(in path)`, and the bare `crate` modifier.
         _ => Visibility::Crate,
     }
+}
+
+/// What the macros a Rust file invokes at its top level, as items, may declare: whether one may
+/// expand to items and `use` declarations the parser does not see, and the names a
+/// `thread_local!` writes, which it declares as statics of the module. A macro that declares no
+/// name (`compile_error!`, the `assert!` and `const_assert!` families, `include_str!`,
+/// `include_bytes!`, `doctest!`) is left out; any other, `cfg_if!` and `include!` among them,
+/// may declare anything. A macro inside a function, an inline `mod` or another item is not at
+/// the top level.
+fn top_level_item_macros(source: &[u8], root: Node<'_>) -> (bool, Vec<String>) {
+    let mut opaque = false;
+    let mut names = Vec::new();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        let invocation = match child.kind() {
+            "macro_invocation" => child,
+            "expression_statement" => match child.named_child(0) {
+                Some(inner) if inner.kind() == "macro_invocation" => inner,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let name = invocation
+            .child_by_field_name("macro")
+            .and_then(|node| node.utf8_text(source).ok())
+            .map(|path| path.rsplit("::").next().unwrap_or(path).trim().to_string())
+            .unwrap_or_default();
+        if declares_no_name(&name) {
+            continue;
+        }
+        if name == "thread_local" {
+            let body = invocation.utf8_text(source).unwrap_or_default();
+            names.extend(thread_local_names(body));
+            continue;
+        }
+        opaque = true;
+    }
+    names.sort();
+    names.dedup();
+    (opaque, names)
+}
+
+/// A macro that expands to no item a path can name.
+fn declares_no_name(macro_name: &str) -> bool {
+    matches!(
+        macro_name,
+        "compile_error" | "include_str" | "include_bytes" | "doctest"
+    ) || ["assert", "debug_assert", "const_assert"]
+        .iter()
+        .any(|family| macro_name.starts_with(family))
+}
+
+/// The statics a `thread_local!` body declares: the name after each `static`.
+fn thread_local_names(body: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut words = body
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .filter(|word| !word.is_empty());
+    while let Some(word) = words.next() {
+        if word == "static" {
+            if let Some(name) = words.next() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// The `trait` or `impl` whose body directly holds this item. An item nested deeper, such as a
@@ -3042,6 +3113,50 @@ mod ri3_rust_module_receiver_tests {
 mod ri3_rust_use_import_site_tests {
     use super::{attribute_path_literals, parse_file};
     use open_kioku_core::{File, FileId, ImportSite, ImportedName, Language, RepositoryId};
+
+    #[test]
+    fn rust_files_record_a_macro_invoked_at_their_top_level() {
+        let invokes = |source: &str| {
+            let file = File {
+                id: FileId::new("file:src/facade.rs"),
+                repository_id: RepositoryId::new("repo"),
+                path: "src/facade.rs".into(),
+                language: Language::Rust,
+                size_bytes: 0,
+                content_hash: "hash".into(),
+                is_generated: false,
+                is_vendor: false,
+            };
+            let facts = parse_file(&file, source).expect("Rust macro fixture should parse");
+            (facts.invokes_item_macro, facts.item_macro_names)
+        };
+        let opaque = |source: &str| invokes(source).0;
+        assert!(opaque("pub use crate::store::*;\nmake_items!();\n"));
+        assert!(opaque(
+            "cfg_if::cfg_if! {\n    if #[cfg(unix)] { pub use unix::*; }\n}\n"
+        ));
+        assert!(opaque("crate::local_fn!();\n"));
+        assert!(opaque("include!(\"generated.rs\");\n"));
+        assert!(!opaque(
+            "macro_rules! m { () => {} }\npub fn f() { println!(\"x\"); }\nmod inner { m!(); }\n"
+        ));
+        // Macros that declare no name a glob could also supply.
+        for source in [
+            "compile_error!(\"unsupported\");\n",
+            "assert!(true);\n",
+            "const_assert_eq!(1, 1);\n",
+            "static_assertions::const_assert!(true);\n",
+            "include_str!(\"README.md\");\ninclude_bytes!(\"blob\");\n",
+            "doctest!(\"../README.md\");\n",
+        ] {
+            assert_eq!(invokes(source), (false, Vec::new()), "{source}");
+        }
+        assert_eq!(
+            invokes("std::thread_local! {\n    static X: u8 = 0;\n    pub static Y: u8 = 1;\n}\n"),
+            (false, vec!["X".to_string(), "Y".to_string()]),
+            "`thread_local!` declares the statics written in it"
+        );
+    }
 
     fn rust_import_sites(source: &str) -> Vec<ImportSite> {
         let file = File {

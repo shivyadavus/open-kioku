@@ -5,10 +5,11 @@ use crate::rust_use_path::{
 };
 use open_kioku_core::{
     File, FileId, ImportSite, Language, ModuleDeclarationSite, ScopeId, ScopeKind, SymbolId,
-    SymbolKind,
+    SymbolKind, Visibility,
 };
 use open_kioku_resolution::{
-    RustConfiguredModules, RustConfiguredRead, RustCrateNames, RustModulePlacement, RustModuleRoute,
+    RustConfiguredModules, RustConfiguredRead, RustCrateNames, RustModuleFiles,
+    RustModulePlacement, RustModuleRoute, RustReexport, RustReexported,
 };
 use open_kioku_semantic_model::{
     CargoImporter, ConfiguredImportTargets, ProjectModel, ProjectRoot,
@@ -17,10 +18,11 @@ pub use open_kioku_semantic_model::{
     ExportBinding, ExportIndex, ImportBinding, ImportBindingRule, ImportIndex, ImportOrigin,
     GLOB_IMPORT_LOCAL_NAME,
 };
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub type FileMap = HashMap<String, Vec<FileId>>;
@@ -106,8 +108,106 @@ pub(crate) struct RustModuleTree<'a> {
     shared_files: OnceCell<SharedFiles>,
     /// [`RustModuleTree::configured_modules`], computed on first use.
     configured: OnceCell<HashMap<String, RustConfiguredModules>>,
-    /// The `pub use` sites of each Rust file, which other crates reach items through.
-    reexports: HashMap<FileId, Vec<ImportSite>>,
+    /// The `use` sites of each Rust file, through which a path naming the file's module reaches
+    /// the names they bring in: any of them from the module's own crate, `pub use` from another.
+    /// Only those written at the top level of the file count ([`is_module_level`]).
+    module_uses: HashMap<FileId, Vec<ImportSite>>,
+    /// The Rust files whose top level invokes a macro, which may expand to items and `use`
+    /// declarations the parser does not see: no glob of theirs settles a name.
+    module_macros: HashSet<FileId>,
+    /// The names a top-level `thread_local!` of each Rust file declares: a glob of the file does
+    /// not settle them either.
+    module_macro_names: HashMap<FileId, HashSet<String>>,
+    /// What the `use` sites of a module bring in under a name, as [`RustModuleTree::used_name`]
+    /// found it.
+    used_names: RefCell<HashMap<UsedNameKey, Rc<UsedName>>>,
+    /// The [`RustModuleTree::used_name`] lookups under way, which a cycle of `use` declarations
+    /// returns to.
+    used_names_open: RefCell<HashSet<UsedNameKey>>,
+    /// How many lookups a cycle or [`MAX_REEXPORT_HOPS`] cut short. A lookup that saw one depends
+    /// on where it was entered from, so it is not kept.
+    used_name_cuts: Cell<usize>,
+}
+
+/// A module, by the extension-less paths of the files that may hold it, a name, and whether the
+/// path naming it is written in another crate.
+type UsedNameKey = (Vec<String>, String, bool);
+
+/// What the `use` sites at the top level of a module bring in under one name.
+#[derive(Debug, Clone, Default)]
+struct UsedName {
+    /// What each `use` naming it explicitly brings in, `as` alias included.
+    named: Vec<RustPathTarget>,
+    /// A `use` naming it explicitly that the tree cannot follow.
+    named_unresolved: bool,
+    /// What each glob `use` brings in under it.
+    globbed: Vec<RustPathTarget>,
+    /// A glob `use` the tree cannot follow, which may bring it in too.
+    glob_unresolved: bool,
+    /// The module's file invokes a macro at its top level, which may expand to a `use` or an item
+    /// of the name that shadows a glob.
+    macro_expanded: bool,
+}
+
+impl UsedName {
+    /// A lookup cut short: anything may bring the name in.
+    fn unknown() -> Self {
+        Self {
+            named_unresolved: true,
+            glob_unresolved: true,
+            ..Self::default()
+        }
+    }
+
+    /// What the name is, when the `use` sites settle it: a named `use` shadows a glob, and every
+    /// one that may supply it must agree. A glob settles nothing beside a macro, which may expand
+    /// to an item or a named `use` that shadows it; a written named `use` stands, since another
+    /// of the name a macro wrote would collide with it.
+    fn target(&self) -> Option<RustPathTarget> {
+        let (targets, unresolved) = if self.named.is_empty() && !self.named_unresolved {
+            (&self.globbed, self.glob_unresolved || self.macro_expanded)
+        } else {
+            (&self.named, self.named_unresolved)
+        };
+        match (targets.split_first(), unresolved) {
+            (Some((first, rest)), false) if rest.iter().all(|target| target == first) => {
+                Some(first.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a `use` may bring in an item of the name other than `item`, which the module
+    /// defines: a named `use`, which compiles beside the item only under a `cfg` or in another
+    /// namespace. A glob never does: an item the module defines shadows what a glob brings in.
+    /// What a macro may expand to is not counted either: it would collide with the item as a
+    /// written `use` does, and the index has always read an item it sees as the name.
+    fn may_override(&self, item: &SymbolId) -> bool {
+        self.named
+            .iter()
+            .any(|target| target.item.as_ref() != Some(item))
+            || self.named_unresolved
+    }
+}
+
+/// How a Rust path is followed through `use` declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReexportWalk {
+    /// The path is written in another crate than the module it names, which brings names in
+    /// for it only through `pub use`.
+    from_other_crate: bool,
+    /// How many `use` declarations it has been followed through.
+    hops: usize,
+}
+
+impl ReexportWalk {
+    /// A path written in a file, through a crate name or not.
+    fn start(crate_name: bool) -> Self {
+        Self {
+            from_other_crate: crate_name,
+            hops: 0,
+        }
+    }
 }
 
 /// A `mod name;` item with no body outside any inline module, and the files it may compile the
@@ -390,12 +490,17 @@ impl<'a> RustModuleTree<'a> {
             declared_modules,
             shared_files: OnceCell::new(),
             configured: OnceCell::new(),
-            reexports: HashMap::new(),
+            module_uses: HashMap::new(),
+            module_macros: HashSet::new(),
+            module_macro_names: HashMap::new(),
+            used_names: RefCell::default(),
+            used_names_open: RefCell::default(),
+            used_name_cuts: Cell::new(0),
         }
     }
 
-    /// Records the Rust import sites: the `pub use` sites a path through a crate name may be
-    /// re-exported by, and the names each scope imports.
+    /// Records the Rust import sites: the `use` sites a path through a module may reach names
+    /// through, and the names each scope imports.
     pub(crate) fn with_import_sites(mut self, sites: &[ImportSite]) -> Self {
         for site in sites
             .iter()
@@ -415,13 +520,25 @@ impl<'a> RustModuleTree<'a> {
                         .insert((site.file_id.clone(), scope.clone(), local));
                 }
             }
-            if site.reexported {
-                self.reexports
-                    .entry(site.file_id.clone())
-                    .or_default()
-                    .push(site.clone());
-            }
+            self.module_uses
+                .entry(site.file_id.clone())
+                .or_default()
+                .push(site.clone());
         }
+        self.used_names = RefCell::default();
+        self
+    }
+
+    /// Records the Rust files whose top level invokes a macro that may declare anything, and the
+    /// names each file's `thread_local!` declares (see [`RustModuleTree::module_macros`]).
+    pub(crate) fn with_module_macros(
+        mut self,
+        files: HashSet<FileId>,
+        names: HashMap<FileId, HashSet<String>>,
+    ) -> Self {
+        self.module_macros = files;
+        self.module_macro_names = names;
+        self.used_names = RefCell::default();
         self
     }
 
@@ -616,9 +733,8 @@ impl<'a> RustModuleTree<'a> {
     /// `source`, written in `file` (at `importer`) in `scope`, mapped onto a crate module tree:
     /// through a module the file declares in scope there (see [`RustModuleTree::use_path_start`]),
     /// through a crate name, or `crate::`/`self::`/`super::` in the importer's own crate. The flag
-    /// is set for a crate-name path, whose items may be reached through that crate's `pub use`
-    /// re-exports. A path whose first segment names both such a module and a crate is mapped
-    /// onto neither.
+    /// is set for a crate-name path, which is written in another crate than the one it names. A
+    /// path whose first segment names both such a module and a crate is mapped onto neither.
     fn rust_path(
         &self,
         (file, importer): (&FileId, &Path),
@@ -655,8 +771,9 @@ impl<'a> RustModuleTree<'a> {
 
     /// What `path` names: the file of a declared module, or else the one module-level item of
     /// its name in the declared parent module. A path naming both a module file and an item
-    /// names the module. When the parent declares no item of the name and `follow_reexports` is
-    /// set, the `pub use` sites of the parent are followed instead.
+    /// names the module. When the parent declares no item of the name, the `use` sites of the
+    /// parent are followed instead, as `walk` says (#476); one it declares that a `use` beside it
+    /// may stand in for leaves the path unresolved.
     ///
     /// A path through a module whose file configuration selects also names what it reaches in
     /// each file of that module (see [`RustModuleTree::configured_path_targets`]); `writer` is
@@ -666,12 +783,11 @@ impl<'a> RustModuleTree<'a> {
         &self,
         path: &RustUsePath,
         writer: Option<&Path>,
-        follow_reexports: bool,
+        walk: ReexportWalk,
         symbols: &open_kioku_resolution::SymbolIndex,
         scopes: &open_kioku_resolution::ScopeIndex,
-        hops: usize,
     ) -> Option<RustPathTarget> {
-        let placed = self.placed_path_target(path, follow_reexports, symbols, scopes, hops);
+        let placed = self.placed_path_target(path, walk, symbols, scopes);
         match self.configured_path_targets(path, writer, placed, symbols) {
             ConfiguredPath::Alternatives(target) | ConfiguredPath::Proven(target) => target,
         }
@@ -681,10 +797,9 @@ impl<'a> RustModuleTree<'a> {
     fn placed_path_target(
         &self,
         path: &RustUsePath,
-        follow_reexports: bool,
+        walk: ReexportWalk,
         symbols: &open_kioku_resolution::SymbolIndex,
         scopes: &open_kioku_resolution::ScopeIndex,
-        hops: usize,
     ) -> Option<RustPathTarget> {
         let (item_name, parent) = path.segments.split_last()?;
         if let Some(module_file) = self.module_file(path, &path.segments) {
@@ -700,15 +815,19 @@ impl<'a> RustModuleTree<'a> {
         }
         let items = rust_module_items(&self.module_stems(path, parent), item_name, symbols);
         match items.as_slice() {
-            [item] => Some(RustPathTarget {
+            // An item defined in the module is the name, shadowing any glob, unless a named `use`
+            // beside it may stand for another, which compiles only under a `cfg` or in another
+            // namespace (#476).
+            [item] => (!self
+                .used_name(path, symbols, scopes, walk)
+                .may_override(item))
+            .then(|| RustPathTarget {
                 module_file: None,
                 item: Some(item.clone()),
                 reexport: false,
                 configured: None,
             }),
-            // An item defined in the module is the name; a `pub use` of the same name beside it
-            // does not compile, so it is followed only where the module defines none.
-            [] if follow_reexports => self.reexported_target(path, symbols, scopes, hops),
+            [] => self.reexported_target(path, symbols, scopes, walk),
             _ => None,
         }
     }
@@ -906,60 +1025,95 @@ impl<'a> RustModuleTree<'a> {
         placed.then_some(file.importer_module)
     }
 
-    /// What the last segment of `path` names through the `pub use` sites of its parent module,
-    /// followed from the re-exporting file. A named re-export shadows a glob one; the name is
-    /// bound only when every re-export of it the module holds agrees, and one the tree cannot
-    /// follow leaves it unbound.
+    /// What the last segment of `path` names through the `use` sites of its parent module,
+    /// followed from the module's file: any of them for a path from the module's own crate, and
+    /// only `pub use` for one from another (#476). A named `use` shadows a glob; the name is bound
+    /// only when every `use` of it the module holds agrees, and one the tree cannot follow leaves
+    /// it unbound.
     fn reexported_target(
         &self,
         path: &RustUsePath,
         symbols: &open_kioku_resolution::SymbolIndex,
         scopes: &open_kioku_resolution::ScopeIndex,
-        hops: usize,
+        walk: ReexportWalk,
     ) -> Option<RustPathTarget> {
-        if hops >= MAX_REEXPORT_HOPS {
-            return None;
-        }
-        let (name, parent) = path.segments.split_last()?;
+        let target = self.used_name(path, symbols, scopes, walk).target()?;
+        Some(RustPathTarget {
+            reexport: true,
+            ..target
+        })
+    }
+
+    /// What the `use` sites at the top level of the module holding the last segment of `path`
+    /// bring in under that name, each followed from the module's file. A glob brings in only an
+    /// item it can see: from another crate a `pub` one, and from the module's own crate one that
+    /// is not private to its module; a module or a private item through a glob is left
+    /// unresolved, and so is a glob of a file whose top level invokes a macro. A cycle of
+    /// `use` declarations, or a chain longer than [`MAX_REEXPORT_HOPS`], is unresolved too.
+    fn used_name(
+        &self,
+        path: &RustUsePath,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+        walk: ReexportWalk,
+    ) -> Rc<UsedName> {
+        let Some((name, parent)) = path.segments.split_last() else {
+            return Rc::new(UsedName::unknown());
+        };
         if name == "*" {
-            return None;
+            return Rc::new(UsedName::unknown());
         }
-        let mut named = Vec::new();
-        let mut named_unresolved = false;
-        let mut globbed = Vec::new();
-        let mut glob_unresolved = false;
-        for file in self
-            .module_stems(path, parent)
-            .iter()
-            .filter_map(|stem| self.files_by_stem.get(stem))
+        let stems = self.module_stems(path, parent);
+        let key = (stems, name.clone(), walk.from_other_crate);
+        if let Some(found) = self.used_names.borrow().get(&key) {
+            return Rc::clone(found);
+        }
+        if walk.hops >= MAX_REEXPORT_HOPS || !self.used_names_open.borrow_mut().insert(key.clone())
         {
+            self.used_name_cuts.set(self.used_name_cuts.get() + 1);
+            return Rc::new(UsedName::unknown());
+        }
+        let cuts = self.used_name_cuts.get();
+        let mut found = UsedName::default();
+        for file in key.0.iter().filter_map(|stem| self.files_by_stem.get(stem)) {
             let Some(importer) = self.files.get(file) else {
                 continue;
             };
-            for site in self.reexports.get(file).into_iter().flatten() {
-                // A `pub use` inside an inline `mod` re-exports from that module, not this one.
-                if site
-                    .scope_id
-                    .as_ref()
-                    .is_some_and(|scope| is_inside_inline_module(scope, scopes))
-                {
-                    continue;
-                }
+            let sites = self
+                .module_uses
+                .get(file)
+                .into_iter()
+                .flatten()
+                .filter(|site| is_module_level(site.scope_id.as_ref(), scopes))
+                .filter(|site| !walk.from_other_crate || site.reexported);
+            for site in sites {
                 if site.is_glob {
                     let Some(prefix) = site.source.strip_suffix("::*") else {
+                        found.glob_unresolved = true;
                         continue;
                     };
                     let source = format!("{prefix}::{name}");
-                    match self.reexport_source_target(
+                    let target = self.reexport_source_target(
                         (file, importer),
                         site.scope_id.as_ref(),
                         &source,
                         name,
                         (symbols, scopes),
-                        hops,
-                    ) {
-                        Some(target) => globbed.push(target),
-                        None => glob_unresolved = true,
+                        walk,
+                    );
+                    match target {
+                        Some(target) if glob_brings_in(&target, walk, symbols) => {
+                            found.globbed.push(target);
+                        }
+                        // A module the glob opens that holds nothing of the name brings none in.
+                        None if self.glob_lacks_name(
+                            (file, importer),
+                            site,
+                            name,
+                            (symbols, scopes),
+                            walk,
+                        ) => {}
+                        _ => found.glob_unresolved = true,
                     }
                     continue;
                 }
@@ -974,34 +1128,97 @@ impl<'a> RustModuleTree<'a> {
                         &site.source,
                         &binding.imported,
                         (symbols, scopes),
-                        hops,
+                        walk,
                     ) {
-                        Some(target) => named.push(target),
-                        None => named_unresolved = true,
+                        Some(target) => found.named.push(target),
+                        None => found.named_unresolved = true,
                     }
                 }
             }
+            // A macro may expand to an item or a `use` of the name the parser does not see.
+            found.macro_expanded |= self.module_macros.contains(file)
+                || self
+                    .module_macro_names
+                    .get(file)
+                    .is_some_and(|names| names.contains(name));
         }
-        // A glob the tree cannot follow may supply the name too, unless a named one shadows it.
-        let (mut targets, unresolved) = if named.is_empty() && !named_unresolved {
-            (globbed, glob_unresolved)
-        } else {
-            (named, named_unresolved)
-        };
-        targets.dedup();
-        match (targets.as_slice(), unresolved) {
-            ([target], false) => Some(RustPathTarget {
-                reexport: true,
-                ..target.clone()
-            }),
-            _ => None,
+        self.used_names_open.borrow_mut().remove(&key);
+        let found = Rc::new(found);
+        if self.used_name_cuts.get() == cuts {
+            self.used_names.borrow_mut().insert(key, Rc::clone(&found));
         }
+        found
     }
 
-    /// What the path a `pub use` in `importer`, written at `scope`, names, when its last segment
-    /// is `imported`. Such a path may also be a Rust 2018 path from the re-exporting module
+    /// Whether the module the glob `site` in `importer` opens provably holds nothing named
+    /// `name`: it is a module the tree declares as a file, read outside any configuration choice,
+    /// whose files define no item or module of the name and whose top-level `use` sites bring
+    /// none in, followed as a glob from `walk` would follow them.
+    fn glob_lacks_name(
+        &self,
+        importer: (&FileId, &Path),
+        site: &ImportSite,
+        name: &str,
+        (symbols, scopes): (
+            &open_kioku_resolution::SymbolIndex,
+            &open_kioku_resolution::ScopeIndex,
+        ),
+        walk: ReexportWalk,
+    ) -> bool {
+        let Some((mut path, crate_name)) = self.rust_path(
+            importer,
+            site.scope_id.as_ref(),
+            &site.source,
+            symbols,
+            scopes,
+        ) else {
+            return false;
+        };
+        let Some((_, module)) = path.segments.split_last() else {
+            return false;
+        };
+        let module = module.to_vec();
+        if !self.declares_file_modules(&path, &module) {
+            return false;
+        }
+        let writer = (!crate_name).then_some(importer.1);
+        if self.configured_choice(&path, writer, &module).is_some() {
+            return false;
+        }
+        let stems = self.module_stems(&path, &module);
+        if !stems
+            .iter()
+            .any(|stem| self.files_by_stem.contains_key(stem))
+        {
+            return false;
+        }
+        let defined = stems.iter().any(|stem| {
+            symbols
+                .by_qualified
+                .get(&format!("{}::{name}", stem.replace('/', "::")))
+                .is_some_and(|ids| !ids.is_empty())
+        });
+        path.segments = module;
+        path.segments.push(name.to_string());
+        if defined || self.module_file(&path, &path.segments).is_some() {
+            return false;
+        }
+        let walk = ReexportWalk {
+            from_other_crate: walk.from_other_crate || crate_name,
+            hops: walk.hops + 1,
+        };
+        let used = self.used_name(&path, symbols, scopes, walk);
+        used.named.is_empty()
+            && !used.named_unresolved
+            && used.globbed.is_empty()
+            && !used.glob_unresolved
+            && !used.macro_expanded
+    }
+
+    /// What the path a `use` in `importer`, written at `scope`, names, when its last segment is
+    /// `imported`. Such a path may also be a Rust 2018 path from the module of the `use`
     /// (`pub use auth::Token;` beside `mod auth;`), read as [`RustModuleTree::use_path_start`]
-    /// reads it.
+    /// reads it. Past a crate name the walk is in another crate, and stays there.
     fn reexport_source_target(
         &self,
         importer: (&FileId, &Path),
@@ -1012,7 +1229,7 @@ impl<'a> RustModuleTree<'a> {
             &open_kioku_resolution::SymbolIndex,
             &open_kioku_resolution::ScopeIndex,
         ),
-        hops: usize,
+        walk: ReexportWalk,
     ) -> Option<RustPathTarget> {
         let (path, crate_name) = self.rust_path(importer, scope, source, symbols, scopes)?;
         let (_, importer) = importer;
@@ -1022,7 +1239,208 @@ impl<'a> RustModuleTree<'a> {
         // `pub use imp::f;` in the module declaring a configuration-selected `imp` makes no
         // choice, so the re-exported name is `f` of each file `imp` may be.
         let writer = (!crate_name).then_some(importer);
-        self.rust_path_target(&path, writer, true, symbols, scopes, hops + 1)
+        let walk = ReexportWalk {
+            from_other_crate: walk.from_other_crate || crate_name,
+            hops: walk.hops + 1,
+        };
+        self.rust_path_target(&path, writer, walk, symbols, scopes)
+    }
+
+    /// What each name the `use` sites of a Rust module bring in names, for paths through the
+    /// module that the resolver reads (#476), by the qualified name tree-sitter would give an
+    /// item of the name in the module's file. Recorded: a name the module brings in and does not
+    /// define, when the `use` sites settle what it is, and a name it defines that a named `use`
+    /// beside it may stand for instead, which stays ambiguous. Only files the tree places, with `use`
+    /// sites at their top level, are read; the names read are those their named `use` sites bind
+    /// and those their globs may bring in, that `wanted` admits: a path the resolver reads ends
+    /// in a name some call writes.
+    pub(crate) fn reexports(
+        &self,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+        wanted: impl Fn(&str) -> bool,
+    ) -> HashMap<String, RustReexport> {
+        let names = self.module_use_names(symbols, scopes);
+        let mut reexports = HashMap::new();
+        let mut files = names.keys().collect::<Vec<_>>();
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        for file in files {
+            let (Some(importer), Some(stem)) = (
+                self.files.get(file),
+                self.files.get(file).and_then(|path| rust_file_stem(path)),
+            ) else {
+                continue;
+            };
+            let exports = self
+                .module_uses
+                .get(file)
+                .into_iter()
+                .flatten()
+                .any(|site| site.reexported && is_module_level(site.scope_id.as_ref(), scopes));
+            for name in names[file].iter().filter(|name| wanted(name)) {
+                let read = |walk| self.reexport_of((file, importer), name, walk, symbols, scopes);
+                let in_crate = read(ReexportWalk::start(false));
+                let from_other_crates = if exports {
+                    read(ReexportWalk::start(true))
+                } else {
+                    None
+                };
+                if in_crate.is_none() && from_other_crates.is_none() {
+                    continue;
+                }
+                reexports.insert(
+                    format!("{}::{name}", stem.replace('/', "::")),
+                    RustReexport {
+                        file: file.clone(),
+                        in_crate,
+                        from_other_crates,
+                    },
+                );
+            }
+        }
+        reexports
+    }
+
+    /// What `name` is in the module of `file` through its `use` sites, as `walk` follows them:
+    /// see [`RustModuleTree::reexports`].
+    fn reexport_of(
+        &self,
+        file: (&FileId, &Path),
+        name: &str,
+        walk: ReexportWalk,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> Option<RustReexported> {
+        let (path, _) = self.rust_path(file, None, &format!("self::{name}"), symbols, scopes)?;
+        if self.module_file(&path, &path.segments).is_some() {
+            return None;
+        }
+        let (_, parent) = path.segments.split_last()?;
+        let items = rust_module_items(&self.module_stems(&path, parent), name, symbols);
+        match items.as_slice() {
+            [] => {
+                let target = self.reexported_target(&path, symbols, scopes, walk)?;
+                match (target.configured, target.item) {
+                    (Some(configured), _) if !configured.items.is_empty() => {
+                        Some(RustReexported::Alternatives {
+                            items: configured.items,
+                            files: RustModuleFiles {
+                                files: configured.files,
+                                unread: configured.unread,
+                            },
+                        })
+                    }
+                    (None, Some(item)) => Some(RustReexported::Item(item)),
+                    _ => None,
+                }
+            }
+            [item] => {
+                let used = self.used_name(&path, symbols, scopes, walk);
+                if !used.may_override(item) {
+                    return None;
+                }
+                let mut candidates = vec![item.clone()];
+                for target in &used.named {
+                    candidates.extend(target.item.iter().cloned());
+                    if let Some(configured) = &target.configured {
+                        candidates.extend(configured.items.iter().cloned());
+                    }
+                }
+                candidates.sort_by(|left, right| left.0.cmp(&right.0));
+                candidates.dedup();
+                Some(RustReexported::Ambiguous(candidates))
+            }
+            _ => None,
+        }
+    }
+
+    /// The names each Rust file's top-level `use` sites may bring in: those its named sites bind,
+    /// and, through its globs, the names each module a glob opens defines or brings in itself,
+    /// read to a fixed point so that globs of globs are covered.
+    fn module_use_names(
+        &self,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> HashMap<FileId, BTreeSet<String>> {
+        let mut names = HashMap::<FileId, BTreeSet<String>>::new();
+        let mut opens = HashMap::<FileId, Vec<FileId>>::new();
+        for (file, sites) in &self.module_uses {
+            let Some(importer) = self.files.get(file) else {
+                continue;
+            };
+            let sites = sites
+                .iter()
+                .filter(|site| is_module_level(site.scope_id.as_ref(), scopes))
+                .collect::<Vec<_>>();
+            if sites.is_empty() {
+                continue;
+            }
+            let own = names.entry(file.clone()).or_default();
+            for site in sites {
+                if !site.is_glob {
+                    own.extend(site.bindings.iter().map(|binding| binding.local.clone()));
+                    continue;
+                }
+                let Some((path, _)) = self.rust_path(
+                    (file, importer),
+                    site.scope_id.as_ref(),
+                    &site.source,
+                    symbols,
+                    scopes,
+                ) else {
+                    continue;
+                };
+                let Some((_, module)) = path.segments.split_last() else {
+                    continue;
+                };
+                let stems = if module.is_empty() {
+                    self.module_stems(&path, module)
+                } else {
+                    path.module_file_stems(module)
+                };
+                opens.entry(file.clone()).or_default().extend(
+                    stems
+                        .iter()
+                        .filter_map(|stem| self.files_by_stem.get(stem).cloned()),
+                );
+            }
+        }
+        // What a glob may bring in: what the module it opens defines, and what it brings in.
+        let supplies = |file: &FileId, names: &HashMap<FileId, BTreeSet<String>>| {
+            let mut found = names.get(file).cloned().unwrap_or_default();
+            found.extend(
+                symbols
+                    .by_file
+                    .get(file)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| symbols.get(id))
+                    .filter(|symbol| {
+                        symbol.language == Language::Rust && symbol.parent_symbol_id.is_none()
+                    })
+                    .map(|symbol| symbol.name.clone()),
+            );
+            found
+        };
+        let mut opening = opens.keys().cloned().collect::<Vec<_>>();
+        opening.sort_by(|left, right| left.0.cmp(&right.0));
+        loop {
+            let mut changed = false;
+            for file in &opening {
+                let mut found = BTreeSet::new();
+                for opened in &opens[file] {
+                    found.extend(supplies(opened, &names));
+                }
+                let own = names.entry(file.clone()).or_default();
+                let before = own.len();
+                own.extend(found);
+                changed |= own.len() != before;
+            }
+            if !changed {
+                break;
+            }
+        }
+        names
     }
 
     /// Records the repository-relative paths discovery skipped; only Rust files matter.
@@ -2496,7 +2914,13 @@ fn rust_import_target(
     // A path through a crate name is written in another crate, where no choice of that crate's
     // configuration-selected modules is made.
     let writer = (!crate_name).then_some(importer);
-    modules.rust_path_target(&path, writer, crate_name, symbols, scopes, 0)
+    modules.rust_path_target(
+        &path,
+        writer,
+        ReexportWalk::start(crate_name),
+        symbols,
+        scopes,
+    )
 }
 
 /// The module-level Rust items named `item` in the files at `module_stems`.
@@ -2553,8 +2977,9 @@ pub const RUST_ITEM_MODULE_STRATEGY: &str = "rust-item-module";
 /// A relative path written inside an inline `mod` block that cannot leave the file it is written
 /// in. The file imports its own module, which is no dependency, so no edge is emitted.
 pub const RUST_SELF_MODULE_STRATEGY: &str = "rust-self-module";
-/// A path through a crate name whose item is reached by following that crate's `pub use`
-/// re-exports reaches the file that defines the item, or the module file it names.
+/// A path whose item is reached by following `use` re-exports, of the importer's own crate or
+/// of the crate a crate name names, reaches the file that defines the item, or the module file
+/// it names (#476).
 pub const RUST_REEXPORT_STRATEGY: &str = "rust-reexport";
 
 impl RustImportEdgeTargets {
@@ -2600,9 +3025,8 @@ impl RustImportEdgeTargets {
 /// - a glob reaches the file of the module it opens;
 /// - an item reaches the file of the module declaring it, which is the crate root only when the
 ///   item is declared there;
-/// - an item a crate-name path reaches only through that crate's `pub use` re-exports reaches the
-///   file declaring it, with its own strategy; an in-crate path through a re-export stays
-///   unresolved;
+/// - an item a path reaches only through `use` re-exports, of its own crate or of the crate a
+///   crate name names, reaches the file declaring it, with its own strategy (#476);
 /// - a path of the importer's own crate the tree cannot answer is left unresolved, including a
 ///   relative path written inside an inline `mod` block, whose module the importing file's path
 ///   cannot tell. A path into a dependency the tree cannot answer is not recorded, and resolves
@@ -2655,7 +3079,8 @@ pub(crate) fn rust_import_edge_targets(
                     // A path through a crate name is written in another crate, where no choice
                     // of that crate's configuration-selected modules is made.
                     let writer = (!crate_name).then_some(*importer);
-                    rust_import_edge(&path, crate_name, writer, symbols, scopes, modules)
+                    let walk = ReexportWalk::start(crate_name);
+                    rust_import_edge(&path, walk, writer, symbols, scopes, modules)
                 })
         };
         if !in_crate && edge.is_none() {
@@ -2722,7 +3147,7 @@ fn rust_self_module_site(site: &ImportSite, scopes: &open_kioku_resolution::Scop
 
 fn rust_import_edge(
     path: &RustUsePath,
-    follow_reexports: bool,
+    walk: ReexportWalk,
     writer: Option<&Path>,
     symbols: &open_kioku_resolution::SymbolIndex,
     scopes: &open_kioku_resolution::ScopeIndex,
@@ -2740,7 +3165,7 @@ fn rust_import_edge(
     // configuration-selected module adds bind the names, not this edge. A writer inside one
     // alternative imports from that alternative alone, and from its own file when that leaves one
     // for every choice on the path (#624).
-    let placed = modules.placed_path_target(path, follow_reexports, symbols, scopes, 0);
+    let placed = modules.placed_path_target(path, walk, symbols, scopes);
     let target = match modules.configured_path_targets(path, writer, placed, symbols) {
         ConfiguredPath::Alternatives(target) | ConfiguredPath::Proven(target) => target,
     }?;
@@ -2848,6 +3273,38 @@ fn inline_file_modules(
         modules.insert((declaring, module));
     }
     (modules, tops)
+}
+
+/// Whether a Rust `use` written at `scope` brings names into the module of its file: it is
+/// written at the file's top level, not in a function, block or inline `mod`.
+fn is_module_level(scope: Option<&ScopeId>, scopes: &open_kioku_resolution::ScopeIndex) -> bool {
+    scope.is_none_or(|scope| {
+        scopes
+            .get(scope)
+            .is_some_and(|scope| scope.kind == ScopeKind::File)
+    })
+}
+
+/// Whether a glob `use` brings in `target`, which the path through the module it opens names: an
+/// item visible where the glob is, from another crate a `pub` one and from the module's own crate
+/// one not private to its module, or the items a module configuration selects, none proven. A
+/// module, and a private item, whose visibility the glob's module may or may not have, are not
+/// settled.
+fn glob_brings_in(
+    target: &RustPathTarget,
+    walk: ReexportWalk,
+    symbols: &open_kioku_resolution::SymbolIndex,
+) -> bool {
+    match &target.item {
+        Some(item) => symbols.get(item).is_some_and(|symbol| {
+            if walk.from_other_crate {
+                symbol.visibility == Visibility::Public
+            } else {
+                symbol.visibility != Visibility::Private
+            }
+        }),
+        None => target.module_file.is_none() && target.configured.is_some(),
+    }
 }
 
 fn is_inside_inline_module(scope_id: &ScopeId, scopes: &open_kioku_resolution::ScopeIndex) -> bool {
@@ -6449,5 +6906,473 @@ mod tests {
         assert_eq!(named("crates/engine/src/main.rs"), vec!["engine"]);
         assert_eq!(named("crates/engine/tests/it.rs"), vec!["engine"]);
         assert_eq!(named("crates/app/src/lib.rs"), vec!["engine"]);
+    }
+
+    /// The modules of a package at the repository root (`src/lib.rs`), indexed with the `use`
+    /// sites of every file, and with `macros` the files whose top level invokes a macro.
+    fn module_tree_with_uses<'a>(
+        files: &'a [File],
+        project: &'a ProjectModel,
+        declarations: &[ModuleDeclarationSite],
+        sites: &[ImportSite],
+        macros: &[&str],
+        scopes: &open_kioku_resolution::ScopeIndex,
+    ) -> RustModuleTree<'a> {
+        RustModuleTree::new(files, project, declarations, scopes)
+            .with_import_sites(sites)
+            .with_module_macros(
+                macros
+                    .iter()
+                    .filter(|file| !file.contains(':'))
+                    .map(|file| FileId::new(format!("file:{file}")))
+                    .collect(),
+                // `file:name`: `file`'s `thread_local!` declares `name`.
+                macros
+                    .iter()
+                    .filter_map(|entry| entry.split_once(':'))
+                    .map(|(file, name)| {
+                        (
+                            FileId::new(format!("file:{file}")),
+                            HashSet::from([name.to_string()]),
+                        )
+                    })
+                    .collect(),
+            )
+    }
+
+    /// `pub use <source>;` in `importer`, binding `local`.
+    fn rust_pub_use(importer: &str, source: &str, local: &str) -> ImportSite {
+        ImportSite {
+            reexported: true,
+            ..rust_use_site(importer, source, local, None)
+        }
+    }
+
+    /// Binds every `use` site of `importer` in the package, as indexing does, and returns what
+    /// each `local` name is bound to with the rule that bound it.
+    fn bind_through_uses(
+        files: &[&str],
+        declarations: Vec<ModuleDeclarationSite>,
+        sites: &[ImportSite],
+        symbols: Vec<Symbol>,
+        macros: &[&str],
+    ) -> ImportRegistry {
+        let files = files.iter().copied().map(source_file).collect::<Vec<_>>();
+        let project = rust_project(&[("", None)]);
+        let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules =
+            module_tree_with_uses(&files, &project, &declarations, sites, macros, &scopes);
+        let mut registry = ImportRegistry::default();
+        for site in sites {
+            registry.insert_unresolved_site(site);
+        }
+        registry.resolve_rust_imports(&symbols, &scopes, &modules);
+        registry
+    }
+
+    /// `(target, rule)` of the binding of `local` in `importer`, `None` where it is unbound.
+    fn bound_with_rule(
+        registry: &ImportRegistry,
+        importer: &str,
+        local: &str,
+    ) -> Option<(String, ImportBindingRule)> {
+        let binding = binding(registry, importer, local);
+        binding
+            .target_symbol
+            .as_ref()
+            .map(|target| (target.0.clone(), binding.rule))
+    }
+
+    const REEXPORT_FILES: [&str; 10] = [
+        "src/lib.rs",
+        "src/api.rs",
+        "src/auth.rs",
+        "src/facade.rs",
+        "src/prelude.rs",
+        "src/store.rs",
+        "src/ledger.rs",
+        "src/ring.rs",
+        "src/loop_back.rs",
+        "src/vault.rs",
+    ];
+
+    fn reexport_declarations() -> Vec<ModuleDeclarationSite> {
+        [
+            "api",
+            "auth",
+            "facade",
+            "prelude",
+            "store",
+            "ledger",
+            "ring",
+            "loop_back",
+            "vault",
+        ]
+        .into_iter()
+        .map(|module| mod_decl("src/lib.rs", module))
+        .collect()
+    }
+
+    fn reexport_symbols() -> Vec<Symbol> {
+        vec![
+            rust_symbol("src/auth.rs", "issue_token"),
+            rust_symbol("src/auth.rs", "Token"),
+            rust_symbol("src/auth.rs", "revoke"),
+            rust_symbol("src/store.rs", "open"),
+            rust_symbol("src/store.rs", "close"),
+            rust_symbol("src/ledger.rs", "open"),
+            rust_symbol("src/ledger.rs", "post"),
+        ]
+    }
+
+    #[test]
+    fn rust_item_imports_follow_use_reexports_of_the_module_they_name() {
+        // `lib.rs`: `pub use auth::issue_token;`, `pub use auth::{Token, revoke as cancel};`,
+        // and a private `use crate::store::close;`. `facade.rs` re-exports the root's
+        // re-export again, so `crate::facade::mint` takes two steps.
+        let sites = vec![
+            rust_pub_use("src/lib.rs", "auth::issue_token", "issue_token"),
+            rust_pub_use("src/lib.rs", "auth::Token", "Token"),
+            rust_pub_use("src/lib.rs", "auth::revoke", "cancel"),
+            rust_use_site("src/lib.rs", "crate::store::close", "close", None),
+            ImportSite {
+                reexported: true,
+                ..rust_use_site("src/facade.rs", "crate::issue_token", "mint", None)
+            },
+            rust_use_site("src/api.rs", "crate::issue_token", "issue_token", None),
+            rust_use_site("src/api.rs", "crate::Token", "Token", None),
+            rust_use_site("src/api.rs", "crate::cancel", "cancel", None),
+            rust_use_site("src/api.rs", "crate::close", "close", None),
+            rust_use_site("src/api.rs", "crate::facade::mint", "mint", None),
+            rust_use_site("src/api.rs", "crate::revoke", "revoke", None),
+        ];
+        let registry = bind_through_uses(
+            &REEXPORT_FILES,
+            reexport_declarations(),
+            &sites,
+            reexport_symbols(),
+            &[],
+        );
+        let reexported = |target: &str| {
+            Some((
+                format!("symbol:src/auth.rs:{target}"),
+                ImportBindingRule::RustReexport,
+            ))
+        };
+        let api = "src/api.rs";
+        assert_eq!(
+            bound_with_rule(&registry, api, "issue_token"),
+            reexported("issue_token"),
+            "a single `pub use` in the crate root"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "Token"),
+            reexported("Token"),
+            "one path of a grouped `pub use`"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "cancel"),
+            reexported("revoke"),
+            "an aliased one, by its alias"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "revoke"),
+            None,
+            "and not by the name it renames"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "close"),
+            Some((
+                "symbol:src/store.rs:close".into(),
+                ImportBindingRule::RustReexport
+            )),
+            "a private `use` of the crate root, reached from a module below it"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "mint"),
+            reexported("issue_token"),
+            "a chain of two re-exports"
+        );
+    }
+
+    #[test]
+    fn rust_glob_reexports_bind_a_name_only_one_item_supplies() {
+        // `prelude.rs`: `pub use crate::store::*;` and `pub use crate::auth::*;`, and a named
+        // `pub use crate::ledger::open;` that shadows the globs' `open`. `facade.rs`:
+        // `pub use crate::store::*;` and `pub use crate::ledger::*;`, which both bring in
+        // `open`.
+        let glob = |importer: &str, source: &str| ImportSite {
+            reexported: true,
+            ..rust_glob_site(importer, source, None)
+        };
+        let mut sites = vec![
+            glob("src/prelude.rs", "crate::store::*"),
+            glob("src/prelude.rs", "crate::auth::*"),
+            rust_pub_use("src/prelude.rs", "crate::ledger::open", "open"),
+            glob("src/facade.rs", "crate::store::*"),
+            glob("src/facade.rs", "crate::ledger::*"),
+        ];
+        for (source, local) in [
+            ("crate::prelude::close", "close"),
+            ("crate::prelude::issue_token", "issue_token"),
+            ("crate::prelude::open", "open"),
+            ("crate::facade::open", "open_either"),
+            ("crate::facade::post", "post"),
+        ] {
+            sites.push(rust_use_site("src/api.rs", source, local, None));
+        }
+        let registry = bind_through_uses(
+            &REEXPORT_FILES,
+            reexport_declarations(),
+            &sites,
+            reexport_symbols(),
+            &[],
+        );
+        let api = "src/api.rs";
+        let reexport = |target: &str| Some((target.to_string(), ImportBindingRule::RustReexport));
+        assert_eq!(
+            bound_with_rule(&registry, api, "close"),
+            reexport("symbol:src/store.rs:close"),
+            "the one glob that brings the name in"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "issue_token"),
+            reexport("symbol:src/auth.rs:issue_token")
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "open"),
+            reexport("symbol:src/ledger.rs:open"),
+            "a named re-export shadows the globs"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "open_either"),
+            None,
+            "two globs bring in two items of the name"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "post"),
+            reexport("symbol:src/ledger.rs:post")
+        );
+    }
+
+    #[test]
+    fn rust_reexports_that_cannot_be_settled_bind_nothing() {
+        let glob = |importer: &str, source: &str| ImportSite {
+            reexported: true,
+            ..rust_glob_site(importer, source, None)
+        };
+        let sites = vec![
+            // A cycle: `ring.rs` and `loop_back.rs` re-export `spin` from each other.
+            rust_pub_use("src/ring.rs", "crate::loop_back::spin", "spin"),
+            rust_pub_use("src/loop_back.rs", "crate::ring::spin", "spin"),
+            // Two named re-exports of one name, as two `cfg`s may write them.
+            rust_pub_use("src/facade.rs", "crate::store::open", "open"),
+            rust_pub_use("src/facade.rs", "crate::ledger::open", "open"),
+            // A glob bringing in `post`, beside a `post` the module defines, which shadows it.
+            glob("src/store.rs", "crate::ledger::*"),
+            // A `thread_local!` of `ring.rs` declares a `revoke` its glob also brings in.
+            glob("src/ring.rs", "crate::auth::*"),
+            // A glob of a crate the index does not hold may bring the name in too.
+            glob("src/prelude.rs", "crate::auth::*"),
+            glob("src/prelude.rs", "outside::*"),
+            // A `use` inside a function brings nothing into the module.
+            rust_use_site(
+                "src/auth.rs",
+                "crate::store::close",
+                "close",
+                Some("fn-scope"),
+            ),
+            // A macro at the top of `vault.rs` may define the name the glob brings in.
+            glob("src/vault.rs", "crate::store::*"),
+            rust_use_site("src/api.rs", "crate::ring::spin", "spin", None),
+            rust_use_site("src/api.rs", "crate::facade::open", "open", None),
+            rust_use_site("src/api.rs", "crate::store::post", "post", None),
+            rust_use_site("src/api.rs", "crate::store::close", "close_store", None),
+            rust_use_site("src/api.rs", "crate::prelude::revoke", "revoke", None),
+            rust_use_site("src/api.rs", "crate::auth::close", "close", None),
+            rust_use_site("src/api.rs", "crate::vault::close", "close_vault", None),
+            rust_use_site("src/api.rs", "crate::ring::revoke", "revoke_ring", None),
+            rust_use_site("src/api.rs", "crate::ring::Token", "Token", None),
+        ];
+        let mut symbols = reexport_symbols();
+        symbols.push(rust_symbol("src/store.rs", "post"));
+        let registry = bind_through_uses(
+            &REEXPORT_FILES,
+            reexport_declarations(),
+            &sites,
+            symbols,
+            &["src/vault.rs", "src/ring.rs:revoke"],
+        );
+        let api = "src/api.rs";
+        for (local, why) in [
+            ("spin", "a cycle"),
+            ("open", "two re-exports of one name"),
+            ("revoke", "a glob the index cannot follow"),
+            ("close", "a `use` inside a function"),
+            ("close_vault", "a module whose top level invokes a macro"),
+            ("revoke_ring", "a name a `thread_local!` declares"),
+        ] {
+            assert_eq!(bound_with_rule(&registry, api, local), None, "{why}");
+        }
+        assert_eq!(
+            bound_with_rule(&registry, api, "close_store"),
+            Some((
+                "symbol:src/store.rs:close".into(),
+                ImportBindingRule::RustModulePath
+            )),
+            "an item the module defines, which no `use` beside it may stand for"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "post"),
+            Some((
+                "symbol:src/store.rs:post".into(),
+                ImportBindingRule::RustModulePath
+            )),
+            "an item the module defines shadows what a glob beside it brings in"
+        );
+        assert_eq!(
+            bound_with_rule(&registry, api, "Token"),
+            Some((
+                "symbol:src/auth.rs:Token".into(),
+                ImportBindingRule::RustReexport
+            )),
+            "a `thread_local!` settles the glob's other names"
+        );
+    }
+
+    #[test]
+    fn rust_paths_from_another_crate_follow_only_pub_use_and_pub_items() {
+        // `engine`'s root: `pub use plan::PlanEngine;` (Rust 2018 path), a private
+        // `use crate::plan::draft;`, and `pub use crate::util::*;` where `util` defines a
+        // private `helper` beside the `pub` `shared`.
+        let reexport = |source: &str| {
+            rust_pub_use(
+                "crates/engine/src/lib.rs",
+                source,
+                source.rsplit("::").next().unwrap(),
+            )
+        };
+        let mut sites = vec![
+            reexport("plan::PlanEngine"),
+            rust_use_site(
+                "crates/engine/src/lib.rs",
+                "crate::plan::draft",
+                "draft",
+                None,
+            ),
+            ImportSite {
+                reexported: true,
+                ..rust_glob_site("crates/engine/src/lib.rs", "crate::util::*", None)
+            },
+        ];
+        let main = "crates/app/src/main.rs";
+        for source in [
+            "engine::PlanEngine",
+            "engine::draft",
+            "engine::shared",
+            "engine::helper",
+        ] {
+            sites.push(rust_use_site(
+                main,
+                source,
+                source.rsplit("::").next().unwrap(),
+                None,
+            ));
+        }
+        let files = CROSS_CRATE_FILES.map(source_file);
+        let project = cross_crate_project();
+        let declarations = vec![
+            mod_decl("crates/engine/src/lib.rs", "plan"),
+            mod_decl("crates/engine/src/lib.rs", "util"),
+        ];
+        let mut helper = rust_symbol("crates/engine/src/util.rs", "helper");
+        helper.visibility = Visibility::Private;
+        let symbols = open_kioku_resolution::SymbolIndex::build(vec![
+            rust_symbol("crates/engine/src/plan.rs", "PlanEngine"),
+            rust_symbol("crates/engine/src/plan.rs", "draft"),
+            rust_symbol("crates/engine/src/util.rs", "shared"),
+            helper,
+        ]);
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = module_tree_with_uses(&files, &project, &declarations, &sites, &[], &scopes);
+        let mut registry = ImportRegistry::default();
+        for site in &sites {
+            registry.insert_unresolved_site(site);
+        }
+        registry.resolve_rust_imports(&symbols, &scopes, &modules);
+        let bound = |local: &str| bound_target(&registry, main, local);
+        assert_eq!(
+            bound("PlanEngine").as_deref(),
+            Some("symbol:crates/engine/src/plan.rs:PlanEngine")
+        );
+        assert_eq!(
+            bound("draft"),
+            None,
+            "a private `use` is not the other crate's"
+        );
+        assert_eq!(
+            bound("shared").as_deref(),
+            Some("symbol:crates/engine/src/util.rs:shared")
+        );
+        assert_eq!(bound("helper"), None, "a glob brings in no private item");
+    }
+
+    #[test]
+    fn rust_reexport_table_records_what_a_path_through_a_module_reaches() {
+        let glob = |importer: &str, source: &str| ImportSite {
+            reexported: true,
+            ..rust_glob_site(importer, source, None)
+        };
+        let sites = vec![
+            rust_pub_use("src/lib.rs", "auth::issue_token", "issue_token"),
+            rust_use_site("src/lib.rs", "crate::store::close", "close", None),
+            glob("src/prelude.rs", "crate::ledger::*"),
+            glob("src/store.rs", "crate::ledger::*"),
+            // `facade` defines `post` and names `ledger`'s in a `use` too, as a `cfg` may.
+            rust_pub_use("src/facade.rs", "crate::ledger::post", "post"),
+        ];
+        let files = REEXPORT_FILES.map(source_file);
+        let project = rust_project(&[("", None)]);
+        let mut symbols = reexport_symbols();
+        symbols.push(rust_symbol("src/store.rs", "post"));
+        symbols.push(rust_symbol("src/facade.rs", "post"));
+        let symbols = open_kioku_resolution::SymbolIndex::build(symbols);
+        let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());
+        let modules = module_tree_with_uses(
+            &files,
+            &project,
+            &reexport_declarations(),
+            &sites,
+            &[],
+            &scopes,
+        );
+        let table = modules.reexports(&symbols, &scopes, |name| name != "close");
+        let item = |id: &str| Some(RustReexported::Item(SymbolId::new(id)));
+        let root = &table["src::lib::issue_token"];
+        assert_eq!(root.file, FileId::new("file:src/lib.rs"));
+        assert_eq!(root.in_crate, item("symbol:src/auth.rs:issue_token"));
+        assert_eq!(
+            root.from_other_crates,
+            item("symbol:src/auth.rs:issue_token")
+        );
+        assert!(
+            !table.contains_key("src::lib::close"),
+            "a name no call writes is not read"
+        );
+        let post = &table["src::prelude::post"];
+        assert_eq!(post.in_crate, item("symbol:src/ledger.rs:post"));
+        assert_eq!(
+            table["src::facade::post"].in_crate,
+            Some(RustReexported::Ambiguous(vec![
+                SymbolId::new("symbol:src/facade.rs:post"),
+                SymbolId::new("symbol:src/ledger.rs:post"),
+            ])),
+            "a name the module defines and a named `use` beside it brings in"
+        );
+        assert!(
+            !table.contains_key("src::store::post"),
+            "an item the module defines shadows a glob beside it"
+        );
     }
 }
