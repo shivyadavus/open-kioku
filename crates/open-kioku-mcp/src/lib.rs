@@ -970,13 +970,33 @@ async fn dispatch(
             };
             let to = open_kioku_graph::resolve_graph_node(store, to)?;
             let edges = store.shortest_path(&from, &to, 12)?;
-            Ok(json!({
+            let mut response = json!({
                 "from": from,
                 "to": to,
                 "edge_authority": edge_authority(&edges),
                 "edges": edges,
                 "evidence_source": "sqlite_graph_store"
-            }))
+            });
+            // `edge_authority` is what each edge establishes on its own; the route is only as
+            // established as the weakest hop's contribution to it, and containment does not carry
+            // across a relationship hop (`graph_route_hop_authority`).
+            let route = open_kioku_core::graph_route_authorities(&edges);
+            if let Some(weakest) = route.iter().min() {
+                response["route_authority"] = json!(weakest);
+                let capped = edges
+                    .iter()
+                    .zip(&route)
+                    .filter(|(edge, contribution)| {
+                        **contribution != open_kioku_core::graph_edge_authority(edge)
+                    })
+                    .map(|(edge, contribution)| (edge.id.0.clone(), *contribution))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                if !capped.is_empty() {
+                    response["hop_route_authority"] = json!(capped);
+                    response["caveats"] = json!([ROUTE_CONTAINMENT_DESCENT_CAVEAT]);
+                }
+            }
+            Ok(response)
         }
         "explain_flow" => explain_flow_tool(store, &params),
         "verify_change" => {
@@ -1755,7 +1775,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("plan_change", "Generate an evidence-backed pre-edit plan for a task: primary files to edit, expected impact, changed-line ranges, edit boundaries, and recommended test targets. `detail` chooses between the full plan, a concise preflight decision, and a patch plan that writes nothing. With persist=true the plan is turned into a versioned ChangeContractV1, stored under .ok/contracts by default, which verify_change can later hold the actual edit to.", json!({"type":"object","properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan. Required unless persist=true is given an existing `plan` or `plan_json`."},"detail":{"type":"string","enum":["plan","preflight","patch"],"description":"Which artifact to return. 'plan' (default) is the full evidence-backed report; 'preflight' is one concise start decision with verdict, confirmed edit files, risks, and evidence quality; 'patch' is a patch plan that writes no files. Ignored when persist=true. An unknown value is an invalid-params error (-32602)."},"persist":{"type":"boolean","description":"Set true to build a versioned change contract from the plan instead of returning the plan itself. Defaults to false. This is the only path that writes."},"store":{"type":"boolean","description":"With persist=true, whether the contract is written under .ok/contracts. Defaults to true; set false for a transient contract that is returned but not stored."},"plan":{"type":"object","description":"With persist=true, an inline PlanReport object to build the contract from instead of planning afresh."},"plan_json":{"type":"string","description":"With persist=true, a JSON-encoded PlanReport to build the contract from instead of planning afresh."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon","html","text"],"description":"Output format. The full plan defaults to 'markdown', which is what an agent should read; ask for 'json' when the plan will be saved and passed to verify_change. Preflight defaults to 'json' and also accepts 'markdown', 'html', and 'text'. Contracts default to 'json'."}}})),
         ("verify_change", "Verify what actually changed against what was declared. Checks an actual unified diff or changed file list against a saved PlanReport or against a stored or inline change contract, covering boundary constraints, expected file coverage, API surface stability, and dependency policy. Supplying an existing verification report instead explains that report - decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests - without verifying anything. Optionally executes configured validation commands and persists timestamped attestation records.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport to verify against."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport to verify against."},"contract_id":{"type":"string","description":"Id of a contract stored under .ok/contracts to verify against. Stored ids append verification records to that contract."},"contract":{"type":"object","description":"Inline ChangeContractV1 or StoredContractRecord object to verify against."},"contract_json":{"type":"string","description":"JSON-encoded ChangeContractV1 or StoredContractRecord to verify against."},"verification":{"type":"object","description":"An existing ContractVerificationReport to explain. When present, nothing is verified."},"verification_json":{"type":"string","description":"A JSON-encoded ContractVerificationReport to explain. When present, nothing is verified."},"explain":{"type":"boolean","description":"Set true with a contract to return the explanation of the resulting verification report rather than the report itself. Defaults to false."},"diff":{"type":"string","description":"The unified diff (git diff format) showing the actual changes to verify."},"since_plan":{"type":"string","description":"Git revision or range (e.g., 'HEAD~1', 'abc123..def456') used with git diff --unified=0 to derive changed files and diff input automatically."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files. Used when diff is not provided."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers supporting the change."},"validation_attestations":{"type":"array","items":{"type":"object"},"description":"Previously recorded validation attestations to replay during contract verification."},"traceability_strict":{"type":"boolean","description":"Set true to reject any evidence references not present in the saved plan or contract, enforcing full traceability. Defaults to false (lenient mode allows extra evidence)."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API surface changes (additions, removals, signature modifications) and flag them as warnings. Defaults to false."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph changes and flag forbidden dependency additions based on architecture policy. Defaults to false; a configured policy enables it anyway."},"run_commands":{"type":"boolean","description":"Set true to execute shell validation commands (test runners, linters) defined in the plan or contract on the local machine. Commands run synchronously and their exit codes are recorded. Defaults to false."},"write_attestation":{"type":"boolean","description":"Set true together with run_commands to persist timestamped pass/fail attestation records under .ok/contracts/validation/. With a contract it requires a stored contract_id. Defaults to false."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format for contract verification and for explanations. Defaults to json."}}})),
         ("find_tests_for_change", "Identify the test files that should be run to validate a change, ranked by relevance from naming conventions, import relationships, and co-change history. A `path` is required to select tests: the ranking is for that changed file, and without one no test is selected and a caveat says so. Matched test targets that cannot validate the change, such as tests the runner skips, are counted by reason in `excluded` and sampled in `excluded_sample`, never listed in `tests`; an empty `tests` carries a caveat saying whether no test was found or every one found was excluded.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs'). Required to select tests; without it the response selects none and says so in `caveats`."},"limit":{"type":"integer","description":"Maximum number of test file recommendations to return, ranked by relevance. Defaults to 20."}}})),
-        ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher, or, when called with no `query`, return the versioned evidence schema instead: supported node types, edge types, query properties, and the Tier-1 relationship-semantic capability matrix. (Note: the DSL is NOT full Cypher.) Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","properties":{"query":{"type":"string","description":"The graph query string to execute. Omit or leave empty to return the evidence schema instead of running a query."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
+        ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher, or, when called with no `query`, return the versioned evidence schema instead: supported node types, edge types, query properties, and the Tier-1 relationship-semantic capability matrix. (Note: the DSL is NOT full Cypher.) Output rows are JSON arrays aligned with the user-selected variables in `columns`, and `paths` holds one entry per row: the edges it was matched through, each with its relationship authority, and `weakest_authority`, the weakest of them. Every edge is matched whatever its authority; bind the edge and filter `authority` to leave heuristic edges out.", json!({"type":"object","properties":{"query":{"type":"string","description":"The graph query string to execute. Omit or leave empty to return the evidence schema instead of running a query."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
     ];
 
     // Advertised only where the feature is configured. Both families stay in
@@ -2060,13 +2080,19 @@ where
     Ok(call_path)
 }
 
+const ROUTE_CONTAINMENT_DESCENT_CAVEAT: &str = "this route descends through CONTAINS or DEFINES after a relationship hop; containment is not transitive across a relationship (a file importing the file that defines X does not establish a relation to X), so hop_route_authority caps that hop at corroborating and route_authority reflects it, while edge_authority still reports what each edge establishes on its own";
+
 /// Each edge's authority, recomputed from its proofs and keyed by edge id. A serialized edge
 /// carries its proofs but not the authority they amount to, so a proof-less edge read alone
 /// shows only its resolver's confidence, which says nothing about whether it is established.
+/// Parsed containment reports `authoritative` (`graph_edge_authority`), as graph query hops do.
 fn edge_authority(edges: &[open_kioku_core::GraphEdge]) -> Value {
     json!(edges
         .iter()
-        .map(|edge| (edge.id.0.clone(), edge.relationship_authority()))
+        .map(|edge| (
+            edge.id.0.clone(),
+            open_kioku_core::graph_edge_authority(edge)
+        ))
         .collect::<std::collections::BTreeMap<_, _>>())
 }
 
@@ -3560,6 +3586,15 @@ mod tests {
                 "get_references_callers.json",
                 r#"{"jsonrpc":"2.0","id":"get-references-callers","method":"get_references","params":{"query":"archive_invoice_event","kind":"callers","limit":1}}"#,
             ),
+            // A parsed DEFINES edge reads authoritative in edge_authority and in a graph query.
+            (
+                "dependency_path_route.json",
+                r#"{"jsonrpc":"2.0","id":"dependency-route","method":"dependency_path","params":{"from":"file:file-billing","to":"symbol:symbol-publish"}}"#,
+            ),
+            (
+                "query_evidence_graph_authority.json",
+                r#"{"jsonrpc":"2.0","id":"query-evidence-graph-authority","method":"query_evidence_graph","params":{"query":"MATCH (f:File)-[d:DEFINES]->(s:Function) WHERE d.authority = 'authoritative' RETURN f, s"}}"#,
+            ),
             (
                 "dependency_path_neighbors.json",
                 r#"{"jsonrpc":"2.0","id":"dependency-neighbors","method":"dependency_path","params":{"from":"src/billing.rs","limit":5}}"#,
@@ -4924,11 +4959,19 @@ mod tests {
                 endpoint_node,
             ];
             let graph_edges = vec![
+                // Parsed containment, which edge_authority and graph query hops report as
+                // authoritative; the archive DEFINES edge keeps default (lexical) evidence.
                 GraphEdge {
                     id: EdgeId::new("edge-file-defines-symbol"),
                     from: file_node.id.clone(),
                     to: NodeId::new("symbol:symbol-publish"),
                     edge_type: GraphEdgeType::Defines,
+                    evidence: open_kioku_core::Evidence {
+                        source: "open-kioku-graph".into(),
+                        source_type: EvidenceSourceType::TreeSitter,
+                        confidence: Confidence::Exact,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 GraphEdge {

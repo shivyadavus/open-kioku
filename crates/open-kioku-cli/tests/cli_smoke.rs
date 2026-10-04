@@ -7725,6 +7725,134 @@ fn path_and_dependency_path_resolve_the_same_nodes() {
     assert!(stderr.contains(unresolved), "{stderr}");
 }
 
+/// `src/ledger.rs` imports `crate::audit::record`, and `src/audit.rs` also defines `archive`.
+/// The import and the DEFINES edge are each established, but ledger.rs has no relation to
+/// `archive`: containment does not carry across a relationship hop, so no surface may read the
+/// route IMPORTS then DEFINES as authoritative (#651).
+#[test]
+fn a_route_into_an_imported_file_s_other_symbols_is_not_authoritative() {
+    let temp = snapshot_fixture_repo_with(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"books\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("src/lib.rs", "pub mod ledger;\npub mod audit;\n"),
+        (
+            "src/ledger.rs",
+            "use crate::audit::record;\n\npub fn post(amount: u64) -> String {\n    settle(amount);\n    format!(\"{}\", guess(amount))\n}\n\npub fn guess(amount: u64) -> u64 {\n    close(amount)\n}\n\npub fn settle(amount: u64) -> u64 {\n    record(amount);\n    close(amount)\n}\n\npub fn close(amount: u64) -> u64 {\n    if amount > 100 {\n        post(amount - 1);\n    }\n    amount\n}\n",
+        ),
+        (
+            "src/audit.rs",
+            "pub fn record(amount: u64) -> String {\n    format!(\"{}\", archive(amount))\n}\n\npub fn archive(amount: u64) -> u64 {\n    amount\n}\n",
+        ),
+    ]);
+    let repo = temp.path();
+    let query = |dsl: &str| -> serde_json::Value {
+        serde_json::from_str(&run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "graph", "query", "--dsl", dsl]);
+            command
+        }))
+        .unwrap()
+    };
+    let rows_reaching = |result: &serde_json::Value, label: &str| {
+        result["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(result["paths"].as_array().unwrap())
+            .filter(|(row, _)| row[1]["label"] == label)
+            .map(|(_, path)| path.clone())
+            .collect::<Vec<_>>()
+    };
+    let from_ledger = "MATCH (a:File)-[c *1..3]->(b:Function) WHERE a.label = 'src/ledger.rs'";
+
+    let proven = query(&format!(
+        "{from_ledger} AND c.authority = 'authoritative' RETURN a, b"
+    ));
+    assert!(
+        rows_reaching(&proven, "src::audit::archive").is_empty(),
+        "{proven:#}"
+    );
+    // ledger.rs's own symbols and the proven call into record still are.
+    assert!(!rows_reaching(&proven, "src::ledger::post").is_empty());
+    assert!(!rows_reaching(&proven, "src::audit::record").is_empty());
+
+    let all = query(&format!("{from_ledger} RETURN a, b"));
+    let through_import = rows_reaching(&all, "src::audit::archive")
+        .into_iter()
+        .find(|path| path["hops"][0]["edge_type"] == "IMPORTS")
+        .unwrap_or_else(|| panic!("{all:#}"));
+    assert_eq!(through_import["weakest_authority"], "corroborating");
+    assert_eq!(through_import["hops"][0]["authority"], "authoritative");
+    assert_eq!(through_import["hops"][1]["edge_type"], "DEFINES");
+    assert_eq!(through_import["hops"][1]["authority"], "authoritative");
+    assert_eq!(
+        through_import["hops"][1]["route_authority"],
+        "corroborating"
+    );
+    assert_eq!(through_import["caveats"].as_array().unwrap().len(), 1);
+
+    // MCP `dependency_path` takes that same route and says so.
+    let response = mcp_tool_call(
+        repo,
+        "dependency_path",
+        serde_json::json!({"from": "src/ledger.rs", "to": "src::audit::archive"}),
+    );
+    let route = &response["result"]["structuredContent"];
+    let edges = route["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 2, "{response}");
+    assert_eq!(edges[1]["edge_type"], "DEFINES", "{response}");
+    let defines = edges[1]["id"].as_str().unwrap();
+    assert_eq!(route["edge_authority"][defines], "authoritative");
+    assert_eq!(route["hop_route_authority"][defines], "corroborating");
+    assert_eq!(route["route_authority"], "corroborating", "{response}");
+    assert_eq!(route["caveats"].as_array().unwrap().len(), 1);
+
+    // `ok path` prints both classes for the hop and the route's.
+    let text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["path", "src/ledger.rs", "src::audit::archive"]);
+        command
+    });
+    assert!(
+        text.contains("Defines [Authoritative; in this route Corroborating]"),
+        "{text}"
+    );
+    assert!(text.contains("route authority: Corroborating"), "{text}");
+
+    // The converse overclaim, `post` up to ledger.rs and across its import ("post depends on
+    // audit.rs"), needs a containment edge walked backwards. No surface walks one, which is why
+    // `graph_route_hop_authority` caps only the descent; this pins that on a real index.
+    let response = mcp_tool_call(
+        repo,
+        "dependency_path",
+        serde_json::json!({"from": "src::ledger::post", "to": "src/audit.rs"}),
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["edges"],
+        serde_json::json!([]),
+        "{response}"
+    );
+    let text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["path", "src::ledger::post", "src/audit.rs"]);
+        command
+    });
+    assert!(text.contains("No dependency path found."), "{text}");
+    let upward = query("MATCH (a:Function)-[*1..3]->(b:File) RETURN a, b");
+    assert_eq!(upward["returned"], 0, "{upward:#}");
+}
+
 /// What the lock holder prints once it holds the lock.
 const INDEX_LOCK_HELD: &str = "ok-test: index lock held";
 /// The line that tells the lock holder to release the lock as a finishing writer does.

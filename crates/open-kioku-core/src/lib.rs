@@ -15,7 +15,8 @@ pub mod relationship;
 pub use analysis_semantics::*;
 
 pub use relationship::{
-    graph_edge_window_key, graph_edge_window_rank, graph_edge_window_tier,
+    graph_edge_authority, graph_edge_window_key, graph_edge_window_rank, graph_edge_window_tier,
+    graph_route_authorities, graph_route_hop_authority, is_containment_edge_type,
     normalize_relationship_proofs, relationship_authority, sort_graph_edges_for_window,
     RelationshipAuthority, RelationshipProof, RelationshipProofFilter, RelationshipProofKind,
     GRAPH_EDGE_WINDOW_RANK_VERSION, GRAPH_EDGE_WINDOW_TIER_MAX, RELATIONSHIP_PROOFS_PROPERTY,

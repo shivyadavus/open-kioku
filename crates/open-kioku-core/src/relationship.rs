@@ -379,6 +379,82 @@ impl GraphEdge {
     }
 }
 
+/// Authority of one graph edge as a surface reports it beside the edge: the graph query's hops,
+/// and `edge_authority` on MCP and CLI reads that return edges.
+///
+/// A relationship edge has its effective [`GraphEdge::relationship_authority`]. Containment
+/// (`CONTAINS`, `DEFINES`) resolves no name, so no proof policy applies to it, and it splits the
+/// way [`graph_edge_window_tier`] splits it: extracted by a parser or an index it records where a
+/// symbol is (`Authoritative`); from the regex fallback it is a guess (`Heuristic`). Read through
+/// `relationship_authority` alone, every parsed `DEFINES` edge would report `heuristic`, the
+/// class a symbol-registry name match gets.
+///
+/// This is the class an edge is reported under, not a gate: callers that decide whether a
+/// relationship may be consumed as structural truth keep reading
+/// [`GraphEdge::relationship_authority`] or a [`RelationshipProofFilter`].
+pub fn graph_edge_authority(edge: &GraphEdge) -> RelationshipAuthority {
+    match edge.edge_type {
+        GraphEdgeType::Contains | GraphEdgeType::Defines => {
+            if edge.evidence.source_type.is_exact_reference_source() {
+                RelationshipAuthority::Authoritative
+            } else {
+                RelationshipAuthority::Heuristic
+            }
+        }
+        _ => edge.relationship_authority(),
+    }
+}
+
+/// Whether an edge type records where something is (`CONTAINS`, `DEFINES`) rather than a
+/// relationship between two things.
+pub fn is_containment_edge_type(edge_type: &GraphEdgeType) -> bool {
+    matches!(edge_type, GraphEdgeType::Contains | GraphEdgeType::Defines)
+}
+
+/// Authority one hop of a forward route contributes to the route, given whether a relationship
+/// hop came before it.
+///
+/// Containment is not transitive across a relationship: "A imports the file that defines X" is
+/// not "A depends on X". A containment hop taken after a relationship hop descends from what the
+/// route reached into everything it contains, so its contribution is capped at `Corroborating`
+/// however established the containment itself is. Containment before any relationship hop (a
+/// file's symbol that calls something) and relationship hops keep [`graph_edge_authority`].
+pub fn graph_route_hop_authority(
+    edge: &GraphEdge,
+    after_relationship: bool,
+) -> RelationshipAuthority {
+    let authority = graph_edge_authority(edge);
+    if after_relationship && is_containment_edge_type(&edge.edge_type) {
+        authority.min(RelationshipAuthority::Corroborating)
+    } else {
+        authority
+    }
+}
+
+/// Each hop's [`graph_route_hop_authority`] along a forward route, in order. Every graph route a
+/// surface returns (`shortest_path`, a multi-hop query walk) follows edges from `from` to `to`,
+/// so a containment hop after a relationship hop is always a descent.
+///
+/// The converse overclaim, a symbol up to its containing file and then across that file's
+/// relationship ("this symbol's file imports X" read as "this symbol depends on X"), needs a
+/// containment edge traversed backwards. No route surface does that: `shortest_path` reads only a
+/// node's outgoing edges, the query walk follows only edges leaving the current node and rejects
+/// reverse hop ranges, and `explain_flow` follows outgoing `CALLS` only. A surface that starts
+/// walking edges backwards must cap that ascent here first;
+/// `a_symbol_never_reaches_its_file_s_imports` (open-kioku-graph) and
+/// `a_route_into_an_imported_file_s_other_symbols_is_not_authoritative` (open-kioku-cli) pin it.
+pub fn graph_route_authorities(edges: &[GraphEdge]) -> Vec<RelationshipAuthority> {
+    let mut after_relationship = false;
+    edges
+        .iter()
+        .map(|edge| {
+            let authority = graph_route_hop_authority(edge, after_relationship);
+            after_relationship |= !is_containment_edge_type(&edge.edge_type);
+            authority
+        })
+        .collect()
+}
+
 /// Rank of an evidence confidence for window ordering: higher is stronger. `Confidence` has no
 /// derived order, and its declaration order is the reverse of what a window keeps first.
 fn confidence_rank(confidence: Confidence) -> u8 {
@@ -917,6 +993,112 @@ mod tests {
         assert_eq!(
             malformed.relationship_authority(),
             RelationshipAuthority::Heuristic
+        );
+    }
+
+    /// `ledger.rs` imports `audit.rs`, which defines `archive`: both edges are established, but
+    /// the route does not establish that ledger.rs relates to archive.
+    #[test]
+    fn containment_after_a_relationship_hop_caps_the_route_at_corroborating() {
+        let mut imports = edge(
+            GraphEdgeType::Imports,
+            vec![proof(RelationshipProofKind::ImportBinding, 1)],
+        );
+        imports.evidence.source_type = EvidenceSourceType::TreeSitter;
+        assert_eq!(
+            graph_edge_authority(&imports),
+            RelationshipAuthority::Authoritative
+        );
+        let mut defines = edge(GraphEdgeType::Defines, Vec::new());
+        defines.evidence.source_type = EvidenceSourceType::TreeSitter;
+
+        assert_eq!(
+            graph_route_authorities(&[imports.clone(), defines.clone()]),
+            [
+                RelationshipAuthority::Authoritative,
+                RelationshipAuthority::Corroborating
+            ]
+        );
+        // Containment first: the file's symbol is what the relationship leaves from.
+        assert_eq!(
+            graph_route_authorities(&[defines.clone(), imports.clone()]),
+            [
+                RelationshipAuthority::Authoritative,
+                RelationshipAuthority::Authoritative
+            ]
+        );
+        assert_eq!(
+            graph_route_authorities(&[defines.clone(), defines.clone()]),
+            [
+                RelationshipAuthority::Authoritative,
+                RelationshipAuthority::Authoritative
+            ]
+        );
+        // A cap never raises: regex containment stays heuristic after a relationship hop.
+        let mut regex = defines;
+        regex.evidence.source_type = EvidenceSourceType::Regex;
+        assert_eq!(
+            graph_route_hop_authority(&regex, true),
+            RelationshipAuthority::Heuristic
+        );
+    }
+
+    /// Parsed containment reports as the fact it is and regex containment as the guess it is;
+    /// every other edge type reports its proof-derived authority, so no evidence source or
+    /// confidence lifts a proofless relationship.
+    #[test]
+    fn reported_edge_authority_splits_containment_by_source_and_reads_proofs_otherwise() {
+        for edge_type in [GraphEdgeType::Contains, GraphEdgeType::Defines] {
+            for (source_type, expected) in [
+                (
+                    EvidenceSourceType::TreeSitter,
+                    RelationshipAuthority::Authoritative,
+                ),
+                (
+                    EvidenceSourceType::Scip,
+                    RelationshipAuthority::Authoritative,
+                ),
+                (EvidenceSourceType::Regex, RelationshipAuthority::Heuristic),
+                (
+                    EvidenceSourceType::Heuristic,
+                    RelationshipAuthority::Heuristic,
+                ),
+            ] {
+                let mut containment = edge(edge_type.clone(), Vec::new());
+                containment.evidence.source_type = source_type.clone();
+                assert_eq!(
+                    graph_edge_authority(&containment),
+                    expected,
+                    "{edge_type:?} from {source_type:?}"
+                );
+            }
+        }
+
+        let mut registry = edge(GraphEdgeType::Calls, Vec::new());
+        registry.evidence.source_type = EvidenceSourceType::Scip;
+        registry.evidence.confidence = Confidence::Exact;
+        assert_eq!(
+            graph_edge_authority(&registry),
+            RelationshipAuthority::Heuristic
+        );
+        let corroborated = edge(
+            GraphEdgeType::Calls,
+            vec![proof(RelationshipProofKind::ImportBinding, 1)],
+        );
+        assert_eq!(
+            graph_edge_authority(&corroborated),
+            RelationshipAuthority::Corroborating
+        );
+        let proven = edge(
+            GraphEdgeType::Calls,
+            vec![
+                proof(RelationshipProofKind::ExactCallSite, 1),
+                proof(RelationshipProofKind::SameScopeDefinition, 1),
+            ],
+        );
+        assert_eq!(
+            graph_edge_authority(&proven),
+            RelationshipAuthority::Authoritative
         );
     }
 }

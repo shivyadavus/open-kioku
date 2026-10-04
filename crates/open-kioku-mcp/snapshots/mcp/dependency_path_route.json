@@ -1,0 +1,31 @@
+{
+  "id": "dependency-route",
+  "jsonrpc": "2.0",
+  "result": {
+    "edge_authority": {
+      "edge-file-defines-symbol": "authoritative"
+    },
+    "edges": [
+      {
+        "edge_type": "DEFINES",
+        "evidence": {
+          "confidence": "exact",
+          "file_range": null,
+          "id": "",
+          "indexed_at": "<indexed_at>",
+          "message": "",
+          "source": "open-kioku-graph",
+          "source_type": "tree_sitter",
+          "symbol_id": null
+        },
+        "from": "file:file-billing",
+        "id": "edge-file-defines-symbol",
+        "to": "symbol:symbol-publish"
+      }
+    ],
+    "evidence_source": "sqlite_graph_store",
+    "from": "file:file-billing",
+    "route_authority": "authoritative",
+    "to": "symbol:symbol-publish"
+  }
+}

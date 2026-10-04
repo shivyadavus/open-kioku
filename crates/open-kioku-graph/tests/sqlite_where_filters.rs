@@ -268,3 +268,115 @@ fn the_batched_read_returns_every_chunk_ordered_by_edge_id() {
         "edges must be ordered by id across chunk boundaries, not by chunk"
     );
 }
+
+/// Authority is recomputed from the proofs the index stores, so a route through a name match
+/// reads heuristic once read back from SQLite, and an authority filter on a hop range walks proven
+/// hops only.
+#[test]
+fn graph_query_authority_reads_proofs_stored_in_a_sqlite_index() {
+    use open_kioku_core::{RelationshipAuthority, RelationshipProof, RelationshipProofKind};
+
+    let store = store();
+    let mut nodes = vec![file_node("file:ledger", "src/ledger.rs")];
+    let mut edges = Vec::new();
+    for name in ["post", "settle", "archive"] {
+        let id = format!("symbol:{name}");
+        nodes.push(symbol_node(
+            &id,
+            &format!("src::ledger::{name}"),
+            "file:ledger",
+        ));
+        edges.push(defines("file:ledger", &id));
+    }
+    let mut proven = edge(
+        "calls:post:settle",
+        "symbol:post",
+        "symbol:settle",
+        GraphEdgeType::Calls,
+        "open-kioku-resolution",
+        EvidenceSourceType::TreeSitter,
+        Confidence::High,
+    );
+    proven
+        .set_relationship_proofs(vec![
+            RelationshipProof::new(RelationshipProofKind::ExactCallSite, "test", 1),
+            RelationshipProof::new(RelationshipProofKind::SameScopeDefinition, "test", 1),
+        ])
+        .unwrap();
+    // A symbol-registry match: confident, but with no proof.
+    let registry = edge(
+        "calls:settle:archive",
+        "symbol:settle",
+        "symbol:archive",
+        GraphEdgeType::Calls,
+        "open-kioku-symbol-registry/unique-name",
+        EvidenceSourceType::Heuristic,
+        Confidence::High,
+    );
+    edges.extend([proven, registry]);
+    store.replace_graph(&nodes, &edges).unwrap();
+
+    let run = |query: &str| {
+        let ast = parse_graph_query(query).unwrap_or_else(|error| panic!("{query}: {error}"));
+        let options = GraphQueryOptions {
+            deadline_ms: 60_000,
+            ..GraphQueryOptions::default()
+        };
+        execute_graph_query(&store, &ast, options)
+            .unwrap_or_else(|error| panic!("{query}: {error}"))
+    };
+
+    let all = run(
+        "MATCH (a:Function)-[:CALLS *1..2]->(b:Function) WHERE a.label = 'src::ledger::post' RETURN b",
+    );
+    let mut reached = all
+        .rows
+        .iter()
+        .zip(&all.paths)
+        .map(|(row, path)| {
+            (
+                row[0]["id"].as_str().unwrap().to_string(),
+                path.weakest_authority,
+                path.hops
+                    .iter()
+                    .map(|hop| hop.authority)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    reached.sort();
+    assert_eq!(
+        reached,
+        vec![
+            (
+                "symbol:archive".to_string(),
+                RelationshipAuthority::Heuristic,
+                vec![
+                    RelationshipAuthority::Authoritative,
+                    RelationshipAuthority::Heuristic
+                ],
+            ),
+            (
+                "symbol:settle".to_string(),
+                RelationshipAuthority::Authoritative,
+                vec![RelationshipAuthority::Authoritative],
+            ),
+        ]
+    );
+
+    assert_eq!(
+        rows_of(
+            &store,
+            "MATCH (a:Function)-[c:CALLS *1..2]->(b:Function) WHERE a.label = 'src::ledger::post' AND c.authority = 'authoritative' RETURN b",
+        ),
+        ["symbol:settle"]
+    );
+    // Parsed containment read back from the index is a fact.
+    assert_eq!(
+        rows_of(
+            &store,
+            "MATCH (f:File)-[d:DEFINES]->(s:Function) WHERE d.authority = 'authoritative' RETURN s",
+        ),
+        ["symbol:archive", "symbol:post", "symbol:settle"]
+    );
+}

@@ -984,23 +984,51 @@ pub async fn run_cli() -> anyhow::Result<()> {
             let from = open_kioku_graph::resolve_graph_node(&store, &from)?;
             let to = open_kioku_graph::resolve_graph_node(&store, &to)?;
             let path = store.shortest_path(&from, &to, 12)?;
-            output(cli.json, &path, || {
-                if path.is_empty() {
-                    println!("No dependency path found.");
-                } else {
-                    // Each hop's authority, as MCP `dependency_path` reports it: a route through a
-                    // name match the symbol registry made is a possible route, not a traced one.
-                    for edge in &path {
+            // `--json` is the edge list MCP `dependency_path` returns under `edges`. Without it
+            // the hops print with their authority whatever the route's size: the shared
+            // `output` helper prints short values as JSON, which for a route would drop the
+            // authority this view exists to show.
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&path)?);
+            } else if path.is_empty() {
+                println!("No dependency path found.");
+            } else {
+                // Each hop's authority, as MCP `dependency_path` reports it: a route through a
+                // name match the symbol registry made is a possible route, not a traced one.
+                // A hop whose contribution to the route is below what the edge establishes on
+                // its own (containment after a relationship hop) prints both.
+                let route = open_kioku_core::graph_route_authorities(&path);
+                for (edge, contribution) in path.iter().zip(&route) {
+                    let authority = open_kioku_core::graph_edge_authority(edge);
+                    if *contribution == authority {
                         println!(
                             "{} -> {} {:?} [{:?}]",
-                            edge.from,
-                            edge.to,
-                            edge.edge_type,
-                            edge.relationship_authority()
+                            edge.from, edge.to, edge.edge_type, authority
+                        );
+                    } else {
+                        println!(
+                            "{} -> {} {:?} [{:?}; in this route {:?}]",
+                            edge.from, edge.to, edge.edge_type, authority, contribution
                         );
                     }
                 }
-            })?;
+                if let Some(weakest) = route.iter().min() {
+                    println!("route authority: {weakest:?}");
+                }
+                if route
+                    .iter()
+                    .zip(&path)
+                    .any(|(contribution, edge)| {
+                        *contribution != open_kioku_core::graph_edge_authority(edge)
+                    })
+                {
+                    println!(
+                        "caveat: the route descends through CONTAINS or DEFINES after a \
+                         relationship hop; containment is not transitive across a \
+                         relationship, so that hop counts at most corroborating"
+                    );
+                }
+            }
         }
         Command::Tests { changed } => {
             let store = open_store(&repo)?;

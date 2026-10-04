@@ -366,9 +366,12 @@ read:
 - MCP `get_references` callers and callees, `dependency_path` and each `explain_flow` flow return
   `edge_authority`, each returned edge's authority keyed by edge id, since a serialized edge
   carries its proofs but not the authority they amount to; `ok path` prints it after each hop.
-  `explain_flow` ends a flow at its first hop no proof establishes. The graph query language
-  (`ok graph query`) has no authority field yet, so a multi-hop pattern can cross these edges
-  without saying so.
+  `explain_flow` ends a flow at its first hop no proof establishes.
+- `ok graph query` and MCP `query_evidence_graph` return `paths` beside `rows`, one per row:
+  the edges the row was matched through, each with its authority, and `weakest_authority`. A
+  multi-hop row reports the strongest route the walk found to it at that depth, and a caveat
+  counts the rows that cross a heuristic edge. `-[c:CALLS *1..3]-> ... WHERE c.authority >=
+  'corroborating'` leaves these edges out of every hop; see [Graph query authority](#graph-query-authority).
 
 Where a proven or corroborated edge already joins the same two nodes with the same type, the
 registry edge is not written: folded in, its line would join the stronger edge's call sites,
@@ -559,6 +562,79 @@ rank with proven edges and would otherwise fill its window ahead of the heuristi
 multi-hop graph query reads that type at each hop.
 `edges_by_type` is a whole-graph scan paged by edge id, not a window; a caller that stops early
 must report the scan as truncated, as `query_relationship_edges` does with `scan_truncated`.
+
+### Graph query authority
+
+Every surface that returns an edge reports one authority for it,
+`open_kioku_core::graph_edge_authority`: `edge_authority` on MCP `get_references`,
+`dependency_path` and `explain_flow`, the class `ok path` prints after each hop, and each hop's
+`authority` in a graph query row. It is recomputed from the edge's proofs on every read, never stored:
+
+- a relationship edge has its effective relationship authority (`heuristic`, `corroborating` or
+  `authoritative`), which no confidence or evidence source raises;
+- `CONTAINS` and `DEFINES` resolve no name, so no proof policy applies to them. Extracted by a
+  parser or an index (tree-sitter, SCIP, LSP) they are `authoritative`; from the regex fallback,
+  `heuristic`. This is the split the window tiers make, without the tier order: a window still
+  ranks containment below proven relationships.
+
+This is the class an edge is reported under. What impact, plan, test selection and verify accept
+as proven is decided by the edge's relationship authority and `RelationshipProofFilter`, which
+this does not change.
+
+A route is weighed by what each hop contributes to it, which is not always what the edge
+establishes on its own. Containment does not carry across a relationship: `src/ledger.rs`
+importing `src/audit.rs`, then `src/audit.rs` defining `archive`, is two established edges and
+no relation between ledger.rs and `archive`. So a `CONTAINS` or `DEFINES` hop taken after a
+relationship hop contributes at most `corroborating`
+(`open_kioku_core::graph_route_hop_authority`, and `graph_route_authorities` for a whole route).
+Containment before any relationship hop is not capped: a file's own symbol, then that symbol's
+call, is the file's call. Every route the graph returns is followed forward, so a containment hop
+after a relationship hop is always a descent into what the route reached. For the same reason no
+route climbs from a symbol to its file and across the file's relationship ("this symbol's file
+imports X" is not "this symbol depends on X"): that needs a containment edge walked backwards,
+and `shortest_path`, the query walk and `explain_flow` follow only outgoing edges, while a reverse
+hop range does not parse. Tests pin it; a surface that starts walking edges backwards has to cap
+that ascent too. MCP `dependency_path`
+returns `route_authority` and, for a capped hop, `hop_route_authority` and a caveat; `ok path`
+prints the hop's contribution beside its class and the route's authority.
+
+`ok graph query` and MCP `query_evidence_graph` match every edge whatever its authority, and
+return `paths` beside `rows`, one entry per row:
+
+```json
+{
+  "weakest_authority": "heuristic",
+  "hops": [
+    {"edge_id": "…", "edge_type": "CALLS", "from": "symbol:…", "to": "symbol:…", "authority": "authoritative"},
+    {"edge_id": "…", "edge_type": "CALLS", "from": "symbol:…", "to": "symbol:…", "authority": "heuristic"}
+  ]
+}
+```
+
+`weakest_authority` is the weakest contribution among the hops. A hop whose contribution is below
+its own `authority` carries `route_authority`, and its path a `caveats` entry.
+
+A one-hop row has its one edge. A multi-hop walk goes one depth at a time and holds each node
+reached at a depth once per route state (whether the route has taken a relationship hop yet),
+with the route to it in that state whose weakest hop is strongest (the first one found among
+equals). Both states are kept because a weaker route that has not crossed a relationship can lead
+through containment to a stronger one. Each node is emitted once per depth, with its strongest
+route of either state, so a row reads `heuristic` only when every route the walk found to that
+node at that depth crosses a heuristic hop. When any returned row does, a caveat counts them.
+
+`authority` is a filter field on a bound edge. It takes `=`, `<`, `<=`, `>` and `>=` with a quoted
+class, ordered `heuristic` < `corroborating` < `authoritative`. On a one-hop edge it compares the
+edge's own class. A hop range binds a variable too, and a filter on it must hold for every hop,
+comparing what the hop contributes to the route, so it agrees with `weakest_authority`; a hop that
+fails it is never walked:
+
+```text
+MATCH (a:Function)-[c:CALLS *1..3]->(b:Function) WHERE c.authority >= 'corroborating' RETURN a, b
+```
+
+The default is deliberately every edge, labelled, rather than proven edges only: edge types the
+proof policy never establishes (`SIMILAR_TO`, `TESTS`, `DERIVED_FROM` and others) would otherwise
+return nothing, which reads as "no such relationship" rather than "only weak evidence".
 
 `graph_nodes` keeps the full node JSON as the source of truth, with query columns
 maintained for common filters:

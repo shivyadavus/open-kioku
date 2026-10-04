@@ -1,0 +1,57 @@
+{
+  "id": "query-evidence-graph-authority",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [
+      "Filters applied in-memory after indexed edge lookup."
+    ],
+    "columns": [
+      "f",
+      "s"
+    ],
+    "has_more": false,
+    "limit": 50,
+    "offset": 0,
+    "paths": [
+      {
+        "hops": [
+          {
+            "authority": "authoritative",
+            "edge_id": "edge-file-defines-symbol",
+            "edge_type": "DEFINES",
+            "from": "file:file-billing",
+            "to": "symbol:symbol-publish"
+          }
+        ],
+        "weakest_authority": "authoritative"
+      }
+    ],
+    "returned": 1,
+    "rows": [
+      [
+        {
+          "file_id": "file-billing",
+          "id": "file:file-billing",
+          "label": "src/billing.rs",
+          "node_type": "file",
+          "properties": {
+            "path": "src/billing.rs"
+          },
+          "symbol_id": null
+        },
+        {
+          "file_id": "file-billing",
+          "id": "symbol:symbol-publish",
+          "label": "publish_invoice_event",
+          "node_type": "function",
+          "properties": {
+            "qualified_name": "billing::routes::publish_invoice_event"
+          },
+          "symbol_id": "symbol-publish"
+        }
+      ]
+    ],
+    "truncated": false,
+    "warnings": []
+  }
+}
