@@ -7,7 +7,7 @@ use crate::pipeline::{
 use open_kioku_core::{
     Binding, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, InheritanceKind,
     InheritanceSite, Language, LineRange, RelationshipProof, RelationshipProofKind, ScopeId,
-    Symbol, SymbolId, SymbolKind,
+    ScopeKind, Symbol, SymbolId, SymbolKind,
 };
 use open_kioku_semantic_model::SemanticRepository;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -476,6 +476,16 @@ pub fn resolve_declared_type_use_outcome(
 ) -> Option<(SymbolId, ResolutionOutcome)> {
     let type_name = binding.declared_type.as_deref()?.trim();
     if type_name.is_empty() {
+        return None;
+    }
+    // A Rust struct field's declared type is read for method calls through the field (#630),
+    // not as a type the struct uses.
+    if ctx.language == Language::Rust
+        && ctx
+            .scopes
+            .get(&binding.scope_id)
+            .is_some_and(|scope| scope.kind == ScopeKind::Class)
+    {
         return None;
     }
     let source = scope_owner_symbol(&binding.scope_id, ctx.scopes)?;

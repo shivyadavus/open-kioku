@@ -703,6 +703,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
         "mod sys;\nuse sys::imp::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
     const CFG_ATTR_ENGINE: &str =
         "pub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n";
+    const STRUCT_FIELD_HOLDER: &str = "mod engine;\nuse crate::engine::Engine;\n\npub struct Holder {\n    engine: Engine,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
         "cross_module_item_import" => (
             vec![
@@ -2340,6 +2341,182 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
             ],
             true,
         ),
+        // A receiver typed by a `crate::` path reads the type through the path (#637).
+        "crate_path_type_receiver" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod model;\n\npub fn caller_fn(value: crate::model::Engine) {\n    value.target_fn();\n}\n",
+                ),
+                ("src/model.rs", CFG_ATTR_ENGINE),
+            ],
+            true,
+        ),
+        // So does one typed by a `super::` path from a child module's file (#637).
+        "super_path_type_receiver" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod model;\n"),
+                (
+                    "src/model.rs",
+                    "pub mod user;\n\npub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n",
+                ),
+                (
+                    "src/model/user.rs",
+                    "pub fn caller_fn(value: &super::Engine) {\n    value.target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A `crate::` path through a module whose file configuration selects keeps a candidate
+        // in each file (#637, #625).
+        "crate_path_type_receiver_cfg_attr_choice" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod sys;\n\npub fn caller_fn(value: &crate::sys::imp::Engine) {\n    value.target_fn();\n}\n",
+                ),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp.rs", CFG_ATTR_ENGINE),
+                ("src/sys/win.rs", CFG_ATTR_ENGINE),
+            ],
+            false,
+        ),
+        // The same path written below the mounted alternative names that file's type (#637,
+        // #624).
+        "crate_path_type_receiver_inside_mounted_alternative" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod sys;\n"),
+                (
+                    "src/sys/mod.rs",
+                    "#[cfg_attr(windows, path = \"win/mod.rs\")]\npub mod imp;\n",
+                ),
+                ("src/sys/imp/mod.rs", CFG_ATTR_ENGINE),
+                (
+                    "src/sys/win/mod.rs",
+                    "pub mod user;\npub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n",
+                ),
+                (
+                    "src/sys/win/user.rs",
+                    "pub fn caller_fn(engine: &crate::sys::imp::Engine) {\n    engine.target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A `crate::` path to a module that does not exist names no type, though a type of the
+        // name exists elsewhere (#637).
+        "crate_path_type_receiver_missing_module" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod model;\n\npub fn caller_fn(value: crate::missing::Engine) {\n    value.target_fn();\n}\n",
+                ),
+                ("src/model.rs", CFG_ATTR_ENGINE),
+            ],
+            false,
+        ),
+        // A method call through a struct field of an imported type reads the field's declared
+        // type (#630).
+        "struct_field_of_imported_type" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", STRUCT_FIELD_HOLDER),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+            ],
+            true,
+        ),
+        // So does one through a field of a parameter whose type is known (#630).
+        "struct_field_through_parameter" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod engine;\nmod holder;\nmod user;\n"),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+                (
+                    "src/holder.rs",
+                    "use crate::engine::Engine;\n\npub struct Holder {\n    pub engine: Engine,\n}\n",
+                ),
+                (
+                    "src/user.rs",
+                    "use crate::holder::Holder;\n\npub fn caller_fn(holder: &Holder) {\n    holder.engine.target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // The field's type is named where the struct is declared, not where the call is: the
+        // caller's own `Engine` is not the field's (#630).
+        "struct_field_type_read_in_declaring_file" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "mod engine;\nmod holder;\nmod user;\n"),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+                (
+                    "src/holder.rs",
+                    "use crate::engine::Engine;\n\npub struct Holder {\n    pub engine: Engine,\n}\n",
+                ),
+                (
+                    "src/user.rs",
+                    "use crate::holder::Holder;\n\npub struct Engine;\n\nimpl Engine {\n    pub fn target_fn(&self) {}\n}\n\npub fn caller_fn(holder: &Holder) {\n    holder.engine.target_fn();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A field declared twice under `#[cfg]`, with a different type each time, is not one
+        // receiver type (#630).
+        "struct_field_declared_per_configuration" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nmod other;\n\npub struct Holder {\n    #[cfg(unix)]\n    engine: engine::Engine,\n    #[cfg(not(unix))]\n    engine: other::Engine,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n",
+                ),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+                ("src/other.rs", CFG_ATTR_ENGINE),
+            ],
+            false,
+        ),
+        // A field whose type the index cannot resolve reaches no method of the name (#630).
+        "struct_field_of_unresolved_type" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\n\npub struct Holder {\n    engine: Missing,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n",
+                ),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+            ],
+            false,
+        ),
+        // A field typed by a type parameter of the struct has no declared type to read (#630).
+        "struct_field_of_generic_type" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::Engine;\n\npub struct Holder<T> {\n    engine: T,\n}\n\nimpl Holder<Engine> {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n",
+                ),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+            ],
+            false,
+        ),
+        // `Box<Engine>` is a `Box` to the receiver logic, as for a local (#630).
+        "struct_field_of_boxed_type" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "mod engine;\nuse crate::engine::Engine;\n\npub struct Holder {\n    engine: Box<Engine>,\n}\n\nimpl Holder {\n    pub fn caller_fn(&self) {\n        self.engine.target_fn();\n    }\n}\n",
+                ),
+                ("src/engine.rs", CFG_ATTR_ENGINE),
+            ],
+            false,
+        ),
         // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
         "super_glob_module_import" => (
             vec![
@@ -2935,6 +3112,49 @@ fn rust_type_relation_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> 
             ),
             ("src/sys/mod.rs", "pub mod imp;\n"),
             ("src/sys/imp.rs", TYPES),
+        ],
+        // A type written as a `crate::` path (#637).
+        "crate_path_type" => vec![
+            ("Cargo.toml", PACKAGE),
+            (
+                "src/lib.rs",
+                "mod sys;\n\npub fn caller_fn(value: crate::sys::imp::TargetType) {\n    let _ = value;\n}\n",
+            ),
+            ("src/sys/mod.rs", "pub mod imp;\n"),
+            ("src/sys/imp.rs", TYPES),
+        ],
+        // A type written as a `self::` path in a module file (#637).
+        "self_path_type" => vec![
+            ("Cargo.toml", PACKAGE),
+            ("src/lib.rs", "mod sys;\n"),
+            (
+                "src/sys/mod.rs",
+                "pub mod imp;\n\npub fn caller_fn(value: &self::imp::TargetType) {\n    let _ = value;\n}\n",
+            ),
+            ("src/sys/imp.rs", TYPES),
+        ],
+        // A `crate::` path through a module whose file configuration selects names the type of
+        // each file (#637, #625).
+        "crate_path_type_cfg_attr_choice" => vec![
+            ("Cargo.toml", PACKAGE),
+            (
+                "src/lib.rs",
+                "mod sys;\n\npub fn caller_fn(value: crate::sys::imp::TargetType) {\n    let _ = value;\n}\n",
+            ),
+            ("src/sys/mod.rs", DECLARING),
+            ("src/sys/imp.rs", TYPES),
+            ("src/sys/win.rs", TYPES),
+        ],
+        // `super::` from `src/sys/imp.rs` is `sys`, which declares no `TargetType`; the crate
+        // root's is not reached (#637).
+        "super_path_type_names_the_parent_alone" => vec![
+            ("Cargo.toml", PACKAGE),
+            ("src/lib.rs", "mod sys;\n\npub struct TargetType;\n"),
+            ("src/sys/mod.rs", "pub mod imp;\n"),
+            (
+                "src/sys/imp.rs",
+                "pub fn caller_fn(value: super::TargetType) {\n    let _ = value;\n}\n",
+            ),
         ],
         // In the 2015 edition a `use` path starts at the crate root (#632).
         "type_through_use_in_2015_edition" => vec![

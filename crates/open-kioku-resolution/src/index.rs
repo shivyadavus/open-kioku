@@ -130,6 +130,9 @@ pub struct ScopeIndex {
     /// The scope of each Rust `mod` item, by the module symbol that owns it. The parser gives a
     /// bodiless `mod name;` a scope too, so only [`ScopeIndex::module_body`] says which is a block.
     modules_by_owner: HashMap<SymbolId, ScopeId>,
+    /// The body scope of each type, such as a Rust `struct`, by the type symbol that owns it;
+    /// `None` for an owner with more than one.
+    types_by_owner: HashMap<SymbolId, Option<ScopeId>>,
     /// Whether each `mod` scope has a body, from the declarations the parser recorded.
     module_has_body: HashMap<ScopeId, bool>,
     /// `mod` scopes that enclose another scope, which only a block can.
@@ -388,6 +391,15 @@ impl ScopeIndex {
                         .insert(owner.clone(), scope.id.clone());
                 }
             }
+            if scope.kind == ScopeKind::Class {
+                if let Some(owner) = &scope.owner_symbol_id {
+                    index
+                        .types_by_owner
+                        .entry(owner.clone())
+                        .and_modify(|found| *found = None)
+                        .or_insert_with(|| Some(scope.id.clone()));
+                }
+            }
         }
         let module_scopes = index.modules_by_owner.values().collect::<HashSet<_>>();
         let modules_with_children = scopes
@@ -578,6 +590,15 @@ impl ScopeIndex {
 
     pub fn get(&self, id: &ScopeId) -> Option<&Scope> {
         self.scopes.get(id)
+    }
+
+    /// The one body scope of the type `owner`, such as the scope a Rust `struct`'s fields are
+    /// declared in.
+    pub(crate) fn type_body(&self, owner: &SymbolId) -> Option<&Scope> {
+        self.types_by_owner
+            .get(owner)?
+            .as_ref()
+            .and_then(|id| self.scopes.get(id))
     }
 
     /// What the `mod` item of `module` is. Without its declaration, a `mod` scope enclosing

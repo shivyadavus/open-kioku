@@ -6,7 +6,8 @@ use crate::pipeline::{
 };
 use open_kioku_core::{
     Binding, CallSite, Confidence, EvidenceSourceType, FileId, FileRange, GraphEdgeType, Language,
-    LineRange, RelationshipProof, RelationshipProofKind, ScopeId, Symbol, SymbolId, SymbolKind,
+    LineRange, RelationshipProof, RelationshipProofKind, ScopeId, ScopeKind, Symbol, SymbolId,
+    SymbolKind,
 };
 use open_kioku_semantic_model::{ConfiguredImportTargets, ImportBinding};
 use std::collections::BTreeMap;
@@ -18,6 +19,11 @@ pub(crate) fn resolve_typed_receiver_outcome(
     let Some(receiver) = call.receiver.as_deref() else {
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
     };
+    if ctx.language == Language::Rust {
+        if let Some(outcome) = rust_field_receiver_outcome(call, ctx, receiver) {
+            return outcome;
+        }
+    }
     // `self.field` is looked up by a local binding of the field's name, which is not the field.
     let through_self_field = receiver.starts_with("self.");
     let lookup_name = receiver
@@ -37,6 +43,150 @@ pub(crate) fn resolve_typed_receiver_outcome(
     };
 
     resolve_type_names_member_outcome_with(call, ctx, &[type_name], proven && !through_self_field)
+}
+
+/// A Rust method call through a struct field (#630): `self.store.save()`, `entry.store.save()`
+/// and `self.a.b.m()`. The receiver's first segment is `self`, read as the type its `impl`
+/// names, or a binding whose type the index proves; each field after it is a named field of the
+/// one struct the segment before it has, read through the type that field declares, from the
+/// struct's own scope and file. References and generic arguments of a field's type are read
+/// through as for a binding's (`&'a S` and `S<u8>` are an `S`; `Box<S>` and `Option<S>` are not
+/// an `S`).
+///
+/// `None` until the first field is found: a receiver that is not such a chain, or whose first
+/// segment's type is not one struct the index proves, is read as before. Once it is found the
+/// field decides, and reaches no candidate when a struct on the way declares the field more than
+/// once (`#[cfg]`-gated fields) or declares it with a type parameter of the struct, or when a
+/// type on the way is not one struct.
+fn rust_field_receiver_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    receiver: &str,
+) -> Option<ResolutionOutcome> {
+    let mut segments = receiver.split('.');
+    let base = segments.next()?;
+    let fields = segments.collect::<Vec<_>>();
+    let is_identifier = |segment: &str| {
+        let name = segment.strip_prefix("r#").unwrap_or(segment);
+        name.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+            && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+    };
+    if fields.is_empty() || !is_identifier(base) || !fields.iter().all(|field| is_identifier(field))
+    {
+        return None;
+    }
+    let mut owner = rust_field_chain_base(call, ctx, base)?;
+    let nothing = || Some(evaluate_candidates(&GraphEdgeType::Calls, Vec::new()));
+    for (index, field) in fields.iter().enumerate() {
+        let first = index == 0;
+        let Some(body) = ctx.scopes.type_body(&owner) else {
+            return if first { None } else { nothing() };
+        };
+        let binding = match ctx
+            .bindings
+            .bindings_by_scope_name
+            .get(&(body.id.clone(), (*field).to_string()))
+            .map(Vec::as_slice)
+        {
+            Some([binding]) => binding,
+            Some(_) => return nothing(),
+            None if first => return None,
+            None => return nothing(),
+        };
+        let Some(declared) = binding
+            .declared_type
+            .as_deref()
+            .and_then(rust_annotated_receiver_type)
+        else {
+            return nothing();
+        };
+        // The field's type is named where the struct is declared. Only type lookup runs in this
+        // context, and it records no evidence, so the caller's path is not used.
+        let declaring = ResolutionContext::new(
+            &body.file_id,
+            ctx.file_path,
+            None,
+            ctx.language.clone(),
+            ctx.repository,
+            ctx.symbols,
+            ctx.scopes,
+            ctx.bindings,
+            ctx.inheritance,
+            ctx.semantics,
+        );
+        let found = collect_type_candidate_set(&declaring, &binding.scope_id, declared);
+        if index + 1 == fields.len() {
+            let types = found
+                .targets
+                .into_iter()
+                .map(|(target, _)| target)
+                .collect();
+            return Some(type_member_outcome(
+                call,
+                ctx,
+                types,
+                found.configured,
+                Some(RUST_FIELD_RECEIVER),
+            ));
+        }
+        match rust_one_struct(ctx, found) {
+            Some(next) => owner = next,
+            None => return nothing(),
+        }
+    }
+    None
+}
+
+/// The struct the first segment of a Rust field chain has: for `self`, the type the caller's
+/// `impl` names, looked up where the `impl` is written; for any other name, the type of the
+/// nearest binding of it when the index proves that type.
+fn rust_field_chain_base(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    base: &str,
+) -> Option<SymbolId> {
+    if base == "self" {
+        let caller = ctx.symbols.get(call.caller_symbol_id.as_ref()?)?;
+        let parent = caller.parent_symbol_id.as_ref()?;
+        // The parser names an `impl` by its written type until it finds a type of that name in
+        // the same file; only a plain name is replaced by that type, which the lookup below
+        // reads again from the `impl`'s scope rather than trusting the file-wide match.
+        let written = match parent.0.rsplit_once(":impl_owner:") {
+            Some((_, written)) => written.to_string(),
+            None => ctx.symbols.get(parent)?.name.clone(),
+        };
+        let impl_scope = ctx.scopes.get(caller.scope_id.as_ref()?)?;
+        if impl_scope.kind != ScopeKind::Trait {
+            return None;
+        }
+        let around = impl_scope.parent_id.as_ref()?;
+        let written = rust_annotated_receiver_type(&written)?;
+        return rust_one_struct(ctx, collect_type_candidate_set(ctx, around, written));
+    }
+    let binding = ctx
+        .bindings
+        .resolve_before(&call.scope_id, base, &call.range, ctx.scopes)?;
+    let (type_name, proven) = binding_receiver_type(ctx, &call.scope_id, binding)?;
+    if !proven {
+        return None;
+    }
+    rust_one_struct(
+        ctx,
+        collect_type_candidate_set(ctx, &call.scope_id, &type_name),
+    )
+}
+
+/// The one candidate of `found` when it is a struct-like type the index places in one file, not
+/// reached through a module whose file configuration selects.
+fn rust_one_struct(ctx: &ResolutionContext<'_>, found: TypeCandidates) -> Option<SymbolId> {
+    if found.configured.is_some() {
+        return None;
+    }
+    let [(target, _)] = <[_; 1]>::try_from(found.targets).ok()?;
+    ctx.symbols
+        .get(&target)
+        .is_some_and(|symbol| symbol.kind == SymbolKind::Class)
+        .then_some(target)
 }
 
 /// The receiver type a binding gives, and whether the index proves it. A written type does; an
@@ -1115,6 +1265,47 @@ pub(crate) fn resolve_type_names_member_outcome_with(
             into.unread |= files.unread;
         }
     }
+    type_member_outcome(
+        call,
+        ctx,
+        type_candidates,
+        configured,
+        receiver_type_proven.then_some(TYPED_RECEIVER),
+    )
+}
+
+/// How a receiver's type was read, for the receiver-type proof of a method call on it: the
+/// proof's strategy and the candidate's evidence message.
+#[derive(Clone, Copy)]
+struct ReceiverTypeRoute {
+    strategy: &'static str,
+    message: &'static str,
+}
+
+/// A receiver whose binding states or proves its type.
+const TYPED_RECEIVER: ReceiverTypeRoute = ReceiverTypeRoute {
+    strategy: "typed_receiver",
+    message: "method candidate from typed receiver binding",
+};
+
+/// A receiver that is a field of a Rust struct, typed by the field's declaration (#630).
+const RUST_FIELD_RECEIVER: ReceiverTypeRoute = ReceiverTypeRoute {
+    strategy: "rust_field_declared_type",
+    message: "method candidate from the declared type of a Rust struct field",
+};
+
+/// Member calls on a receiver whose type is one of `type_candidates`. `receiver` is how the
+/// receiver's type was proven, or `None` when it is a candidate the index cannot prove.
+/// `configured` holds the files of a module whose file configuration selects that a candidate
+/// was reached through.
+fn type_member_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    mut type_candidates: Vec<SymbolId>,
+    configured: Option<RustModuleFiles>,
+    receiver: Option<ReceiverTypeRoute>,
+) -> ResolutionOutcome {
+    let receiver_type_proven = receiver.is_some();
     normalize_symbol_ids(&mut type_candidates);
     if type_candidates.is_empty() {
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
@@ -1157,10 +1348,9 @@ pub(crate) fn resolve_type_names_member_outcome_with(
         );
     }
     if !direct_targets.is_empty() {
-        return if receiver_type_proven {
-            evaluate_direct_member_targets(call, ctx, direct_targets)
-        } else {
-            evaluate_unproven_member_targets(call, ctx, direct_targets)
+        return match receiver {
+            Some(route) => evaluate_direct_member_targets_via(call, ctx, direct_targets, route),
+            None => evaluate_unproven_member_targets(call, ctx, direct_targets),
         };
     }
 
@@ -1329,6 +1519,15 @@ pub(crate) fn evaluate_direct_member_targets(
     ctx: &ResolutionContext<'_>,
     targets: Vec<SymbolId>,
 ) -> ResolutionOutcome {
+    evaluate_direct_member_targets_via(call, ctx, targets, TYPED_RECEIVER)
+}
+
+fn evaluate_direct_member_targets_via(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    targets: Vec<SymbolId>,
+    route: ReceiverTypeRoute,
+) -> ResolutionOutcome {
     let candidate_count = targets.len();
     let ambiguity = ambiguity_strings(&targets);
     let candidates = targets
@@ -1340,12 +1539,12 @@ pub(crate) fn evaluate_direct_member_targets(
                 source_type: EvidenceSourceType::TreeSitter,
                 file_range: call_file_range(call, ctx),
                 symbol_id: Some(target.clone()),
-                message: "method candidate from typed receiver binding".into(),
+                message: route.message.into(),
             });
             candidate.proofs.push(call_site_proof(call, ctx, &target));
             candidate.proofs.push(proof(
                 RelationshipProofKind::ReceiverType,
-                "typed_receiver",
+                route.strategy,
                 call,
                 ctx,
                 &target,
@@ -1593,13 +1792,15 @@ pub(crate) fn collect_type_candidate_set(
     }
 }
 
-/// The types a Rust type written as a path whose first segment is a module in scope names
-/// (`s: sys::imp::S` beside `mod sys;`, #632), read as a call path through a type is: the last
-/// segment is a type of the module the rest of the path reaches. References and generic
-/// arguments are read through as for a receiver. A path whose first segment names both such a
-/// module and a crate reaches no candidate, since it may start from either. `None` for any other
-/// type, which is looked up by name as before: a path starting at `crate`, `self`, `super`, a
-/// crate name or an import is not read here.
+/// The types a Rust type written as a module path names, read as a call path through a type is:
+/// the last segment is a type of the module the rest of the path reaches. The path starts at
+/// `crate`, `self` or `super` (`e: crate::model::Entry`, #637), or at a module in scope
+/// (`s: sys::imp::S` beside `mod sys;`, #632). References and generic arguments are read through
+/// as for a receiver. Through a module whose file configuration selects, each file's type is a
+/// candidate, unless the file writing the path fixes the choice. A path whose first segment names
+/// both a module in scope and a crate reaches no candidate, since it may start from either.
+/// `None` for any other type, which is looked up by name as before: a path starting at a crate
+/// name or an import is not read here.
 fn rust_path_type_candidates(
     ctx: &ResolutionContext<'_>,
     scope_id: &ScopeId,
@@ -1612,10 +1813,14 @@ fn rust_path_type_candidates(
         return None;
     }
     let first = module_path.split("::").next().unwrap_or_default().trim();
-    if matches!(first, "" | "self" | "super" | "crate" | "Self") {
-        return None;
+    match first {
+        "" | "Self" => return None,
+        // Read from the crate root, or from the module around `scope_id`, as a call path is.
+        "crate" | "self" | "super" => {}
+        _ => {
+            crate::context::rust_module_in_scope(ctx, scope_id, first)?;
+        }
     }
-    crate::context::rust_module_in_scope(ctx, scope_id, first)?;
     let (targets, strategy) = rust_module_path_items(scope_id, ctx, module_path, name, |symbol| {
         symbol.kind != SymbolKind::Module && is_type_symbol(&symbol.kind)
     })?;
@@ -3625,9 +3830,19 @@ mod tests {
             // The path names no type there, or starts nowhere in scope.
             assert!(types(ctx, "child::Missing").is_empty());
             assert!(types(ctx, "stray::Thing").is_empty());
-            // Only a path starting at a module in scope is read this way.
-            assert!(types(ctx, "self::child::Thing").is_empty());
-            assert!(types(ctx, "crate::worker::child::Thing").is_empty());
+            // A path starting at `self`, `super` or `crate` is read the same way (#637).
+            for written in [
+                "self::child::Thing",
+                "&self::child::Thing",
+                "crate::worker::child::Thing",
+                "super::worker::child::Thing",
+            ] {
+                assert_eq!(types(ctx, written), vec!["sym:child:Thing"], "{written}");
+            }
+            // Each must spell where the type is.
+            assert!(types(ctx, "crate::child::Thing").is_empty());
+            assert!(types(ctx, "super::child::Thing").is_empty());
+            assert!(types(ctx, "self::Thing").is_empty());
         });
         // A first segment that is also a crate's name may start from either.
         with_module_files_naming(vec![thing], true, &[], &["child"], Vec::new(), |ctx| {

@@ -2743,6 +2743,259 @@
       "notes": "Regression case (#632): `edition.workspace = true` under `[workspace.package] edition = \"2021\"` makes the package 2021, where the same `use` looks `sys` up in scope and names `src/a/sys.rs`."
     },
     {
+      "id": "ci-rust-calls-132-crate_path_type_receiver",
+      "fixture_id": "ci/ri3/rust/calls/crate_path_type_receiver",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:crate_path_type_receiver:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "crate_path_type_receiver",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:crate_path_type_receiver:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#637): `caller_fn(value: crate::model::Engine)` calls `value.target_fn()`, which reaches the method of `Engine` in `src/model.rs` through the type's `crate::` path."
+    },
+    {
+      "id": "ci-rust-calls-133-super_path_type_receiver",
+      "fixture_id": "ci/ri3/rust/calls/super_path_type_receiver",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:super_path_type_receiver:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "super_path_type_receiver",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:super_path_type_receiver:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#637): `caller_fn(value: &super::Engine)` in `src/model/user.rs` reaches the method of the `Engine` that `src/model.rs` declares."
+    },
+    {
+      "id": "ci-rust-calls-134-crate_path_type_receiver_cfg_attr_choice",
+      "fixture_id": "ci/ri3/rust/calls/crate_path_type_receiver_cfg_attr_choice",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:crate_path_type_receiver_cfg_attr_choice:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "crate_path_type_receiver_cfg_attr_choice",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#637): `value: &crate::sys::imp::Engine` through `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` keeps a candidate in `src/sys/imp.rs` and `src/sys/win.rs`, neither authoritative."
+    },
+    {
+      "id": "ci-rust-calls-135-crate_path_type_receiver_inside_mounted_alternative",
+      "fixture_id": "ci/ri3/rust/calls/crate_path_type_receiver_inside_mounted_alternative",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:crate_path_type_receiver_inside_mounted_alternative:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "crate_path_type_receiver_inside_mounted_alternative",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::win::mod::target_fn",
+        "identity": "symbol:rust:calls:crate_path_type_receiver_inside_mounted_alternative:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#637): `engine: &crate::sys::imp::Engine` written in `src/sys/win/user.rs`, below the mounted alternative `src/sys/win/mod.rs`, names that file's `Engine`, so `engine.target_fn()` is proven into it."
+    },
+    {
+      "id": "ci-rust-calls-136-crate_path_type_receiver_missing_module",
+      "fixture_id": "ci/ri3/rust/calls/crate_path_type_receiver_missing_module",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:crate_path_type_receiver_missing_module:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "crate_path_type_receiver_missing_module",
+      "notes": "Regression case (#637): `value: crate::missing::Engine` names no module, so `value.target_fn()` must not reach the `Engine` of `src/model.rs`."
+    },
+    {
+      "id": "ci-rust-calls-137-struct_field_of_imported_type",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_of_imported_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_of_imported_type:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "struct_field_of_imported_type",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:struct_field_of_imported_type:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#630): `self.engine.target_fn()` on a field `engine: Engine`, with `Engine` imported from `src/engine.rs`, reaches that type's method."
+    },
+    {
+      "id": "ci-rust-calls-138-struct_field_through_parameter",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_through_parameter",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_through_parameter:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "struct_field_through_parameter",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:struct_field_through_parameter:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#630): `holder.engine.target_fn()` for `holder: &Holder`, whose field `engine: Engine` is declared in `src/holder.rs`, reaches the method of `src/engine.rs`."
+    },
+    {
+      "id": "ci-rust-calls-139-struct_field_type_read_in_declaring_file",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_type_read_in_declaring_file",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_type_read_in_declaring_file:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "struct_field_type_read_in_declaring_file",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::engine::target_fn",
+        "identity": "symbol:rust:calls:struct_field_type_read_in_declaring_file:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#630): The field's `Engine` is the one `src/holder.rs` imports, not the caller's own `Engine` in `src/user.rs`."
+    },
+    {
+      "id": "ci-rust-calls-140-struct_field_declared_per_configuration",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_declared_per_configuration",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_declared_per_configuration:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_declared_per_configuration",
+      "notes": "Regression case (#630): A field declared under `#[cfg(unix)]` as `engine::Engine` and under `#[cfg(not(unix))]` as `other::Engine` is not one receiver type."
+    },
+    {
+      "id": "ci-rust-calls-141-struct_field_of_unresolved_type",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_of_unresolved_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_of_unresolved_type:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_of_unresolved_type",
+      "notes": "Regression case (#630): A field `engine: Missing`, a type the index cannot resolve, reaches no `target_fn`."
+    },
+    {
+      "id": "ci-rust-calls-142-struct_field_of_generic_type",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_of_generic_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_of_generic_type:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_of_generic_type",
+      "notes": "Regression case (#630): A field `engine: T` is typed by a type parameter of the struct, so it has no declared type to read, even in `impl Holder<Engine>`."
+    },
+    {
+      "id": "ci-rust-calls-143-struct_field_of_boxed_type",
+      "fixture_id": "ci/ri3/rust/calls/struct_field_of_boxed_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:struct_field_of_boxed_type:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "struct_field_of_boxed_type",
+      "notes": "Regression case (#630): A field `engine: Box<Engine>` is a `Box` to the receiver logic, as a local of that type is, so no method of `Engine` is proven."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
@@ -2888,6 +3141,81 @@
         "identity": "symbol:rust:uses_type:type_through_use_in_2015_edition:target"
       },
       "notes": "Regression case (#632): in a package of the 2015 edition, `caller_fn(value: TargetType)` after `use sys::TargetType;` in `src/a.rs`, which declares its own `mod sys;`, uses the crate root's `src/sys.rs` type."
+    },
+    {
+      "id": "ci-rust-uses_type-07-crate_path_type",
+      "fixture_id": "ci/ri3/rust/uses_type/crate_path_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:crate_path_type:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "crate_path_type",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::TargetType",
+        "identity": "symbol:rust:uses_type:crate_path_type:target"
+      },
+      "notes": "Regression case (#637): `caller_fn(value: crate::sys::imp::TargetType)` uses the `TargetType` of `src/sys/imp.rs`."
+    },
+    {
+      "id": "ci-rust-uses_type-08-self_path_type",
+      "fixture_id": "ci/ri3/rust/uses_type/self_path_type",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:self_path_type:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "self_path_type",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "src::sys::imp::TargetType",
+        "identity": "symbol:rust:uses_type:self_path_type:target"
+      },
+      "notes": "Regression case (#637): `caller_fn(value: &self::imp::TargetType)` in `src/sys/mod.rs` uses the `TargetType` of `src/sys/imp.rs`."
+    },
+    {
+      "id": "ci-rust-uses_type-09-crate_path_type_cfg_attr_choice",
+      "fixture_id": "ci/ri3/rust/uses_type/crate_path_type_cfg_attr_choice",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:crate_path_type_cfg_attr_choice:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "crate_path_type_cfg_attr_choice",
+      "candidate_count_expected": 2,
+      "notes": "Regression case (#637): `crate::sys::imp::TargetType` through `#[cfg_attr(windows, path = \"win.rs\")] pub mod imp;` keeps a `USES_TYPE` candidate in each file and no authoritative edge."
+    },
+    {
+      "id": "ci-rust-uses_type-10-super_path_type_names_the_parent_alone",
+      "fixture_id": "ci/ri3/rust/uses_type/super_path_type_names_the_parent_alone",
+      "split": "development",
+      "language": "rust",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:uses_type:super_path_type_names_the_parent_alone:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "super_path_type_names_the_parent_alone",
+      "notes": "Regression case (#637): `super::TargetType` in `src/sys/imp.rs` names `sys`, which declares no `TargetType`; the crate root's `TargetType` must not be reached."
     },
     {
       "id": "ci-rust-implements-01-metamorphic_a",
