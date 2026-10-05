@@ -4889,6 +4889,107 @@ fn impact_since_accounts_for_every_path_git_reports_including_header_only_entrie
     assert!(!plan.contains("signing.p12"), "{plan}");
 }
 
+/// `path` with `since` reads the diff as git gives it, so a file renamed to a secret-like name
+/// is reported as renamed, but the name it was renamed to is withheld on both surfaces.
+#[test]
+fn impact_path_since_never_names_the_secret_like_path_a_file_was_renamed_to() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"ledger\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub mod books;\npub mod ledger;\n").unwrap();
+    fs::write(
+        repo.join("src/ledger.rs"),
+        "pub fn settle() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/books.rs"),
+        "use crate::ledger::settle;\n\npub fn close() -> u32 {\n    settle()\n}\n",
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "cli@example.com"]);
+    git(repo, &["config", "user.name", "CLI Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "--quiet", "-m", "initial"]);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    git(repo, &["mv", "src/ledger.rs", ".env.production"]);
+
+    let cli = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "--json",
+            "impact",
+            "--file",
+            "src/ledger.rs",
+            "--since",
+            "HEAD",
+        ]);
+        command
+    });
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "impact_analysis",
+            "arguments": {"path": "src/ledger.rs", "since": "HEAD"}
+        }
+    })
+    .to_string();
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("mcp").arg("serve");
+            command
+        },
+        &(request + "\n"),
+    );
+    let mcp: serde_json::Value = serde_json::from_str(mcp.trim()).unwrap();
+    let mcp_report = mcp["result"]["structuredContent"].clone();
+    let cli_report: serde_json::Value = serde_json::from_str(&cli).unwrap();
+    for (surface, report) in [("cli", &cli_report), ("mcp", &mcp_report)] {
+        let caveat = report["relationship_impact_caveats"][0]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            caveat.contains("renames `src/ledger.rs` to a secret-like path, which is withheld"),
+            "{surface}: {report:#}"
+        );
+        assert_eq!(
+            report["risk_report"]["reasons"][0], report["relationship_impact_caveats"][0],
+            "{surface}: {report:#}"
+        );
+    }
+    assert!(!cli.contains(".env.production"), "{cli}");
+    assert!(!mcp.to_string().contains(".env.production"), "{mcp:#}");
+}
+
 #[test]
 fn index_mode_is_reported_by_index_and_status_json() {
     let temp = tempfile::tempdir().unwrap();

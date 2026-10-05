@@ -1041,6 +1041,14 @@ impl Removal<'_> {
     fn caveat(&self) -> String {
         let path = self.path.display();
         match self.renamed_to {
+            // Only `path` with `since` reads the unwithheld diff; a secret-like name is never
+            // named, there either.
+            Some(new) if open_kioku_core::is_secret_like_path(new) => format!(
+                "the diff renames `{path}` to a secret-like path, which is withheld: these are \
+                 the dependents the index last held for `{path}`, read through the file and every \
+                 symbol it defined, and one that names it by path or module breaks unless the \
+                 change updates it"
+            ),
             Some(new) => format!(
                 "the diff renames `{path}` to `{}`: these are the dependents the index last \
                  held for `{path}`, read through the file and every symbol it defined, and one that names it \
