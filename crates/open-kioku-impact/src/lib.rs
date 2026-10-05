@@ -818,11 +818,12 @@ impl<'a> ImpactEngine<'a> {
             ));
         }
         if changed_paths_withheld > 0 {
+            // The policy judges names, not content, so the caveat says which rule matched and
+            // nothing about what the files hold (#676).
             caveats.push(format!(
-                "{changed_paths_withheld} changed path(s) are secret-like (key material or \
-                 environment files), which the secret-path policy never indexes or names: they \
-                 are counted in `changed_paths_withheld`, and are not in `changed_files` or any \
-                 report"
+                "{changed_paths_withheld} changed path(s) match a secret-path pattern, which the \
+                 secret-path policy never indexes or names: they are counted in \
+                 `changed_paths_withheld`, and are not in `changed_files` or any report"
             ));
         }
         Ok(ImpactAnswer::Diff(DiffImpact {
@@ -6912,7 +6913,15 @@ mod tests {
         assert!(answer
             .caveats
             .iter()
-            .any(|caveat| caveat.starts_with("4 changed path(s) are secret-like")));
+            .any(|caveat| caveat.starts_with("4 changed path(s) match a secret-path pattern")));
+        // The policy reads names, so the caveat claims nothing about content (#676).
+        for claim in ["key material", "environment file"] {
+            assert!(
+                answer.caveats.iter().all(|caveat| !caveat.contains(claim)),
+                "{:?}",
+                answer.caveats
+            );
+        }
         let shape = answer.to_json("HEAD", &diff);
         assert_eq!(shape["changed_paths_withheld"], 4, "{shape:#}");
         let kept = shape["changed_files"]
@@ -6957,6 +6966,25 @@ mod tests {
         for secret in [".env", "signing.p12", "old.pem"] {
             assert!(!text.contains(secret), "{secret} is named: {shape:#}");
         }
+    }
+
+    /// Source named after a key type is a changed file like any other; an environment file
+    /// beside it is still withheld (#676).
+    #[test]
+    fn source_named_after_a_key_type_is_not_withheld() {
+        let diff = [
+            diff_changing("loaders/id_rsa_loader.py", None),
+            diff_changing(".env.production", None),
+            diff_changing("keys/id_rsa_github", None),
+        ];
+        let (kept, withheld) = withhold_secret_like_paths(&diff);
+        assert_eq!(withheld, 2);
+        assert_eq!(
+            kept.iter()
+                .filter_map(|change| change.new_path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Path::new("loaders/id_rsa_loader.py")]
+        );
     }
 
     fn diff_deleting(path: &str) -> open_kioku_git::DiffFile {

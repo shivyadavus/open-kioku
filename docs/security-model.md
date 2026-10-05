@@ -7,9 +7,11 @@ Default posture:
 - no network access
 - no file writes
 - no hidden-file scanning
-- deny `.env` / `.env.*`, `.aws/**`, `.ssh/**`, `id_rsa*`, `id_ed25519*`, and key material
-  (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`) on every path, whatever the
-  file's language (`is_secret_like_path`). A file merely named for a secret is indexed:
+- deny every path that matches a secret-path pattern, whatever the file's language
+  (`is_secret_like_path`; see "Secret-path patterns" below): environment files, the `.aws`
+  and `.ssh` directories, SSH keys, and key or certificate files by extension. The rule
+  reads names, not content, so a withheld path is reported as matching a pattern, never
+  described as holding a key. A file merely named for a secret is indexed:
   `secrets.yaml`, `credentials.json`, or `SECRETS.md` with its secret-like values replaced
   (see "Secret-value redaction" below), and `secrets.go` as written; parser messages that
   would quote file content are redacted. `[paths] deny` excludes any other path, and the
@@ -56,6 +58,42 @@ Policy is enforced by `open-kioku-actions::PolicyGate`. Commands must exactly ma
 Contract verification uses the same exact command allowlist before running validation commands. When attestation writing is requested, each executed or denied validation command records cwd, timestamps, exit code, allowlist status, normalized outcome, and bounded stdout/stderr summaries in a validation ledger under `.ok/contracts/validation/`.
 
 Patch planning is available in read-only mode because it produces a plan, evidence, risks, tests, and a boundary. Open Kioku exposes no MCP source-editing tool; approved patches are applied with the user's normal editor and then verified against the plan.
+
+## Secret-path patterns
+
+A path is skipped as `secret_policy`, never read, and never named when any of its components
+(case-insensitive) is:
+
+- an environment file: `.env`, or `.env.` followed by anything (`.env.production`,
+  `.env.example`; a template is blocked too, since one may hold real values);
+- the `.aws` or `.ssh` directory, whatever is under it;
+- an SSH key: a name starting with one of `ssh-keygen`'s default stems (`id_dsa`, `id_ecdsa`,
+  `id_ed25519`, `id_rsa`, `id_xmss`; `open_kioku_core::SSH_KEY_STEMS`), unless the name ends
+  in a programming-source extension (`.cjs`, `.go`, `.java`, `.js`, `.jsx`, `.mjs`, `.py`,
+  `.rs`, `.ts`, `.tsx`; `KEY_STEM_SOURCE_EXTENSIONS`). The stem is a prefix because keys are
+  renamed and copied (`id_rsa_github`, `id_rsa4096`, `id_rsa.bak`); a source extension is
+  the one suffix no key is written under, so `loaders/id_rsa_loader.py` is code;
+- key or certificate material by extension: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`,
+  `*.keystore`.
+
+| Path | Result |
+|---|---|
+| `.env`, `.env.local`, `.env.production`, `config/.env.production`, `.env.example` | blocked |
+| `.aws/credentials`, `.ssh/config`, `.ssh/build/keys.py` | blocked |
+| `id_rsa`, `id_rsa.pub`, `id_dsa`, `id_ecdsa_sk`, `id_ed25519`, `id_ed25519_sk.pub`, `id_xmss` | blocked |
+| `keys/id_rsa_github`, `keys/id_rsa4096`, `keys/id_rsa-cert.pub`, `keys/id_rsa.bak`, `keys/id_rsa.txt`, `keys/id_rsa.json` | blocked |
+| `id_rsa/loader.py`, `src/.env.rs` | blocked (a matching component anywhere in the path) |
+| `config/server.key`, `certs/tls.PEM`, `certs/client.p12`, `certs/client.pfx`, `android/release.jks`, `android/release.keystore` | blocked |
+| `loaders/id_rsa_loader.py`, `src/id_rsa.rs`, `pkg/id_ed25519_signer.go`, `web/id_rsa_parser.ts`, `lib/id_dsa.js`, `codec/id_rsa_codec.java` | indexed |
+| `secrets.yaml`, `credentials.json`, `docs/SECRETS.md`, `secret_key.txt` | indexed, secret-like values redacted |
+| `internal/secrets.go`, `src/CredentialsProvider.java` | indexed as written |
+| `.envrc`, `config/.environment.yaml`, `src/keyboard.rs`, `docs/key.md` | not matched (a hidden file still needs `allow_hidden_files`) |
+
+`ok impact --since`, `ok plan --since` and MCP `impact_analysis` and `plan_change` with
+`since` count a changed path that matches as withheld, and say only that it matches a
+secret-path pattern. An index built before a pattern changed keeps its old file set until it
+is rebuilt; `PROJECT_RESOLVER_SEMANTICS_VERSION` moves with this list, so such an index
+reports `RebuildRequired`.
 
 ## Secret-value redaction
 

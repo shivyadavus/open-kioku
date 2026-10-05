@@ -5267,6 +5267,178 @@ fn impact_path_since_never_names_the_secret_like_path_a_file_was_renamed_to() {
     assert!(!mcp.to_string().contains(".env.production"), "{mcp:#}");
 }
 
+/// Source named after a key type is indexed, and its change reported, on every surface that
+/// reads a diff; an environment file changed beside it is counted on each and named on none
+/// (#676).
+#[test]
+fn source_named_after_a_key_type_is_reported_and_an_env_file_beside_it_is_withheld() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+    fn mcp_call(repo: &std::path::Path, tool: &str, arguments: serde_json::Value) -> String {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments}
+        })
+        .to_string();
+        run_with_stdin(
+            {
+                let mut command = ok();
+                command.arg("--repo").arg(repo).arg("mcp").arg("serve");
+                command
+            },
+            &(request + "\n"),
+        )
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("app")).unwrap();
+    fs::create_dir_all(repo.join("loaders")).unwrap();
+    fs::write(
+        repo.join("app/main.py"),
+        "from loaders.id_rsa_loader import load_key\n\n\ndef run():\n    return load_key()\n",
+    )
+    .unwrap();
+    fs::write(repo.join("loaders/__init__.py"), "").unwrap();
+    fs::write(
+        repo.join("loaders/id_rsa_loader.py"),
+        "def load_key():\n    return \"keys\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join(".env.production"), "LEDGER_TOKEN=first\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "cli@example.com"]);
+    git(repo, &["config", "user.name", "CLI Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "--quiet", "-m", "initial"]);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    // Indexed: the loader is searchable by its function; the environment file is not.
+    let found = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "load_key"]);
+        command
+    });
+    assert!(found.contains("loaders/id_rsa_loader.py"), "{found}");
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args(["--json", "status"]);
+        command
+    });
+    assert!(!status.contains(".env.production"), "{status}");
+    let token = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "LEDGER_TOKEN"]);
+        command
+    });
+    assert!(!token.contains(".env.production"), "{token}");
+
+    fs::write(
+        repo.join("loaders/id_rsa_loader.py"),
+        "def load_key():\n    return \"rotated\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join(".env.production"), "LEDGER_TOKEN=second\n").unwrap();
+
+    let impact_text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "impact", "--since", "HEAD"]);
+        command
+    });
+    let impact: serde_json::Value = serde_json::from_str(&impact_text).unwrap();
+    let changed = impact["changed_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|change| change["new_path"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(changed, vec!["loaders/id_rsa_loader.py"], "{impact:#}");
+    assert!(
+        impact["impact_reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|report| report["target"] == "loaders/id_rsa_loader.py"),
+        "{impact:#}"
+    );
+    assert_eq!(impact["changed_paths_withheld"], 1, "{impact:#}");
+    let caveats = impact["caveats"].to_string();
+    assert!(
+        caveats.contains("1 changed path(s) match a secret-path pattern"),
+        "{caveats}"
+    );
+    assert!(!caveats.contains("key material"), "{caveats}");
+    assert!(!impact_text.contains(".env.production"), "{impact_text}");
+
+    let mcp_impact = mcp_call(
+        repo,
+        "impact_analysis",
+        serde_json::json!({"since": "HEAD"}),
+    );
+    let mcp_value: serde_json::Value = serde_json::from_str(mcp_impact.trim()).unwrap();
+    let structured = &mcp_value["result"]["structuredContent"];
+    for key in ["changed_files", "changed_paths_withheld", "caveats"] {
+        assert_eq!(structured[key], impact[key], "{key}: {structured:#}");
+    }
+    assert!(!mcp_impact.contains(".env.production"), "{mcp_impact}");
+
+    let plan = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "plan",
+            "rotate the loader",
+            "--since",
+            "HEAD",
+            "--format",
+            "json",
+        ]);
+        command
+    });
+    assert!(plan.contains("loaders/id_rsa_loader.py"), "{plan}");
+    assert!(plan.contains("1 secret-like changed path(s)"), "{plan}");
+    assert!(!plan.contains(".env.production"), "{plan}");
+
+    let mcp_plan = mcp_call(
+        repo,
+        "plan_change",
+        serde_json::json!({"task": "rotate the loader", "since": "HEAD"}),
+    );
+    assert!(mcp_plan.contains("loaders/id_rsa_loader.py"), "{mcp_plan}");
+    assert!(
+        mcp_plan.contains("1 secret-like changed path(s)"),
+        "{mcp_plan}"
+    );
+    assert!(!mcp_plan.contains(".env.production"), "{mcp_plan}");
+}
+
 #[test]
 fn index_mode_is_reported_by_index_and_status_json() {
     let temp = tempfile::tempdir().unwrap();

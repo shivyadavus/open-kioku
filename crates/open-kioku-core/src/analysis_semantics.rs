@@ -22,8 +22,14 @@ pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v2";
 /// file (`*.csproj`, `*.fsproj`, `*.vbproj`) holding build artifacts, and an `obj` holding a
 /// NuGet restore's output or, beside a project file, a `Debug`/`Release` directory, so neither
 /// its files nor its manifests are read; earlier versions indexed the JSON and other supported
-/// files MSBuild copies there (#684). v4 is taken by an open change.
-pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v5";
+/// files MSBuild copies there (#684). v4 was left to #676, which landed as v6.
+/// v6 (#676; v4 was reserved for it): a file whose name starts with an SSH key stem but ends in
+/// a programming-source extension (`id_rsa_loader.py`, `src/id_rsa_tool.rs`) is indexed, so it
+/// can be a module, a crate root, or an import target; earlier indexes skipped it as
+/// secret-like and hold no edge into it, and no history row for it. A private-key PEM body in
+/// programming-language source is replaced before it is indexed; earlier versions stored it as
+/// written.
+pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v6";
 /// v3: a Rust `use` path inside the importing file's own crate resolves through that crate's
 /// declared module tree, so its `IMPORTS` edge names the file declaring the module or the item;
 /// v2 resolved such a path against the repository-root `src/` and fell back to the crate root,

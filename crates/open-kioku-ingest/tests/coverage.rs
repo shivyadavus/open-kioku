@@ -780,7 +780,7 @@ fn a_kept_directory_does_not_bypass_the_secret_path_policy() {
     write(root, "deploy/dist/app.py", "def deploy():\n    pass\n");
     write(root, "deploy/dist/server.key", "PRIVATE KEY MATERIAL\n");
     write(root, "deploy/dist/.env", "TOKEN=abc123\n");
-    write(root, "deploy/dist/id_rsa.py", "def leaked():\n    pass\n");
+    write(root, "deploy/dist/id_rsa_deploy", "PRIVATE KEY MATERIAL\n");
     write(root, ".ssh/build/keys.py", "def keys():\n    pass\n");
     write(root, "secrets/dist/token.py", "def token():\n    pass\n");
     git(root, &["add", "."]);
@@ -807,7 +807,7 @@ fn a_kept_directory_does_not_bypass_the_secret_path_policy() {
     for blocked in [
         "deploy/dist/server.key",
         "deploy/dist/.env",
-        "deploy/dist/id_rsa.py",
+        "deploy/dist/id_rsa_deploy",
         ".ssh/build/keys.py",
         "secrets/dist/token.py",
     ] {
@@ -831,6 +831,89 @@ fn a_kept_directory_does_not_bypass_the_secret_path_policy() {
         .chunks
         .iter()
         .any(|chunk| chunk.text.contains("PRIVATE KEY") || chunk.text.contains("abc123")));
+}
+
+/// Source named after a key type is indexed and resolved like any other module, while the key
+/// files and environment file beside it stay skipped and unnamed, even with hidden files allowed
+/// so the secret-path rule alone decides (#676).
+#[test]
+fn source_named_after_a_key_type_is_indexed_and_keys_beside_it_are_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "--quiet"]);
+    write(
+        root,
+        "app/main.py",
+        "from loaders.id_rsa_loader import load_key\n\n\ndef run():\n    return load_key()\n",
+    );
+    write(root, "loaders/__init__.py", "");
+    write(
+        root,
+        "loaders/id_rsa_loader.py",
+        "def load_key():\n    return \"keys\"\n",
+    );
+    write(root, "keys/id_rsa_github", "LEDGER-KEY-MATERIAL\n");
+    write(root, "keys/id_rsa.txt", "LEDGER-KEY-MATERIAL\n");
+    write(root, "config/.env.production", "LEDGER_TOKEN=plain\n");
+    git(root, &["add", "."]);
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    config.security.allow_hidden_files = true;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let files = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        files.contains(&"loaders/id_rsa_loader.py".to_string()),
+        "{files:?}"
+    );
+    for blocked in [
+        "keys/id_rsa_github",
+        "keys/id_rsa.txt",
+        "config/.env.production",
+    ] {
+        assert!(!files.contains(&blocked.to_string()), "{blocked} indexed");
+    }
+    let id = |name: &str| {
+        snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .unwrap_or_else(|| panic!("a symbol named {name}"))
+            .id
+            .clone()
+    };
+    let (run, load_key) = (id("run"), id("load_key"));
+    assert!(
+        snapshot
+            .resolved_relationships
+            .iter()
+            .any(|edge| edge.edge_type == GraphEdgeType::Calls
+                && edge.from == run
+                && edge.to == load_key),
+        "{:?}",
+        snapshot.resolved_relationships
+    );
+    let skipped = &snapshot.skipped_paths;
+    let secret_skips = skipped
+        .iter()
+        .filter(|skip| skip.reason == SkipReason::SecretPolicy)
+        .collect::<Vec<_>>();
+    assert_eq!(secret_skips.len(), 3, "{skipped:?}");
+    assert!(secret_skips
+        .iter()
+        .all(|skip| skip.path == Path::new("[redacted]") && !skip.safe_to_show));
+    let shown = format!("{skipped:?}");
+    for withheld in ["id_rsa_github", "id_rsa.txt", ".env"] {
+        assert!(!shown.contains(withheld), "{withheld} named: {shown}");
+    }
+    assert!(!snapshot.chunks.iter().any(|chunk| {
+        chunk.text.contains("LEDGER-KEY-MATERIAL") || chunk.text.contains("LEDGER_TOKEN")
+    }));
 }
 
 /// A Python repository with `app/` indexed and up to three git-ignored trees: a `venv/` that

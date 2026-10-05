@@ -836,7 +836,8 @@ impl Indexer {
             &scope_index,
         )
         // A redacted skip names no path. Only secret-like paths are redacted, so a skipped crate
-        // root goes unseen here only when its file is named like key material (`id_rsa.rs`).
+        // root goes unseen here only when its path matches a secret-path pattern
+        // (`src/.env.rs`; `src/id_rsa.rs` is source and indexed, #676).
         .with_unindexed_files(
             skipped_paths
                 .iter()
