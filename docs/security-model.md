@@ -33,13 +33,13 @@ Default posture:
   them, while an unanchored one (`**/vault/**`) and the secret-like rules do. An index built
   before this rule keeps such SCIP rows, and still reports itself compatible, until it is
   rebuilt: `ok watch` does not re-import SCIP, so re-run `ok index` to remove them
-- directories pruned as build output or installed packages are named in the index's
-  coverage record and skipped paths (`docs/indexing-pipeline.md`, "Pruned directories"),
-  except a secret-like one (`.ssh/build`), which is counted in `pruned_unlisted` and listed
-  as `[redacted]`; `ok snapshot import` withholds an artifact's secret-like pruned paths the
+- directories pruned as build output, installed packages or submodules are named in the
+  index's coverage record and skipped paths (`docs/indexing-pipeline.md`, "Pruned directories"),
+  except a secret-like one (`.ssh/build`, a submodule at `ops/.ssh`), which is counted in
+  `pruned_unlisted` and listed as `[redacted]`; `ok snapshot import` withholds an artifact's secret-like pruned paths the
   same way. No file under a pruned directory is opened: deciding to prune checks only
-  whether marker files exist, and counting committed source asks Git, locally, for its
-  tracked paths
+  whether marker files exist (a `.git` entry for a submodule), and counting committed source
+  asks Git, locally, for its tracked paths. A checked-out submodule's files are never indexed
 - a `build` or `dist` directory `[index] keep_dirs` lists is walked, not trusted: every file
   under it passes the same secret-path rule, `[paths] deny`, hidden-file rule and ignore
   files as any other, so key material in a kept directory is skipped as `secret_policy` with

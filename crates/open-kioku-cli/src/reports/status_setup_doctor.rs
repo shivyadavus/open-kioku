@@ -2014,6 +2014,21 @@ fn policy_exclusion_next_step(coverage: &IndexCoverage) -> String {
 /// exclusions (`hidden`, `ignored`, ...) are outside the ratio and name their own
 /// setting in the check message.
 fn coverage_next_step(coverage: &IndexCoverage) -> String {
+    let stray_git = coverage
+        .pruned_source_dirs()
+        .into_iter()
+        .filter(|dir| dir.reason == open_kioku_core::PruneReason::Submodule)
+        .take(3)
+        .map(|dir| format!("`{}/`", dir.path))
+        .collect::<Vec<_>>();
+    if coverage.pruned_source_files() > 0 && !stray_git.is_empty() {
+        // `keep_dirs` cannot walk a nested work tree; the `.git` inside is what cut it.
+        return format!(
+            "Coverage: {} git-tracked source file(s) are not indexed because discovery pruned {} as nested repositories: each holds a `.git` entry, yet this repository tracks files under it. If that `.git` is left over (a `git init` or a tool's scratch clone), remove it and run `ok index .`; if the directory is meant to be another repository, make it a submodule so this one tracks only its gitlink. The files are listed in `ok --json status --full` `quality.skipped_paths` with reason `pruned`.",
+            group_thousands(coverage.pruned_source_files()),
+            stray_git.join(", ")
+        );
+    }
     if coverage.pruned_source_files() > 0 {
         let dirs = coverage
             .pruned_source_dirs()

@@ -11,6 +11,13 @@
 //! The rule, by directory name:
 //!
 //! - `.git`, `.ok`: tooling, always pruned and never reported; they are never user source.
+//! - Any directory holding a `.git` entry, when the root is in a Git repository: a nested work
+//!   tree (a checked-out submodule, a clone or a linked worktree inside the repository), pruned
+//!   as `submodule` whatever its name. Git tracks none of its files here, and fails a
+//!   `check-ignore` batch that names one. An uninitialised submodule's directory holds no
+//!   `.git` and is walked: it is normally empty, and a file left in it is judged like any other
+//!   (`git_ignore` keeps such a path from failing the batch), though Git shows no edit to it.
+//!   Outside a Git repository (a folder of clones) every clone is walked.
 //! - `node_modules`: installed packages, always pruned.
 //! - `.venv`, `venv`: pruned when they hold `pyvenv.cfg` (venv, virtualenv 20+) or
 //!   `conda-meta` (conda). Without either, the walk goes in; a `.venv` is hidden, so its files
@@ -86,6 +93,11 @@ pub struct DiscoveryPruner {
     root: PathBuf,
     /// Repository-relative, validated by `IndexConfig::kept_dirs`.
     kept: BTreeSet<PathBuf>,
+    /// Whether `root` lies in a Git repository (it or a directory above it holds a `.git`, the
+    /// marker `git_ignore` reads too), so that a nested work tree below it is a separate
+    /// repository to this one. A folder of clones that is not itself in a repository is walked
+    /// into each of them.
+    in_git_repository: bool,
 }
 
 impl DiscoveryPruner {
@@ -104,6 +116,9 @@ impl DiscoveryPruner {
         Self {
             root: root.to_path_buf(),
             kept: kept.into_iter().collect(),
+            in_git_repository: root
+                .ancestors()
+                .any(|ancestor| ancestor.join(".git").exists()),
         }
     }
 
@@ -112,8 +127,9 @@ impl DiscoveryPruner {
     }
 
     /// The verdict for `path`, a directory entry under the root (`is_dir` from the walker's file
-    /// type, so a symlink is never followed to decide). Only a handful of names are ever pruned,
-    /// and a directory with any other name costs one string comparison.
+    /// type, so a symlink is never followed to decide). Only a handful of names are ever pruned;
+    /// a directory with any other name costs one string comparison, and in a Git repository one
+    /// `lstat` of its `.git`.
     pub(crate) fn classify(&self, path: &Path, is_dir: bool) -> DirVerdict {
         let root = self.root.as_path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -125,6 +141,12 @@ impl DiscoveryPruner {
         }
         if !is_dir || path == root {
             return DirVerdict::Walk;
+        }
+        // Before the names: a submodule called `build` is still another repository, and
+        // `keep_dirs` cannot make its files this one's. Git answers nothing about a path inside
+        // a submodule: `git check-ignore` fails the whole batch on one (#677).
+        if self.in_git_repository && has_git_entry(path) {
+            return DirVerdict::Prune(PruneReason::Submodule);
         }
         match name {
             "node_modules" => DirVerdict::Prune(PruneReason::Dependencies),
@@ -213,6 +235,12 @@ fn beside_any(path: &Path, manifests: &[&str]) -> bool {
             .iter()
             .any(|manifest| parent.join(manifest).is_file())
     })
+}
+
+/// Whether `path` holds a `.git` entry: a directory for a clone, a `gitdir:` file for a
+/// submodule or a linked worktree. Not followed if it is a symlink.
+fn has_git_entry(path: &Path) -> bool {
+    std::fs::symlink_metadata(path.join(".git")).is_ok()
 }
 
 /// The cache-directory marker (<https://bford.info/cachedir/>) Cargo and other tools write.
@@ -497,5 +525,48 @@ mod tests {
                 DirVerdict::Walk
             );
         }
+    }
+
+    /// A nested work tree is another repository: pruned as a submodule whatever its name, a
+    /// kept one included, and reported at its own path for a file inside it (#677).
+    #[test]
+    fn a_nested_work_tree_in_a_repository_is_pruned_as_a_submodule() {
+        const SUBMODULE: DirVerdict = DirVerdict::Prune(PruneReason::Submodule);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        // A checked-out submodule's `.git` is a `gitdir:` file; a clone's is a directory.
+        write(root, "vendor/ledger/.git");
+        write(root, "vendor/ledger/src/lib.rs");
+        fs::create_dir_all(root.join("clones/store/.git")).unwrap();
+        write(root, "Cargo.toml");
+        write(root, "build/.git");
+        // An uninitialised submodule: an empty directory beside its gitlink.
+        fs::create_dir_all(root.join("vendor/pending")).unwrap();
+
+        let pruner = DiscoveryPruner::with_kept(root, vec![PathBuf::from("build")]);
+        for nested in ["vendor/ledger", "clones/store", "build"] {
+            assert_eq!(
+                pruner.classify(&root.join(nested), true),
+                SUBMODULE,
+                "{nested}"
+            );
+        }
+        assert_eq!(verdict(root, "vendor/pending"), DirVerdict::Walk);
+        assert_eq!(verdict(root, "vendor"), DirVerdict::Walk);
+        // The root's own `.git` is tooling, and the root is walked.
+        assert_eq!(verdict(root, ".git"), DirVerdict::Tooling);
+        assert_eq!(classify(root, root, true), DirVerdict::Walk);
+        assert_eq!(
+            pruner.pruned_at(Path::new("vendor/ledger/src/lib.rs")),
+            Some((PathBuf::from("vendor/ledger"), Some(PruneReason::Submodule)))
+        );
+
+        // A folder of clones that is not itself a repository is walked into each clone.
+        let folder = tempfile::tempdir().unwrap();
+        write(folder.path(), "ledger/.git");
+        fs::create_dir_all(folder.path().join("store/.git")).unwrap();
+        assert_eq!(verdict(folder.path(), "ledger"), DirVerdict::Walk);
+        assert_eq!(verdict(folder.path(), "store"), DirVerdict::Walk);
     }
 }

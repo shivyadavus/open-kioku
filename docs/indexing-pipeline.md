@@ -176,6 +176,7 @@ still read 100%. The rule, by directory name:
 | Directory | Pruned when | Reason |
 |---|---|---|
 | `.git`, `.ok` | always (a worktree's `.git` file too); never recorded | tooling |
+| any name, holding a `.git` entry, in a Git repository | it is a nested work tree: a checked-out submodule, a clone or a linked worktree | `submodule` |
 | `node_modules` | always | `dependencies` |
 | `.venv`, `venv` | it holds `pyvenv.cfg` or `conda-meta` | `virtual_env` |
 | `target` | it holds `CACHEDIR.TAG`, or sits beside `Cargo.toml`, `pom.xml`, `build.sbt`, `build.properties` (sbt's `project/`) or `project.clj` | `build_output` |
@@ -204,7 +205,8 @@ snapshot import's changed-file count, `ok watch`'s event filter and `ok doctor`'
 sampling. So an edit to a declared `src/build/` module triggers a re-index and a
 `cargo build` writing `target/` does not, and a workspace member in a directory named
 `target` is a crate while Cargo's packaged copies under the real `target/package/` are not
-(`PROJECT_RESOLVER_SEMANTICS_VERSION` v2; earlier indexes report `RebuildRequired`). Each
+(`PROJECT_RESOLVER_SEMANTICS_VERSION` v2 for `target`, v3 for nested work trees; earlier
+indexes report `RebuildRequired`). Each
 pruned directory is recorded in
 `skipped_paths` with reason `pruned` and source `detector`, and in coverage as above. When
 it pruned anything in a Git work tree, discovery runs `git ls-files` once to count the
@@ -217,6 +219,47 @@ repository keeps excluding a `src/build/` module, now as a visible `config_exclu
 until they are removed. They are no longer written by `ok init` or added on load, and
 `ok doctor` names any of them an `ok.toml` still lists, with a next step to remove them
 unless the exclusion is intended.
+
+### Submodules and nested repositories
+
+In a Git repository, a directory holding a `.git` entry (a `gitdir:` file or a directory) is
+a nested work tree: a checked-out submodule, a repository cloned inside this one, or a linked
+worktree added inside it. Discovery prunes it as `submodule` whatever its name, before the
+name rules above, and `[index] keep_dirs` does not walk it. Git tracks none of its files in
+this repository, at most a gitlink naming a commit, so its content is another repository's
+source: this repository's diffs do not show an edit inside it, and `ok verify` could not
+hold one to a plan. Until #677, `ok index` failed outright on a checked-out submodule,
+because `git check-ignore` rejects the whole batch when one path lies inside a submodule
+("Pathspec ... is in submodule").
+
+- The submodule is named in coverage (`pruned`, reason `submodule`) and in `skipped_paths`
+  as `pruned`, with its tracked source count, which is 0: this repository tracks only the
+  gitlink, so it never lowers coverage. A secret-like submodule path is counted in
+  `pruned_unlisted`, never named.
+- A submodule inside it, or a submodule under another pruned directory (`node_modules`), is
+  cut with its outermost pruned directory and not listed separately.
+- An uninitialised submodule is a directory with no `.git` beside its gitlink: it is walked.
+  It is normally empty; a file left in it is indexed like any other, though Git shows no
+  edit to it, and `git check-ignore` is asked about the rest of the batch without it.
+- A directory with its own `.git` that holds files this repository tracks is not a real
+  submodule (Git tracks no file under one): the `.git` is stray. It is still pruned, but its
+  tracked source counts as missing, as under an undeclared build directory, and `ok doctor`
+  names the directory and says to remove the `.git`. A plan sets no rule for it.
+- The root is in a Git repository when it or a directory above it holds a `.git`. When
+  neither does (a folder of clones), there is no repository for a clone to be nested in,
+  and every clone is walked. A folder of clones under a repository, such as a home
+  directory kept in Git, has each clone pruned and named.
+- `ok snapshot import` prunes a served path under a submodule here as it prunes other
+  directories, and asks Git about the rest: when `git check-ignore` fails on a path under a
+  gitlink (an artifact built before the directory became a submodule, or a submodule this
+  checkout has not initialised), paths under the gitlinks the index records are dropped
+  from that question and the others are asked again. Under an uninitialised submodule such
+  a path is served like any other file the checkout does not hold.
+- `ok watch` ignores events inside a submodule. `ok impact --since`, `ok plan --since` and
+  `ok verify` read a moved submodule as one changed path, its gitlink, which the index does
+  not hold: each pins `git diff --submodule=short` whatever `diff.submodule` says (#671).
+  A plan forbids `<submodule>/**`, and that rule matches the gitlink too: moving the commit
+  this repository records is a change of its own, not part of an edit planned here.
 
 ### Keeping a build directory
 

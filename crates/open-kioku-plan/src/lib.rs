@@ -2002,13 +2002,17 @@ fn default_forbidden_boundary_rules() -> Vec<BoundaryForbiddenRule> {
 
 /// One forbidden rule per directory the index records as pruned, at any depth, citing that
 /// record (`coverage:pruned:<path>`): build output is changed through its source or generator,
-/// and installed packages and environments through their manifests. This replaced root
+/// installed packages and environments through their manifests, and a submodule in its own
+/// repository (the rule matches its gitlink too: moving the commit this repository records is
+/// a change of its own, not part of an edit planned here). This replaced root
 /// `target/**`, `build/**` and `dist/**` rules that forbade a declared `build/` package and
 /// missed a nested `web/dist/` bundle (#661).
 ///
 /// An undeclared `build`/`dist` holding git-tracked source gets no rule: discovery only guessed
 /// it was output, the coverage record already reports the files as missing, and forbidding them
-/// would turn that guess into a boundary. A directory the record does not name (past its cap of
+/// would turn that guess into a boundary. Neither does a directory pruned as a submodule that
+/// holds git-tracked source: Git tracks no file under a real submodule, so its `.git` is stray
+/// and the files are this repository's. A directory the record does not name (past its cap of
 /// 50, secret-like, or an index written before paths were recorded) gets no rule either; an
 /// edit there is still outside `allowed_files` and needs expansion evidence.
 fn pruned_dir_forbidden_rules(
@@ -2026,8 +2030,9 @@ fn pruned_dir_forbidden_rules(
                 PruneReason::BuildOutput => {
                     "discovery pruned this directory as build output (a cache tag or a build manifest beside it); change its source or generator instead"
                 }
-                PruneReason::UndeclaredBuildDir
-                    if dir.tracked_source_files.is_some_and(|count| count > 0) =>
+                reason
+                    if reason.counts_tracked_source()
+                        && dir.tracked_source_files.is_some_and(|count| count > 0) =>
                 {
                     return None;
                 }
@@ -2039,6 +2044,9 @@ fn pruned_dir_forbidden_rules(
                 }
                 PruneReason::VirtualEnv => {
                     "discovery pruned a Python environment; it is generated state"
+                }
+                PruneReason::Submodule => {
+                    "discovery pruned a submodule: its files belong to another repository, and the commit this one records for it is not part of this change"
                 }
             };
             Some(BoundaryForbiddenRule {
@@ -4048,6 +4056,8 @@ mod tests {
                 dir("tools/build", PruneReason::UndeclaredBuildDir, Some(3)),
                 dir("svc/node_modules", PruneReason::Dependencies, Some(0)),
                 dir("py/.venv", PruneReason::VirtualEnv, Some(0)),
+                dir("vendor/ledger", PruneReason::Submodule, Some(0)),
+                dir("tools/ledger", PruneReason::Submodule, Some(2)),
             ],
             0,
         );
@@ -4065,6 +4075,7 @@ mod tests {
             ("gen/build/**", "coverage:pruned:gen/build"),
             ("svc/node_modules/**", "coverage:pruned:svc/node_modules"),
             ("py/.venv/**", "coverage:pruned:py/.venv"),
+            ("vendor/ledger/**", "coverage:pruned:vendor/ledger"),
         ] {
             let rule = rules
                 .iter()
@@ -4079,6 +4090,8 @@ mod tests {
             assert!(boundary.forbidden_files.contains(&PathBuf::from(pattern)));
         }
         assert!(!patterns(&boundary).contains(&"tools/build/**".to_string()));
+        // A `.git` over tracked source is stray: the files are this repository's.
+        assert!(!patterns(&boundary).contains(&"tools/ledger/**".to_string()));
         assert!(!patterns(&boundary).contains(&"build/**".to_string()));
         // The patterns stay sorted and unique.
         let mut sorted = patterns(&boundary);

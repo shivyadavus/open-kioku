@@ -99,7 +99,69 @@ fn inside_work_tree(root: &Path) -> Result<bool> {
     Ok(probe.status.success() && String::from_utf8_lossy(&probe.stdout).trim() == "true")
 }
 
+/// Git's verdict on `candidates`. `git check-ignore` fails the whole batch when one path lies
+/// inside a submodule ("Pathspec ... is in submodule"), checked out or not. Discovery never
+/// sends one from a checked-out submodule (`crate::prune` cuts it), but an imported index can
+/// name files under a submodule this checkout has not initialised, and an uninitialised
+/// submodule's directory can hold stray files. So on a failure, the paths under the gitlinks
+/// Git records are left out of the answer (not ignored: no rule of this repository's reaches
+/// them), and the rest are asked once more. The gitlinks are listed only then: a repository with no submodule pays
+/// nothing, and no error message is parsed.
 fn check_ignored_candidates(root: &Path, candidates: &[PathBuf]) -> Result<HashSet<PathBuf>> {
+    match run_check_ignore(root, candidates) {
+        Ok(ignored) => Ok(ignored),
+        Err(err) => {
+            // A listing that fails too says nothing about the first failure: report that one.
+            let Ok(gitlinks) = gitlinks(root) else {
+                return Err(err);
+            };
+            if gitlinks.is_empty() {
+                return Err(err);
+            }
+            let outside = candidates
+                .iter()
+                .filter(|path| !gitlinks.iter().any(|link| path.starts_with(link)))
+                .cloned()
+                .collect::<Vec<_>>();
+            if outside.len() == candidates.len() {
+                return Err(err);
+            }
+            run_check_ignore(root, &outside)
+        }
+    }
+}
+
+/// The submodule paths Git's index records (mode `160000`), relative to `root`.
+fn gitlinks(root: &Path) -> Result<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--stage"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| OkError::Repository(format!("git submodule listing failed: {err}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(OkError::Repository(format!(
+            "git submodule listing failed: {}",
+            stderr.trim()
+        )));
+    }
+    // Each entry is `<mode> <object> <stage>\t<path>`.
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| {
+            let entry = entry.strip_prefix(b"160000 ")?;
+            let tab = entry.iter().position(|byte| *byte == b'\t')?;
+            Some(PathBuf::from(
+                String::from_utf8_lossy(&entry[tab + 1..]).into_owned(),
+            ))
+        })
+        .collect())
+}
+
+fn run_check_ignore(root: &Path, candidates: &[PathBuf]) -> Result<HashSet<PathBuf>> {
     if candidates.is_empty() {
         return Ok(HashSet::new());
     }
@@ -256,6 +318,37 @@ mod tests {
 
         let ignored = check_ignored_candidates(dir.path(), &candidates).unwrap();
         assert_eq!(ignored.len(), candidates.len());
+    }
+
+    /// `git check-ignore` fails a batch naming a path inside a submodule, initialised or not.
+    /// Such a path is dropped and the rest still get Git's answer: an imported index can name
+    /// files under a submodule this checkout never initialised (#677).
+    #[test]
+    fn a_path_inside_a_submodule_does_not_fail_the_batch() {
+        let dir = initialized_repo();
+        write(dir.path(), ".gitignore", "*.log\n");
+        // A gitlink, as `git submodule add` records it, without fetching anything.
+        run(
+            dir.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,1111111111111111111111111111111111111111,vendor/ledger",
+            ],
+        );
+        let candidates = [
+            PathBuf::from("src/main.rs"),
+            PathBuf::from("trace.log"),
+            PathBuf::from("vendor/ledger/lib.rs"),
+            PathBuf::from("vendor/ledger/trace.log"),
+        ];
+        let ignored = check_ignored_candidates(dir.path(), &candidates).unwrap();
+        assert_eq!(ignored, HashSet::from([PathBuf::from("trace.log")]));
+
+        // A failure that no gitlink explains is still an error.
+        let unexplained = [PathBuf::from("src/main.rs"), PathBuf::from("../outside.rs")];
+        assert!(check_ignored_candidates(dir.path(), &unexplained).is_err());
     }
 
     #[test]

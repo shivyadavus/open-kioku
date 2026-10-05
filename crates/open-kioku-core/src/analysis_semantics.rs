@@ -14,7 +14,11 @@ pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v2";
 /// `package.json` copied into a bundle's `dist/`) is not read. v1 skipped every `target` by name
 /// and read manifests under `build/` and `dist/`, so a member crate in a `target` directory had
 /// no module tree and its `crate::` paths proved no edge.
-pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v2";
+/// v3: in a Git repository, discovery prunes every nested work tree (a checked-out submodule, a
+/// clone or a linked worktree inside the repository) as `submodule`, so neither its files nor its
+/// manifests are read. v2 indexed a nested clone or worktree as this repository's source, its
+/// manifests included, and failed outright on a checked-out submodule (#677).
+pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v3";
 /// v3: a Rust `use` path inside the importing file's own crate resolves through that crate's
 /// declared module tree, so its `IMPORTS` edge names the file declaring the module or the item;
 /// v2 resolved such a path against the repository-root `src/` and fell back to the crate root,
