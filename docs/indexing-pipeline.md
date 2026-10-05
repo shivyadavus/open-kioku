@@ -247,8 +247,10 @@ because `git check-ignore` rejects the whole batch when one path lies inside a s
   names the directory and says to remove the `.git`. A plan sets no rule for it.
 - The root is in a Git repository when it or a directory above it holds a `.git`. When
   neither does (a folder of clones), there is no repository for a clone to be nested in,
-  and every clone is walked. A folder of clones under a repository, such as a home
-  directory kept in Git, has each clone pruned and named.
+  and every clone is walked. The check looks above the root, so a project that is not a
+  repository itself but sits under one higher up (a home directory kept in Git, a workspace
+  folder inside a monorepo checkout) counts as in that repository: each clone inside the
+  project is pruned as `submodule` and named in coverage. Index each clone on its own.
 - `ok snapshot import` prunes a served path under a submodule here as it prunes other
   directories, and asks Git about the rest: when `git check-ignore` fails on a path under a
   gitlink (an artifact built before the directory became a submodule, or a submodule this
@@ -258,8 +260,10 @@ because `git check-ignore` rejects the whole batch when one path lies inside a s
 - `ok watch` ignores events inside a submodule. `ok impact --since`, `ok plan --since` and
   `ok verify` read a moved submodule as one changed path, its gitlink, which the index does
   not hold: each pins `git diff --submodule=short` whatever `diff.submodule` says (#671).
-  A plan forbids `<submodule>/**`, and that rule matches the gitlink too: moving the commit
-  this repository records is a change of its own, not part of an edit planned here.
+  A plan forbids `<submodule>/**`, the files under it, but not the gitlink itself: a bump
+  task edits only that path, so `ok verify` reports it as `out_of_boundary`, which
+  `--evidence-ref` admits (the rule's own `coverage:pruned:<submodule>` ref will do), never
+  as a `forbidden_boundary` nothing can admit.
 
 ### Keeping a build directory
 

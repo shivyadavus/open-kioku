@@ -2002,9 +2002,10 @@ fn default_forbidden_boundary_rules() -> Vec<BoundaryForbiddenRule> {
 
 /// One forbidden rule per directory the index records as pruned, at any depth, citing that
 /// record (`coverage:pruned:<path>`): build output is changed through its source or generator,
-/// installed packages and environments through their manifests, and a submodule in its own
-/// repository (the rule matches its gitlink too: moving the commit this repository records is
-/// a change of its own, not part of an edit planned here). This replaced root
+/// installed packages and environments through their manifests, and a submodule's files in its
+/// own repository. The rule covers the files under the directory, not its own path: for a
+/// submodule that path is the gitlink, which a bump edits, and `ok verify` judges it as any path
+/// outside the boundary (`open_kioku_patch::forbidden_rule_matches`). This replaced root
 /// `target/**`, `build/**` and `dist/**` rules that forbade a declared `build/` package and
 /// missed a nested `web/dist/` bundle (#661).
 ///
@@ -2026,32 +2027,33 @@ fn pruned_dir_forbidden_rules(
         .pruned
         .iter()
         .filter_map(|dir| {
+            // Missing source, not output or another repository: no rule (see above).
+            if dir.reason.counts_tracked_source()
+                && dir.tracked_source_files.is_some_and(|count| count > 0)
+            {
+                return None;
+            }
             let reason = match dir.reason {
                 PruneReason::BuildOutput => {
-                    "discovery pruned this directory as build output (a cache tag or a build manifest beside it); change its source or generator instead"
-                }
-                reason
-                    if reason.counts_tracked_source()
-                        && dir.tracked_source_files.is_some_and(|count| count > 0) =>
-                {
-                    return None;
+                    "discovery pruned this directory as build output (a cache tag or a build manifest beside it); change its source or generator instead".to_owned()
                 }
                 PruneReason::UndeclaredBuildDir => {
-                    "discovery pruned this build directory as output: no module, package or `[index] keep_dirs` entry declares it source"
+                    "discovery pruned this build directory as output: no module, package or `[index] keep_dirs` entry declares it source".to_owned()
                 }
                 PruneReason::Dependencies => {
-                    "discovery pruned installed packages; dependencies change through their manifest"
+                    "discovery pruned installed packages; dependencies change through their manifest".to_owned()
                 }
                 PruneReason::VirtualEnv => {
-                    "discovery pruned a Python environment; it is generated state"
+                    "discovery pruned a Python environment; it is generated state".to_owned()
                 }
-                PruneReason::Submodule => {
-                    "discovery pruned a submodule: its files belong to another repository, and the commit this one records for it is not part of this change"
-                }
+                PruneReason::Submodule => format!(
+                    "discovery pruned a submodule: the files under it belong to another repository and change there; moving the commit this repository records for it edits `{}` itself, which this rule does not cover, so evidence can admit it",
+                    dir.path
+                ),
             };
             Some(BoundaryForbiddenRule {
                 pattern: format!("{}/**", dir.path),
-                reason: reason.into(),
+                reason,
                 evidence_refs: vec![format!("coverage:pruned:{}", dir.path)],
             })
         })

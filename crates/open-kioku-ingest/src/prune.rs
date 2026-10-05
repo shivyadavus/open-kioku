@@ -17,7 +17,8 @@
 //!   `check-ignore` batch that names one. An uninitialised submodule's directory holds no
 //!   `.git` and is walked: it is normally empty, and a file left in it is judged like any other
 //!   (`git_ignore` keeps such a path from failing the batch), though Git shows no edit to it.
-//!   Outside a Git repository (a folder of clones) every clone is walked.
+//!   Outside a Git repository (a folder of clones) every clone is walked; a folder under a
+//!   repository higher up (a home directory kept in Git) is in it, and its clones are pruned.
 //! - `node_modules`: installed packages, always pruned.
 //! - `.venv`, `venv`: pruned when they hold `pyvenv.cfg` (venv, virtualenv 20+) or
 //!   `conda-meta` (conda). Without either, the walk goes in; a `.venv` is hidden, so its files

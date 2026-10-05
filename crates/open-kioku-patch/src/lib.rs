@@ -2936,7 +2936,7 @@ fn boundary_violations(
         boundary
             .forbidden_rules
             .iter()
-            .find(|rule| boundary_pattern_matches(&rule.pattern, normalized))
+            .find(|rule| forbidden_rule_matches(rule, normalized))
             .map(|rule| {
                 (
                     format!(
@@ -3073,7 +3073,7 @@ fn expansion_warnings(
                 || boundary
                     .forbidden_rules
                     .iter()
-                    .any(|rule| boundary_pattern_matches(&rule.pattern, &normalized))
+                    .any(|rule| forbidden_rule_matches(rule, &normalized))
             {
                 return None;
             }
@@ -3736,6 +3736,24 @@ fn normalize_path(path: &Path) -> String {
         .replace('\\', "/")
         .trim_start_matches("./")
         .to_string()
+}
+
+/// Whether the forbidden `rule` covers the changed `path` (normalized, `/`-separated).
+///
+/// A plan's rule for a directory the index records as pruned (`<dir>/**`, citing
+/// `coverage:pruned:<dir>`) covers the files under it, not `<dir>` itself: a pruned directory
+/// is never a changed file, except a submodule's gitlink, which moving the submodule to another
+/// commit edits. That edit is this repository's own, so it is judged like any path outside the
+/// boundary (`out_of_boundary`, admitted by evidence) rather than forbidden outright (#677).
+pub fn forbidden_rule_matches(rule: &BoundaryForbiddenRule, path: &str) -> bool {
+    let pattern = rule.pattern.trim_start_matches("./").replace('\\', "/");
+    if let Some(dir) = pattern.strip_suffix("/**") {
+        let pruned_ref = format!("coverage:pruned:{dir}");
+        if path == dir && rule.evidence_refs.contains(&pruned_ref) {
+            return false;
+        }
+    }
+    boundary_pattern_matches(&rule.pattern, path)
 }
 
 fn boundary_pattern_matches(pattern: &str, path: &str) -> bool {
@@ -4841,6 +4859,28 @@ rename to src/menu.rs
             .unwrap()
             .reason;
         assert!(reason.contains("evidence reference"), "{reason}");
+    }
+
+    /// A pruned directory's rule covers the files under it, not the directory's own path: for a
+    /// submodule that path is the gitlink a bump edits, judged like any path outside the
+    /// boundary. Other rules keep matching their directory's path (#677).
+    #[test]
+    fn a_pruned_directory_rule_spares_its_own_path() {
+        let rule = |pattern: &str, evidence: &str| BoundaryForbiddenRule {
+            pattern: pattern.into(),
+            reason: "test".into(),
+            evidence_refs: vec![evidence.into()],
+        };
+        let submodule = rule("ext/ledger/**", "coverage:pruned:ext/ledger");
+        assert!(forbidden_rule_matches(&submodule, "ext/ledger/lib.rs"));
+        assert!(forbidden_rule_matches(&submodule, "ext/ledger/src/a.rs"));
+        assert!(!forbidden_rule_matches(&submodule, "ext/ledger"));
+        assert!(!forbidden_rule_matches(&submodule, "ext/ledgers"));
+        // A rule that does not cite the directory's coverage record is unchanged.
+        let default = rule("vendor/**", "boundary:default-forbidden");
+        assert!(forbidden_rule_matches(&default, "vendor"));
+        let other = rule("ext/ledger/**", "coverage:pruned:ext/other");
+        assert!(forbidden_rule_matches(&other, "ext/ledger"));
     }
 
     #[test]
