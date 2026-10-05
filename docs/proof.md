@@ -44,8 +44,8 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | --- | ---: |
 | Mode | `full` |
 | Analysis semantics | `Compatible` |
-| Stored semantics fingerprint | `ef6973b816b446a53e66955d050fa296fe526e6e464c0ccdaa7241551f697e25` |
-| Current semantics fingerprint | `ef6973b816b446a53e66955d050fa296fe526e6e464c0ccdaa7241551f697e25` |
+| Stored semantics fingerprint | `0e391945b9e5398e14748c6eaf28da7e0a09059d28224b1720825e6d6507ffb4` |
+| Current semantics fingerprint | `0e391945b9e5398e14748c6eaf28da7e0a09059d28224b1720825e6d6507ffb4` |
 | Graph rebuild required | `false` |
 | Files | 5 |
 | Symbols | 8 |
@@ -59,7 +59,7 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | SCIP exact references | 0 |
 | Static analysis facts | 22 |
 
-Indexed at `2026-10-05 04:35:59.831585 UTC`.
+Indexed at `2026-10-05 06:40:15.425122 UTC`.
 
 Build systems: `cargo`.
 
@@ -180,9 +180,9 @@ Quality notes (198): scip: 1, symbol_registry_caveat: 132, symbol_registry_unres
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
-| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-10-05 04:35:59.831585 UTC |
+| `pass` | `index` | 5 files, 8 symbols, indexed at 2026-10-05 06:40:15.425122 UTC |
 | `pass` | `graph` | relationship graph present |
-| `pass` | `analysis-semantics` | compatible; fingerprint ef6973b816b446a53e66955d050fa296fe526e6e464c0ccdaa7241551f697e25 |
+| `pass` | `analysis-semantics` | compatible; fingerprint 0e391945b9e5398e14748c6eaf28da7e0a09059d28224b1720825e6d6507ffb4 |
 | `pass` | `generations` | legacy layout (adopts the generation layout on the next `ok index`) |
 | `pass` | `semantic-lifecycle` | semantic search is disabled in ok.toml (explicit local opt-in) |
 | `warn` | `quality` | SCIP exact references unavailable; 2 tests, 5 imports indexed |
