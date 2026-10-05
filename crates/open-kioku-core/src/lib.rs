@@ -2301,6 +2301,10 @@ pub struct SyntaxFacts {
     pub type_aliases: Vec<TypeAliasSite>,
     #[serde(default)]
     pub package_declaration: Option<PackageDeclarationSite>,
+    /// The file parsed with syntax errors and its facts are what error recovery kept: set only
+    /// for C#, the one language read through its errors rather than set aside whole.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub syntax_errors: bool,
     /// A Rust file whose top level invokes a macro (`cfg_if! { .. }`, `make_items!();`), which
     /// may expand to items and `use` declarations no other fact here records. Macros that
     /// declare no name (`compile_error!`, `assert!`, `include_str!`) do not count, and
@@ -2407,6 +2411,24 @@ pub struct Symbol {
 /// back from the working tree and nothing is inferred, so an empty field means
 /// the evidence is missing — which `caveats` says out loud rather than letting
 /// the caller read absence as a short definition.
+/// The definition a name lookup picked, with the others it passed over.
+///
+/// A name can have several definitions: overloads, the parts of a C# `partial` type, `Entry`
+/// and `Entry<T>`, or a namespace and a type of one qualified name. The lookup answers with the
+/// first by rank; `other_definitions` counts the rest and `caveats` says so, so one record is
+/// never read as the only one. Serialized as the symbol's own fields, with the two added only
+/// when another definition exists.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolDefinition {
+    #[serde(flatten)]
+    pub symbol: Symbol,
+    /// Indexed definitions other than `symbol` that the same query matched.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub other_definitions: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caveats: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SymbolContext {
     pub symbol: Symbol,
@@ -4048,6 +4070,14 @@ pub struct LanguageCoverage {
     pub generated: usize,
     #[serde(default)]
     pub skipped: BTreeMap<SkipReason, usize>,
+    /// Indexed files that parsed with syntax errors, whose symbols are only what error recovery
+    /// kept: a file counts as indexed whether recovery kept every declaration or none.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub parsed_with_errors: usize,
+    /// Of `parsed_with_errors`, files whose types were named by line patterns because recovery
+    /// kept none of them.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub pattern_fallback: usize,
 }
 
 impl LanguageCoverage {
@@ -4667,6 +4697,17 @@ impl IndexCoverage {
             .entry(language.key().to_owned())
             .or_default()
             .discovered += 1;
+    }
+
+    /// Records an indexed file that parsed with syntax errors, and whether patterns named its
+    /// types.
+    pub fn record_parsed_with_errors(&mut self, language: &Language, pattern_fallback: bool) {
+        let entry = self
+            .by_language
+            .entry(language.key().to_owned())
+            .or_default();
+        entry.parsed_with_errors += 1;
+        entry.pattern_fallback += usize::from(pattern_fallback);
     }
 
     pub fn record_indexed(&mut self, language: &Language, generated: bool) {
@@ -5349,6 +5390,29 @@ impl IndexCoverage {
                     )
                 ));
             }
+        }
+        // Indexed is not the same as read whole: a file recovery kept little of still counts.
+        for (language, entry) in &self.by_language {
+            if entry.parsed_with_errors == 0 {
+                continue;
+            }
+            let files = if entry.parsed_with_errors == 1 {
+                "file"
+            } else {
+                "files"
+            };
+            let mut caveat = format!(
+                "{} {language} {files} parsed with syntax errors (their symbols are what error recovery kept",
+                group_thousands(entry.parsed_with_errors)
+            );
+            if entry.pattern_fallback > 0 {
+                caveat.push_str(&format!(
+                    "; {} named by pattern only",
+                    group_thousands(entry.pattern_fallback)
+                ));
+            }
+            caveat.push(')');
+            caveats.push(caveat);
         }
         if self.walk_errors > 0 {
             caveats.push(format!(
@@ -9131,6 +9195,31 @@ mod index_coverage_tests {
                 "{language:?}"
             );
         }
+    }
+
+    #[test]
+    fn files_parsed_with_errors_are_named_beside_the_ratio() {
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..3 {
+            coverage.record_discovered(&Language::CSharp);
+            coverage.record_indexed(&Language::CSharp, false);
+        }
+        coverage.record_parsed_with_errors(&Language::CSharp, false);
+        coverage.record_parsed_with_errors(&Language::CSharp, true);
+        // Every file is indexed, so the ratio is complete; the caveat says what that hides.
+        assert_eq!(coverage.programming_percent(), Some(100.0));
+        assert!(
+            coverage.summary_line().ends_with(
+                "; 2 c_sharp files parsed with syntax errors (their symbols are what error recovery kept; 1 named by pattern only)"
+            ),
+            "{}",
+            coverage.summary_line()
+        );
+        let entry = &coverage.by_language["c_sharp"];
+        assert_eq!((entry.parsed_with_errors, entry.pattern_fallback), (2, 1));
+        // Absent from JSON when zero, so other languages' records are unchanged.
+        let json = serde_json::to_value(LanguageCoverage::default()).unwrap();
+        assert!(json.get("parsed_with_errors").is_none());
     }
 
     #[test]

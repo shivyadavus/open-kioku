@@ -1,6 +1,6 @@
 use open_kioku_core::{
-    CodeChunk, Confidence, EvidenceSourceType, LineRange, Symbol, SymbolContext, SymbolId,
-    SymbolKind, SymbolOccurrence,
+    CodeChunk, Confidence, EvidenceSourceType, LineRange, Symbol, SymbolContext, SymbolDefinition,
+    SymbolId, SymbolKind, SymbolOccurrence,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::MetadataStore;
@@ -11,6 +11,31 @@ pub const SYMBOL_CONTEXT_SURROUNDING_LINES: u32 = 10;
 /// Cap on the definition lines one context bundle returns. A definition longer
 /// than this is cut and marked `truncated` rather than silently trimmed.
 pub const SYMBOL_CONTEXT_MAX_BODY_LINES: u32 = 400;
+
+/// Candidates one definition lookup reads; a count of the others at this bound is a floor.
+const DEFINITION_CANDIDATES: usize = 250;
+
+/// Says how many other definitions the query matched, and how many of those share the chosen
+/// one's qualified name: the parts of a C# `partial` type, overloads, `Entry` and `Entry<T>`.
+fn alternatives_caveat(query: &str, chosen: &Symbol, others: &[Symbol]) -> Option<String> {
+    if others.is_empty() {
+        return None;
+    }
+    let same = others
+        .iter()
+        .filter(|other| other.qualified_name == chosen.qualified_name)
+        .count();
+    let floor = if others.len() + 1 >= DEFINITION_CANDIDATES {
+        "at least "
+    } else {
+        ""
+    };
+    Some(format!(
+        "{floor}{} other indexed definition(s) also match `{query}`, {same} of them under the same qualified name `{}` (overloads, other parts of a partial type, or same-named declarations); this is the first by rank, and search_symbols or `ok symbol find` lists them all",
+        others.len(),
+        chosen.qualified_name
+    ))
+}
 
 pub struct SymbolEngine<'a> {
     store: &'a dyn MetadataStore,
@@ -26,26 +51,41 @@ impl<'a> SymbolEngine<'a> {
     }
 
     pub fn definition(&self, query: &str) -> Result<Symbol> {
+        Ok(self.definition_report(query)?.symbol)
+    }
+
+    /// The definition `definition` picks, with a caveat counting the other indexed definitions
+    /// the query matched, so a caller that reads one record knows it is not the only one.
+    pub fn definition_report(&self, query: &str) -> Result<SymbolDefinition> {
         // Indexed exact-name fast path first; the substring scan only runs when the query is a
         // qualified-name fragment (or otherwise not an exact identity).
         let mut matches = self
             .store
-            .symbols_named(query, 250)?
+            .symbols_named(query, DEFINITION_CANDIDATES)?
             .into_iter()
             .filter(|symbol| symbol.name == query || symbol.qualified_name.ends_with(query))
             .collect::<Vec<_>>();
         if matches.is_empty() {
             matches = self
-                .find(query, 250)?
+                .find(query, DEFINITION_CANDIDATES)?
                 .into_iter()
                 .filter(|symbol| symbol.name == query || symbol.qualified_name.ends_with(query))
                 .collect::<Vec<_>>();
         }
         matches.sort_by_key(|symbol| definition_rank(symbol, query));
-        matches
-            .into_iter()
+        let mut matches = matches.into_iter();
+        let symbol = matches
             .next()
-            .ok_or_else(|| OkError::SymbolNotFound(query.into()))
+            .ok_or_else(|| OkError::SymbolNotFound(query.into()))?;
+        let others = matches.collect::<Vec<_>>();
+        let caveats = alternatives_caveat(query, &symbol, &others)
+            .into_iter()
+            .collect();
+        Ok(SymbolDefinition {
+            symbol,
+            other_definitions: others.len(),
+            caveats,
+        })
     }
 
     pub fn by_id(&self, id: &SymbolId) -> Result<Option<Symbol>> {
@@ -60,9 +100,9 @@ impl<'a> SymbolEngine<'a> {
     /// recovered from it comes back as a caveat rather than as a shorter answer
     /// that reads like a complete one.
     pub fn context(&self, query: &str, surrounding_lines: u32) -> Result<SymbolContext> {
-        let symbol = self.definition(query)?;
+        let definition = self.definition_report(query)?;
         let mut context = SymbolContext {
-            symbol,
+            symbol: definition.symbol,
             path: None,
             body: None,
             body_range: None,
@@ -72,7 +112,7 @@ impl<'a> SymbolEngine<'a> {
             trailing_range: None,
             truncated: false,
             evidence: Vec::new(),
-            caveats: Vec::new(),
+            caveats: definition.caveats,
         };
 
         match self.store.file_by_id(&context.symbol.file_id)? {
@@ -451,6 +491,45 @@ mod tests {
             visibility: open_kioku_core::Visibility::Unknown,
             alias_of: None,
         }
+    }
+
+    #[test]
+    fn a_definition_names_the_other_definitions_it_passed_over() {
+        let store = MemoryStore {
+            symbols: vec![
+                symbol("part-a", "Ledger", "Acme::Ledger", SymbolKind::Class),
+                symbol("part-b", "Ledger", "Acme::Ledger", SymbolKind::Class),
+                symbol("other", "Ledger", "Books::Ledger", SymbolKind::Class),
+                symbol("alone", "Journal", "Acme::Journal", SymbolKind::Class),
+            ],
+            ..MemoryStore::default()
+        };
+        let engine = SymbolEngine::new(&store);
+        let definition = engine.definition_report("Acme::Ledger").unwrap();
+        assert_eq!(definition.other_definitions, 1);
+        assert!(
+            definition.caveats[0].contains("1 other indexed definition(s)")
+                && definition.caveats[0]
+                    .contains("1 of them under the same qualified name `Acme::Ledger`"),
+            "{:?}",
+            definition.caveats
+        );
+        let by_name = engine.definition_report("Ledger").unwrap();
+        assert_eq!(by_name.other_definitions, 2);
+        // The caveat reaches the body lookup too.
+        let context = engine
+            .context("Ledger", SYMBOL_CONTEXT_SURROUNDING_LINES)
+            .unwrap();
+        assert!(context
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("2 other indexed definition(s)")));
+        // A unique definition serializes as the bare symbol record.
+        let alone = engine.definition_report("Journal").unwrap();
+        assert_eq!(alone.other_definitions, 0);
+        let json = serde_json::to_value(&alone).unwrap();
+        assert_eq!(json["qualified_name"], "Acme::Journal");
+        assert!(json.get("caveats").is_none() && json.get("other_definitions").is_none());
     }
 
     #[test]

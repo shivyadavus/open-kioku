@@ -110,6 +110,7 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
     ctx.scope_stack.push(file_scope_id);
 
     walk(file, content, tree.root_node(), &mut ctx, &mut out);
+    out.syntax_errors = syntax_errors;
     out.package_declaration = package_declaration(file, content, tree.root_node());
     if file.language == Language::Rust {
         let (opaque, names) = top_level_item_macros(content.as_bytes(), tree.root_node());
@@ -522,7 +523,7 @@ fn enter(
     let mut entered = Entered::default();
 
     let named = if file.language == Language::CSharp {
-        csharp::symbol(node, content.as_bytes())
+        csharp::symbol(node, content.as_bytes(), ctx.syntax_errors)
     } else {
         symbol_name_node(file, node, ctx).and_then(|(name_node, symbol_kind)| {
             let name = name_node.utf8_text(content.as_bytes()).ok()?;
@@ -531,7 +532,7 @@ fn enter(
     };
     if let Some((name, symbol_kind)) = named.filter(|(name, _)| !name.is_empty()) {
         let line_range = if file.language == Language::CSharp {
-            csharp::line_range(node)
+            csharp::line_range(node, ctx.syntax_errors)
         } else {
             LineRange {
                 start: (node.start_position().row + 1) as u32,

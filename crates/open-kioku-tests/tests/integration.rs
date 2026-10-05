@@ -245,6 +245,11 @@ fn csharp_symbols_are_found_through_search_cli_and_mcp() {
     assert!(parts
         .iter()
         .all(|part| part["kind"] == "class" && part["language"] == "c_sharp"));
+    // `Ledger.Audit.cs` spells no accessibility; the type is public because `Ledger.cs` says so.
+    assert!(
+        parts.iter().all(|part| part["visibility"] == "public"),
+        "{found:#}"
+    );
 
     let symbols = mcp_call(
         &temp,
@@ -276,6 +281,37 @@ fn csharp_symbols_are_found_through_search_cli_and_mcp() {
         text.contains("Acme::Ledger::Reconciler::Reconcile"),
         "{definition:#}"
     );
+    assert!(definition.get("caveats").is_none(), "{definition:#}");
+
+    // A partial type has a definition per part: the one returned says the other exists.
+    let partial = mcp_call(
+        &temp,
+        "get_definition",
+        serde_json::json!({ "query": "Acme::Ledger::Ledger" }),
+    );
+    assert_eq!(
+        partial["qualified_name"], "Acme::Ledger::Ledger",
+        "{partial:#}"
+    );
+    assert_eq!(partial["visibility"], "public", "{partial:#}");
+    assert_eq!(partial["other_definitions"], 1, "{partial:#}");
+    assert!(
+        partial["caveats"][0]
+            .as_str()
+            .is_some_and(|caveat| caveat.contains("1 of them under the same qualified name")),
+        "{partial:#}"
+    );
+    let cli = Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["--json", "symbol", "definition", "Acme::Ledger::Ledger"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli: serde_json::Value = serde_json::from_slice(&cli).expect("symbol def is JSON");
+    assert_eq!(cli["other_definitions"], 1, "{cli:#}");
 
     std::fs::remove_dir_all(&temp).unwrap();
 }

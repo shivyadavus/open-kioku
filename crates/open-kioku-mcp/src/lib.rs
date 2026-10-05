@@ -989,7 +989,7 @@ async fn dispatch(
                     engine.context(query, SYMBOL_CONTEXT_SURROUNDING_LINES)?
                 ));
             }
-            Ok(json!(engine.definition(query)?))
+            Ok(json!(engine.definition_report(query)?))
         }
         "get_references" => {
             require_authoritative_relationships(store)?;

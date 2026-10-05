@@ -682,6 +682,12 @@ impl Indexer {
             match outcome {
                 Ok((parsed_file, redacted)) => {
                     redacted_files += usize::from(redacted);
+                    if parsed_file.syntax.syntax_errors {
+                        let by_pattern = parsed_file.syntax.symbols.iter().any(|symbol| {
+                            symbol.provenance == open_kioku_core::EvidenceSourceType::Heuristic
+                        });
+                        coverage.record_parsed_with_errors(&file.language, by_pattern);
+                    }
                     rust_type_only_items
                         .extend(parsed_file.syntax.rust_type_only_items.iter().cloned());
                     rust_enum_variants
@@ -763,6 +769,9 @@ impl Indexer {
             tests.extend(file.tests);
             analysis_facts.extend(file.analysis_facts);
         }
+        // A parser reads one file: a C# `partial` type's part that omits its accessibility takes
+        // the one another part declares.
+        open_kioku_languages::csharp::unify_partial_type_visibility(&mut symbols);
         // Extraction applies the runners' default discovery rules; where a pytest
         // configuration changes them, its Python test files fall back to the test-path rule.
         let test_discovery_notes =

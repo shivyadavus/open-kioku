@@ -80,11 +80,179 @@ pub(crate) fn scope_kind(kind: &str) -> Option<ScopeKind> {
 /// named with its interface, `IEntry.Total`: it is reachable only through that interface, and
 /// must not read as a second `Total` of the class.
 ///
-/// A declaration whose place the grammar's error recovery invented (a method directly in a
-/// namespace, a type inside a method) is not a symbol: see [`is_placed`].
-pub(crate) fn symbol(node: Node<'_>, source: &[u8]) -> Option<(String, SymbolKind)> {
+/// A declaration C# could not have written is not a symbol, whatever the grammar made of it: one
+/// whose name is a reserved keyword (`#if` recovery has produced a local function named `if`), a
+/// constructor or finalizer not named after its type (`extension(Entry e) { .. }`, a C# 14
+/// extension block this grammar reads as a constructor), a local function with an access
+/// modifier, or a declaration whose place the recovery invented: see [`is_placed`].
+/// `recovered` is set when the file parsed with syntax errors, where a local function must also
+/// be reached from a member through its body, never from a top-level statement.
+pub(crate) fn symbol(
+    node: Node<'_>,
+    source: &[u8],
+    recovered: bool,
+) -> Option<(String, SymbolKind)> {
     let (name, kind) = declared(node, source)?;
-    (!name.is_empty() && is_placed(node)).then_some((name, kind))
+    let valid = !name.is_empty()
+        && !names_a_keyword(node, source)
+        && names_its_type(node, source)
+        && is_placed(node)
+        && (node.kind() != "local_function_statement"
+            || local_function_is_placed(node, source, recovered));
+    valid.then_some((name, kind))
+}
+
+/// C#'s reserved keywords, which no declaration can be named without an `@`.
+const RESERVED_KEYWORDS: &[&str] = &[
+    "abstract",
+    "as",
+    "base",
+    "bool",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "checked",
+    "class",
+    "const",
+    "continue",
+    "decimal",
+    "default",
+    "delegate",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "event",
+    "explicit",
+    "extern",
+    "false",
+    "finally",
+    "fixed",
+    "float",
+    "for",
+    "foreach",
+    "goto",
+    "if",
+    "implicit",
+    "in",
+    "int",
+    "interface",
+    "internal",
+    "is",
+    "lock",
+    "long",
+    "namespace",
+    "new",
+    "null",
+    "object",
+    "operator",
+    "out",
+    "override",
+    "params",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "ref",
+    "return",
+    "sbyte",
+    "sealed",
+    "short",
+    "sizeof",
+    "stackalloc",
+    "static",
+    "string",
+    "struct",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "uint",
+    "ulong",
+    "unchecked",
+    "unsafe",
+    "ushort",
+    "using",
+    "virtual",
+    "void",
+    "volatile",
+    "while",
+];
+
+fn names_a_keyword(node: Node<'_>, source: &[u8]) -> bool {
+    node.child_by_field_name("name")
+        .filter(|name| name.kind() == "identifier")
+        .and_then(|name| name.utf8_text(source).ok())
+        .is_some_and(|name| RESERVED_KEYWORDS.contains(&name))
+}
+
+/// A constructor or finalizer is named after the type declaring it.
+fn names_its_type(node: Node<'_>, source: &[u8]) -> bool {
+    if !matches!(
+        node.kind(),
+        "constructor_declaration" | "destructor_declaration"
+    ) {
+        return true;
+    }
+    let own = node
+        .child_by_field_name("name")
+        .and_then(|name| name.utf8_text(source).ok());
+    let owner = owner(node)
+        .filter(|owner| holds_members(owner.kind()))
+        .and_then(|owner| owner.child_by_field_name("name"))
+        .and_then(|name| name.utf8_text(source).ok());
+    own.is_some() && own == owner
+}
+
+/// Modifiers a local function may carry; an access modifier is never one of them.
+const LOCAL_FUNCTION_MODIFIERS: &[&str] = &["static", "async", "unsafe", "extern"];
+
+/// A local function is declared in a body: the nearest declaration above it, through blocks,
+/// statements and expressions, is a member or another local function that is itself a symbol.
+/// A program's top-level statements may declare one too, except in a file that parsed with
+/// syntax errors, where a member recovery could not keep lands among top-level statements.
+fn local_function_is_placed(node: Node<'_>, source: &[u8], recovered: bool) -> bool {
+    let mut cursor = node.walk();
+    let access = node.children(&mut cursor).any(|child| {
+        child.kind() == "modifier"
+            && child
+                .child(0)
+                .is_some_and(|token| !LOCAL_FUNCTION_MODIFIERS.contains(&token.kind()))
+    });
+    if access {
+        return false;
+    }
+    let mut parent = node.parent();
+    while let Some(current) = parent {
+        let kind = current.kind();
+        if kind == "global_statement" {
+            return !recovered;
+        }
+        if kind == "accessor_declaration" {
+            return current
+                .parent()
+                .and_then(|list| list.parent())
+                .is_some_and(|member| symbol(member, source, recovered).is_some());
+        }
+        if names_local_functions(kind) {
+            return symbol(current, source, recovered).is_some();
+        }
+        if kind == "ERROR"
+            || is_type_declaration(kind)
+            || matches!(
+                kind,
+                "namespace_declaration" | "compilation_unit" | "declaration_list"
+            )
+        {
+            return false;
+        }
+        parent = current.parent();
+    }
+    false
 }
 
 fn declared(node: Node<'_>, source: &[u8]) -> Option<(String, SymbolKind)> {
@@ -119,6 +287,7 @@ fn declared(node: Node<'_>, source: &[u8]) -> Option<(String, SymbolKind)> {
                 "implicit"
             };
             let target = node.child_by_field_name("type").and_then(text)?;
+            let target = unalias(&target);
             Some((format!("{direction} operator {target}"), SymbolKind::Method))
         }
         "local_function_statement" => Some((name()?, SymbolKind::Function)),
@@ -160,9 +329,16 @@ fn explicit_interface(node: Node<'_>, source: &[u8]) -> Option<String> {
     let specifier = node
         .children(&mut cursor)
         .find(|child| child.kind() == "explicit_interface_specifier")?;
-    let interface = squeeze(specifier.utf8_text(source).ok()?);
+    let interface = unalias(&squeeze(specifier.utf8_text(source).ok()?));
     let interface = interface.trim_end_matches('.');
     (!interface.is_empty()).then(|| interface.to_string())
+}
+
+/// A type name without alias qualifiers, so no `::` enters a name the qualified name joins with
+/// `::`: `global::Acme.IAudit` is `Acme.IAudit`, and an extern alias's `Legacy::Acme.IAudit` is
+/// `Legacy.Acme.IAudit`, which keeps it apart from the global one.
+fn unalias(name: &str) -> String {
+    name.replace("global::", "").replace("::", ".")
 }
 
 /// The declaration a symbol node belongs to: a field or event field for one of its declarators,
@@ -226,13 +402,32 @@ fn is_placed(node: Node<'_>) -> bool {
 
 /// A declaration's line range. A file-scoped namespace (`namespace Acme.Ledger;`) holds every
 /// declaration after it to the end of the file, though the grammar ends its node at the `;`.
-pub(crate) fn line_range(node: Node<'_>) -> LineRange {
+///
+/// In a file that parsed with syntax errors, a type directly in a namespace or the compilation
+/// unit also holds the top-level statements and error nodes right after it: C# allows no
+/// statement after a type, so they are what recovery cut from it when it closed the type at a
+/// brace that belonged to a block inside it.
+pub(crate) fn line_range(node: Node<'_>, recovered: bool) -> LineRange {
     let declaration = declaration_of(node);
     let start = declaration.start_position().row as u32 + 1;
-    let end = match declaration.parent() {
+    let mut end = match declaration.parent() {
         Some(unit) if declaration.kind() == FILE_SCOPED_NAMESPACE => last_line_of(unit),
         _ => declaration.end_position().row as u32 + 1,
     };
+    if recovered
+        && is_type_declaration(declaration.kind())
+        && owner(declaration).is_some_and(|owner| {
+            matches!(owner.kind(), "compilation_unit" | "namespace_declaration")
+        })
+    {
+        let mut next = declaration.next_named_sibling();
+        while let Some(sibling) =
+            next.filter(|sibling| matches!(sibling.kind(), "global_statement" | "ERROR"))
+        {
+            end = end.max(last_line_of(sibling));
+            next = sibling.next_named_sibling();
+        }
+    }
     LineRange {
         start,
         end: end.max(start),
@@ -838,7 +1033,8 @@ class Global { void Run() { } }
             );
         }
         // The part with no access modifier takes the type's declared access from the other part
-        // in C#; each declaration records only what it spells, so it reads as the default.
+        // in C#. A parser reads one file, so it records the default; ingest unifies the parts
+        // (`open_kioku_languages::csharp::unify_partial_type_visibility`).
         assert_eq!(one.visibility, Visibility::Public);
         assert_eq!(other.visibility, Visibility::Crate);
         // Members of either part are members of the one logical type.
@@ -1098,6 +1294,118 @@ public class Platform
         assert_eq!(
             table(&program),
             vec![row("Greet", Function, Visibility::Private, 2, 2)]
+        );
+    }
+
+    fn qualified(facts: &SyntaxFacts) -> Vec<&str> {
+        facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn an_extension_block_recovery_misreads_invents_no_member() {
+        // A C# 14 extension block, which this grammar reads as a constructor named `extension`
+        // and closes the class at the block's brace, leaving the rest as top-level statements.
+        let facts = parse(
+            "EntryExtensions.cs",
+            "namespace Acme.Ledger;\n\npublic static class EntryExtensions\n{\n    extension(Entry entry)\n    {\n        public bool IsEmpty => entry.Value.Amount == 0;\n        public Entry Negate() => entry;\n    }\n\n    public static int Count(this Entry entry) => 1;\n}\n",
+        );
+        let names = qualified(&facts);
+        assert!(
+            names.iter().all(|name| !name.contains("extension")),
+            "{names:?}"
+        );
+        // `Count` is lost with the class's tail, not moved to the namespace.
+        assert!(!names.contains(&"Acme::Ledger::Count"), "{names:?}");
+        // The class still spans to its own closing brace.
+        let class = find(&facts, "Acme::Ledger::EntryExtensions");
+        assert_eq!(
+            class.range.as_ref().map(|range| (range.start, range.end)),
+            Some((3, 12))
+        );
+
+        let split = parse(
+            "Ext.cs",
+            "namespace Acme.Split;\n\npublic static class Ext\n{\n    public static int Before(this string s) => 1;\n\n    extension(string s)\n    {\n        public int Length2 => s.Length;\n        public int Twice() => 2;\n    }\n\n    public static int After(this string s) => 3;\n}\n",
+        );
+        assert_eq!(
+            qualified(&split),
+            vec![
+                "Acme::Split",
+                "Acme::Split::Ext",
+                "Acme::Split::Ext::Before",
+                "Acme::Split::Ext::After",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reserved_keyword_is_never_a_name() {
+        // `#if` around an `else if` arm: recovery reads `if (..) { .. }` as a local function.
+        let facts = parse(
+            "Grid.cs",
+            "namespace Acme;\npublic class Grid\n{\n    public bool TryGet(out int value)\n    {\n        if (instance is null)\n        {\n            value = 0;\n        }\n#if MODERN\n        else if (instance.GetType() == typeof(int[,]))\n        {\n            value = 1;\n        }\n#endif\n        else\n        {\n            value = 2;\n        }\n        return true;\n    }\n}\n",
+        );
+        assert_eq!(
+            qualified(&facts),
+            vec!["Acme", "Acme::Grid", "Acme::Grid::TryGet"]
+        );
+    }
+
+    #[test]
+    fn a_constructor_is_named_after_its_type() {
+        // Without syntax errors too: C# has no constructor of another name.
+        let facts = parse(
+            "Ledger.cs",
+            "class Ledger\n{\n    public Ledger() { }\n    Journal(int size) { }\n    ~Ledger() { }\n}\n",
+        );
+        assert_eq!(
+            qualified(&facts),
+            vec!["Ledger", "Ledger::Ledger", "Ledger::~Ledger"]
+        );
+    }
+
+    #[test]
+    fn a_local_function_sits_in_a_member_body() {
+        // An access modifier is never on a local function, and in a file with syntax errors a
+        // top-level statement holds none.
+        let facts = parse(
+            "Program.cs",
+            "Run();\nvoid Run() { }\npublic int Stray() => 1;\nclass Holder\n{\n    int Get\n    {\n        get\n        {\n            int Twice(int x) => x * 2;\n            return Twice(1);\n        }\n    }\n}\n",
+        );
+        assert_eq!(
+            qualified(&facts),
+            vec!["Run", "Holder", "Holder::Get", "Holder::Get::Twice"]
+        );
+        let recovered = parse(
+            "Broken.cs",
+            "Run();\nvoid Run() { }\nclass Broken { void F() { if (x { } }\n",
+        );
+        assert!(
+            qualified(&recovered).iter().all(|name| *name != "Run"),
+            "{:?}",
+            qualified(&recovered)
+        );
+    }
+
+    #[test]
+    fn alias_qualifiers_stay_out_of_names() {
+        let facts = parse(
+            "Bridge.cs",
+            "extern alias Legacy;\n\nnamespace Acme.Ledger.Interop;\n\npublic class Bridge : global::Acme.Ledger.IAudit, Legacy::Acme.Ledger.IAudit\n{\n    void global::Acme.Ledger.IAudit.Audit() { }\n    void Legacy::Acme.Ledger.IAudit.Audit() { }\n    public static implicit operator global::Acme.Money(Bridge bridge) => default;\n}\n",
+        );
+        assert_eq!(
+            qualified(&facts),
+            vec![
+                "Acme::Ledger::Interop",
+                "Acme::Ledger::Interop::Bridge",
+                "Acme::Ledger::Interop::Bridge::Acme.Ledger.IAudit.Audit",
+                "Acme::Ledger::Interop::Bridge::Legacy.Acme.Ledger.IAudit.Audit",
+                "Acme::Ledger::Interop::Bridge::implicit operator Acme.Money",
+            ]
         );
     }
 }

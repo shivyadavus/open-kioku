@@ -811,7 +811,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
             match command {
                 SymbolCommand::Find { name } => output(cli.json, &engine.find(&name, 50)?, || {})?,
                 SymbolCommand::Definition { name } => {
-                    output(cli.json, &engine.definition(&name)?, || {})?
+                    output(cli.json, &engine.definition_report(&name)?, || {})?
                 }
                 SymbolCommand::Context { name } => output(
                     cli.json,

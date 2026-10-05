@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use test_discovery::TestFileDiscovery;
 
+mod csharp_fallback;
 mod test_discovery;
 
 #[derive(Debug, Clone)]
@@ -204,22 +205,7 @@ fn pattern_symbols(file: &File, content: &str) -> Vec<Symbol> {
         ),
         // Reached only when tree-sitter left no declaration whole. Type declarations alone: a
         // C# member line has no keyword a pattern could tell from a statement.
-        Language::CSharp => extract_with_patterns(
-            file,
-            content,
-            &[
-                (
-                    r"^\s*(?:[a-z]+\s+)*(?:class|struct|enum|record(?:\s+class|\s+struct)?)\s+([A-Za-z_][A-Za-z0-9_]*)",
-                    SymbolKind::Class,
-                    1,
-                ),
-                (
-                    r"^\s*(?:[a-z]+\s+)*interface\s+([A-Za-z_][A-Za-z0-9_]*)",
-                    SymbolKind::Interface,
-                    1,
-                ),
-            ],
-        ),
+        Language::CSharp => csharp_fallback::symbols(file, content),
         Language::Sql => extract_with_patterns(
             file,
             content,
@@ -2027,13 +2013,17 @@ endpoint = "https://orders.example.com/v1/orders"
                     SymbolKind::Class,
                     EvidenceSourceType::Heuristic
                 ),
+                // Braces still open around it: `Broken`'s and `Lost`'s.
                 (
-                    "Acme::IHidden",
+                    "Acme::Broken::IHidden",
                     SymbolKind::Interface,
                     EvidenceSourceType::Heuristic
                 ),
             ]
         );
+        assert!(parsed.syntax.symbols[1..]
+            .iter()
+            .all(|symbol| symbol.confidence == Confidence::Low));
         // A file read whole keeps tree-sitter's symbols alone.
         let whole = HeuristicParser.parse_with_hint(&file, "namespace Acme;\n", None);
         assert_eq!(whole.syntax.symbols.len(), 1);

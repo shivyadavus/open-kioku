@@ -280,8 +280,9 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// (`test_file_helper`), which is not validation evidence; a v19 index records every callable of
 /// a test file as a test, so a file of `setUp` and `withTempRepo` helpers reads as validation.
 /// v21: a `.cs` file is C#, parsed by tree-sitter into namespace, type and member symbols
-/// qualified by namespace and type nesting, and chunked with each symbol's `///` documentation;
-/// a v20 index holds `.cs` files as unknown text with no symbols.
+/// qualified by namespace and type nesting, and chunked with each symbol's `///` documentation,
+/// read through syntax errors where recovery kept a declaration whole and in place; a v20
+/// index holds `.cs` files as unknown text with no symbols.
 pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v21";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
