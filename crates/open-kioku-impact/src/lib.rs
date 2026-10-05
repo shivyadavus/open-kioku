@@ -3246,6 +3246,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let f2 = File {
             id: FileId::new("f2"),
@@ -3256,6 +3257,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let f3 = File {
             id: FileId::new("f3"),
@@ -3266,6 +3268,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
 
         let c1 = CodeChunk {
@@ -3623,6 +3626,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let source = file("source", "src/rates.rs");
         let caller = file("caller", "src/publisher.rs");
@@ -3774,6 +3778,7 @@ mod tests {
             content_hash: "source".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let caller = File {
             id: FileId::new("caller"),
@@ -3784,6 +3789,7 @@ mod tests {
             content_hash: "caller".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbol = Symbol {
             id: SymbolId::new("symbol:rate_validator"),
@@ -3938,6 +3944,7 @@ mod tests {
             content_hash: "source".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let historical_neighbor = File {
             id: FileId::new("neighbor"),
@@ -3948,6 +3955,7 @@ mod tests {
             content_hash: "neighbor".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let manifest = IndexManifest {
             analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
@@ -4031,6 +4039,7 @@ mod tests {
             content_hash: "provider".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let client = File {
             id: FileId::new("client"),
@@ -4041,6 +4050,7 @@ mod tests {
             content_hash: "client".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let chunks = vec![
             CodeChunk {
@@ -4143,6 +4153,7 @@ mod tests {
             content_hash: "hot".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let chunks = vec![CodeChunk {
             id: "hot-chunk".into(),
@@ -4233,6 +4244,7 @@ mod tests {
             content_hash: "hot-history".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let manifest = IndexManifest {
             analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
@@ -4352,6 +4364,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let target_file = make_file("target", "src/auth.rs");
         let caller_file = make_file("caller", "src/session.rs");
@@ -4557,6 +4570,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: generated,
             is_vendor: false,
+            generated_by: None,
         };
         // The edit target; a declaration file generated from it by a banner; and its test.
         let source = make_file("source", "src/client.ts", false);
@@ -4718,6 +4732,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let target = make_file("target", "src/big.rs");
         let caller = make_file("caller", "src/caller.rs");
@@ -4833,6 +4848,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let target = make_file("target", "src/a_ledger.rs");
         let caller = make_file("caller", "src/z_books.rs");
@@ -4982,6 +4998,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let target = file("target", "src/ledger.rs");
         let caller = file("caller", "src/books.rs");
@@ -5117,6 +5134,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         {
             let store = SqliteStore::open(&path).unwrap();
@@ -5190,6 +5208,7 @@ mod tests {
             content_hash: "target".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let manifest = IndexManifest {
             analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
@@ -5244,6 +5263,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let mut files = vec![file("source", "src/rates.rs".into())];
         files.extend((0..callers).map(|index| {
@@ -5632,6 +5652,7 @@ mod tests {
             content_hash: "terms".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 
@@ -5842,6 +5863,7 @@ mod tests {
                     content_hash: path.into(),
                     is_generated: false,
                     is_vendor: false,
+                    generated_by: None,
                 });
             }
             id

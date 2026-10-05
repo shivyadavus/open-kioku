@@ -2779,6 +2779,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbols = parse_symbols(&file, "pub struct Worker;\npub fn run() {}\n").unwrap();
         assert!(symbols.iter().any(|symbol| symbol.name == "Worker"));
@@ -2799,6 +2800,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -2865,6 +2867,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         parse_symbols(&file, source)
             .expect("visibility fixture should parse")
@@ -2972,6 +2975,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         parse_symbols(&file, source)
             .expect("visibility fixture should parse")
@@ -3251,6 +3255,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -3296,6 +3301,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -3342,6 +3348,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbols = parse_symbols(&file, r#"{"cluster": {"name": "local"}}"#).unwrap();
         assert!(symbols.is_empty());
@@ -3358,6 +3365,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let code = r#"
             package com.acme;
@@ -3410,6 +3418,7 @@ mod ri3_rust_module_receiver_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(&file, "pub fn write() { crate::storage::persist(); }")
             .expect("Rust fixture should parse");
@@ -3441,6 +3450,7 @@ mod ri3_rust_use_import_site_tests {
                 content_hash: "hash".into(),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             };
             let facts = parse_file(&file, source).expect("Rust macro fixture should parse");
             (facts.invokes_item_macro, facts.item_macro_names)
@@ -3484,6 +3494,7 @@ mod ri3_rust_use_import_site_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -3537,6 +3548,7 @@ mod ri3_rust_use_import_site_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         parse_file(&file, source)
             .expect("Rust import fixture should parse")
@@ -3603,6 +3615,7 @@ mod ri3_rust_use_import_site_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -3716,6 +3729,7 @@ mod ri3_rust_binding_type_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         parse_file(&file, source)
             .expect("Rust binding fixture should parse")
@@ -3768,6 +3782,7 @@ mod ri3_rust_binding_type_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -3803,6 +3818,7 @@ mod ri3_rust_binding_type_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -3856,6 +3872,7 @@ mod ri3_rust_binding_type_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -3944,6 +3961,7 @@ mod ri3_go_type_classification_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -3977,6 +3995,7 @@ mod ri3_go_type_classification_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let facts = parse_file(
             &file,
@@ -4034,6 +4053,7 @@ mod ri3_go_type_classification_tests {
                 content_hash: "hash".into(),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             };
             let facts = parse_file(&file, content).expect("package fixture should parse");
             facts.package_declaration.map(|site| {

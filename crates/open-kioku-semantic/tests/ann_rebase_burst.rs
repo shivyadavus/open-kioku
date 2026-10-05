@@ -59,6 +59,7 @@ fn persist_snapshot(repo: &Path, store: &SqliteStore, commit: &str, fixtures: &[
             content_hash: fixture.content_hash.clone(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         })
         .collect::<Vec<_>>();
     let chunks = fixtures

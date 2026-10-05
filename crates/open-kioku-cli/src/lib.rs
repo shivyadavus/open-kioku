@@ -155,6 +155,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let endpoint = |name: &str, file_id: &str| Symbol {
             id: open_kioku_core::SymbolId::new(format!("symbol-{name}")),

@@ -444,6 +444,7 @@ mod tests {
             content_hash: format!("hash-{id}"),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 
@@ -488,6 +489,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbol = Symbol {
             id: SymbolId::new("symbol-1"),
@@ -540,6 +542,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let chunk = CodeChunk {
             id: "chunk-1".into(),
@@ -567,6 +570,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let chunk = CodeChunk {
             id: "chunk-1".into(),

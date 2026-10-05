@@ -871,6 +871,7 @@ mod tests {
             content_hash: format!("hash-{id}"),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 
@@ -1348,6 +1349,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let import1 = Import {
             file_id: file.id.clone(),
@@ -1390,6 +1392,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbol = Symbol {
             id: SymbolId::new("s1"),
@@ -1540,6 +1543,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let fact = AnalysisFact {
             id: "fact1".into(),
@@ -1578,6 +1582,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let fact =
             |id: &str, target: &str, kind: GraphNodeType, edge_type: GraphEdgeType| AnalysisFact {
@@ -1666,6 +1671,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let file2 = File {
             id: FileId::new("f2"),
@@ -1676,6 +1682,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
 
         let graph1 = InMemoryGraph::from_index_with_analysis(
@@ -1713,6 +1720,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbol = Symbol {
             id: SymbolId::new("s1"),
@@ -2078,6 +2086,7 @@ mod ri3_static_import_authority_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let import = Import {
             file_id: file.id.clone(),
@@ -2119,6 +2128,7 @@ mod ri3_static_import_authority_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let files = [
             manifest("crates/app/Cargo.toml"),
@@ -2175,6 +2185,7 @@ mod ri3_import_resolution_authority_tests {
             content_hash: format!("hash:{path}"),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 

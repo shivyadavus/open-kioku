@@ -4164,6 +4164,7 @@ mod tests {
             content_hash: "rates".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let chunk = |start: u32, end: u32| CodeChunk {
             id: format!("rates:{start}"),
@@ -4387,6 +4388,7 @@ mod tests {
             content_hash: "mutation".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let validator_file = File {
             id: FileId::new("validator"),
@@ -4397,6 +4399,7 @@ mod tests {
             content_hash: "validator".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let mutation_symbol = Symbol {
             id: SymbolId::new("mutation-symbol"),
@@ -4840,6 +4843,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let files = vec![
             file("queue/mod.ts", "f1"),
@@ -4877,6 +4881,7 @@ mod tests {
             content_hash: path.into(),
             is_generated,
             is_vendor: false,
+            generated_by: None,
         };
         vec![
             file("src/orbit/pipeline.py", Language::Python, false),
@@ -6635,6 +6640,7 @@ mod tests {
             content_hash: "patch".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let noise_file = File {
             id: FileId::new("noise"),
@@ -6645,6 +6651,7 @@ mod tests {
             content_hash: "noise".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let patch_symbol = Symbol {
             id: SymbolId::new("change-verifier"),
@@ -6709,6 +6716,7 @@ mod tests {
             content_hash: "config".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let history_file = File {
             id: FileId::new("history"),
@@ -6719,6 +6727,7 @@ mod tests {
             content_hash: "history".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let config_symbol = Symbol {
             id: SymbolId::new("default-history-max-commits"),
@@ -6803,6 +6812,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbol = |id: &str, name: &str| Symbol {
             id: SymbolId::new(id),

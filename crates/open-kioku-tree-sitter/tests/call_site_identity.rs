@@ -15,6 +15,7 @@ fn chained_same_name_calls_have_distinct_ids() {
         content_hash: "hash".into(),
         is_generated: false,
         is_vendor: false,
+        generated_by: None,
     };
     let code = r#"
 struct Repo;

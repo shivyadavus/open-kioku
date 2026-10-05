@@ -37,6 +37,7 @@ fn persist_snapshot(repo: &Path, store: &SqliteStore, commit: &str, text: &str, 
         content_hash: hash.into(),
         is_generated: false,
         is_vendor: false,
+        generated_by: None,
     };
     let chunk = CodeChunk {
         id: "chunk:file_status".into(),

@@ -113,11 +113,9 @@ What is counted:
   generated are indexed and flagged, so they stay in coverage. A file looks generated when
   its first eight lines carry a generation banner, or when its name is one a .NET build tool
   writes: `*.g.cs`, `*.g.i.cs`, `*.Designer.cs` (any case), and `*.AssemblyInfo.cs` under an
-  `obj/` directory (a project's own `Properties/AssemblyInfo.cs` is source); the name rule
-  applies once C# files are indexed, which they are not yet. `is_generated` records no
-  reason, so a file flagged by its name cannot yet be told from one flagged by a banner:
-  when C# files are parsed, the name rule must record which rule fired (a persisted source and
-  evidence, as a ranking signal does), so a demotion it causes is traceable. Only
+  `obj/` directory (a project's own `Properties/AssemblyInfo.cs` is source). Each flagged
+  file records the rule in `File::generated_by`, persisted with the file: `banner` (also when
+  the name matches) or `build_tool_name`, so a demotion it causes traces to its evidence. Only
   document-corpus files the generated-content detector rejects are skipped as `generated`.
 
 Two ratios are reported, and only one of them is judged. The **programming-language

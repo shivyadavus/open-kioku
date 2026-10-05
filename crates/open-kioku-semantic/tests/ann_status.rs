@@ -42,6 +42,7 @@ fn auto_backend_persists_hnsw_and_reports_resolved_backend_after_restart() {
         content_hash: "file-hash".into(),
         is_generated: false,
         is_vendor: false,
+        generated_by: None,
     }];
     let chunks = vec![CodeChunk {
         id: "chunk_auth".into(),

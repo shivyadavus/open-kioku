@@ -4513,6 +4513,7 @@ mod tests {
                 content_hash: String::new(),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             })
             .collect::<Vec<_>>();
         let resolutions = resolutions

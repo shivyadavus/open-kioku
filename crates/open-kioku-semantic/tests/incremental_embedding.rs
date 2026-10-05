@@ -64,6 +64,7 @@ fn persist(repo: &Path, store: &SqliteStore, sources: &[Source]) {
             content_hash: content,
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         for (line, text) in source.chunks.iter().enumerate() {
             chunks.push(CodeChunk {

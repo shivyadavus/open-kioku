@@ -49,6 +49,7 @@ fn file(id: &str, path: &str) -> File {
         content_hash: format!("hash-{id}"),
         is_generated: false,
         is_vendor: false,
+        generated_by: None,
     }
 }
 

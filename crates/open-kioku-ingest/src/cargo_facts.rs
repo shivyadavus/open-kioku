@@ -244,6 +244,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         });
         let facts = cargo_manifest_facts(&project, &files);
         let mut stated = facts

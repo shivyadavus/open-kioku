@@ -1603,6 +1603,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 
@@ -1616,6 +1617,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 
@@ -1629,6 +1631,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 
@@ -1642,6 +1645,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 
@@ -1937,6 +1941,7 @@ endpoint = "https://orders.example.com/v1/orders"
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 
@@ -2195,6 +2200,7 @@ endpoint = "https://orders.example.com/v1/orders"
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let src = "fn helper() {}\n";
         let symbols = extract_symbols(&file, src);
@@ -2222,6 +2228,7 @@ endpoint = "https://orders.example.com/v1/orders"
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 

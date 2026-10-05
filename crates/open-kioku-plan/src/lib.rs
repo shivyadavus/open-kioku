@@ -3406,6 +3406,7 @@ mod tests {
             content_hash: "auth-hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let file_lib = File {
             id: FileId::new("lib"),
@@ -3416,6 +3417,7 @@ mod tests {
             content_hash: "lib-hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let file_test = File {
             id: FileId::new("test"),
@@ -3426,6 +3428,7 @@ mod tests {
             content_hash: "test-hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let issue_token = Symbol {
             id: SymbolId::new("issue-token"),
@@ -5550,6 +5553,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let files = [
             file("rates", "src/main/java/com/acme/Rates.java"),
@@ -5840,6 +5844,7 @@ mod tests {
             content_hash: "source".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let test_file = File {
             id: FileId::new("test-file"),
@@ -5850,6 +5855,7 @@ mod tests {
             content_hash: "test-file".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbol = Symbol {
             id: SymbolId::new("source-symbol"),
@@ -5948,6 +5954,7 @@ mod tests {
             content_hash: "rates".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let test_file = File {
             id: FileId::new("rates-test"),
@@ -5958,6 +5965,7 @@ mod tests {
             content_hash: "rates-test".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let convert = Symbol {
             id: SymbolId::new("convert-currency"),
