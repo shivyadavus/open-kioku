@@ -1677,7 +1677,7 @@ fn anchor_miss_probe(
 ) -> String {
     if identifiers.is_empty() {
         "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository.".into()
-    } else if let Some(probe) = pruned_source.anchor_probe() {
+    } else if let Some(probe) = pruned_source.anchor_probe(excluded_source) {
         probe
     } else if excluded_source {
         "Run `ok search <identifier>` for each name; the index excluded most of a language's source (see the `coverage` negative evidence), so a name it does not hold may be defined in those files.".into()
@@ -1713,7 +1713,12 @@ pub fn pruned_source_links(
                 .cloned()
                 .collect()
         };
-        for identifier in candidates {
+        // A hyphenated anchor (`--dry-run`, `X-Request-Id`) is a flag, header or package name,
+        // never a symbol name in an indexed language, so no symbol table could define it.
+        for identifier in candidates
+            .into_iter()
+            .filter(|identifier| !identifier.contains('-'))
+        {
             if store.symbols_named(&identifier, 1)?.is_empty() {
                 undefined.push(identifier);
             }

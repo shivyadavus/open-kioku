@@ -8461,9 +8461,12 @@ fn anchor_probe(report: &serde_json::Value) -> Option<String> {
 
 /// Asserts that context and plan, on the CLI and over MCP, link `task` to `dir`: a coverage
 /// caveat naming it, the zero-weight signal citing `coverage:pruned:<dir>`, the `coverage`
-/// item, a probe that says the name may be in `dir` instead of that it does not exist, and the
-/// 0.50 cap with its blocker. CLI and MCP report the same caveats and score.
-fn assert_task_reaches_pruned_source(repo: &std::path::Path, task: &str, dir: &str) {
+/// item, and a probe that says the name may be in `dir` instead of that it does not exist. With
+/// `capped` (the task names the directory's path) the 0.50 cap and its blocker apply; without it
+/// (an undefined name) neither does, and the unmatched name holds the score to the anchor cap.
+/// Either way `ok preflight` does not say `safe_to_start`. CLI and MCP report the same caveats
+/// and score.
+fn assert_task_reaches_pruned_source(repo: &std::path::Path, task: &str, dir: &str, capped: bool) {
     let (cli, mcp) = coverage_surfaces(repo, task);
     for (index, kind) in [(0, "context"), (1, "plan")] {
         for (surface, report) in [("cli", &cli[index]), ("mcp", &mcp[index])] {
@@ -8489,18 +8492,20 @@ fn assert_task_reaches_pruned_source(repo: &std::path::Path, task: &str, dir: &s
                     ),
                 "{label}: {breakdown}"
             );
+            let blocked = breakdown["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| {
+                    blocker.as_str().is_some_and(|text| {
+                        text.starts_with("the task names a directory the index pruned: ")
+                            && text.contains(&format!("{dir}/"))
+                    })
+                });
+            assert_eq!(blocked, capped, "{label}: {breakdown}");
+            let ceiling = if capped { 0.50 } else { 0.60 };
             assert!(
-                breakdown["blockers"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|blocker| blocker.as_str().is_some_and(|text| text
-                        .starts_with("the task may name code in a directory the index pruned: ")
-                        && text.contains(&format!("{dir}/")))),
-                "{label}: {breakdown}"
-            );
-            assert!(
-                breakdown["overall_score"].as_f64().unwrap() <= 0.50 + 1e-6,
+                breakdown["overall_score"].as_f64().unwrap() <= ceiling + 1e-6,
                 "{label}: {breakdown}"
             );
             let item = coverage_negative_evidence(report)
@@ -8542,6 +8547,22 @@ fn assert_task_reaches_pruned_source(repo: &std::path::Path, task: &str, dir: &s
             "{kind}: CLI and MCP disagree"
         );
     }
+    let out = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("preflight")
+            .arg(task)
+            .arg("--format")
+            .arg("json");
+        command
+    });
+    let preflight: serde_json::Value = serde_json::from_str(&out).expect("preflight json");
+    assert_ne!(
+        preflight["verdict"], "safe_to_start",
+        "{task:?}: {preflight}"
+    );
 }
 
 /// Asserts that neither context nor plan, on either surface, reports a pruned directory for
@@ -8602,9 +8623,10 @@ fn a_name_in_tracked_source_behind_a_stray_git_points_at_the_pruned_directory() 
         repo,
         "fix ledger_rollover_total rounding in the invoice path",
         "tools/ledger",
+        false,
     );
     // Named by path rather than by an identifier.
-    assert_task_reaches_pruned_source(repo, "explain tools/ledger/lib.rs", "tools/ledger");
+    assert_task_reaches_pruned_source(repo, "explain tools/ledger/lib.rs", "tools/ledger", true);
     // A name the index defines is answered from indexed code.
     assert_task_reaches_no_pruned_source(repo, "fix invoice_total rounding in live_entry");
 
@@ -8648,11 +8670,23 @@ fn an_undeclared_build_dir_with_tracked_source_is_named_and_strong_build_output_
         status["coverage"]["pruned"][0]["reason"],
         "undeclared_build_dir"
     );
-    assert_task_reaches_pruned_source(repo, "fix compile_release_plan ordering", "tools/build");
-    assert_task_reaches_pruned_source(repo, "what does tools/build/plan.py return", "tools/build");
+    assert_task_reaches_pruned_source(
+        repo,
+        "fix compile_release_plan ordering",
+        "tools/build",
+        false,
+    );
+    assert_task_reaches_pruned_source(
+        repo,
+        "what does tools/build/plan.py return",
+        "tools/build",
+        true,
+    );
     assert_task_reaches_no_pruned_source(repo, "fix run_release error handling");
     // A prose mention of "build" names no directory.
     assert_task_reaches_no_pruned_source(repo, "fix the build step in run_release");
+    // A flag is no symbol name, so it is never looked up as one.
+    assert_task_reaches_no_pruned_source(repo, "add a --dry-run flag to run_release");
 
     let bundle = pruned_source_fixture(
         &[

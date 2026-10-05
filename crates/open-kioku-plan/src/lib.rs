@@ -131,12 +131,20 @@ impl PreflightReport {
                 .any(|component| {
                     component.signal == open_kioku_core::COVERAGE_SELECTED_LANGUAGE_SIGNAL
                 });
+        // The task names, or names code that may be in, a pruned directory holding tracked
+        // source: the index read none of it, so it cannot say what an edit there touches.
+        let task_reaches_pruned_source = plan
+            .confidence_breakdown
+            .components
+            .iter()
+            .any(|component| component.signal == open_kioku_core::PRUNED_SOURCE_SIGNAL);
         let caution = !insufficient
             && (plan.risk.level.eq_ignore_ascii_case("high")
                 || plan.risk.level.eq_ignore_ascii_case("critical")
                 || plan.evidence_quality.unresolved_import_count > 0
                 || plan.evidence_quality.ambiguous_edge_count > 0
-                || coverage_gap_in_selected_language);
+                || coverage_gap_in_selected_language
+                || task_reaches_pruned_source);
         let verdict = if insufficient {
             PreflightVerdict::InsufficientEvidence
         } else if caution {
@@ -1037,7 +1045,7 @@ fn anchor_miss_probe(
 ) -> String {
     if identifiers.is_empty() {
         "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository.".into()
-    } else if let Some(probe) = pruned_source.anchor_probe() {
+    } else if let Some(probe) = pruned_source.anchor_probe(excluded_source) {
         probe
     } else if excluded_source {
         "Run `ok search <identifier>` for each name; the index excluded most of a language's source (see the `coverage` negative evidence), so a name it does not hold may be defined in those files.".into()

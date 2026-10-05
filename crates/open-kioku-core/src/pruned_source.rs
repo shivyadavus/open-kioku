@@ -21,6 +21,11 @@
 //!   is not explained by a bundle.
 //!
 //! Prune records carry no per-file languages, so language is not used to narrow the link.
+//!
+//! Only a directory the task names by path, whose tracked source counts as missing, caps
+//! confidence. An undefined name is reported but does not cap: a name the task asks to create,
+//! or to rename something to, has no indexed definition by construction. A missing name already
+//! lowers confidence through the `anchor` negative evidence item.
 
 use std::path::Path;
 
@@ -30,8 +35,9 @@ use crate::{
 };
 
 /// Score-component signal emitted when a task reaches a pruned directory holding git-tracked
-/// source. Zero weight like `index_coverage`: the caps price it; the component carries the
-/// `coverage:pruned:<path>` evidence ids a reader traces them to.
+/// source. Zero weight like `index_coverage`: the caps price it, and the component carries the
+/// `coverage:pruned:<path>` evidence ids a reader traces them to. `ok preflight` reads it to
+/// withhold `safe_to_start`, so it is a stable name rather than prose to match on.
 pub const PRUNED_SOURCE_SIGNAL: &str = "index_coverage_pruned_source";
 
 /// At most this many directories are named in one caveat, blocker or probe; the rest are
@@ -187,6 +193,22 @@ fn dir_details(dirs: &[&PrunedDir]) -> String {
         .join("; ")
 }
 
+/// `tools/build/ (3 tracked source files), out/dist/ (1 tracked source file)`, the first few
+/// and how many more.
+fn dir_labels(dirs: &[&PrunedDir]) -> String {
+    let mut labels = dirs
+        .iter()
+        .take(PRUNED_SOURCE_DIRS_NAMED)
+        .map(|dir| dir.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rest = dirs.len().saturating_sub(PRUNED_SOURCE_DIRS_NAMED);
+    if rest > 0 {
+        labels.push_str(&format!(" and {} more", group_thousands(rest)));
+    }
+    labels
+}
+
 impl PrunedSourceLinks {
     pub fn is_empty(&self) -> bool {
         self.unresolved_dirs.is_empty() && self.named_dirs.is_empty()
@@ -203,18 +225,29 @@ impl PrunedSourceLinks {
         dirs
     }
 
-    /// Linked directories whose tracked source counts as missing: the weak rule's guess, or a
-    /// stray `.git`. These cap; a directory pruned on strong evidence that the task names is
-    /// reported and caps nothing, as its committed files never lower coverage.
-    fn capping_dirs(&self) -> Vec<&PrunedDir> {
+    /// Linked directories whose tracked source counts as missing (the weak rule's guess, or a
+    /// stray `.git`), however the task reached them.
+    fn missing_source_dirs(&self) -> Vec<&PrunedDir> {
         self.dirs()
             .into_iter()
             .filter(|dir| dir.reason.counts_tracked_source())
             .collect()
     }
 
-    /// Whether the 0.50 cap applies: the task names, or may name code in, a directory whose
-    /// tracked source the index counts as missing.
+    /// Directories the task names by path whose tracked source counts as missing: the only
+    /// links that cap. The task points at files the index never read. An undefined name does
+    /// not cap. A name the task asks to create or rename to is undefined by construction, and
+    /// a missing name already lowers confidence through the `anchor` item. A directory pruned on
+    /// strong evidence caps nothing, as its committed files never lower coverage.
+    fn capping_dirs(&self) -> Vec<&PrunedDir> {
+        self.named_dirs
+            .iter()
+            .filter(|dir| dir.reason.counts_tracked_source())
+            .collect()
+    }
+
+    /// Whether the 0.50 cap applies: the task names the path of a directory whose tracked
+    /// source the index counts as missing.
     pub fn caps(&self) -> bool {
         !self.capping_dirs().is_empty()
     }
@@ -257,46 +290,46 @@ impl PrunedSourceLinks {
         let dirs = self.capping_dirs();
         (!dirs.is_empty()).then(|| {
             format!(
-                "the task may name code in a directory the index pruned: {}",
-                dirs.iter()
-                    .take(PRUNED_SOURCE_DIRS_NAMED)
-                    .map(|dir| dir.label())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "the task names a directory the index pruned: {}",
+                dir_labels(&dirs)
             )
         })
     }
 
     /// The `anchor` item's next probe: replaces "does not exist in this repository or needs
-    /// `ok index`", which a pruned directory holding tracked source makes untrue.
-    pub fn anchor_probe(&self) -> Option<String> {
-        let dirs = self.dirs();
+    /// `ok index`", which a pruned directory holding tracked source makes untrue. Only
+    /// directories whose tracked source counts as missing are named: a missing name is not
+    /// explained by build output. With `excluded_source` (a majority coverage gap) the probe
+    /// says that too, so it never names a narrower cause than the evidence supports.
+    pub fn anchor_probe(&self, excluded_source: bool) -> Option<String> {
+        let dirs = self.missing_source_dirs();
         (!dirs.is_empty()).then(|| {
+            let gap = if excluded_source {
+                " The index also excluded most of a language's source, so the name may be defined in those files."
+            } else {
+                ""
+            };
             format!(
-                "Run `ok search <identifier>` for each name; a name the index does not hold may be in {}, which the index pruned (see the `coverage` negative evidence), so its absence from the index is not evidence it is absent from the repository.",
+                "Run `ok search <identifier>` for each name; a name the index does not hold may be in {}, which the index pruned (see the `coverage` negative evidence), so its absence from the index is not evidence it is absent from the repository.{gap}",
                 dir_list(&dirs)
             )
         })
     }
 
-    /// A plan's risk reason beside the cap, worded like the coverage-gap reason.
+    /// A plan's risk reason: `low confidence: …` beside the cap, and otherwise a disclosure
+    /// naming the undefined anchors and where they may be.
     pub fn risk_reason(&self) -> Option<String> {
-        if !self.caps() {
-            return None;
+        if self.caps() {
+            return Some(format!(
+                "low confidence: the task names a directory the index pruned: {}",
+                dir_labels(&self.capping_dirs())
+            ));
         }
-        let dirs = self
-            .capping_dirs()
-            .iter()
-            .take(PRUNED_SOURCE_DIRS_NAMED)
-            .map(|dir| dir.label())
-            .collect::<Vec<_>>()
-            .join(", ");
-        Some(if self.undefined_identifiers.is_empty() {
-            format!("low confidence: the task names a directory the index pruned: {dirs}")
-        } else {
+        (!self.unresolved_dirs.is_empty()).then(|| {
             format!(
-                "low confidence: named task anchor(s) {} may be defined in a directory the index pruned: {dirs}",
-                self.undefined_identifiers.join(", ")
+                "named task anchor(s) {} have no indexed definition and may be defined in a directory the index pruned: {}",
+                self.undefined_identifiers.join(", "),
+                dir_labels(&self.unresolved_dirs.iter().collect::<Vec<_>>())
             )
         })
     }
@@ -310,7 +343,7 @@ impl PrunedSourceLinks {
                 "Search the files under `{path}/` directly (`git ls-files {path}`) before concluding a name is absent; if they are source an agent should see, list `{path}` under `[index] keep_dirs` in `ok.toml`, then run `ok index .`."
             ),
             PruneReason::Submodule => format!(
-                "Search the files under `{path}/` directly (`git ls-files {path}`) before concluding a name is absent; this repository tracks them, so the `{path}/.git` that pruned them is stray: remove it if the directory is this repository's source, then run `ok index .`."
+                "Search the files under `{path}/` directly (`git ls-files {path}`) before concluding a name is absent; this repository tracks them, so the `{path}/.git` that pruned them looks stray. If the directory is this repository's source, move that `.git` out of the tree rather than deleting it (it may hold another repository's unpushed history), then run `ok index .`."
             ),
             PruneReason::BuildOutput | PruneReason::Dependencies | PruneReason::VirtualEnv => {
                 format!(
@@ -427,7 +460,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(paths, ["tools/build", "vendor/ledger"]);
         assert!(links.named_dirs.is_empty());
-        assert!(links.caps());
+        // Reported, never capped: a name the task asks to create is undefined too.
+        assert!(!links.caps());
+        assert_eq!(links.blocker(), None);
+        assert_eq!(
+            links.risk_reason().as_deref(),
+            Some("named task anchor(s) compile_plan have no indexed definition and may be defined in a directory the index pruned: tools/build/ (3 tracked source files), vendor/ledger/ (2 tracked source files)")
+        );
         assert_eq!(
             links.caveats(),
             ["index coverage: compile_plan has no indexed definition and may be in tools/build/ or vendor/ledger/, which the index pruned (tools/build/: undeclared build directory, 3 tracked source files; vendor/ledger/: nested repository, 2 tracked source files); an absence there is not evidence"]
@@ -440,9 +479,13 @@ mod tests {
             ]
         );
         assert!(links
-            .anchor_probe()
+            .anchor_probe(false)
             .unwrap()
             .contains("may be in tools/build/ or vendor/ledger/, which the index pruned"));
+        assert!(links
+            .anchor_probe(true)
+            .unwrap()
+            .ends_with("The index also excluded most of a language's source, so the name may be defined in those files."));
 
         // Without an undefined name nothing links.
         assert!(coverage
@@ -491,12 +534,12 @@ mod tests {
             dir("dist", PruneReason::BuildOutput, Some(60)),
         ]);
         let weak = ConfidenceBreakdown::from_signals(input(
-            coverage.pruned_source_links("fix ledger_total", vec!["ledger_total".into()]),
+            coverage.pruned_source_links("edit vendor/ledger/lib.rs", Vec::new()),
         ));
         assert!(weak.overall_score <= 0.50, "{weak:?}");
         assert_eq!(weak.overall_enum, Confidence::Low);
         assert!(weak.blockers.contains(
-            &"the task may name code in a directory the index pruned: vendor/ledger/ (2 tracked source files)"
+            &"the task names a directory the index pruned: vendor/ledger/ (2 tracked source files)"
                 .to_owned()
         ));
         let component = weak
@@ -506,6 +549,25 @@ mod tests {
             .expect("the signal");
         assert_eq!(component.weight, 0.0);
         assert_eq!(component.evidence_ids, ["coverage:pruned:vendor/ledger"]);
+
+        // An undefined name is reported with the signal and caps nothing by itself; the
+        // unmatched identifier lowers confidence through the `anchor` item instead.
+        let named_only = ConfidenceBreakdown::from_signals(input(
+            coverage.pruned_source_links("fix ledger_total", vec!["ledger_total".into()]),
+        ));
+        assert_eq!(named_only.overall_score, baseline.overall_score);
+        assert!(named_only
+            .components
+            .iter()
+            .any(|component| component.signal == PRUNED_SOURCE_SIGNAL));
+        assert!(named_only
+            .caveats
+            .iter()
+            .any(|caveat| caveat.starts_with("index coverage: ledger_total has no indexed")));
+        assert!(named_only
+            .blockers
+            .iter()
+            .all(|blocker| !blocker.contains("pruned")));
 
         // A strong-evidence directory the task names is reported with its signal, but its
         // caveat, like a coverage gap's, does not trigger the any-caveat cap: the score is the

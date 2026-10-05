@@ -196,8 +196,8 @@ evidence; 0.30 when no task term appears in the selected context, or 0.50 when f
 `WEAK_TASK_RELEVANCE` (0.34) of them do; 0.60 with counted negative evidence; 0.50 when
 every named task identifier is unmatched by the selected context; 0.50 or 0.74 beside a
 majority coverage gap under the conditions in "Index coverage gaps"; 0.50 when the task
-reaches a pruned directory whose tracked source counts as missing ("Pruned directories
-holding tracked source"); and 0.94 with any
+names the path of a pruned directory whose tracked source counts as missing ("Pruned
+directories holding tracked source"); and 0.94 with any
 caveat except a coverage caveat, including a plan's evidence-quality caveats attached
 after scoring. The `Exact` label
 additionally requires `exact_reference_count > 0`; otherwise the label stops at `High`.
@@ -397,21 +397,39 @@ A link is reported on context and plan alike, through `open_kioku_context::prune
 - the zero-weight `index_coverage_pruned_source` component, citing `coverage:pruned:<path>`;
 - the same facts in the one `coverage` negative evidence item, with
   `index_manifest.quality.coverage.pruned` and the ids among its `inspected_sources`. Its next
-  probe names the remedy: `[index] keep_dirs` for an undeclared build directory, removing the
-  stray `.git` for a nested repository, or editing through the source for strong-evidence
+  probe names the remedy: `[index] keep_dirs` for an undeclared build directory, moving the
+  stray `.git` out of the tree (not deleting it) for a nested repository, or editing through
+  the source for strong-evidence
   output. It is not counted in `negative_evidence_count`;
 - the `anchor` item's next probe, which says the name may be in the directory, `which the
   index pruned`, instead of saying it does not exist.
 
-**Cap: 0.50 (`Low`)**, with the blocker `the task may name code in a directory the index
-pruned: tools/build/ (1 tracked source file)`, when a linked directory's tracked source
-counts as missing (`undeclared_build_dir`, `submodule`). This is the coverage gap's absence
-symptom cap, keyed to a directory: the index read none of what the task points at. A plan adds
-the risk reason `low confidence: named task anchor(s) … may be defined in a directory the index
-pruned: …`, or `low confidence: the task names a directory the index pruned: …`. `ok preflight`
-reads the plan's `Low` label as `insufficient_evidence`. A strong-evidence directory the task
-names is reported and caps nothing. Its committed files are build output by evidence, and an
-edit to them goes through their source, which the index holds.
+**Cap: 0.50 (`Low`)**, with the blocker `the task names a directory the index pruned:
+tools/build/ (1 tracked source file)`, only when the task names the path of a directory whose
+tracked source counts as missing (`undeclared_build_dir`, `submodule`). The task points at
+files the index never read. A plan adds the risk reason `low confidence: the task names a
+directory the index pruned: …`, and `ok preflight` reads the plan's `Low` label as
+`insufficient_evidence`.
+
+An undefined-name link adds no cap of its own. A name the task asks to create, or to rename
+something to, has no indexed definition by construction. Capping on it would push every such
+task in a repository with a weak pruned directory to `Low`, while the true positives gain
+almost nothing. The unmatched identifier already lowers confidence through the `anchor` item:
+the 0.60 counted-negative-evidence cap, or 0.50 when every named identifier is unmatched. The
+link changes what the pack says about the miss, not how much it costs. A plan adds the
+disclosure `named task anchor(s) … have no indexed definition and may be defined in a directory
+the index pruned: …`. Hyphenated anchors (`--dry-run`, `X-Request-Id`) are flags, headers or
+package names, never symbol names, so they are not looked up and never link.
+
+`ok preflight` and MCP `plan_change {detail: "preflight"}` withhold `safe_to_start` whenever
+the `index_coverage_pruned_source` signal is present, for either link and any reason, and
+answer `start_with_caution` instead: the index cannot say what an edit there touches.
+
+A strong-evidence directory the task names is reported and caps nothing. Its committed files
+are build output by evidence, and an edit to them goes through their source, which the index
+holds. The `anchor` probe names only directories whose tracked source counts as missing.
+With a majority coverage gap as well, it adds that the index excluded most of a language's
+source. The blocker and risk reason name at most three directories, and count the rest.
 
 Use `ok search --explain-ranking "query"` to inspect dominant signals for each
 result. Use `ok eval` to compare baseline ranking, fused ranking, and signal
