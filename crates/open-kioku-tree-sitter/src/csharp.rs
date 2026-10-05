@@ -98,8 +98,27 @@ pub(crate) fn symbol(
         && names_its_type(node, source)
         && is_placed(node)
         && (node.kind() != "local_function_statement"
-            || local_function_is_placed(node, source, recovered));
+            || local_function_is_placed(node, source, recovered))
+        && owner_is_a_symbol(node, source, recovered);
     valid.then_some((name, kind))
+}
+
+/// A member, enum member, record parameter or nested type belongs to a type that is itself a
+/// symbol: one recovery moved, or could not read, takes its members with it rather than leaving
+/// them under a qualified name that names no type.
+fn owner_is_a_symbol(node: Node<'_>, source: &[u8], recovered: bool) -> bool {
+    let declaration = declaration_of(node);
+    let owner = if declaration.kind() == "parameter" {
+        declaration.parent().and_then(|list| list.parent())
+    } else {
+        owner(declaration)
+    };
+    match owner {
+        Some(owner) if is_type_declaration(owner.kind()) => {
+            symbol(owner, source, recovered).is_some()
+        }
+        _ => true,
+    }
 }
 
 /// C#'s reserved keywords, which no declaration can be named without an `@`.
@@ -391,9 +410,15 @@ fn is_placed(node: Node<'_>) -> bool {
         | "record_declaration"
         | "interface_declaration"
         | "enum_declaration"
-        | "delegate_declaration" => owner.is_some_and(|owner| {
-            matches!(owner, "compilation_unit" | "namespace_declaration") || holds_members(owner)
-        }),
+        | "delegate_declaration" => match owner {
+            // A type outside every type is `public`, `internal` or `file` (CS1527): a
+            // `private` or `protected` one there is a nested type recovery moved out.
+            Some("compilation_unit" | "namespace_declaration") => {
+                !has_modifier(declaration, "private") && !has_modifier(declaration, "protected")
+            }
+            Some(owner) => holds_members(owner),
+            None => false,
+        },
         "enum_member_declaration" => owner == Some("enum_declaration"),
         "local_function_statement" | "parameter" => true,
         _ => owner.is_some_and(holds_members),
@@ -1407,5 +1432,17 @@ public class Platform
                 "Acme::Ledger::Interop::Bridge::implicit operator Acme.Money",
             ]
         );
+    }
+
+    #[test]
+    fn a_nested_type_recovery_moved_out_of_its_type_is_dropped_with_its_members() {
+        // A `private` or `protected` type cannot stand in a namespace: recovery that closes a
+        // type early (here, spelled out) leaves its nested types there, under a qualified name
+        // that skips their enclosing type.
+        let facts = parse(
+            "Wrapper.cs",
+            "namespace Acme\n{\n    internal class Wrapper { }\n    private readonly struct Enumerator\n    {\n        public object Key => null;\n    }\n    protected class Hook { }\n}\n",
+        );
+        assert_eq!(qualified(&facts), vec!["Acme", "Acme::Wrapper"]);
     }
 }
