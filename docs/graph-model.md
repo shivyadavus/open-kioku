@@ -406,12 +406,26 @@ read:
   symbol it defined touched, so its proven dependents, the files that import it by path included,
   are kept up to the same bound of 200, and its first caveat and risk reason say the file is
   gone. It ranks among the other changed paths by those dependents, ahead of a path with as many proven ones. When the index does not hold it (it was
-  rebuilt after the change, or never held the path, as with a secret-like path), there are no
-  edges into it to read: it is listed in `removed_paths_not_indexed` with a caveat of its own,
-  apart from `impact_reports_omitted`, so the reports, the paths the cap left out and the removed
-  paths not indexed add up to every changed path. A rename counts as a removal of its previous path
-  beside a change to its new one; two files swapping names remove neither. `ok impact --file F
-  --since R` for a removed `F` gives the same report.
+  rebuilt after the change, or never held the path), there are no edges into it to read: it is
+  listed in `removed_paths_not_indexed` with a caveat of its own, apart from
+  `impact_reports_omitted`. A secret-like path is never named: it is counted in
+  `changed_paths_withheld`, with a caveat, and a rename or copy between it and another path keeps
+  the other side as a plain addition or deletion. The reports, the paths the cap left out,
+  the removed paths not indexed and the withheld paths add up to every path `git diff
+  --name-status` names. A rename counts as a removal of its previous path beside a change to its
+  new one; two files swapping names remove neither. `ok impact --file F --since R` for a removed
+  `F` gives the same report.
+
+  Git writes some entries with no `---`/`+++` lines: an empty file added or deleted, a binary
+  file added, modified, deleted or renamed, and a mode change. Their paths are read from the
+  `diff --git` line (quoted paths decoded, the `a/`/`b/` prefixes dropped only when both sides
+  carry them, a path holding ` b/` split where both halves agree) and the `new file mode`,
+  `deleted file mode` and `rename`/`copy` lines. A binary change is marked `binary` in
+  `changed_files`; git states none of its lines, so its whole file is the change, as for a
+  removal. An entry with no hunks that is not binary (a mode change, an empty file) changes no
+  line and touches no symbol, and says so where that could change the answer. A changed
+  submodule is one path whatever `diff.submodule` says, and a symlink that becomes a file (or the
+  reverse) is one path, as `--name-status` reports it.
 - The context pack's graph stream gives a neighbour `corroborating` retrieval authority only
   when a proven or corroborated edge, or parsed containment, joins it to the anchor; a
   neighbour reached only by heuristic edges is `heuristic`. The stream ranks and cuts its

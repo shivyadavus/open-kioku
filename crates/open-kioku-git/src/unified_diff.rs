@@ -176,6 +176,113 @@ pub fn file_header_name(value: &str) -> &str {
     }
 }
 
+/// The old and new paths a `diff --git <old> <new>` line names, given the text after
+/// `diff --git `. The `a/` and `b/` prefixes are dropped when both sides carry them, so a diff
+/// made with `--no-prefix` reads the same. `None` when the line cannot be split into two paths
+/// with certainty.
+///
+/// The header is the only place git names the path of an entry it writes without `---`/`+++`
+/// lines: an empty file added or deleted, a binary change, a mode change. Git quotes a path
+/// holding a double quote, backslash or control byte (or, under `core.quotePath`, a non-ASCII
+/// byte) but never one holding only spaces, so an unquoted line is split where both halves name
+/// the same path, as `git apply` splits it; a path may itself hold ` b/`. Only a rename or copy
+/// names two different paths, and it names both again on its `rename`/`copy` lines, so such a
+/// line is split only at a lone ` b/`.
+pub fn git_header_paths(rest: &str) -> Option<(String, String)> {
+    let rest = rest.trim_end_matches('\r');
+    if rest.starts_with('"') {
+        let (old, after) = unquote_path(rest)?;
+        let after = after.strip_prefix(' ')?;
+        let new = if after.starts_with('"') {
+            let (new, tail) = unquote_path(after)?;
+            if !tail.is_empty() {
+                return None;
+            }
+            new
+        } else {
+            after.to_string()
+        };
+        return Some(strip_header_prefixes(&old, &new));
+    }
+    if rest.ends_with('"') {
+        // An unquoted path holds no `"`, so the quoted side starts at the first ` "`.
+        let at = rest.find(" \"")?;
+        let (new, tail) = unquote_path(&rest[at + 1..])?;
+        return tail
+            .is_empty()
+            .then(|| strip_header_prefixes(&rest[..at], &new));
+    }
+    let splits = rest
+        .match_indices(' ')
+        .map(|(at, _)| (&rest[..at], &rest[at + 1..]));
+    if let Some((old, new)) = splits
+        .clone()
+        .map(|(old, new)| strip_header_prefixes(old, new))
+        .find(|(old, new)| old == new)
+    {
+        return Some((old, new));
+    }
+    let mut prefixed = splits.filter(|(old, new)| old.starts_with("a/") && new.starts_with("b/"));
+    let (old, new) = prefixed.next()?;
+    prefixed
+        .next()
+        .is_none()
+        .then(|| strip_header_prefixes(old, new))
+}
+
+/// Both prefixes or neither: a `--no-prefix` path that starts with `a/` keeps it.
+fn strip_header_prefixes<'a>(old: &'a str, new: &'a str) -> (String, String) {
+    let (old, new) = old
+        .strip_prefix("a/")
+        .zip(new.strip_prefix("b/"))
+        .unwrap_or((old, new));
+    (old.to_string(), new.to_string())
+}
+
+/// A git-quoted path at the start of `raw`, decoded, and the text after its closing quote.
+/// `None` unless `raw` starts with a well-formed quoted path naming UTF-8 bytes.
+fn unquote_path(raw: &str) -> Option<(String, &str)> {
+    let inner = raw.strip_prefix('"')?;
+    let bytes = inner.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        index += 1;
+        match byte {
+            b'"' => return Some((String::from_utf8(decoded).ok()?, &inner[index..])),
+            b'\\' => {
+                let escaped = *bytes.get(index)?;
+                index += 1;
+                decoded.push(match escaped {
+                    b'0'..=b'7' => {
+                        let mut value = u32::from(escaped - b'0');
+                        for _ in 0..2 {
+                            match bytes.get(index) {
+                                Some(digit @ b'0'..=b'7') => {
+                                    value = value * 8 + u32::from(digit - b'0');
+                                    index += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        u8::try_from(value).ok()?
+                    }
+                    b'a' => 0x07,
+                    b'b' => 0x08,
+                    b't' => b'\t',
+                    b'n' => b'\n',
+                    b'v' => 0x0b,
+                    b'f' => 0x0c,
+                    b'r' => b'\r',
+                    other => other,
+                });
+            }
+            _ => decoded.push(byte),
+        }
+    }
+    None
+}
+
 /// The hunk header as far as its closing `@@`, leaving out the function-context source line
 /// git appends, so a message quoting it does not echo repository content.
 fn header_ranges(header: &str) -> &str {
@@ -204,7 +311,96 @@ fn side_count(side: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_header_name, DiffLine, HunkScanner, MalformedDiff};
+    use super::{file_header_name, git_header_paths, DiffLine, HunkScanner, MalformedDiff};
+
+    fn same(path: &str) -> Option<(String, String)> {
+        Some((path.to_string(), path.to_string()))
+    }
+
+    #[test]
+    fn a_header_naming_one_path_twice_is_split_where_both_halves_agree() {
+        assert_eq!(
+            git_header_paths("a/src/lib.rs b/src/lib.rs"),
+            same("src/lib.rs")
+        );
+        assert_eq!(
+            git_header_paths("a/sp ace.bin b/sp ace.bin"),
+            same("sp ace.bin")
+        );
+        // A path holding ` b/` cannot be split at its first ` b/`.
+        assert_eq!(
+            git_header_paths("a/x b/y.bin b/x b/y.bin"),
+            same("x b/y.bin")
+        );
+        assert_eq!(git_header_paths("a/b/c.png b/b/c.png"), same("b/c.png"));
+        assert_eq!(git_header_paths("a/run.sh b/run.sh\r"), same("run.sh"));
+    }
+
+    #[test]
+    fn a_no_prefix_header_keeps_paths_that_start_like_a_prefix() {
+        assert_eq!(
+            git_header_paths("src/lib.rs src/lib.rs"),
+            same("src/lib.rs")
+        );
+        assert_eq!(git_header_paths("a/x.bin a/x.bin"), same("a/x.bin"));
+        assert_eq!(git_header_paths("b/x.bin b/x.bin"), same("b/x.bin"));
+        assert_eq!(
+            git_header_paths("sp ace/x b/y sp ace/x b/y"),
+            same("sp ace/x b/y")
+        );
+    }
+
+    #[test]
+    fn quoted_header_paths_are_decoded() {
+        assert_eq!(
+            git_header_paths("\"a/caf\\303\\251 menu.png\" \"b/caf\\303\\251 menu.png\""),
+            same("café menu.png")
+        );
+        assert_eq!(
+            git_header_paths("\"a/tab\\there\" \"b/tab\\there\""),
+            same("tab\there")
+        );
+        assert_eq!(
+            git_header_paths("\"a/q\\\"uote\" \"b/q\\\"uote\""),
+            same("q\"uote")
+        );
+        assert_eq!(
+            git_header_paths("\"x/\\303\\251.bin\" \"x/\\303\\251.bin\""),
+            same("x/é.bin")
+        );
+        // Each side is quoted on its own, so a rename can mix the two.
+        assert_eq!(
+            git_header_paths("a/plain.bin \"b/\\303\\251.bin\""),
+            Some(("plain.bin".into(), "é.bin".into()))
+        );
+        assert_eq!(
+            git_header_paths("\"a/\\303\\251.bin\" b/plain.bin"),
+            Some(("é.bin".into(), "plain.bin".into()))
+        );
+    }
+
+    #[test]
+    fn a_header_naming_two_paths_is_split_only_where_certain() {
+        assert_eq!(
+            git_header_paths("a/old.bin b/new.bin"),
+            Some(("old.bin".into(), "new.bin".into()))
+        );
+        assert_eq!(
+            git_header_paths("a/sp ace.bin b/new name.bin"),
+            Some(("sp ace.bin".into(), "new name.bin".into()))
+        );
+        for ambiguous in [
+            "a/x b/y b/z",
+            "old.bin new.bin",
+            "",
+            "a/only",
+            "\"a/unterminated b/x",
+            "\"a/x\" \"b/x\" trailing",
+            "\"a/bad\\777\" \"b/bad\\777\"",
+        ] {
+            assert_eq!(git_header_paths(ambiguous), None, "{ambiguous}");
+        }
+    }
 
     fn scan(diff: &str) -> (Vec<DiffLine<'_>>, Result<(), MalformedDiff>) {
         let mut scanner = HunkScanner::new();

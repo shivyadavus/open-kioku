@@ -928,7 +928,8 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         );
                     } else {
                         println!("Changed files since {since}:");
-                        for change in &changed {
+                        let (shown, _) = open_kioku_impact::withhold_secret_like_paths(&changed);
+                        for change in &shown {
                             println!("  {}", render_changed_range(change));
                         }
                         for caveat in &answer.caveats {

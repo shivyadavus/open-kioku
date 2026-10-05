@@ -4661,6 +4661,335 @@ fn impact_since_reports_deleted_and_renamed_files_on_cli_and_mcp() {
     );
 }
 
+/// Git writes some diff entries with no `---`/`+++` lines: an empty file deleted, a binary file
+/// added, modified, deleted or renamed, a mode change. Their paths were read from nowhere, so
+/// they were missing from `changed_files`, the reports and `removed_paths_not_indexed`. Every
+/// path `git diff --name-status` names is now accounted for, a secret-like one by count alone.
+#[cfg(unix)]
+#[test]
+fn impact_since_accounts_for_every_path_git_reports_including_header_only_entries() {
+    use std::collections::BTreeSet;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap()
+    }
+    fn write(repo: &std::path::Path, path: &str, content: &[u8]) {
+        let path = repo.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    let strings = |values: &serde_json::Value| -> BTreeSet<String> {
+        values
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect()
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    write(
+        repo,
+        "Cargo.toml",
+        b"[package]\nname = \"ledger\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(repo, "src/lib.rs", b"pub fn settle() -> u32 {\n    1\n}\n");
+    write(repo, "src/empty.rs", b"");
+    write(repo, "scripts/run.sh", b"#!/bin/sh\n");
+    write(repo, "assets/logo.png", b"png\0one\x01");
+    write(repo, "fonts/old.woff", b"woff\0old\x02");
+    write(repo, "caf\u{e9} menu b/icon.png", b"icon\0\x03");
+    write(repo, "keys/signing.p12", b"p12\0one\x04");
+    let blob = [b"\0".as_slice(), &[b'q'; 4000]].concat();
+    write(repo, "blob store.bin", &blob);
+    // A symlink that becomes a file: one `T` path to git, a deletion and an addition in the diff.
+    std::os::unix::fs::symlink("src/lib.rs", repo.join("link")).unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "cli@example.com"]);
+    git(repo, &["config", "user.name", "CLI Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "--quiet", "-m", "initial"]);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    write(repo, "src/lib.rs", b"pub fn settle() -> u32 {\n    2\n}\n");
+    git(repo, &["rm", "--quiet", "src/empty.rs", "fonts/old.woff"]);
+    write(repo, "assets/logo.png", b"png\0two\x01");
+    write(repo, "caf\u{e9} menu b/icon.png", b"icon\0\x05");
+    write(repo, "keys/signing.p12", b"p12\0two\x04");
+    write(repo, "fonts/new.woff", b"woff\0new\x06");
+    git(repo, &["add", "fonts/new.woff"]);
+    fs::set_permissions(
+        repo.join("scripts/run.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("moved b")).unwrap();
+    git(repo, &["mv", "blob store.bin", "moved b/blob.bin"]);
+    write(repo, "moved b/blob.bin", &[blob.as_slice(), b"Z"].concat());
+    fs::remove_file(repo.join("link")).unwrap();
+    write(repo, "link", b"now a file\n");
+
+    // Every path git reports, both sides of a rename included.
+    let name_status = git(
+        repo,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "HEAD",
+        ],
+    );
+    let mut reported = BTreeSet::new();
+    let mut tokens = name_status.split('\0').filter(|token| !token.is_empty());
+    while let Some(status) = tokens.next() {
+        let paths = if status.starts_with('R') { 2 } else { 1 };
+        reported.extend(tokens.by_ref().take(paths).map(str::to_string));
+    }
+    assert!(
+        name_status.starts_with("M\0assets/logo.png\0"),
+        "{name_status:?}"
+    );
+    assert!(
+        name_status.contains("R099\0blob store.bin\0moved b/blob.bin\0"),
+        "the binary rename is detected: {name_status:?}"
+    );
+    assert!(name_status.contains("T\0link\0"), "{name_status:?}");
+    assert_eq!(reported.len(), 11, "{reported:?}");
+    let named = reported
+        .iter()
+        .filter(|path| path.as_str() != "keys/signing.p12")
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let impact: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "impact", "--since", "HEAD"]);
+        command
+    }))
+    .unwrap();
+
+    let changed_files = impact["changed_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|change| [&change["old_path"], &change["new_path"]])
+        .filter_map(|path| path.as_str().map(str::to_string))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(changed_files, named, "{impact:#}");
+    let binary = impact["changed_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|change| change["binary"] == true)
+        .count();
+    assert_eq!(binary, 5, "{impact:#}");
+
+    let targets = impact["impact_reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|report| report["target"].as_str().map(str::to_string))
+        .collect::<BTreeSet<_>>();
+    let not_indexed = strings(&impact["removed_paths_not_indexed"]);
+    let omitted = impact["impact_reports_omitted"].as_u64().unwrap_or(0) as usize;
+    let withheld = impact["changed_paths_withheld"].as_u64().unwrap_or(0) as usize;
+    assert_eq!(omitted, 0, "{impact:#}");
+    assert_eq!(withheld, 1, "{impact:#}");
+    assert!(targets.is_disjoint(&not_indexed), "{impact:#}");
+    assert_eq!(
+        targets
+            .union(&not_indexed)
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        named,
+        "{impact:#}"
+    );
+    assert_eq!(
+        targets.len() + omitted + not_indexed.len() + withheld,
+        reported.len(),
+        "reports, omitted, removed-not-indexed and withheld add up to git's paths: {impact:#}"
+    );
+    assert!(
+        not_indexed.contains("fonts/old.woff") && not_indexed.contains("blob store.bin"),
+        "{impact:#}"
+    );
+    assert!(!impact.to_string().contains("signing.p12"), "{impact:#}");
+
+    // MCP answers the same request with the same accounting.
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "impact_analysis", "arguments": {"since": "HEAD"}}
+    })
+    .to_string();
+    let response = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("mcp").arg("serve");
+            command
+        },
+        &(request + "\n"),
+    );
+    let response: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+    let mcp = &response["result"]["structuredContent"];
+    for key in [
+        "changed_files",
+        "removed_paths_not_indexed",
+        "changed_paths_withheld",
+        "caveats",
+    ] {
+        assert_eq!(mcp[key], impact[key], "{key}: {mcp:#}");
+    }
+    assert!(
+        !response.to_string().contains("signing.p12"),
+        "{response:#}"
+    );
+
+    // A plan from the same diff lists the binary change whole and counts the secret-like one.
+    let plan = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "plan",
+            "settle the ledger",
+            "--since",
+            "HEAD",
+            "--format",
+            "json",
+        ]);
+        command
+    });
+    assert!(plan.contains("assets/logo.png binary"), "{plan}");
+    assert!(plan.contains("1 secret-like changed path(s)"), "{plan}");
+    assert!(!plan.contains("signing.p12"), "{plan}");
+}
+
+/// `path` with `since` reads the diff as git gives it, so a file renamed to a secret-like name
+/// is reported as renamed, but the name it was renamed to is withheld on both surfaces.
+#[test]
+fn impact_path_since_never_names_the_secret_like_path_a_file_was_renamed_to() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"ledger\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub mod books;\npub mod ledger;\n").unwrap();
+    fs::write(
+        repo.join("src/ledger.rs"),
+        "pub fn settle() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/books.rs"),
+        "use crate::ledger::settle;\n\npub fn close() -> u32 {\n    settle()\n}\n",
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "cli@example.com"]);
+    git(repo, &["config", "user.name", "CLI Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "--quiet", "-m", "initial"]);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    git(repo, &["mv", "src/ledger.rs", ".env.production"]);
+
+    let cli = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "--json",
+            "impact",
+            "--file",
+            "src/ledger.rs",
+            "--since",
+            "HEAD",
+        ]);
+        command
+    });
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "impact_analysis",
+            "arguments": {"path": "src/ledger.rs", "since": "HEAD"}
+        }
+    })
+    .to_string();
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("mcp").arg("serve");
+            command
+        },
+        &(request + "\n"),
+    );
+    let mcp: serde_json::Value = serde_json::from_str(mcp.trim()).unwrap();
+    let mcp_report = mcp["result"]["structuredContent"].clone();
+    let cli_report: serde_json::Value = serde_json::from_str(&cli).unwrap();
+    for (surface, report) in [("cli", &cli_report), ("mcp", &mcp_report)] {
+        let caveat = report["relationship_impact_caveats"][0]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            caveat.contains("renames `src/ledger.rs` to a secret-like path, which is withheld"),
+            "{surface}: {report:#}"
+        );
+        assert_eq!(
+            report["risk_report"]["reasons"][0], report["relationship_impact_caveats"][0],
+            "{surface}: {report:#}"
+        );
+    }
+    assert!(!cli.contains(".env.production"), "{cli}");
+    assert!(!mcp.to_string().contains(".env.production"), "{mcp:#}");
+}
+
 #[test]
 fn index_mode_is_reported_by_index_and_status_json() {
     let temp = tempfile::tempdir().unwrap();

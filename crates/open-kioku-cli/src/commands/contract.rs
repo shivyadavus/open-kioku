@@ -667,6 +667,7 @@ fn verify_diff_input(
                 "--no-ext-diff",
                 "--no-color",
                 "--find-renames",
+                "--submodule=short",
                 "--src-prefix=a/",
                 "--dst-prefix=b/",
                 "--relative",
@@ -708,6 +709,7 @@ fn verify_diff_since(
             "--no-ext-diff",
             "--no-color",
             "--find-renames",
+            "--submodule=short",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             "--relative",
@@ -746,10 +748,17 @@ fn task_with_changed_ranges(repo: &Path, task: &str, since: &str) -> anyhow::Res
     }
     let mut enriched =
         format!("{task}\n\nChanged files and line ranges from `git diff {since} --unified=0`:\n");
+    // A secret-like path is counted, never named, as `ok impact --since` counts it.
+    let (changed, withheld) = open_kioku_impact::withhold_secret_like_paths(&changed);
     for change in &changed {
         enriched.push_str("- ");
         enriched.push_str(&render_changed_range(change));
         enriched.push('\n');
+    }
+    if withheld > 0 {
+        enriched.push_str(&format!(
+            "- {withheld} secret-like changed path(s), withheld by the secret-path policy\n"
+        ));
     }
     Ok(enriched)
 }
@@ -781,7 +790,10 @@ fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
         .rename_score
         .map(|score| format!(" rename_score={score}"))
         .unwrap_or_default();
-    if ranges.is_empty() {
+    if change.binary {
+        // Git states no lines of a binary file: the whole file is the change.
+        format!("{:?} {} binary{}", change.status, path, score)
+    } else if ranges.is_empty() {
         format!("{:?} {}{}", change.status, path, score)
     } else {
         format!(
