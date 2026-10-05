@@ -13,7 +13,7 @@ use open_kioku_core::{
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
-    detect_language, is_supported_code, likely_generated, likely_vendor_path,
+    detect_language, is_supported_code, likely_generated, likely_generated_path, likely_vendor_path,
 };
 use open_kioku_parse::{HeuristicParser, Parser};
 use open_kioku_scip::ScipIndexReport;
@@ -1779,7 +1779,8 @@ impl Indexer {
             // whose generated implementation files carry a "do not edit" banner, skipping them removed
             // 394 files and a tenth of the files real commits went on to change. Ranking
             // decides what a generated file is worth; the index must still know it exists.
-            let is_generated = likely_generated(&content);
+            // .NET build tools name what they write rather than mark it (`*.g.cs`, `*.Designer.cs`).
+            let is_generated = likely_generated(&content) || likely_generated_path(&rel);
             let content_hash = hash_bytes(&bytes);
             ledger.indexed(&language, is_generated);
             files.push(File {

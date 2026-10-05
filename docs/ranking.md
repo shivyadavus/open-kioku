@@ -231,7 +231,8 @@ runs, so a git-ignored `env/`, `out/` or `site-packages` tree of `.py` or `.js` 
 `venv/` holding neither `pyvenv.cfg` nor `conda-meta`, is a gap. Directories discovery prunes as build output or installed packages count once
 each in `pruned_dirs` and are named in `coverage.pruned`; their untracked files are never
 discovered and never produce a gap. Git-tracked source under a `build` or `dist` pruned only
-because nothing declares it (`undeclared_build_dir`) is the exception: it is discovered and
+because nothing declares it (`undeclared_build_dir`), or under MSBuild output
+(`msbuild_output`, where a script can share `bin/` with the build), is the exception: it is discovered and
 skipped as `pruned`, an omission, so enough of it is an `omitted` gap. Committed files under
 a directory pruned on strong evidence (a cache tag, a build manifest beside it) never are: a
 `dist/` bundle committed beside `package.json` caps no confidence (`docs/indexing-pipeline.md`, "Pruned directories").
@@ -251,6 +252,8 @@ never a directory name alone:
 | `site_packages` | a `site-packages` or `dist-packages` holding `*.dist-info` or `*.egg-info` metadata |
 | `go_vendor` | a `vendor` holding `modules.txt` (`go mod vendor`) |
 | `composer_vendor` | a `vendor` holding `composer/installed.json` (Composer) |
+| `nuget_packages` | a package directory `<Id>.<Version>/` directly inside a `packages`, holding `<Id>.<Version>.nupkg` or `<Id>.nuspec` (NuGet's `packages.config` layout) |
+| `nuget_global_packages` | a package directory `<id>/` directly inside a `packages` or `.packages`, with a `<version>/` holding `.nupkg.metadata` or `<id>.<version>.nupkg.sha512` (the global packages folder's layout) |
 
 Only the installation directory is classed, never the tree around a marker. `python -m venv
 .` run inside a first-party `services/api/` writes `pyvenv.cfg` beside the service's own

@@ -59,9 +59,16 @@ can never drop files silently. `IndexQuality.coverage` (JSON: `quality.coverage`
   marker (`pyvenv.cfg`, `conda-meta/`) classes its `lib/python*/site-packages` or
   `Lib/site-packages`, never the rest of the tree around it. Ingest probes only the ancestors
   of excluded programming-language files, each directory once per scan, and only those named
-  `site-packages`, `dist-packages` or `vendor`: `*.dist-info`/`*.egg-info` inside, or an
-  environment marker at the root of the layout above it; `modules.txt` or
-  `composer/installed.json` in a `vendor`. Redacted paths are not recorded, and secret-like
+  `site-packages`, `dist-packages` or `vendor`, or directly inside a `packages` or `.packages`:
+  `*.dist-info`/`*.egg-info` inside, or an environment marker at the root of the layout above
+  it; `modules.txt` or `composer/installed.json` in a `vendor`; and for NuGet, a package
+  directory in `packages.config`'s layout (`<Id>.<Version>/` holding `<Id>.<Version>.nupkg` or
+  `<Id>.nuspec`) or in the global packages folder's (`<id>/` with a `<version>/` holding
+  `.nupkg.metadata` or `<id>.<version>.nupkg.sha512`). Each package directory is classed on
+  its own, never the `packages/` around it: a JavaScript workspace's `packages/` holding a
+  git-ignored first-party `web-gen/` beside one restored package prices `web-gen/` as source.
+  A `.nuspec` outside a versioned package directory is an authored one packing first-party
+  code and classes nothing. Redacted paths are not recorded, and secret-like
   directories are withheld like `policy_excluded_dirs`. Coverage gaps name their directories
   and price installed dependencies apart from it (`docs/ranking.md`, "Index coverage gaps").
   Empty on a manifest written before it was recorded, which prices every missing file as
@@ -103,8 +110,15 @@ What is counted:
   `[index] max_file_size`, and the doctor's next step names it when that reason
   dominates.
 - `generated` counts indexed files flagged `is_generated`: source files that look
-  generated are indexed and flagged, so they stay in coverage. Only document-corpus files
-  the generated-content detector rejects are skipped as `generated`.
+  generated are indexed and flagged, so they stay in coverage. A file looks generated when
+  its first eight lines carry a generation banner, or when its name is one a .NET build tool
+  writes: `*.g.cs`, `*.g.i.cs`, `*.Designer.cs` (any case), and `*.AssemblyInfo.cs` under an
+  `obj/` directory (a project's own `Properties/AssemblyInfo.cs` is source); the name rule
+  applies once C# files are indexed, which they are not yet. `is_generated` records no
+  reason, so a file flagged by its name cannot yet be told from one flagged by a banner:
+  when C# files are parsed, the name rule must record which rule fired (a persisted source and
+  evidence, as a ranking signal does), so a demotion it causes is traceable. Only
+  document-corpus files the generated-content detector rejects are skipped as `generated`.
 
 Two ratios are reported, and only one of them is judged. The **programming-language
 ratio** counts files in rust, java, typescript, javascript, python, go, and sql — the
@@ -180,6 +194,8 @@ still read 100%. The rule, by directory name:
 | `node_modules` | always | `dependencies` |
 | `.venv`, `venv` | it holds `pyvenv.cfg` or `conda-meta` | `virtual_env` |
 | `target` | it holds `CACHEDIR.TAG`, or sits beside `Cargo.toml`, `pom.xml`, `build.sbt`, `build.properties` (sbt's `project/`) or `project.clj` | `build_output` |
+| `bin` | it sits beside an MSBuild project file (`*.csproj`, `*.fsproj`, `*.vbproj`) and holds build artifacts: `*.dll`, `*.pdb`, `*.exe`, `*.deps.json`, or a `Debug`/`Release` directory | `msbuild_output` |
+| `obj` | it holds a NuGet restore's `project.assets.json` or `*.nuget.g.props`, or sits beside an MSBuild project file and holds a `Debug`/`Release` directory | `msbuild_output` |
 | `build`, `dist` | no module or package declares it, and it holds `CACHEDIR.TAG` or sits beside a build manifest | `build_output` |
 | `build`, `dist` | no module or package declares it, and nothing else accounts for it | `undeclared_build_dir` |
 
@@ -197,6 +213,16 @@ guess, and what it gets wrong stays visible as committed source counted `pruned`
 published libraries commit their `dist/` bundle beside `package.json`, and counting it
 would read a fully indexed repository as 25% covered and cap every plan's confidence. An unmarked `target` or `venv` is
 walked; a `.venv` without a marker is walked and its files skipped by the hidden-file rule.
+A `bin` is where most ecosystems keep first-party scripts, so a project file beside it is not
+enough: it is walked until the build has written into it, and a `.sln` alone never counts,
+because MSBuild writes `bin/` beside each project, not beside the solution. An `obj` with no
+restore output and no build configuration directory is walked too. A script can still share
+`bin/` with the build (a committed `bin/release_tool.py` beside a git-ignored `bin/Debug/`),
+and MSBuild commits nothing, so git-tracked source under a `msbuild_output` directory is
+treated as under `undeclared_build_dir`: discovered, skipped as `pruned`, counted against the
+ratio, named in the caveat (`N git-tracked source files not indexed under MSBuild output
+directory: bin/`), and given no forbidden rule in a plan. `[index] keep_dirs` does not take
+`bin` or `obj`; `ok doctor` advises moving such files out of the build's output directory.
 Only directories are pruned: a file named `build` is discovered like any other.
 
 Every walk applies the same rule: discovery, the `.gitignore`/`.okignore` file walk, the
@@ -205,8 +231,8 @@ snapshot import's changed-file count, `ok watch`'s event filter and `ok doctor`'
 sampling. So an edit to a declared `src/build/` module triggers a re-index and a
 `cargo build` writing `target/` does not, and a workspace member in a directory named
 `target` is a crate while Cargo's packaged copies under the real `target/package/` are not
-(`PROJECT_RESOLVER_SEMANTICS_VERSION` v2 for `target`, v3 for nested work trees; earlier
-indexes report `RebuildRequired`). Each
+(`PROJECT_RESOLVER_SEMANTICS_VERSION` v2 for `target`, v3 for nested work trees, v5 for
+`bin` and `obj`; earlier indexes report `RebuildRequired`). Each
 pruned directory is recorded in
 `skipped_paths` with reason `pruned` and source `detector`, and in coverage as above. When
 it pruned anything in a Git work tree, discovery runs `git ls-files` once to count the

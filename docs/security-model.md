@@ -33,6 +33,10 @@ Default posture:
   them, while an unanchored one (`**/vault/**`) and the secret-like rules do. An index built
   before this rule keeps such SCIP rows, and still reports itself compatible, until it is
   rebuilt: `ok watch` does not re-import SCIP, so re-run `ok index` to remove them
+- deny .NET secrets by the same rule: a strong-name key pair (`*.snk`) and a user-secrets
+  store, a `secrets.json` below a directory named `UserSecrets` (any case), the layout
+  `dotnet user-secrets` writes outside the repository, copied into one. A `secrets.json`
+  anywhere else is a config file named for secrets, indexed with its values redacted
 - directories pruned as build output, installed packages or submodules are named in the
   index's coverage record and skipped paths (`docs/indexing-pipeline.md`, "Pruned directories"),
   except a secret-like one (`.ssh/build`, a submodule at `ops/.ssh`), which is counted in
