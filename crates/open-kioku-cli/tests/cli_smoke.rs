@@ -8734,6 +8734,65 @@ fn an_undeclared_build_dir_with_tracked_source_is_named_and_strong_build_output_
     }
 }
 
+/// #679, most common shape: indexed code calls a function that only a pruned directory defines.
+/// The selection spells the name at the call site (`ledger/app.py`), so it is not an unmatched
+/// anchor, but no indexed symbol defines it, and the pack must still point at the directory.
+/// Path forms anchored with `../` or `/` name the directory too, while a URL whose host and path
+/// happen to spell it does not.
+#[test]
+fn a_name_called_from_indexed_code_but_defined_only_in_a_pruned_dir_points_at_it() {
+    let temp = pruned_source_fixture(
+        &[
+            (
+                "ledger/app.py",
+                "from tools.build.manifest import render_manifest\n\n\ndef post_entry(ledger, amount):\n    ledger.append(amount)\n    return sum(ledger)\n\n\ndef rate_limit(requests_per_minute):\n    return max(1, requests_per_minute)\n\n\ndef publish(ledger):\n    return render_manifest(ledger)\n",
+            ),
+            (
+                "tools/build/manifest.py",
+                "def render_manifest(ledger):\n    return {\"entries\": list(ledger)}\n",
+            ),
+        ],
+        &[],
+    );
+    let repo = temp.path();
+    let task = "fix render_manifest output ordering";
+    // The shape under test: the selection spells the name where indexed code calls it.
+    let (cli, _) = coverage_surfaces(repo, task);
+    assert!(
+        cli[0]["primary_files"]
+            .as_array()
+            .expect("primary_files")
+            .iter()
+            .any(|result| result["path"] == "ledger/app.py"),
+        "{}",
+        cli[0]["primary_files"]
+    );
+    assert!(
+        report_texts(&cli[0])
+            .iter()
+            .all(|text| !text.contains("spelled by no selected context: render_manifest")),
+        "the name is spelled by the selection: {}",
+        cli[0]
+    );
+    assert_task_reaches_pruned_source(repo, task, "tools/build", false);
+    assert_task_reaches_pruned_source(
+        repo,
+        "edit ../tools/build/manifest.py so render_manifest sorts keys",
+        "tools/build",
+        true,
+    );
+    assert_task_reaches_pruned_source(
+        repo,
+        "edit /tools/build/manifest.py so render_manifest sorts keys",
+        "tools/build",
+        true,
+    );
+    assert_task_reaches_no_pruned_source(
+        repo,
+        "fetch rates for rate_limit from https://tools/build/rates.json",
+    );
+}
+
 /// The human surfaces print the gap beside the coverage summary. Without this, a refactor
 /// collapsing the coverage print back into a single `summary_line()` call passes fmt, clippy,
 /// every test and every snapshot family, and the defect returns silently: the summary ratio is

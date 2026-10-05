@@ -1355,9 +1355,10 @@ impl ConfidenceBreakdown {
         } else if !gaps_in_selected_languages.is_empty() {
             overall_score = overall_score.min(0.74);
         }
-        // The absence symptom cap, for a directory: the task names it, or names code no indexed
-        // symbol defines while it holds tracked source the index counts as missing. A directory
-        // pruned on strong evidence is reported and caps nothing.
+        // The task names the path of a directory whose tracked source the index counts as
+        // missing, so it points at files the index never read. A name no indexed symbol defines
+        // is reported and does not cap here, because a name the task asks to create is undefined
+        // too. A directory pruned on strong evidence is reported and caps nothing.
         if pruned_source.caps() {
             overall_score = overall_score.min(0.50);
         }

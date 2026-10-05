@@ -899,9 +899,7 @@ impl<'a> ContextPackBuilder<'a> {
             Err(_) => CoverageInput::Unreadable,
         };
         let pruned_source = match &coverage_record {
-            Ok(Some(record)) => {
-                pruned_source_links(self.store, record, task, &primary_files, &unmatched_anchors)?
-            }
+            Ok(Some(record)) => pruned_source_links(self.store, record, task)?,
             _ => PrunedSourceLinks::default(),
         };
         let primary_languages = primary_language_keys(self.store, coverage.gaps(), &primary_files)?;
@@ -1687,35 +1685,24 @@ fn anchor_miss_probe(
 }
 
 /// The pruned directories holding git-tracked source that `task` reaches, per
-/// [`open_kioku_core::IndexCoverage::pruned_source_links`]. A task identifier counts as
-/// undefined when the selected context does not spell it (or nothing was selected) and no
-/// indexed symbol has that name; the symbol table is read only when a directory pruned on the
-/// weak rule or behind a stray `.git` holds tracked source, so most repositories look nothing
-/// up. Plans call this too, so both surfaces link a task to the same directories.
+/// [`open_kioku_core::IndexCoverage::pruned_source_links`]. A named task identifier counts as
+/// undefined when no indexed symbol has that name, whether or not the selected context spells
+/// it. The commonest case is indexed code calling a function that only a pruned directory
+/// defines: the selection spells the name at the call site, and the definition is still absent.
+/// The symbol table is read only when a directory pruned on the weak rule or behind a stray
+/// `.git` holds tracked source, so most repositories look nothing up. Plans call this too, so
+/// both surfaces link a task to the same directories.
 pub fn pruned_source_links(
     store: &dyn OkStore,
     coverage: &open_kioku_core::IndexCoverage,
     task: &str,
-    selected: &[SearchResult],
-    unmatched_anchors: &[String],
 ) -> Result<PrunedSourceLinks> {
     let mut undefined = Vec::new();
     if coverage.may_hide_tracked_source() {
-        // `unmatched_named_anchors` is empty over an empty selection, where every named
-        // identifier is unmatched.
-        let candidates = if selected.is_empty() {
-            open_kioku_core::named_anchors(task)
-        } else {
-            let weak = open_kioku_core::weak_named_anchors(task);
-            unmatched_anchors
-                .iter()
-                .filter(|anchor| !weak.contains(anchor))
-                .cloned()
-                .collect()
-        };
-        // A hyphenated anchor (`--dry-run`, `X-Request-Id`) is a flag, header or package name,
-        // never a symbol name in an indexed language, so no symbol table could define it.
-        for identifier in candidates
+        // `named_anchors` leaves out hyphenated prose words. A hyphenated anchor the task marks
+        // as code (`--dry-run`, `X-Request-Id`) is a flag, header or package name, never a
+        // symbol name in an indexed language, so no symbol table could define it.
+        for identifier in open_kioku_core::named_anchors(task)
             .into_iter()
             .filter(|identifier| !identifier.contains('-'))
         {

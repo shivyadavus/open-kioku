@@ -14,8 +14,9 @@
 //! - **Named by the task**: a path-like task token (one holding a `/`) is the directory or a
 //!   path below it (`tools/build/plan.py`, `build/`). A bare word never counts: "fix the build"
 //!   names no directory. Any prune reason qualifies, because the task asked about those files.
-//! - **An undefined name**: a named task identifier that no selected context spells and that
-//!   no indexed symbol defines, beside a directory pruned on the weak rule or behind a stray
+//! - **An undefined name**: a named task identifier that no indexed symbol defines (spelled
+//!   by the selected context or not: indexed code may call a function only a pruned directory
+//!   defines), beside a directory pruned on the weak rule or behind a stray
 //!   `.git`. Directories pruned on strong evidence (a cache tag, a build manifest beside them)
 //!   never qualify this way: their committed files are output, and a name missing from source
 //!   is not explained by a bundle.
@@ -48,7 +49,7 @@ const PRUNED_SOURCE_DIRS_NAMED: usize = 3;
 /// [`IndexCoverage::pruned_source_links`]; empty when the task reaches none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrunedSourceLinks {
-    /// Named task identifiers that no selected context spells and no indexed symbol defines,
+    /// Named task identifiers that no indexed symbol defines,
     /// in task order. Empty when `unresolved_dirs` is.
     pub undefined_identifiers: Vec<String>,
     /// Directories pruned on the weak rule or behind a stray `.git` that hold tracked source,
@@ -80,7 +81,7 @@ impl IndexCoverage {
     /// The pruned directories holding tracked source that `task` reaches: those whose path it
     /// names, and, when `undefined_identifiers` is not empty, every one pruned on the weak rule
     /// or behind a stray `.git`. `undefined_identifiers` are the task's named identifiers that
-    /// no selected context spells and no indexed symbol defines; the caller looks them up.
+    /// no indexed symbol defines; the caller looks them up.
     pub fn pruned_source_links(
         &self,
         task: &str,
@@ -125,7 +126,24 @@ pub fn task_names_directory(task: &str, dir: &str) -> bool {
         .any(|token| {
             // A sentence may end on the path (`... in tools/build/.`).
             let token = token.trim_end_matches('.');
-            let token = token.strip_prefix("./").unwrap_or(token);
+            // `./build/x`, `../tools/build/x` and `/tools/build/x` all name the directory from
+            // somewhere; strip the anchoring prefix and compare the rest.
+            // The tokenizer splits on `:`, so a URL (`https://tools/build/x`) reaches here as
+            // `//host/...`: a host, not a path in this repository.
+            if token.starts_with("//") {
+                return false;
+            }
+            let mut token = token;
+            loop {
+                let rest = token
+                    .strip_prefix("./")
+                    .or_else(|| token.strip_prefix("../"))
+                    .or_else(|| token.strip_prefix('/'));
+                match rest {
+                    Some(rest) => token = rest,
+                    None => break,
+                }
+            }
             let token = token.trim_end_matches('/');
             token == dir
                 || token
@@ -428,6 +446,26 @@ mod tests {
         assert!(task_names_directory("read ./build/gen.rs", "build"));
         assert!(task_names_directory(
             "read tools\\build\\gen.rs",
+            "tools/build"
+        ));
+        assert!(task_names_directory(
+            "compare ../tools/build/plan.py",
+            "tools/build"
+        ));
+        assert!(task_names_directory(
+            "open /tools/build/plan.py",
+            "tools/build"
+        ));
+        assert!(task_names_directory("open ../../build/x.py", "build"));
+        // An absolute path elsewhere does not end up naming a root directory, and a URL's host
+        // and path are not repository paths.
+        assert!(!task_names_directory("read /usr/lib/build/x.py", "build"));
+        assert!(!task_names_directory(
+            "fetch https://tools/build/rates.json",
+            "tools/build"
+        ));
+        assert!(!task_names_directory(
+            "fetch http://example.com/tools/build/rates",
             "tools/build"
         ));
         // Prose, and a sibling sharing a prefix, name nothing.

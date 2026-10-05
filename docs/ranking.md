@@ -373,8 +373,8 @@ on all of them would teach readers to ignore it.
 
 | Link | Fires when | Directories |
 | --- | --- | --- |
-| named by the task | a task token holding a `/` (`tools/build/plan.py`, `./build/`, `` `tools/build` ``) is the directory's path or a path below it. A bare word (`build`, `dist`) never counts, and neither does a sibling sharing a prefix (`tools/builder/`) | any listed directory holding tracked source, whatever its reason |
-| an undefined name | a named task identifier (`named_anchors`, never a hyphenated prose word) that the selected context does not spell (every named identifier when nothing was selected), and that no indexed symbol has as its name (`symbols_named`) | every listed directory pruned as `undeclared_build_dir` or `submodule` holding tracked source |
+| named by the task | a task token holding a `/` (`tools/build/plan.py`, `./build/`, `../tools/build/x`, `/tools/build/x`, `` `tools/build` ``) is the directory's path or a path below it, after any leading `./`, `../` or `/`. A bare word (`build`, `dist`) never counts, and neither does a sibling sharing a prefix (`tools/builder/`) or a URL (`https://tools/build/x`, whose host and path are not repository paths) | any listed directory holding tracked source, whatever its reason |
+| an undefined name | a named task identifier (`named_anchors`, never a hyphenated prose word) that no indexed symbol has as its name (`symbols_named`), whether or not the selected context spells it. The commonest case is indexed code calling a function only a pruned directory defines: the call site is selected and spells the name, and the definition is still absent | every listed directory pruned as `undeclared_build_dir` or `submodule` holding tracked source |
 
 Directories pruned on strong evidence (`build_output` with a cache tag or a manifest beside
 it, `dependencies`, `virtual_env`) never link through an undefined name. Their committed files
@@ -383,7 +383,7 @@ never lower coverage. They link only when the task names their path. A directory
 tracked count of zero, or with no count (outside Git), never links. A secret-like path is
 never named: ingest does not list one, and the link skips any such entry an older or imported
 manifest holds. The symbol table is read only when a weak or stray-`.git` directory holding
-tracked source is listed, once per unmatched identifier. Any other repository looks nothing
+tracked source is listed, once per named task identifier, as a `UNION` of two index searches. Any other repository looks nothing
 up.
 
 A link is reported on context and plan alike, through `open_kioku_context::pruned_source_links`:

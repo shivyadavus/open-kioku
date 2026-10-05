@@ -1539,13 +1539,7 @@ impl MetadataStore for SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        // Both branches are satisfied from dedicated indexes (name COLLATE NOCASE and
-        // qualified_name), so exact lookups never scan the symbols table.
-        let mut stmt = conn
-            .prepare(
-                "SELECT json FROM symbols WHERE name = ?1 COLLATE NOCASE OR qualified_name = ?1 ORDER BY qualified_name LIMIT ?2",
-            )
-            .map_err(storage_err)?;
+        let mut stmt = conn.prepare(SYMBOLS_NAMED_SQL).map_err(storage_err)?;
         let rows = stmt
             .query_map(params![name, limit as i64], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
@@ -5319,6 +5313,21 @@ const LIST_SYMBOLS_BY_QUALIFIED_NAME_SQL: &str = "SELECT json FROM symbols \
      WHERE (?1 = '%%' OR name LIKE ?1 COLLATE NOCASE OR qualified_name LIKE ?1 COLLATE NOCASE) \
      ORDER BY qualified_name LIMIT ?2 OFFSET ?3";
 
+/// `MetadataStore::symbols_named`: symbols whose short name equals `?1` case-insensitively or
+/// whose qualified name equals it, in qualified-name order (row order among equal names), at
+/// most `?2`. Written as a `UNION` of two single-index lookups (`idx_symbols_name_nocase`,
+/// `idx_symbols_qualified_name`). The equivalent `name = ?1 COLLATE NOCASE OR qualified_name =
+/// ?1` depends on the planner. The bundled SQLite (3.45) plans it as a multi-index OR. SQLite
+/// 3.53 plans it as a walk of all of `idx_symbols_qualified_name`, to skip the sort: about 45 ms
+/// on this repository's index, and seconds at half a million symbols. Context and plan run this
+/// lookup per task identifier, so the plan must not depend on the SQLite version. `UNION` keeps
+/// a row matched by both branches once, and the sort covers only the matched rows.
+const SYMBOLS_NAMED_SQL: &str = "SELECT json FROM ( \
+     SELECT json, qualified_name, rowid AS row_order FROM symbols WHERE name = ?1 COLLATE NOCASE \
+     UNION \
+     SELECT json, qualified_name, rowid AS row_order FROM symbols WHERE qualified_name = ?1 \
+     ) ORDER BY qualified_name, row_order LIMIT ?2";
+
 /// Symbols in qualified-name order, except that a Go type alias whose target the index placed is
 /// listed just after that type, through `idx_symbols_list_order`: one index read in order, so a
 /// page costs what the plain qualified-name order did. See [`SYMBOL_LIST_ORDER_KEY_COLUMN`].
@@ -6579,7 +6588,7 @@ mod tests {
         GRAPH_REBUILD_REQUIRED_FLAG, LIST_SYMBOLS_BY_ALIAS_ORDER_SQL, LIST_SYMBOLS_SQL,
         NEIGHBOR_INCOMING, NEIGHBOR_INCOMING_WITH_LOOPS, NEIGHBOR_LOOPS_BY_INCOMING,
         NEIGHBOR_LOOPS_BY_OUTGOING, NEIGHBOR_OUTGOING, SHORTEST_PATH_OUTGOING,
-        SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION,
+        SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION, SYMBOLS_NAMED_SQL,
         SYMBOL_LIST_ORDER_KEY_COLUMN,
     };
     use chrono::{TimeZone, Utc};
@@ -9468,6 +9477,91 @@ mod tests {
         assert!(position("store::store::Entry") < position("audit::Entry"));
         assert!(position("zz::Entry") < position("store::store::Entry Space"));
         assert!(position("store::store::Entry::Amount") < position("ledger::aliases::Amount"));
+    }
+
+    /// Context and plan run `symbols_named` per task identifier. Newer SQLite (3.53) plans the
+    /// `OR` form it replaced as a walk of a whole index. This guards the `UNION` against that,
+    /// on whatever SQLite is bundled: each branch must be an index search, and nothing may walk
+    /// `symbols` or its indexes in full. The bundled 3.45 also plans the `OR` form as a
+    /// multi-index OR, so this test passes with either query on 3.45.
+    #[test]
+    fn symbols_named_searches_its_indexes_and_never_scans_the_symbols_table() {
+        let store = make_store();
+        index_symbols(&store, &mixed_alias_symbols());
+        let conn = store.connection.lock().unwrap();
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SYMBOLS_NAMED_SQL}"))
+            .unwrap();
+        let plan = stmt
+            .query_map(params!["Entry", 1_i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        for index in ["idx_symbols_name_nocase", "idx_symbols_qualified_name"] {
+            assert!(
+                plan.iter()
+                    .any(|step| step.starts_with("SEARCH symbols") && step.contains(index)),
+                "{index}: {plan:?}"
+            );
+        }
+        // A scan of the union's few matched rows is fine; a scan of the table is not.
+        assert!(
+            !plan.iter().any(|step| step.starts_with("SCAN symbols")),
+            "{plan:?}"
+        );
+    }
+
+    /// The `UNION` returns what the `OR` form returned, in the same order, under every limit:
+    /// a row matching both branches once, qualified-name order with row order among equals.
+    #[test]
+    fn symbols_named_returns_what_the_or_form_returned() {
+        let store = make_store();
+        index_symbols(&store, &mixed_alias_symbols());
+        let all = store.list_symbols(None, usize::MAX, 0).unwrap();
+        let mut names = all
+            .iter()
+            .flat_map(|symbol| {
+                [
+                    symbol.name.clone(),
+                    symbol.name.to_ascii_uppercase(),
+                    symbol.qualified_name.clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        names.push("no_such_symbol".into());
+        names.sort();
+        names.dedup();
+        let reference = |name: &str, limit: usize| -> Vec<String> {
+            let conn = store.connection.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT json FROM symbols WHERE name = ?1 COLLATE NOCASE OR qualified_name = ?1 \
+                     ORDER BY qualified_name, rowid LIMIT ?2",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map(params![name, limit as i64], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows.iter()
+                .map(|json| serde_json::from_str::<Symbol>(json).unwrap().id.0)
+                .collect()
+        };
+        let mut matched_any = false;
+        for name in &names {
+            for limit in [1, 2, usize::MAX] {
+                let ids = store
+                    .symbols_named(name, limit)
+                    .unwrap()
+                    .into_iter()
+                    .map(|symbol| symbol.id.0)
+                    .collect::<Vec<_>>();
+                matched_any |= !ids.is_empty();
+                assert_eq!(ids, reference(name, limit), "{name:?} limit {limit}");
+            }
+        }
+        assert!(matched_any);
     }
 
     #[test]
