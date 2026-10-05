@@ -528,9 +528,13 @@ fn is_labelled_digest(run: &str, core: &str, preceding: &str) -> bool {
         return false;
     };
     let label = label.trim_end_matches([' ', '\t', '"', '\'']);
+    // The key starts after the last character that cannot be part of one; that character can be
+    // more than one byte (a CJK or accented label), so step over its full width.
     let key_start = label
-        .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
-        .map_or(0, |at| at + 1);
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+        .map_or(0, |(at, ch)| at + ch.len_utf8());
     let key = label[key_start..].to_ascii_lowercase();
     DIGEST_LENGTHS.iter().any(|(name, hex_len, _)| {
         key.ends_with(name) && core.len() == *hex_len && core.bytes().all(|b| b.is_ascii_hexdigit())
@@ -934,6 +938,20 @@ mod tests {
 
     fn redacted(text: &str) -> String {
         redact_secret_values(text, ContentKind::Config).text
+    }
+
+    #[test]
+    fn a_digest_label_after_a_multibyte_character_does_not_split_it() {
+        let digest = striding(b"0123456789abcdef", 64, 7, 3);
+        let cases = [
+            format!("名前sha256: {digest}\n"),
+            format!("\"説明\": \"値\", \"résumé_sha256\": \"{digest}\"\n"),
+            format!("ключ_sha256 = \"{digest}\"\n"),
+        ];
+        for case in cases {
+            let result = redact_secret_values(&case, ContentKind::Config);
+            assert_eq!(result.text, case, "a public digest stays as written");
+        }
     }
 
     #[test]
