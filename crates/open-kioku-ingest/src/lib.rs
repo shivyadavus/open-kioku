@@ -31,6 +31,7 @@ mod cargo_facts;
 mod cycle_memo;
 mod dependency_trees;
 pub mod derived;
+mod dotnet_tests;
 mod git_ignore;
 pub mod path_policy;
 mod prune;
@@ -761,8 +762,12 @@ impl Indexer {
         }
         // Extraction applies the runners' default discovery rules; where a pytest
         // configuration changes them, its Python test files fall back to the test-path rule.
-        let test_discovery_notes =
+        let mut test_discovery_notes =
             test_discovery::widen_configured_python_tests(&root, &files, &mut tests);
+        // A C# test's command filters `dotnet test` to it; its project file says where it runs.
+        test_discovery_notes.extend(dotnet_tests::scope_csharp_test_commands(
+            &root, &files, &mut tests,
+        ));
         dedupe_symbols(&mut symbols);
         let imports = extract_imports_from_syntax(&import_sites);
         emit_progress(

@@ -20,6 +20,8 @@
 //!   `TestMain` is the package's lifecycle hook.
 //! - JavaScript and TypeScript: tests are registration calls, so a declared callable is a test
 //!   only when its own declaration is one.
+//! - C#: an xUnit `[Fact]`/`[Theory]`, NUnit `[Test]`/`[TestCase]`/`[TestCaseSource]` or MSTest
+//!   `[TestMethod]` method, the last in a `[TestClass]` class; see [`crate::csharp_tests`].
 //!
 //! These are the runners' default rules. Runner configuration is not read here, so a callable
 //! that matches none of them is reported as matching no default rule, never as one no runner
@@ -29,6 +31,7 @@
 //! a wrapper function rather than `test(..)`/`it(..)`, and Kotlin and Scala, which are not
 //! indexed. A language with no runner model here keeps the file rule: every callable is a test.
 
+use crate::csharp_tests::CSharpTests;
 use crate::{
     declares_registered_test, has_adjacent_annotation, has_test_name_prefix,
     is_stacked_test_annotation,
@@ -51,10 +54,17 @@ pub(crate) struct TestFileDiscovery<'a> {
     /// or annotates something `@Test`. Those runners ignore JUnit 3 naming, so a `test*`
     /// method there is a test only when annotated.
     annotation_junit: bool,
+    /// The xUnit, NUnit and MSTest rules of a C# file.
+    csharp: Option<&'a CSharpTests<'a>>,
 }
 
 impl<'a> TestFileDiscovery<'a> {
-    pub(crate) fn new(file: &File, lines: &'a [&'a str], symbols: &'a [Symbol]) -> Self {
+    pub(crate) fn new(
+        file: &File,
+        lines: &'a [&'a str],
+        symbols: &'a [Symbol],
+        csharp: Option<&'a CSharpTests<'a>>,
+    ) -> Self {
         let path = file.path.to_string_lossy().replace('\\', "/");
         let file_name = path.rsplit('/').next().unwrap_or_default().to_string();
         Self {
@@ -70,6 +80,7 @@ impl<'a> TestFileDiscovery<'a> {
                         || line.starts_with("import org.junit.Test")
                         || java_annotation_name(line) == Some("Test")
                 }),
+            csharp,
         }
     }
 
@@ -86,9 +97,10 @@ impl<'a> TestFileDiscovery<'a> {
             Language::TypeScript | Language::JavaScript => {
                 declares_registered_test(self.lines, symbol)
             }
-            // No C# runner (xUnit, NUnit, MSTest) is read yet, so no C# callable is proven to
-            // run as a test: it stays a helper, which is not validation evidence.
-            Language::CSharp => false,
+            Language::CSharp => self
+                .csharp
+                .as_ref()
+                .is_some_and(|csharp| csharp.runs(symbol)),
             Language::Yaml
             | Language::Json
             | Language::Toml

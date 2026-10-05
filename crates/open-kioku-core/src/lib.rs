@@ -703,6 +703,23 @@ fn is_test_dir_segment(segment: &str) -> bool {
         || lower.ends_with("-spec")
         || lower.ends_with("_spec")
         || has_camel_test_suffix(segment)
+        || is_dotted_test_project(segment)
+}
+
+/// `Acme.Ledger.Tests`, `Acme.Ledger.UnitTests`, `Acme.Specs`: a .NET test project's directory,
+/// named `<Project>.<Suffix>` after the project it tests. Unlike a `-tests` crate or package,
+/// which may be product code, a dotted test suffix names the test project by convention. Only
+/// the last dotted part counts, and only a test word: `Acme.Testing` is a library of test
+/// doubles that ships, and `Acme.Tests.Shared` is judged by its own name.
+fn is_dotted_test_project(segment: &str) -> bool {
+    let Some((project, suffix)) = segment.rsplit_once('.') else {
+        return false;
+    };
+    !project.is_empty()
+        && (matches!(
+            suffix.to_ascii_lowercase().as_str(),
+            "test" | "tests" | "spec" | "specs"
+        ) || has_camel_test_suffix(suffix))
 }
 
 fn is_test_file_name(name: &str) -> bool {
@@ -2619,7 +2636,7 @@ impl TestExclusionReason {
                 "Enable the skipped tests (`test.skip`, `it.todo`, `test.failing`) before relying on validation recommendations."
             }
             Self::Helper => {
-                "If your test runner is configured to collect these callables, run them yourself: runner configuration is not read. Otherwise add tests that match a default discovery rule (`#[test]`, `@Test`, `def test_*`, `func TestX`, `test(..)`/`it(..)`)."
+                "If your test runner is configured to collect these callables, run them yourself: runner configuration is not read. Otherwise add tests that match a default discovery rule (`#[test]`, `@Test`, `def test_*`, `func TestX`, `test(..)`/`it(..)`, `[Fact]`/`[Test]`/`[TestMethod]`)."
             }
         }
     }
@@ -8961,6 +8978,28 @@ mod test_path_tests {
             "spec/models/user_spec.rb",
         ] {
             assert!(is_test_path(path), "{path} should be a test path");
+        }
+    }
+
+    #[test]
+    fn dotnet_test_project_directories_are_tests() {
+        for path in [
+            "src/Acme.Ledger.Tests/Builders/EntryBuilder.cs",
+            "src/Acme.Ledger.UnitTests/Builders.cs",
+            "src/Acme.Ledger.IntegrationTests/Startup.cs",
+            "src/Acme.Ledger.Specs/Posting.cs",
+            "src/acme.ledger.tests/Builders.cs",
+        ] {
+            assert!(is_test_code_path(path), "{path} should be test code");
+        }
+        for path in [
+            "src/Acme.Testing/FakeClock.cs",
+            "src/Acme.Tests.Shared/Clock.cs",
+            "src/Acme.Ledger/Ledger.cs",
+            "src/.Tests/Ledger.cs",
+            "src/Acme.Contest/Score.cs",
+        ] {
+            assert!(!is_test_path(path), "{path} should not be a test path");
         }
     }
 

@@ -196,7 +196,7 @@ Semantic retrieval is optional and local (`ok --repo . semantic index`, then `ok
 
 ## Language Support
 
-Tree-sitter parsing and symbol extraction cover **Rust, Python, TypeScript/TSX, JavaScript/JSX, Go, Java, and C#**. C# records symbols and chunks only: its `using` directives, calls and type relationships are not resolved yet. YAML and JSON are parsed structurally; file/chunk indexing also covers TOML, SQL, Markdown, Terraform, and other repository text. Language-aware resolution adds scope, import, receiver/type, containment, and inheritance semantics where supported.
+Tree-sitter parsing and symbol extraction cover **Rust, Python, TypeScript/TSX, JavaScript/JSX, Go, Java, and C#**. C# records symbols, chunks and xUnit, NUnit and MSTest tests with `dotnet test` commands scoped to their project; its `using` directives, calls and type relationships are not resolved yet. YAML and JSON are parsed structurally; file/chunk indexing also covers TOML, SQL, Markdown, Terraform, and other repository text. Language-aware resolution adds scope, import, receiver/type, containment, and inheritance semantics where supported.
 
 Exact Java definitions and references from a `scip-java` index: [`docs/guides/java-scip.md`](docs/guides/java-scip.md)
 

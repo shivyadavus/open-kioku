@@ -271,7 +271,11 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// v21: a `.cs` file is C#, parsed by tree-sitter into namespace, type and member symbols
 /// qualified by namespace and type nesting, and chunked with each symbol's `///` documentation;
 /// a v20 index holds `.cs` files as unknown text with no symbols.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v21";
+/// v22: a C# method xUnit, NUnit or MSTest runs (`[Fact]`, `[Test]`, `[TestMethod]` in a
+/// `[TestClass]`) is a test whose command filters `dotnet test` to it in its project, and a
+/// `<Project>.Tests` directory is a test path; a v21 index holds every C# callable of a test
+/// file as a helper, and none outside one as a test.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v22";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 
