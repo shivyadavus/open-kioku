@@ -1796,6 +1796,20 @@ mod tests {
         assert!(source(&concatenated).text.contains("const after = 1;"));
     }
 
+    /// Multi-byte characters inside a key block, after an escape or beside a run, never split a
+    /// character: the scan steps only to ASCII boundaries.
+    #[test]
+    fn source_key_blocks_with_multibyte_text_do_not_panic() {
+        let body = key_body(29);
+        let text = format!(
+            "let key = \"-----BEGIN PRIVATE KEY-----\\é\n{} // ключ\nпривет \\ü\n-----END PRIVATE KEY-----\";\n",
+            body.join("\n")
+        );
+        let result = source(&text);
+        assert_no_key_window(&result, &body[..body.len() - 1]);
+        assert_eq!(result.text.lines().count(), text.lines().count());
+    }
+
     /// A PEM parser, the code most likely to sit after a BEGIN constant, is indexed as written:
     /// its identifiers (`parsePkcs8PrivateKey`, `ParsePrivateKeyBlock`) and messages are code,
     /// not key material, and the block a BEGIN constant opens ends at the first line of code.
