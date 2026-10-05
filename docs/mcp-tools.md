@@ -102,6 +102,8 @@ arguments returns `-32602` (invalid params):
 - a blank `search_code` query, a blank `regex_search` pattern, and a pattern that
   does not parse;
 - `verify_change` given no changed file, or a diff that names none;
+- `verify_change` given a diff whose `diff --git` entry uses a path prefix style git does not
+  write by default (a custom `--src-prefix`/`--dst-prefix`), or whose paths fit no single style;
 - an identifier Open Kioku issued that the repository does not hold: a
   `retrieve_context` handle, or a `verify_change` `contract_id`;
 - `plan_change` with `persist: true` given a `plan` or `plan_json` the contract

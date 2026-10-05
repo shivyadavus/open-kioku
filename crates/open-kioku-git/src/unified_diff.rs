@@ -8,6 +8,7 @@
 //! under-counted one leaves content to be read as headers. [`HunkScanner`] records the first
 //! such place so callers report it instead of silently losing or inventing a path.
 
+use std::borrow::Cow;
 use std::fmt;
 
 /// The first place a diff stopped matching its hunk headers.
@@ -230,6 +231,376 @@ pub fn git_header_paths(rest: &str) -> Option<(String, String)> {
         .then(|| strip_header_prefixes(old, new))
 }
 
+/// The old- and new-side path prefixes git can write on a `diff --git` entry. `a/` and `b/` are
+/// the default, and what every diff `ok` runs itself pins. `diff.noprefix` writes none.
+/// `diff.mnemonicPrefix` names what each side is: a (c)ommit, the (i)ndex, the (w)ork tree, an
+/// (o)bject, or `1`/`2` under `--no-index`. `-R` swaps the sides, prefixes included, so every
+/// pair is also accepted reversed. Any other prefix (`diff.srcPrefix`, `--src-prefix`) cannot be
+/// told apart from part of a path and is not guessed.
+const PREFIX_STYLES: &[(&str, &str)] = &[
+    ("a/", "b/"),
+    ("", ""),
+    ("c/", "i/"),
+    ("c/", "w/"),
+    ("i/", "w/"),
+    ("o/", "w/"),
+    ("1/", "2/"),
+    ("b/", "a/"),
+    ("i/", "c/"),
+    ("w/", "c/"),
+    ("w/", "i/"),
+    ("w/", "o/"),
+    ("2/", "1/"),
+];
+
+/// A `diff --git` entry whose paths cannot be read with certainty. It names the entry by
+/// position, not path: the path is what could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableDiffEntry {
+    /// 1-based position of the entry among the diff's `diff --git` headers.
+    pub entry: usize,
+    /// 1-based line of the entry's `diff --git` header.
+    pub line: usize,
+    pub reason: &'static str,
+}
+
+impl fmt::Display for UnreadableDiffEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "entry {} (the `diff --git` header at line {}): {}",
+            self.entry, self.line, self.reason
+        )
+    }
+}
+
+/// `diff` with every `diff --git` entry's paths written with git's default `a/` and `b/`
+/// prefixes, so a reader that assumes them reads a diff made under any prefix configuration.
+///
+/// Each entry's prefix style is taken from its `diff --git` header, checked against its
+/// `rename`/`copy` lines (which carry no prefix) and its `---`/`+++` lines, and then applied to
+/// all of them; the `---`/`+++` paths are never stripped one by one, which reads a prefix-less
+/// `a/lib.rs` as `lib.rs`. An entry that fits no style, or more than one, is an error rather
+/// than a guess. Entries already in the default style, and text outside `diff --git` entries,
+/// are left byte for byte, so a diff `ok` produced comes back borrowed. Rewritten lines keep
+/// their line numbers.
+pub fn with_default_prefixes(diff: &str) -> Result<Cow<'_, str>, UnreadableDiffEntry> {
+    let lines = diff_lines(diff);
+    let entries = git_entries(&lines);
+    let mut rewrites = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let (prefixes, old, new) = entry.resolve().map_err(|reason| UnreadableDiffEntry {
+            entry: index + 1,
+            line: entry.header_line + 1,
+            reason,
+        })?;
+        if prefixes != ("a/", "b/") {
+            rewrites.push((entry, old, new));
+        }
+    }
+    if rewrites.is_empty() {
+        return Ok(Cow::Borrowed(diff));
+    }
+    let mut replaced = vec![None; lines.len()];
+    for (entry, old, new) in rewrites {
+        let old_side = quote_header_path(&format!("a/{old}"));
+        let new_side = quote_header_path(&format!("b/{new}"));
+        replaced[entry.header_line] = Some(format!("diff --git {old_side} {new_side}"));
+        for marker in &entry.markers {
+            let side = match (&marker.path, marker.old_side) {
+                (MarkerPath::DevNull, _) => "/dev/null",
+                (MarkerPath::Path(_), true) => &old_side,
+                (MarkerPath::Path(_), false) => &new_side,
+            };
+            let lead = if marker.old_side { "---" } else { "+++" };
+            replaced[marker.line] = Some(format!("{lead} {side}"));
+        }
+    }
+    let mut out = String::with_capacity(diff.len() + 64);
+    for (line, replacement) in lines.iter().zip(replaced) {
+        match replacement {
+            Some(text) => {
+                out.push_str(&text);
+                out.push_str(line.ending);
+            }
+            None => {
+                out.push_str(line.text);
+                out.push_str(line.ending);
+            }
+        }
+    }
+    Ok(Cow::Owned(out))
+}
+
+/// One line of a diff as `str::lines` reads it, with the terminator it had.
+struct RawLine<'a> {
+    text: &'a str,
+    ending: &'a str,
+}
+
+fn diff_lines(diff: &str) -> Vec<RawLine<'_>> {
+    diff.split_inclusive('\n')
+        .map(|chunk| {
+            let text = chunk
+                .strip_suffix('\n')
+                .map(|text| text.strip_suffix('\r').unwrap_or(text))
+                .unwrap_or(chunk);
+            RawLine {
+                text,
+                ending: &chunk[text.len()..],
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MarkerPath {
+    DevNull,
+    Path(String),
+}
+
+/// A `---` (`old_side`) or `+++` file header of a `diff --git` entry, decoded but still prefixed.
+struct Marker {
+    line: usize,
+    old_side: bool,
+    path: MarkerPath,
+}
+
+/// A prefix pair and the old and new paths it leaves.
+type EntryFit = ((&'static str, &'static str), String, String);
+
+/// What a `diff --git` entry says about its paths before its first hunk.
+struct GitEntry<'a> {
+    header_line: usize,
+    header: &'a str,
+    /// The `rename`/`copy` `from` and `to` paths, which git writes without a prefix.
+    moved_from: Option<Option<String>>,
+    moved_to: Option<Option<String>>,
+    markers: Vec<Marker>,
+    /// A `---`/`+++` value that does not decode, so no style can be checked against it.
+    undecodable_marker: bool,
+}
+
+fn git_entries<'a>(lines: &[RawLine<'a>]) -> Vec<GitEntry<'a>> {
+    let mut entries: Vec<GitEntry<'a>> = Vec::new();
+    let mut in_hunks = false;
+    let mut scanner = HunkScanner::new();
+    for (index, line) in lines.iter().enumerate() {
+        let text = line.text;
+        let kind = scanner.scan(text);
+        if kind != DiffLine::Header {
+            in_hunks |= matches!(kind, DiffLine::HunkHeader(_));
+            continue;
+        }
+        if let Some(header) = text.strip_prefix("diff --git ") {
+            in_hunks = false;
+            entries.push(GitEntry {
+                header_line: index,
+                header,
+                moved_from: None,
+                moved_to: None,
+                markers: Vec::new(),
+                undecodable_marker: false,
+            });
+            continue;
+        }
+        let Some(entry) = entries.last_mut().filter(|_| !in_hunks) else {
+            continue;
+        };
+        let moved = |value: &str| {
+            let value = value.trim_end_matches('\r');
+            if value.starts_with('"') {
+                unquote_path(value).and_then(|(path, tail)| tail.is_empty().then_some(path))
+            } else {
+                Some(value.to_string())
+            }
+        };
+        if let Some(value) = text
+            .strip_prefix("rename from ")
+            .or_else(|| text.strip_prefix("copy from "))
+        {
+            entry.moved_from = Some(moved(value));
+        } else if let Some(value) = text
+            .strip_prefix("rename to ")
+            .or_else(|| text.strip_prefix("copy to "))
+        {
+            entry.moved_to = Some(moved(value));
+        } else if let Some((value, old_side)) = text
+            .strip_prefix("--- ")
+            .map(|value| (value, true))
+            .or_else(|| text.strip_prefix("+++ ").map(|value| (value, false)))
+        {
+            match marker_path(value) {
+                Some(path) => entry.markers.push(Marker {
+                    line: index,
+                    old_side,
+                    path,
+                }),
+                None => entry.undecodable_marker = true,
+            }
+        }
+    }
+    entries
+}
+
+fn marker_path(value: &str) -> Option<MarkerPath> {
+    let name = file_header_name(value);
+    let path = if name.starts_with('"') {
+        let (path, tail) = unquote_path(name)?;
+        if !tail.is_empty() {
+            return None;
+        }
+        path
+    } else {
+        name.to_string()
+    };
+    Some(if path == "/dev/null" {
+        MarkerPath::DevNull
+    } else {
+        MarkerPath::Path(path)
+    })
+}
+
+impl GitEntry<'_> {
+    /// The entry's prefix pair and its unprefixed old and new paths.
+    fn resolve(&self) -> Result<EntryFit, &'static str> {
+        if self.undecodable_marker {
+            return Err("a `---` or `+++` path does not decode");
+        }
+        let moved = match (&self.moved_from, &self.moved_to) {
+            (None, None) => None,
+            (Some(Some(from)), Some(Some(to))) => Some((from.as_str(), to.as_str())),
+            _ => return Err("its `rename`/`copy` lines do not name both paths"),
+        };
+        let splits = header_splits(self.header);
+        // A header names one path twice, or the two paths of its `rename`/`copy` lines.
+        let exact = self.fits(&splits, |old, new| match moved {
+            Some((from, to)) => old == from && new == to,
+            None => old == new,
+        });
+        let fits = match (exact.len(), moved) {
+            (0, None) => {
+                // Two different paths with no `rename`/`copy` lines is not something git
+                // writes, but read as before: a rename, only under a real prefix pair (with no
+                // prefix it is any split of the line) and only at a single place.
+                self.fits(&splits, |old, new| old != new)
+                    .into_iter()
+                    .filter(|(prefixes, _, _)| *prefixes != ("", ""))
+                    .collect()
+            }
+            _ => exact,
+        };
+        let mut fits = fits.into_iter();
+        match (fits.next(), fits.next()) {
+            (Some(fit), None) => Ok(fit),
+            (Some(_), Some(_)) => Err(
+                "its paths read more than one way under git's default, mnemonic and no-prefix \
+                 styles",
+            ),
+            (None, _) => Err(
+                "its `diff --git`, `rename`/`copy` and `---`/`+++` lines do not name the same \
+                 paths under git's default (`a/`, `b/`), mnemonic (`diff.mnemonicPrefix`) or \
+                 no-prefix (`diff.noprefix`) style",
+            ),
+        }
+    }
+
+    /// Every split and prefix pair under which the header's paths satisfy `shape` and agree
+    /// with the entry's `---`/`+++` lines.
+    fn fits(
+        &self,
+        splits: &[(String, String)],
+        shape: impl Fn(&str, &str) -> bool,
+    ) -> Vec<EntryFit> {
+        let mut fits = Vec::new();
+        for (old_side, new_side) in splits {
+            for &(old_prefix, new_prefix) in PREFIX_STYLES {
+                let (Some(old), Some(new)) = (
+                    old_side.strip_prefix(old_prefix),
+                    new_side.strip_prefix(new_prefix),
+                ) else {
+                    continue;
+                };
+                if old.is_empty() || new.is_empty() || !shape(old, new) {
+                    continue;
+                }
+                let markers_agree = self.markers.iter().all(|marker| match &marker.path {
+                    MarkerPath::DevNull => true,
+                    MarkerPath::Path(path) if marker.old_side => path == old_side,
+                    MarkerPath::Path(path) => path == new_side,
+                });
+                if markers_agree {
+                    fits.push(((old_prefix, new_prefix), old.to_string(), new.to_string()));
+                }
+            }
+        }
+        fits
+    }
+}
+
+/// Every way the text after `diff --git ` splits into a prefixed old and new side. A quoted
+/// side fixes the split; an unquoted line splits at any space, since git never quotes a path
+/// for holding one.
+fn header_splits(rest: &str) -> Vec<(String, String)> {
+    let rest = rest.trim_end_matches('\r');
+    if rest.starts_with('"') {
+        let Some((old, after)) = unquote_path(rest) else {
+            return Vec::new();
+        };
+        let Some(after) = after.strip_prefix(' ') else {
+            return Vec::new();
+        };
+        let new = if after.starts_with('"') {
+            match unquote_path(after) {
+                Some((new, "")) => new,
+                _ => return Vec::new(),
+            }
+        } else {
+            after.to_string()
+        };
+        return vec![(old, new)];
+    }
+    if rest.ends_with('"') {
+        // An unquoted path holds no `"`, so the quoted side starts at the first ` "`.
+        return rest
+            .find(" \"")
+            .and_then(|at| match unquote_path(&rest[at + 1..]) {
+                Some((new, "")) => Some(vec![(rest[..at].to_string(), new)]),
+                _ => None,
+            })
+            .unwrap_or_default();
+    }
+    rest.match_indices(' ')
+        .map(|(at, _)| (rest[..at].to_string(), rest[at + 1..].to_string()))
+        .collect()
+}
+
+/// A path as git writes it on a header line: quoted, with C escapes, when it holds a space, a
+/// double quote, a backslash or a control byte, so every reader splits and ends it the same way.
+fn quote_header_path(path: &str) -> String {
+    let needs_quotes = path
+        .chars()
+        .any(|ch| ch == ' ' || ch == '"' || ch == '\\' || ch.is_ascii_control());
+    if !needs_quotes {
+        return path.to_string();
+    }
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('"');
+    for ch in path.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\t' => quoted.push_str("\\t"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            ch if ch.is_ascii_control() => quoted.push_str(&format!("\\{:03o}", ch as u32)),
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Both prefixes or neither: a `--no-prefix` path that starts with `a/` keeps it.
 fn strip_header_prefixes<'a>(old: &'a str, new: &'a str) -> (String, String) {
     let (old, new) = old
@@ -311,7 +682,11 @@ fn side_count(side: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_header_name, git_header_paths, DiffLine, HunkScanner, MalformedDiff};
+    use super::{
+        file_header_name, git_header_paths, with_default_prefixes, DiffLine, HunkScanner,
+        MalformedDiff, UnreadableDiffEntry,
+    };
+    use std::borrow::Cow;
 
     fn same(path: &str) -> Option<(String, String)> {
         Some((path.to_string(), path.to_string()))
@@ -548,5 +923,225 @@ mod tests {
              2.39.2\n",
         );
         assert_eq!(result, Ok(()));
+    }
+
+    fn rewritten(diff: &str) -> String {
+        with_default_prefixes(diff).unwrap().into_owned()
+    }
+
+    #[test]
+    fn default_prefix_diffs_come_back_unchanged() {
+        let diff = "diff --git a/src/lib.rs b/src/lib.rs\n\
+                    --- a/src/lib.rs\n\
+                    +++ b/src/lib.rs\n\
+                    @@ -1 +1 @@\n\
+                    -a\n\
+                    +b\n\
+                    diff --git a/x.bin b/x.bin\n\
+                    Binary files a/x.bin and b/x.bin differ\n";
+        assert!(matches!(with_default_prefixes(diff), Ok(Cow::Borrowed(_))));
+        assert!(matches!(with_default_prefixes(""), Ok(Cow::Borrowed(_))));
+    }
+
+    #[test]
+    fn mnemonic_prefixes_are_rewritten_on_every_line_of_their_entry() {
+        assert_eq!(
+            rewritten(
+                "diff --git i/w/lib.rs w/w/lib.rs\r\n\
+                 --- i/w/lib.rs\r\n\
+                 +++ w/w/lib.rs\r\n\
+                 @@ -1 +1 @@\r\n\
+                 --- i/w/lib.rs\r\n\
+                 +++ w/w/lib.rs\r\n\
+                 diff --git c/src/gone.rs w/src/gone.rs\n\
+                 deleted file mode 100644\n\
+                 --- c/src/gone.rs\n\
+                 +++ /dev/null\n\
+                 diff --git w/run.sh c/run.sh\n\
+                 old mode 100755\n\
+                 new mode 100644\n"
+            ),
+            // Hunk content that looks like file headers is left as it is.
+            "diff --git a/w/lib.rs b/w/lib.rs\r\n\
+             --- a/w/lib.rs\r\n\
+             +++ b/w/lib.rs\r\n\
+             @@ -1 +1 @@\r\n\
+             --- i/w/lib.rs\r\n\
+             +++ w/w/lib.rs\r\n\
+             diff --git a/src/gone.rs b/src/gone.rs\n\
+             deleted file mode 100644\n\
+             --- a/src/gone.rs\n\
+             +++ /dev/null\n\
+             diff --git a/run.sh b/run.sh\n\
+             old mode 100755\n\
+             new mode 100644\n"
+        );
+    }
+
+    #[test]
+    fn prefix_less_paths_keep_a_leading_a_or_b_directory() {
+        assert_eq!(
+            rewritten(
+                "diff --git a/lib.rs a/lib.rs\n\
+                 --- a/lib.rs\n\
+                 +++ a/lib.rs\n\
+                 diff --git b/x.bin b/x.bin\n\
+                 Binary files b/x.bin and b/x.bin differ\n\
+                 diff --git src/added.rs src/added.rs\n\
+                 new file mode 100644\n\
+                 --- /dev/null\n\
+                 +++ src/added.rs\n"
+            ),
+            "diff --git a/a/lib.rs b/a/lib.rs\n\
+             --- a/a/lib.rs\n\
+             +++ b/a/lib.rs\n\
+             diff --git a/b/x.bin b/b/x.bin\n\
+             Binary files b/x.bin and b/x.bin differ\n\
+             diff --git a/src/added.rs b/src/added.rs\n\
+             new file mode 100644\n\
+             --- /dev/null\n\
+             +++ b/src/added.rs\n"
+        );
+    }
+
+    #[test]
+    fn renames_take_their_prefixes_from_the_rename_lines() {
+        // Prefix-less, a rename from `a/old` to `b/new` looks like a default-prefix header.
+        assert_eq!(
+            rewritten(
+                "diff --git a/old.rs b/new.rs\n\
+                 similarity index 90%\n\
+                 rename from a/old.rs\n\
+                 rename to b/new.rs\n\
+                 --- a/old.rs\n\
+                 +++ b/new.rs\n"
+            ),
+            "diff --git a/a/old.rs b/b/new.rs\n\
+             similarity index 90%\n\
+             rename from a/old.rs\n\
+             rename to b/new.rs\n\
+             --- a/a/old.rs\n\
+             +++ b/b/new.rs\n"
+        );
+        assert_eq!(
+            rewritten(
+                "diff --git c/sp ace/old.rs w/w b/new.rs\n\
+                 rename from sp ace/old.rs\n\
+                 rename to w b/new.rs\n"
+            ),
+            "diff --git \"a/sp ace/old.rs\" \"b/w b/new.rs\"\n\
+             rename from sp ace/old.rs\n\
+             rename to w b/new.rs\n"
+        );
+        assert_eq!(
+            rewritten(
+                "diff --git c/src/old.rs i/src/new.rs\n\
+                 copy from src/old.rs\n\
+                 copy to src/new.rs\n"
+            ),
+            "diff --git a/src/old.rs b/src/new.rs\n\
+             copy from src/old.rs\n\
+             copy to src/new.rs\n"
+        );
+    }
+
+    #[test]
+    fn spaces_and_quoted_paths_are_written_quoted() {
+        assert_eq!(
+            rewritten(
+                "diff --git i/sp ace.txt w/sp ace.txt\n\
+                 --- i/sp ace.txt\t\n\
+                 +++ w/sp ace.txt\t\n\
+                 diff --git \"i/caf\\303\\251\\tx\" \"w/caf\\303\\251\\tx\"\n\
+                 --- \"i/caf\\303\\251\\tx\"\n\
+                 +++ \"w/caf\\303\\251\\tx\"\n"
+            ),
+            "diff --git \"a/sp ace.txt\" \"b/sp ace.txt\"\n\
+             --- \"a/sp ace.txt\"\n\
+             +++ \"b/sp ace.txt\"\n\
+             diff --git \"a/caf\u{e9}\\tx\" \"b/caf\u{e9}\\tx\"\n\
+             --- \"a/caf\u{e9}\\tx\"\n\
+             +++ \"b/caf\u{e9}\\tx\"\n"
+        );
+    }
+
+    #[test]
+    fn a_header_fixed_only_by_its_file_headers_is_read_through_them() {
+        // Two different paths and no `rename` lines: split where the file headers say.
+        assert_eq!(
+            rewritten("diff --git i/x w/y w/z\n--- i/x w/y\n+++ w/z\n"),
+            "diff --git \"a/x w/y\" b/z\n--- \"a/x w/y\"\n+++ b/z\n"
+        );
+    }
+
+    #[test]
+    fn entries_whose_paths_cannot_be_read_fail_by_position_without_naming_a_path() {
+        let unreadable = |diff: &str| with_default_prefixes(diff).unwrap_err();
+        let ok_entry =
+            "diff --git a/ok.rs b/ok.rs\n--- a/ok.rs\n+++ b/ok.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        for (entry, reason) in [
+            // A custom prefix is indistinguishable from a directory.
+            (
+                "diff --git old/src/k.rs new/src/k.rs\n--- old/src/k.rs\n+++ new/src/k.rs\n",
+                "do not name the same paths",
+            ),
+            (
+                "diff --git old/src/k.rs new/src/j.rs\nrename from src/k.rs\nrename to src/j.rs\n",
+                "do not name the same paths",
+            ),
+            // Two different paths with no prefix and no rename lines split anywhere.
+            (
+                "diff --git src/k.rs src/j.rs\n",
+                "do not name the same paths",
+            ),
+            // `---`/`+++` lines that disagree with the header.
+            (
+                "diff --git i/k.rs w/k.rs\n--- i/k.rs\n+++ w/j.rs\n",
+                "do not name the same paths",
+            ),
+            (
+                "diff --git a/k.rs b/k.rs\n--- k.rs\n+++ k.rs\n",
+                "do not name the same paths",
+            ),
+            // A rename split at two places, with nothing to choose between them.
+            (
+                "diff --git a/x b/y b/z\nBinary files differ\n",
+                "more than one way",
+            ),
+            (
+                "diff --git a/k.rs b/k.rs\n--- \"a/bad\\777\"\n+++ b/k.rs\n",
+                "does not decode",
+            ),
+            (
+                "diff --git c/k.rs w/j.rs\nrename from k.rs\n",
+                "do not name both paths",
+            ),
+            ("diff --git a/only\n", "do not name the same paths"),
+        ] {
+            let diff = format!("{ok_entry}{entry}");
+            let error = unreadable(&diff);
+            assert_eq!((error.entry, error.line), (2, 7), "{entry}: {error}");
+            assert!(error.reason.contains(reason), "{entry}: {error}");
+            let message = error.to_string();
+            assert!(
+                message.starts_with("entry 2 (the `diff --git` header at line 7)"),
+                "{message}"
+            );
+            for path in ["k.rs", "j.rs", "only", "src/"] {
+                assert!(!message.contains(path), "{message}");
+            }
+        }
+        let first = unreadable("diff --git x/k.rs y/k.rs\n");
+        assert!(
+            matches!(
+                first,
+                UnreadableDiffEntry {
+                    entry: 1,
+                    line: 1,
+                    ..
+                }
+            ),
+            "{first}"
+        );
     }
 }

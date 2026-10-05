@@ -11956,3 +11956,216 @@ fn a_type_declared_beside_an_alias_stays_above_its_own_alias() {
         "{search}"
     );
 }
+
+/// `ok verify --diff` reads a diff the user made, under whatever prefix configuration they
+/// have. Mnemonic prefixes (`c/`, `i/`, `w/`) were read as part of each path and prefix-less
+/// paths were stripped of a real leading `a/` or `b/`, so the boundary check saw paths that
+/// were never changed and missed ones that were. Every configuration git offers now yields
+/// exactly the paths `git diff --name-only --no-renames` lists, and a prefix that cannot be
+/// read fails by entry position instead of being guessed.
+#[cfg(unix)]
+#[test]
+fn verify_reads_user_diffs_made_with_any_git_prefix_configuration() {
+    use std::collections::BTreeSet;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap()
+    }
+    fn write(repo: &std::path::Path, path: &str, content: &[u8]) {
+        let path = repo.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    fn chmod(repo: &std::path::Path, path: &str, mode: u32) {
+        fs::set_permissions(repo.join(path), fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = &temp.path().join("repo");
+    let out = &temp.path().join("out");
+    fs::create_dir_all(repo).unwrap();
+    fs::create_dir_all(out).unwrap();
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "cli@example.com"]);
+    git(repo, &["config", "user.name", "CLI Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    write(repo, ".gitignore", b".ok/\nok.toml\n");
+    write(
+        repo,
+        "Cargo.toml",
+        b"[package]\nname = \"ledger\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(repo, "src/lib.rs", b"pub fn settle() -> u32 {\n    1\n}\n");
+    write(repo, "src/gone.rs", b"pub fn gone() {}\n");
+    write(
+        repo,
+        "src/old.rs",
+        b"pub fn one() {}\npub fn two() {}\npub fn three() {}\npub fn four() {}\n",
+    );
+    write(repo, "docs/sp ace.md", b"# notes\n");
+    write(repo, "a/lib.rs", b"pub fn a() {}\n");
+    write(repo, "w/lib.rs", b"pub fn w() {}\n");
+    write(repo, "i/notes.md", b"index notes\n");
+    write(repo, "sp ace/x b/y.txt", b"one\n");
+    write(repo, "run.sh", b"#!/bin/sh\n");
+    write(repo, "assets/logo.bin", b"logo\0one\x01");
+    write(repo, "assets/old.bin", b"old\0blob\x02");
+    write(repo, "keys/signing.p12", b"p12\0one\x03");
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "--quiet", "-m", "initial"]);
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let plan_path = out.join("plan.json");
+    let plan = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "plan",
+            "change how the ledger settles",
+            "--format",
+            "json",
+        ]);
+        command
+    });
+    fs::write(&plan_path, plan).unwrap();
+
+    // Staged: an edit, a deletion, a text rename into `w/`, a binary rename into `a/`, additions
+    // under `a/` and `w/`, a mode change, binary edits (one secret-like) and names with spaces.
+    write(repo, "src/lib.rs", b"pub fn settle() -> u32 {\n    2\n}\n");
+    git(repo, &["rm", "--quiet", "src/gone.rs", "i/notes.md"]);
+    git(repo, &["mv", "src/old.rs", "w/new.rs"]);
+    write(
+        repo,
+        "w/new.rs",
+        b"pub fn one() {}\npub fn two() {}\npub fn three() {}\npub fn five() {}\n",
+    );
+    git(repo, &["mv", "assets/old.bin", "a/old.bin"]);
+    write(repo, "docs/sp ace.md", b"# notes\nmore\n");
+    write(repo, "a/lib.rs", b"pub fn a() {}\npub fn b() {}\n");
+    write(repo, "w/lib.rs", b"pub fn w() {}\npub fn i() {}\n");
+    write(repo, "a/added.rs", b"pub fn added() {}\n");
+    write(repo, "w/sp ace new.rs", b"pub fn spaced() {}\n");
+    write(repo, "assets/new.bin", b"new\0bin\x04");
+    write(repo, "sp ace/x b/y.txt", b"two\n");
+    chmod(repo, "run.sh", 0o755);
+    write(repo, "assets/logo.bin", b"logo\0two\x01");
+    write(repo, "keys/signing.p12", b"p12\0two\x03");
+    git(repo, &["add", "-A"]);
+    // Unstaged on top, so the index and the work tree differ too.
+    write(repo, "a/lib.rs", b"pub fn a() {}\npub fn c() {}\n");
+    write(repo, "w/lib.rs", b"pub fn w() {}\npub fn j() {}\n");
+    write(repo, "sp ace/x b/y.txt", b"three\n");
+    fs::remove_file(repo.join("docs/sp ace.md")).unwrap();
+    chmod(repo, "run.sh", 0o644);
+
+    let mnemonic = ["-c", "diff.mnemonicPrefix=true"];
+    let noprefix = ["-c", "diff.noprefix=true"];
+    let variants: [(&[&str], &[&str], &str); 9] = [
+        (&[], &["--cached"], "+++ b/a/added.rs"),
+        (&[], &["HEAD"], "diff --git a/w/lib.rs b/w/lib.rs"),
+        (
+            &[],
+            &["-R", "--cached"],
+            "diff --git b/a/added.rs a/a/added.rs",
+        ),
+        (&noprefix, &["--cached"], "diff --git a/added.rs a/added.rs"),
+        (&noprefix, &["HEAD"], "diff --git w/lib.rs w/lib.rs"),
+        (&mnemonic, &["--cached"], "diff --git c/a/lib.rs i/a/lib.rs"),
+        (&mnemonic, &["HEAD"], "diff --git c/w/lib.rs w/w/lib.rs"),
+        (&mnemonic, &[], "diff --git i/a/lib.rs w/a/lib.rs"),
+        (
+            &mnemonic,
+            &["-R", "HEAD"],
+            "diff --git w/w/lib.rs c/w/lib.rs",
+        ),
+    ];
+    let mut renames_seen = 0;
+    for (index, (config, range, marker)) in variants.into_iter().enumerate() {
+        let diff_args = [config, &["diff", "--find-renames"], range].concat();
+        let diff = git(repo, &diff_args);
+        assert!(diff.contains(marker), "{diff_args:?} wrote:\n{diff}");
+        renames_seen += usize::from(diff.contains("rename from "));
+        let names_args = [
+            &[
+                "-c",
+                "core.quotePath=false",
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+            ],
+            range,
+        ]
+        .concat();
+        let expected = git(repo, &names_args)
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(expected.len() >= 4, "{names_args:?}: {expected:?}");
+
+        let diff_path = out.join(format!("variant-{index}.diff"));
+        fs::write(&diff_path, &diff).unwrap();
+        let output = ok()
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "verify", "--plan"])
+            .arg(&plan_path)
+            .arg("--diff")
+            .arg(&diff_path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let report: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|err| panic!("{diff_args:?}: {err}\n{stdout}\n{stderr}"));
+        let changed = report["changed_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|path| path.as_str().unwrap().to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(changed, expected, "{diff_args:?}\n{diff}");
+    }
+    assert!(renames_seen >= 6, "the staged renames are detected");
+
+    // A custom prefix is indistinguishable from a directory: verify refuses rather than guesses,
+    // and names the entry by position, not by the path it could not read.
+    let custom = git(
+        repo,
+        &["diff", "--cached", "--src-prefix=old/", "--dst-prefix=new/"],
+    );
+    let custom_path = out.join("custom.diff");
+    fs::write(&custom_path, &custom).unwrap();
+    let refused = ok()
+        .arg("--repo")
+        .arg(repo)
+        .args(["--json", "verify", "--plan"])
+        .arg(&plan_path)
+        .arg("--diff")
+        .arg(&custom_path)
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("entry 1 (the `diff --git` header at line 1)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("added.rs"), "{stderr}");
+}

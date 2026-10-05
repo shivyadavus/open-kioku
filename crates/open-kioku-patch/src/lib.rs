@@ -16,7 +16,9 @@ use open_kioku_core::{
     Symbol, SymbolKind, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
-use open_kioku_git::unified_diff::{file_header_name, DiffLine, HunkScanner, MalformedDiff};
+use open_kioku_git::unified_diff::{
+    file_header_name, with_default_prefixes, DiffLine, HunkScanner, MalformedDiff,
+};
 use open_kioku_impact::ImpactEngine;
 use open_kioku_plan::ContractBuilder;
 use open_kioku_storage::{MetadataStore, OkStore, SearchIndex};
@@ -331,6 +333,7 @@ impl<'a> ChangeVerifier<'a> {
         plan: &PlanReport,
         input: VerifyChangeInput,
     ) -> Result<ChangeVerificationReport> {
+        let input = with_default_diff_prefixes(input)?;
         let changed_files = changed_files_from_input(&input);
         if changed_files.is_empty() {
             return Err(OkError::InvalidInput(
@@ -493,6 +496,7 @@ impl<'a> ContractVerifier<'a> {
         plan: &PlanReport,
         input: VerifyChangeInput,
     ) -> Result<ContractVerificationReport> {
+        let input = with_default_diff_prefixes(input)?;
         contract.validate().map_err(|err| {
             OkError::Config(format!("contract verification input is invalid: {err}"))
         })?;
@@ -1396,6 +1400,7 @@ pub fn diff_dependencies(
     contract: &ChangeContractV1,
     input: &VerifyChangeInput,
 ) -> Result<DependencyDeltaReport> {
+    let input = &with_default_diff_prefixes(input.clone())?;
     let changed_files = changed_files_from_input(input);
     let before = dependency_edges_from_index(store, &changed_files)?;
     let after = dependency_edges_from_worktree(repo, &changed_files)?;
@@ -2440,6 +2445,31 @@ impl DependencyDeltaClassificationKey for DependencyDeltaClassification {
             DependencyDeltaClassification::ViolatingDelta => "2-violating-delta",
         }
     }
+}
+
+/// The input with its diff's entries rewritten to git's default `a/` and `b/` prefixes, which
+/// every reader below assumes. A supplied diff can come from any git configuration: under
+/// `diff.mnemonicPrefix` a `w/src/lib.rs` would be read as a path of its own and `src/lib.rs`
+/// missed, and under `diff.noprefix` a real `a/` directory would be stripped. An entry whose
+/// paths cannot be read with certainty fails verification outright: a changed file the
+/// boundary check never sees is a pass it should not give.
+fn with_default_diff_prefixes(mut input: VerifyChangeInput) -> Result<VerifyChangeInput> {
+    let Some(diff) = input.unified_diff.as_deref() else {
+        return Ok(input);
+    };
+    match with_default_prefixes(diff) {
+        Ok(std::borrow::Cow::Borrowed(_)) => {}
+        Ok(std::borrow::Cow::Owned(diff)) => input.unified_diff = Some(diff),
+        Err(unreadable) => {
+            return Err(OkError::InvalidInput(format!(
+                "cannot read the changed paths of the supplied diff's {unreadable}. Verify will \
+                 not guess them, since a changed file it does not see cannot fail the boundary \
+                 check. Regenerate the diff with git's default, mnemonic or no-prefix paths \
+                 (for example `git diff --src-prefix=a/ --dst-prefix=b/`)"
+            )));
+        }
+    }
+    Ok(input)
 }
 
 /// Every path a unified diff adds, modifies or removes. A rename contributes both of its
@@ -5554,6 +5584,93 @@ rename to src/menu.rs
         assert!(err
             .to_string()
             .starts_with("invalid input: verify requires at least one changed file"));
+    }
+
+    /// A supplied diff can come from any prefix configuration. Mnemonic prefixes were read as
+    /// paths of their own, so `src/secrets/keys.rs` went unseen and the forbidden rule never
+    /// fired; prefix-less paths lost a real leading `a/` or `b/` directory.
+    #[test]
+    fn verify_reads_mnemonic_and_prefix_less_diffs_as_the_default_style() {
+        let plan = plan_forbidding_secrets(&["src/handler.rs", "a/lib.rs"]);
+        let mnemonic = "diff --git c/src/secrets/keys.rs i/src/secrets/keys.rs\n\
+                        --- c/src/secrets/keys.rs\n\
+                        +++ i/src/secrets/keys.rs\n\
+                        @@ -1 +1 @@\n\
+                        -old\n\
+                        +new\n\
+                        diff --git c/src/handler.rs i/src/handler.rs\n\
+                        new file mode 100644\n\
+                        --- /dev/null\n\
+                        +++ i/src/handler.rs\n\
+                        @@ -0,0 +1 @@\n\
+                        +fn checkout() {}\n";
+        let report = verify_diff(&plan, mnemonic);
+        assert_eq!(
+            report.changed_files,
+            vec![
+                PathBuf::from("src/handler.rs"),
+                PathBuf::from("src/secrets/keys.rs")
+            ]
+        );
+        assert_eq!(report.verdict, VerificationVerdict::Fail);
+        assert!(
+            report
+                .boundary_violations
+                .iter()
+                .any(|finding| finding.kind == "forbidden_boundary"
+                    && finding.path.as_deref() == Some(Path::new("src/secrets/keys.rs"))),
+            "{:?}",
+            report.boundary_violations
+        );
+
+        let prefix_less = "diff --git a/lib.rs a/lib.rs\n\
+                           --- a/lib.rs\n\
+                           +++ a/lib.rs\n\
+                           @@ -1 +1 @@\n\
+                           -old\n\
+                           +new\n\
+                           diff --git src/handler.rs src/handler.rs\n\
+                           Binary files src/handler.rs and src/handler.rs differ\n";
+        let report = verify_diff(&plan, prefix_less);
+        assert_eq!(
+            report.changed_files,
+            vec![PathBuf::from("a/lib.rs"), PathBuf::from("src/handler.rs")]
+        );
+        assert!(report.boundary_violations.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn verify_refuses_a_diff_entry_whose_paths_it_cannot_read() {
+        let store = RuntimeStore::new().without_runtime();
+        let diff = "diff --git a/src/handler.rs b/src/handler.rs\n\
+                    --- a/src/handler.rs\n\
+                    +++ b/src/handler.rs\n\
+                    @@ -1 +1 @@\n\
+                    -old\n\
+                    +new\n\
+                    diff --git old/src/secrets/keys.rs new/src/secrets/keys.rs\n\
+                    --- old/src/secrets/keys.rs\n\
+                    +++ new/src/secrets/keys.rs\n\
+                    @@ -1 +1 @@\n\
+                    -old\n\
+                    +new\n";
+        let err = ChangeVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &plan_forbidding_secrets(&["src/handler.rs"]),
+                VerifyChangeInput {
+                    unified_diff: Some(diff.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, OkError::InvalidInput(_)), "{err:?}");
+        let message = err.to_string();
+        assert!(
+            message.contains("entry 2 (the `diff --git` header at line 7)"),
+            "{message}"
+        );
+        assert!(!message.contains("keys.rs"), "{message}");
     }
 
     #[test]
