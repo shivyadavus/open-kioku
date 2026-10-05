@@ -3610,10 +3610,48 @@ pub struct SkippedPath {
     pub safe_to_show: bool,
 }
 
-/// Paths that hold key material or environment secrets, which are never read, whatever the
-/// file's language: `.env`, `.env.*`, `.aws`, `.ssh`, `id_rsa*`, `id_ed25519*`, `*.pem`,
-/// `*.key`, `*.p12`, `*.pfx`, `*.jks`, and `*.keystore`. Discovery skips them as
-/// `secret_policy` and the semantic corpus excludes them: one rule for both. A file merely
+/// The names `ssh-keygen` gives a key pair, one per key type. A path component starting with
+/// one is an SSH key unless it ends in a [`KEY_STEM_SOURCE_EXTENSIONS`] extension
+/// ([`is_secret_like_path`]).
+pub const SSH_KEY_STEMS: &[&str] = &["id_dsa", "id_ecdsa", "id_ed25519", "id_rsa", "id_xmss"];
+
+/// Programming-language source extensions the indexer reads. A name that starts with an
+/// [`SSH_KEY_STEMS`] stem and ends in one of these (`id_rsa_loader.py`) is read as source,
+/// while every other suffix (`.pub`, `.bak`, `.old`, `.txt`, `-cert.pub`, `_deploy`, `4096`) is how
+/// a key is copied or renamed. A name alone cannot prove a file holds no key, so source is not
+/// trusted on its name: `open-kioku-ingest::redaction::redact_private_keys` replaces any
+/// private-key PEM body in programming-language source before it is indexed. Every entry must
+/// be an extension `open-kioku-languages::detect_language` reads as a programming language, or
+/// one it does not read at all, which discovery never indexes (`cs` until C# is supported); a
+/// test there holds the two together, so no entry can name data, config or prose.
+pub const KEY_STEM_SOURCE_EXTENSIONS: &[&str] = &[
+    "cjs", "cs", "go", "java", "js", "jsx", "mjs", "py", "rs", "ts", "tsx",
+];
+
+/// Extensions of key and certificate material, a .NET strong-name key pair (`snk`) included.
+/// A name carrying one as any extension, the last or an earlier one, matches: `server.key`,
+/// but also `id_rsa.pem.ts`, `x.key.js` and `Ledger.snk.md`, a key renamed with another
+/// extension appended.
+pub const KEY_MATERIAL_EXTENSIONS: &[&str] =
+    &["jks", "key", "keystore", "p12", "pem", "pfx", "snk"];
+
+/// Paths that match a secret-path pattern, which are never read, whatever the file's language.
+/// A path matches when any component is one of:
+///
+/// - an environment file, `.env` or `.env.*` (`.env.production`, `.env.example`);
+/// - the `.aws` or `.ssh` directory;
+/// - an SSH key: a name starting with an [`SSH_KEY_STEMS`] stem (`id_rsa`, `id_rsa.pub`,
+///   `id_ed25519_deploy`, `id_rsa4096`), unless it ends in a [`KEY_STEM_SOURCE_EXTENSIONS`]
+///   extension (`id_rsa_loader.py` is code; #676);
+/// - key or certificate material by extension ([`KEY_MATERIAL_EXTENSIONS`]): `*.pem`, `*.key`,
+///   `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.snk`, as the last extension or an earlier one
+///   (`id_rsa.pem.ts`, `x.key.js`).
+///
+/// A .NET user-secrets store (`UserSecrets/<id>/secrets.json`) matches as well (#684).
+///
+/// Discovery skips them as `secret_policy` and the semantic corpus excludes them: one rule for
+/// both. The rule judges a path by its name alone and cannot know what a file holds, so a
+/// match is reported as a pattern match, never as a description of the content. A file merely
 /// named for a secret is not matched. A class named `CredentialsProviderTest` or a module
 /// named `secrets.go` is code (a name rule silently dropped 25 Java files from one
 /// repository), and a `secrets.yaml`, `credentials.json`, or `SECRETS.md` is indexed with its
@@ -3625,16 +3663,32 @@ pub fn is_secret_like_path(path: &Path) -> bool {
         value == ".env"
             || value.starts_with(".env.")
             || matches!(value.as_str(), ".aws" | ".ssh")
-            || value.starts_with("id_rsa")
-            || value.starts_with("id_ed25519")
-            || value.ends_with(".pem")
-            || value.ends_with(".key")
-            || value.ends_with(".p12")
-            || value.ends_with(".pfx")
-            || value.ends_with(".jks")
-            || value.ends_with(".keystore")
-            || value.ends_with(".snk")
+            || names_ssh_key(&value)
+            || has_key_material_extension(&value)
     }) || is_user_secrets_store(path)
+}
+
+/// `value` (lower-case) has a [`KEY_MATERIAL_EXTENSIONS`] entry as any of its extensions: a
+/// segment after a `.` that is not the name's first.
+fn has_key_material_extension(value: &str) -> bool {
+    value
+        .split('.')
+        .skip(1)
+        .any(|extension| KEY_MATERIAL_EXTENSIONS.contains(&extension))
+}
+
+/// `value` (lower-case) starts with an SSH key stem and does not end in a source extension.
+/// The stem is matched as a prefix, not a whole name, because keys are routinely renamed
+/// (`id_rsa_github`, `id_rsa.bak`, `id_rsa4096`); only the source-extension exemption narrows
+/// it.
+fn names_ssh_key(value: &str) -> bool {
+    SSH_KEY_STEMS.iter().any(|stem| {
+        value.strip_prefix(stem).is_some_and(|rest| {
+            !rest
+                .rsplit_once('.')
+                .is_some_and(|(_, extension)| KEY_STEM_SOURCE_EXTENSIONS.contains(&extension))
+        })
+    })
 }
 
 /// The caveat every search surface attaches when the index holds redacted values. A query for
@@ -3646,7 +3700,7 @@ pub fn redaction_search_caveat(redacted_files: Option<usize>) -> Option<String> 
     let redacted = redacted_files?;
     (redacted > 0).then(|| {
         format!(
-            "{redacted} data, config, or prose file(s) are indexed with secret-like values replaced by `[REDACTED]`, so a redacted value cannot be found by searching for it"
+            "{redacted} file(s) are indexed with secret-like values replaced by `[REDACTED]`, so a redacted value cannot be found by searching for it"
         )
     })
 }
@@ -3700,6 +3754,8 @@ mod secret_path_tests {
             "UserSecrets/7f3c2a1e-0b4d-4e8a-9c61-5d2f8e0a7b13/secrets.json",
             "ops/Microsoft/UserSecrets/ledger-dev/secrets.json",
             "ops/usersecrets/secrets.JSON",
+            // A key extension before the last is still one (#676), as for `id_rsa.pem.ts`.
+            "src/Ledger/Ledger.snk.md",
         ] {
             assert!(is_secret_like_path(Path::new(blocked)), "{blocked}");
         }
@@ -3713,7 +3769,6 @@ mod secret_path_tests {
             "UserSecrets",
             "docs/snk/notes.md",
             "src/Ledger/snk.cs",
-            "src/Ledger/Ledger.snk.md",
         ] {
             assert!(!is_secret_like_path(Path::new(indexed)), "{indexed}");
         }
@@ -3764,6 +3819,132 @@ mod secret_path_tests {
             "config/.environment.yaml",
         ] {
             assert!(!is_secret_like_path(Path::new(indexed)), "{indexed}");
+        }
+    }
+
+    /// Every row of the secret-path table in `docs/security-model.md` (#676). A key-file stem
+    /// is a prefix, so a renamed or copied key stays blocked; only a programming-source
+    /// extension takes a name that starts with one out of the rule.
+    #[test]
+    fn secret_path_table_blocks_keys_and_env_files_and_passes_source_named_after_them() {
+        let must_stay_blocked = [
+            // Environment files, a template included: one may hold real values.
+            ".env",
+            ".env.local",
+            ".env.production",
+            "config/.env.production",
+            ".env.example",
+            ".ENV.Production",
+            // Credential directories, whatever is under them.
+            ".aws/credentials",
+            ".aws/credentials.json",
+            ".ssh/config",
+            ".ssh/known_hosts",
+            ".ssh/build/keys.py",
+            // SSH keys under every `ssh-keygen` default name, public halves included.
+            "id_rsa",
+            "id_rsa.pub",
+            "id_dsa",
+            "id_ecdsa",
+            "id_ecdsa_sk",
+            "id_ed25519",
+            "id_ed25519.pub",
+            "id_ed25519_sk.pub",
+            "id_xmss",
+            "deploy/id_rsa",
+            "deploy/ID_RSA",
+            // A key renamed, copied, certified, or backed up keeps its stem.
+            "keys/id_rsa_github",
+            "keys/id_ed25519-work",
+            "keys/id_rsa4096",
+            "keys/id_rsa-cert.pub",
+            "keys/id_rsa.bak",
+            "keys/id_rsa.old",
+            "keys/id_rsa.orig",
+            "keys/id_rsa.txt",
+            "keys/id_rsa.md",
+            "keys/id_rsa.json",
+            "keys/id_rsa_loader.yaml",
+            // A directory named for a key blocks everything under it, source included.
+            "id_rsa/loader.py",
+            "keys/id_ed25519_deploy/main.go",
+            // A source extension does not rescue a non-stem pattern.
+            "src/.env.rs",
+            // Key and certificate material by extension.
+            "config/server.key",
+            "certs/tls.PEM",
+            "certs/ca.pem",
+            "certs/client.p12",
+            "certs/client.pfx",
+            "android/release.jks",
+            "android/release.keystore",
+            // A key extension before the last one: a key renamed with a source extension.
+            "keys/id_rsa.pem.ts",
+            "keys/x.key.js",
+            "certs/client.p12.py",
+            "android/release.jks.java",
+            "keys/id_rsa.key.cs",
+            "keys/ID_RSA.PEM.TS",
+            "certs/.pem",
+        ];
+        for blocked in must_stay_blocked {
+            assert!(
+                is_secret_like_path(Path::new(blocked)),
+                "{blocked} must stay blocked"
+            );
+        }
+
+        let now_pass = [
+            // Source named after a key type: blocked before #676.
+            "loaders/id_rsa_loader.py",
+            "src/id_rsa.rs",
+            "src/id_rsa_tool.rs",
+            "pkg/id_ed25519_signer.go",
+            "web/id_rsa_parser.ts",
+            "web/id_rsa_form.tsx",
+            "web/id_rsa.d.ts",
+            "lib/id_dsa.js",
+            "lib/id_ecdsa_util.mjs",
+            "lib/id_ecdsa_util.cjs",
+            "ui/id_rsa_view.jsx",
+            "codec/id_rsa_codec.java",
+            "src/IdRsa/id_rsa_loader.cs",
+            "loaders/ID_RSA_LOADER.PY",
+        ];
+        for source in now_pass {
+            assert!(
+                !is_secret_like_path(Path::new(source)),
+                "{source} must pass"
+            );
+        }
+
+        let still_pass = [
+            // Named for a secret, indexed with values redacted (#379); never path-blocked.
+            "secrets.yaml",
+            "config/credentials.yaml",
+            "credentials.json",
+            "docs/SECRETS.md",
+            "secret_key.txt",
+            "src/CredentialsProvider.java",
+            "internal/secrets.go",
+            // Near misses of an environment file or a key extension.
+            ".envrc",
+            "config/.environment.yaml",
+            "src/env.rs",
+            "src/keyboard.rs",
+            "src/monkey.rs",
+            "docs/key.md",
+            "src/pem_reader.rs",
+            "src/identity.rs",
+            "src/key.rs",
+            "src/pem.ts",
+            "src/keys.pemfile.rs",
+        ];
+        for ordinary in still_pass {
+            assert!(
+                !is_secret_like_path(Path::new(ordinary)),
+                "{ordinary} must pass"
+            );
         }
     }
 }
@@ -5540,9 +5721,10 @@ pub struct IndexQuality {
     /// rather than treat absence as full coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<IndexCoverage>,
-    /// Data, config and prose files indexed with at least one secret-like value replaced by
-    /// `[REDACTED]` before storage (`docs/security-model.md`). `null` on manifests written
-    /// before redaction existed: those indexes stored such files' values as read. Serialized
+    /// Files indexed with at least one secret-like value replaced by `[REDACTED]` before
+    /// storage: data, config and prose files, and source holding a private-key PEM block
+    /// (`docs/security-model.md`). `null` on manifests written before redaction existed: those
+    /// indexes stored such files' values as read. Serialized
     /// even when absent, so a client reading `quality.redacted_files ?? 0` cannot render an
     /// unredacted index as one with nothing to redact.
     #[serde(default)]

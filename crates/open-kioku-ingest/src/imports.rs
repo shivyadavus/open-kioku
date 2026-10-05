@@ -6843,11 +6843,12 @@ mod tests {
 
     #[test]
     fn a_manifest_named_root_discovery_skipped_without_a_path_still_withholds() {
-        // `[[bin]] path = "src/id_rsa_tool.rs"` is skipped as secret-like, and its skip is
-        // redacted, so no unindexed path names it; the manifest still does. It declares `cli`.
+        // `[[bin]] path = "src/.env.rs"` is skipped as secret-like (an environment-file
+        // name), and its skip is redacted, so no unindexed path names it; the
+        // manifest still does. It declares `cli`.
         let files = ["src/lib.rs", "src/cli.rs"].map(source_file);
         let project = rust_package_with_targets(CargoTargets {
-            roots: vec![PathBuf::from("src/id_rsa_tool.rs")],
+            roots: vec![PathBuf::from("src/.env.rs")],
             not_autodiscovered: Vec::new(),
         });
         let scopes = open_kioku_resolution::ScopeIndex::build(Vec::new());

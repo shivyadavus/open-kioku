@@ -5267,6 +5267,418 @@ fn impact_path_since_never_names_the_secret_like_path_a_file_was_renamed_to() {
     assert!(!mcp.to_string().contains(".env.production"), "{mcp:#}");
 }
 
+/// Source named after a key type is indexed, and its change reported, on every surface that
+/// reads a diff; an environment file changed beside it is counted on each and named on none
+/// (#676).
+#[test]
+fn source_named_after_a_key_type_is_reported_and_an_env_file_beside_it_is_withheld() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+    fn mcp_call(repo: &std::path::Path, tool: &str, arguments: serde_json::Value) -> String {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments}
+        })
+        .to_string();
+        run_with_stdin(
+            {
+                let mut command = ok();
+                command.arg("--repo").arg(repo).arg("mcp").arg("serve");
+                command
+            },
+            &(request + "\n"),
+        )
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("app")).unwrap();
+    fs::create_dir_all(repo.join("loaders")).unwrap();
+    fs::write(
+        repo.join("app/main.py"),
+        "from loaders.id_rsa_loader import load_key\n\n\ndef run():\n    return load_key()\n",
+    )
+    .unwrap();
+    fs::write(repo.join("loaders/__init__.py"), "").unwrap();
+    fs::write(
+        repo.join("loaders/id_rsa_loader.py"),
+        "def load_key():\n    return \"keys\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join(".env.production"), "LEDGER_TOKEN=first\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "cli@example.com"]);
+    git(repo, &["config", "user.name", "CLI Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "--quiet", "-m", "initial"]);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    // Indexed: the loader is searchable by its function; the environment file is not.
+    let found = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "load_key"]);
+        command
+    });
+    assert!(found.contains("loaders/id_rsa_loader.py"), "{found}");
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args(["--json", "status"]);
+        command
+    });
+    assert!(!status.contains(".env.production"), "{status}");
+    let token = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "LEDGER_TOKEN"]);
+        command
+    });
+    assert!(!token.contains(".env.production"), "{token}");
+
+    fs::write(
+        repo.join("loaders/id_rsa_loader.py"),
+        "def load_key():\n    return \"rotated\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join(".env.production"), "LEDGER_TOKEN=second\n").unwrap();
+
+    let impact_text = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "impact", "--since", "HEAD"]);
+        command
+    });
+    let impact: serde_json::Value = serde_json::from_str(&impact_text).unwrap();
+    let changed = impact["changed_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|change| change["new_path"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(changed, vec!["loaders/id_rsa_loader.py"], "{impact:#}");
+    assert!(
+        impact["impact_reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|report| report["target"] == "loaders/id_rsa_loader.py"),
+        "{impact:#}"
+    );
+    assert_eq!(impact["changed_paths_withheld"], 1, "{impact:#}");
+    let caveats = impact["caveats"].to_string();
+    assert!(
+        caveats.contains("1 changed path(s) match a secret-path pattern"),
+        "{caveats}"
+    );
+    assert!(!caveats.contains("key material"), "{caveats}");
+    assert!(!impact_text.contains(".env.production"), "{impact_text}");
+
+    let mcp_impact = mcp_call(
+        repo,
+        "impact_analysis",
+        serde_json::json!({"since": "HEAD"}),
+    );
+    let mcp_value: serde_json::Value = serde_json::from_str(mcp_impact.trim()).unwrap();
+    let structured = &mcp_value["result"]["structuredContent"];
+    for key in ["changed_files", "changed_paths_withheld", "caveats"] {
+        assert_eq!(structured[key], impact[key], "{key}: {structured:#}");
+    }
+    assert!(!mcp_impact.contains(".env.production"), "{mcp_impact}");
+
+    let plan = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args([
+            "plan",
+            "rotate the loader",
+            "--since",
+            "HEAD",
+            "--format",
+            "json",
+        ]);
+        command
+    });
+    assert!(plan.contains("loaders/id_rsa_loader.py"), "{plan}");
+    assert!(plan.contains("1 secret-like changed path(s)"), "{plan}");
+    assert!(!plan.contains(".env.production"), "{plan}");
+
+    let mcp_plan = mcp_call(
+        repo,
+        "plan_change",
+        serde_json::json!({"task": "rotate the loader", "since": "HEAD"}),
+    );
+    assert!(mcp_plan.contains("loaders/id_rsa_loader.py"), "{mcp_plan}");
+    assert!(
+        mcp_plan.contains("1 secret-like changed path(s)"),
+        "{mcp_plan}"
+    );
+    assert!(!mcp_plan.contains(".env.production"), "{mcp_plan}");
+}
+
+/// A private key pasted into source never reaches a store or an output, whatever the file is
+/// named: a file named after a key type (`id_rsa.py`, `id_rsa.rs`) and an ordinary test
+/// fixture are indexed with the key's body replaced, a key renamed with a source extension
+/// appended (`id_rsa.pem.ts`) is not indexed at all, and C# source (`id_rsa_loader.cs`) holds
+/// no key body whether or not C# is indexed (#676).
+#[test]
+fn private_keys_in_source_never_reach_the_index_search_or_snapshot() {
+    const BASE64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    // Key bodies built at run time, so no string in the repository reads as a key.
+    let body = |seed: usize| {
+        (0..3)
+            .map(|line| striding_token(BASE64, 64, 7 + 2 * line, seed + line))
+            .collect::<Vec<_>>()
+    };
+    let (python, rust, renamed, fixture, csharp) =
+        (body(1), body(11), body(21), body(31), body(41));
+    // The shapes the #689 review found the first source rule kept.
+    let (concatenated, commented, statements, lower, spaced) =
+        (body(51), body(61), body(71), body(81), body(91));
+    let lines = [
+        &python,
+        &rust,
+        &renamed,
+        &fixture,
+        &csharp,
+        &concatenated,
+        &commented,
+        &statements,
+        &lower,
+        &spaced,
+    ]
+    .into_iter()
+    .flatten()
+    .cloned()
+    .collect::<Vec<_>>();
+    // No 20-character stretch of any key line may survive anywhere, not only whole lines.
+    let windows = lines
+        .iter()
+        .flat_map(|line| {
+            (0..=line.len() - 20).map(move |start| line[start..start + 20].to_string())
+        })
+        .collect::<Vec<_>>();
+    let secrets = windows.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    for dir in ["keys", "src", "tests/fixtures"] {
+        fs::create_dir_all(repo.join(dir)).unwrap();
+    }
+    fs::write(
+        repo.join("keys/id_rsa.py"),
+        format!(
+            "KEY = \"\"\"-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----\"\"\"\n\n\ndef load_ledger_key():\n    return KEY\n",
+            python.join("\n")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/id_rsa.rs"),
+        format!(
+            "pub const LEDGER_KEY: &str = \"-----BEGIN PRIVATE KEY-----\\n{}\\n-----END PRIVATE KEY-----\\n\";\n\npub fn ledger_key() -> &'static str {{\n    LEDGER_KEY\n}}\n",
+            rust.join("\\n")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("keys/id_rsa.pem.ts"),
+        format!(
+            "export const renamedLedgerKey = `-----BEGIN EC PRIVATE KEY-----\n{}\n-----END EC PRIVATE KEY-----`;\n",
+            renamed.join("\n")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("tests/fixtures/keys_fixture.py"),
+        format!(
+            "FIXTURE_KEY = (\n    \"-----BEGIN OPENSSH PRIVATE KEY-----\\n\"\n{}    \"-----END OPENSSH PRIVATE KEY-----\\n\"\n)\n\n\ndef fixture_ledger_key():\n    return FIXTURE_KEY\n",
+            fixture
+                .iter()
+                .map(|line| format!("    \"{line}\\n\"\n"))
+                .collect::<String>()
+        ),
+    )
+    .unwrap();
+    // C# source named after a key type: indexed once C# is a language the index reads, and
+    // then with the key's body replaced like any other source; never stored as written.
+    fs::write(
+        repo.join("src/id_rsa_loader.cs"),
+        format!(
+            "public static class LedgerKeys\n{{\n    private const string Key = @\"-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----\";\n}}\n",
+            csharp.join("\n")
+        ),
+    )
+    .unwrap();
+    // Two literals concatenated per line, a trailing comment per line, and a BEGIN constant
+    // followed by code with the body in later statements.
+    fs::write(
+        repo.join("src/ledger_keys.js"),
+        format!(
+            "export const concatenated =\n  '-----BEGIN RSA PRIVATE KEY-----\\n' +\n{}  '-----END RSA PRIVATE KEY-----';\n\nexport const parts = [\n  '-----BEGIN PRIVATE KEY-----',\n{}  '-----END PRIVATE KEY-----',\n];\n\nconst KEY = '-----BEGIN RSA PRIVATE KEY-----'; const X = 1;\n{}const END = '-----END RSA PRIVATE KEY-----';\n\nexport function ledgerKeyParts() {{\n  return parts;\n}}\n",
+            concatenated
+                .iter()
+                .map(|line| {
+                    let (left, right) = line.split_at(line.len() / 2);
+                    format!("  '{left}' + '{right}\\n' +\n")
+                })
+                .collect::<String>(),
+            commented
+                .iter()
+                .enumerate()
+                .map(|(index, line)| format!("  '{line}', // part {index}\n"))
+                .collect::<String>(),
+            statements
+                .iter()
+                .enumerate()
+                .map(|(index, line)| format!("const BODY{index} = '{line}';\n"))
+                .collect::<String>()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("tests/fixtures/lower_key.py"),
+        format!(
+            "LOWER_KEY = \"\"\"-----begin rsa private key-----\n{}\n-----end rsa private key-----\"\"\"\n\n\ndef lower_ledger_key():\n    return LOWER_KEY\n",
+            lower.join("\n")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/spaced_key.rs"),
+        format!(
+            "pub const SPACED_KEY: &str = \"-----BEGIN RSA  PRIVATE KEY-----\n{}\n-----END RSA  PRIVATE KEY-----\";\n\npub fn spaced_ledger_key() -> &'static str {{\n    SPACED_KEY\n}}\n",
+            spaced.join("\n")
+        ),
+    )
+    .unwrap();
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    // The source files are indexed and their code is searchable; the renamed key is not.
+    for (query, path) in [
+        ("load_ledger_key", "keys/id_rsa.py"),
+        ("ledger_key", "src/id_rsa.rs"),
+        ("fixture_ledger_key", "tests/fixtures/keys_fixture.py"),
+        ("ledgerKeyParts", "src/ledger_keys.js"),
+        ("lower_ledger_key", "tests/fixtures/lower_key.py"),
+        ("spaced_ledger_key", "src/spaced_key.rs"),
+    ] {
+        let found = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", query]);
+            command
+        });
+        assert!(found.contains(path), "{query}: {found}");
+        assert_secrets_absent(&format!("ok search {query}"), &found, &secrets);
+    }
+    let renamed_search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "renamedLedgerKey"]);
+        command
+    });
+    assert!(
+        !renamed_search.contains("id_rsa.pem.ts"),
+        "{renamed_search}"
+    );
+    for line in &lines {
+        let by_value = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", line]);
+            command
+        });
+        assert_secrets_absent("ok search by key line", &by_value, &secrets);
+    }
+
+    // SQLite and its WAL hold chunk text uncompressed, so their bytes are checked directly.
+    for entry in walkdir::WalkDir::new(repo.join(".ok")) {
+        let entry = entry.unwrap();
+        if entry.file_type().is_file() {
+            let bytes = fs::read(entry.path()).unwrap();
+            assert_secrets_absent(
+                &entry.path().display().to_string(),
+                &String::from_utf8_lossy(&bytes),
+                &secrets,
+            );
+        }
+    }
+    let lexical =
+        tantivy_stored_texts_and_terms(&open_kioku_search_tantivy::default_index_dir(repo));
+    assert!(
+        lexical.iter().any(|text| text.contains("load_ledger_key")),
+        "the lexical index holds the source"
+    );
+    assert_secrets_absent("tantivy", &lexical.join("\n"), &secrets);
+
+    for quality in ["best", "fast"] {
+        let exported = run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).args([
+                "--json",
+                "snapshot",
+                "export",
+                "--quality",
+                quality,
+            ]);
+            command
+        });
+        assert_secrets_absent("snapshot export report", &exported, &secrets);
+        let artifact = fs::File::open(repo.join(".ok/artifacts/index.snapshot.zst")).unwrap();
+        let database = zstd::decode_all(artifact).unwrap();
+        let database = String::from_utf8_lossy(&database);
+        assert!(
+            database.contains("load_ledger_key"),
+            "the artifact holds the source"
+        );
+        assert_secrets_absent(
+            &format!("snapshot artifact ({quality})"),
+            &database,
+            &secrets,
+        );
+    }
+}
+
 #[test]
 fn index_mode_is_reported_by_index_and_status_json() {
     let temp = tempfile::tempdir().unwrap();
@@ -10768,7 +11180,7 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
     });
     assert!(
         indexed.contains(
-            "redaction: 1 data, config, or prose file(s) indexed with secret-like values replaced by [REDACTED]"
+            "redaction: 1 file(s) indexed with secret-like values replaced by [REDACTED]"
         ),
         "{indexed}"
     );
@@ -10940,10 +11352,7 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
         .expect("doctor has a redaction check");
     assert_eq!(check["status"], "pass", "{check}");
     assert!(
-        check["message"]
-            .as_str()
-            .unwrap()
-            .starts_with("1 data, config, or prose file(s)"),
+        check["message"].as_str().unwrap().starts_with("1 file(s)"),
         "{check}"
     );
 

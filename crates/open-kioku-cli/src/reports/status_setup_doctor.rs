@@ -1680,7 +1680,7 @@ fn redaction_summary(quality: &open_kioku_core::IndexQuality) -> String {
         // key that reads as a quantity, or a format the index does not read.
         Some(0) => "no value matched the redaction rules in the indexed data, config, or prose files (see docs/security-model.md for what the rules cover)".to_string(),
         Some(count) => format!(
-            "{} data, config, or prose file(s) indexed with secret-like values replaced by [REDACTED]",
+            "{} file(s) indexed with secret-like values replaced by [REDACTED]",
             group_thousands(count)
         ),
         None => "not recorded; this index predates secret-value redaction, so its data, config, and prose files were stored as read".to_string(),
