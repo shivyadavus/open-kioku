@@ -686,6 +686,32 @@ mod tests {
         assert!(is_relevant_path(&pruner, &root.join("tools/dist/emit.py")));
     }
 
+    /// An edit inside a checked-out submodule is another repository's, so it re-indexes
+    /// nothing here; the index never held its files (#677).
+    #[test]
+    fn ignores_edits_inside_a_submodule() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("vendor/ledger/src")).unwrap();
+        fs::write(
+            root.join("vendor/ledger/.git"),
+            "gitdir: ../../.git/modules/ledger\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("vendor/pending")).unwrap();
+        let pruner = DiscoveryPruner::new(root, &OkConfig::default()).unwrap();
+        assert!(!is_relevant_path(
+            &pruner,
+            &root.join("vendor/ledger/src/lib.rs")
+        ));
+        assert!(is_relevant_path(
+            &pruner,
+            &root.join("vendor/pending/lib.rs")
+        ));
+        assert!(is_relevant_path(&pruner, &root.join("src/lib.rs")));
+    }
+
     #[test]
     fn incremental_reindex_refuses_incompatible_semantics_and_preserves_manifest() {
         let temp = tempfile::tempdir().unwrap();

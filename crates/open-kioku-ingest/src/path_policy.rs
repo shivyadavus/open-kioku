@@ -199,16 +199,21 @@ pub fn record_excluded_indexed_file(
 /// discovery here prunes (`dirs`, each with its reason), as `ok index` here would have
 /// recorded them. Under an undeclared build directory, the weak rule, a file stays discovered
 /// and is skipped as `pruned`: an omission, so the coverage it costs is visible. Under one
-/// pruned on strong evidence, or under `.git`/`.ok` (no reason), discovery counts no file, so
-/// the file leaves the ratio altogether. Each directory is named in the coverage record and
-/// skipped paths, unless its path is secret-like, when it is only counted.
+/// pruned on strong evidence or as a submodule, or under `.git`/`.ok` (no reason), discovery
+/// counts no file, so the file leaves the ratio altogether. Each directory is named in the
+/// coverage record and skipped paths, unless its path is secret-like, when it is only counted.
 pub fn record_pruned_indexed_files(
     quality: &mut IndexQuality,
     files: &[(File, Option<PruneReason>)],
     dirs: &BTreeMap<PathBuf, PruneReason>,
 ) {
     for (file, reason) in files {
-        let weak = reason.is_some_and(PruneReason::counts_tracked_source);
+        // A file under a submodule here was the exporter's source, not this checkout's: the
+        // import cannot ask Git whether this repository tracks it, and under a real submodule
+        // it does not, so it leaves the ratio as under any strong rule.
+        let weak = reason.is_some_and(|reason| {
+            reason.counts_tracked_source() && reason != PruneReason::Submodule
+        });
         if weak {
             quality.skipped_paths.push(SkippedPath {
                 path: file.path.clone(),

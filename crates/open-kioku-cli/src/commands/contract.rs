@@ -962,7 +962,7 @@ fn verify_saved_plan_boundary(
         if let Some(rule) = boundary
             .forbidden_rules
             .iter()
-            .find(|rule| boundary_pattern_matches(&rule.pattern, path))
+            .find(|rule| open_kioku_patch::forbidden_rule_matches(rule, path))
         {
             errors.push(format!(
                 "forbidden boundary edit: {path} matches `{}` ({})",
@@ -1017,29 +1017,3 @@ fn normalize_boundary_path(path: &Path) -> String {
     raw.trim_start_matches("./").to_string()
 }
 
-fn boundary_pattern_matches(pattern: &str, path: &str) -> bool {
-    let pattern = pattern.trim_start_matches("./").replace('\\', "/");
-    if pattern == path {
-        return true;
-    }
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        if let Some(middle) = prefix.strip_prefix("**/") {
-            return path == middle
-                || path.starts_with(&format!("{middle}/"))
-                || path.contains(&format!("/{middle}/"));
-        }
-        return path == prefix || path.starts_with(&format!("{prefix}/"));
-    }
-    if pattern.contains('*') {
-        let mut remainder = path;
-        for part in pattern.split('*').filter(|part| !part.is_empty()) {
-            if let Some(index) = remainder.find(part) {
-                remainder = &remainder[index + part.len()..];
-            } else {
-                return false;
-            }
-        }
-        return true;
-    }
-    false
-}

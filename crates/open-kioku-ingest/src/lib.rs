@@ -1939,7 +1939,9 @@ impl ScanLedger {
     /// with the Git-tracked programming-language files under it counted. Tracked source under a
     /// `build` or `dist` pruned only because nothing declares it may be a misclassified source
     /// directory, so each such file is discovered and skipped (`pruned`, or the policy that
-    /// excludes it anyway). Under a directory pruned on strong evidence (a cache tag, a build
+    /// excludes it anyway). So is tracked source under a directory pruned as a submodule: Git
+    /// tracks no file under a real one, so these are this repository's files behind a stray
+    /// `.git`. Under a directory pruned on strong evidence (a cache tag, a build
     /// manifest beside it, installed packages) committed files are a published bundle or
     /// vendored packages: counted on the directory, never against the ratio.
     fn record_pruned_dirs(

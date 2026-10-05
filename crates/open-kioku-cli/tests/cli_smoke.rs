@@ -2546,6 +2546,283 @@ fn snapshot_import_prunes_what_the_importers_keep_dirs_does_not_keep() {
     );
 }
 
+/// A checked-out submodule is another repository: `ok index` prunes it as `submodule` rather
+/// than failing on `git check-ignore` ("Pathspec ... is in submodule", #677), and a snapshot
+/// that served its path as this repository's source, from before it became a submodule,
+/// imports with that path pruned rather than failing the same way.
+#[test]
+fn a_checked_out_submodule_is_indexed_around_and_reported() {
+    let temp = tempfile::tempdir().unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        fs::create_dir_all(dir).unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.email=cli@example.com",
+                "-c",
+                "user.name=CLI Test",
+                "-c",
+                "commit.gpgsign=false",
+                // Git refuses a local-path submodule source by default since 2.38.1.
+                "-c",
+                "protocol.file.allow=always",
+            ])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    let library = "pub fn vendored_ledger_marker() {}\n";
+    let source = temp.path().join("ledger");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("lib.rs"), library).unwrap();
+    git(&source, &["init", "--quiet"]);
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "--quiet", "-m", "ledger"]);
+    git(
+        temp.path(),
+        &["clone", "--quiet", "--bare", "ledger", "ledger.git"],
+    );
+
+    // The exporter's checkout held the library as plain committed files.
+    let repo = temp.path().join("app");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("libs/ledger")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub struct Worker;\n").unwrap();
+    fs::write(repo.join("libs/ledger/lib.rs"), library).unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(&repo);
+        command
+    });
+    commit_all(&repo, "initial");
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+    export_snapshot(&repo);
+
+    // Now it is a checked-out submodule.
+    git(&repo, &["rm", "-r", "--quiet", "libs/ledger"]);
+    let bare = temp.path().join("ledger.git");
+    git(
+        &repo,
+        &[
+            "submodule",
+            "--quiet",
+            "add",
+            bare.to_str().unwrap(),
+            "libs/ledger",
+        ],
+    );
+    git(&repo, &["commit", "--quiet", "-m", "ledger as a submodule"]);
+    assert!(repo.join("libs/ledger/.git").is_file());
+    assert!(repo.join("libs/ledger/lib.rs").is_file());
+
+    let submodule = serde_json::json!([{
+        "path": "libs/ledger",
+        "reason": "submodule",
+        "tracked_source_files": 0
+    }]);
+    let searched_paths = |repo: &std::path::Path| {
+        run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", "vendored_ledger_marker"]);
+            command
+        })
+    };
+
+    let imported = import_snapshot_json(&repo, &[]);
+    assert_eq!(
+        imported["policy_filtered_by_source"],
+        serde_json::json!({"pruned": 1}),
+        "{imported}"
+    );
+    let status = status_json(&repo);
+    // The import cannot ask Git what this checkout tracks under it.
+    assert_eq!(
+        status["coverage"]["pruned"],
+        serde_json::json!([{"path": "libs/ledger", "reason": "submodule"}]),
+        "{status}"
+    );
+    assert!(!searched_paths(&repo).contains("libs/ledger"));
+
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+    let status = status_json(&repo);
+    assert_eq!(status["coverage"]["pruned"], submodule, "{status}");
+    assert_eq!(status["coverage"]["pruned_dirs"], 1, "{status}");
+    assert!(!searched_paths(&repo).contains("libs/ledger"));
+}
+
+/// Bumping a submodule edits only its gitlink. The plan forbids the files under the submodule,
+/// not that path, so `ok verify --git` reports the bump as `out_of_boundary`, which evidence
+/// admits, instead of a `forbidden_boundary` that nothing can (#677).
+#[test]
+fn a_submodule_bump_is_out_of_boundary_and_evidence_admits_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        fs::create_dir_all(dir).unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.email=cli@example.com",
+                "-c",
+                "user.name=CLI Test",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "protocol.file.allow=always",
+            ])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    let source = temp.path().join("ledger");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("lib.rs"), "pub fn ledger_total() {}\n").unwrap();
+    git(&source, &["init", "--quiet"]);
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "--quiet", "-m", "ledger"]);
+    git(
+        temp.path(),
+        &["clone", "--quiet", "--bare", "ledger", "ledger.git"],
+    );
+
+    let repo = temp.path().join("app");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub struct Worker;\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(&repo);
+        command
+    });
+    commit_all(&repo, "initial");
+    let bare = temp.path().join("ledger.git");
+    git(
+        &repo,
+        &[
+            "submodule",
+            "--quiet",
+            "add",
+            bare.to_str().unwrap(),
+            "ext/ledger",
+        ],
+    );
+    git(
+        &repo,
+        &["commit", "--quiet", "-m", "add the ledger submodule"],
+    );
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+
+    let plan_json = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).args([
+            "plan",
+            "bump the ext/ledger submodule",
+            "--format",
+            "json",
+        ]);
+        command
+    });
+    let plan: serde_json::Value = serde_json::from_str(&plan_json).unwrap();
+    let rule = plan["recommended_change_boundary"]["forbidden_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rule| rule["pattern"] == "ext/ledger/**")
+        .unwrap_or_else(|| panic!("the submodule's files are forbidden: {plan_json}"))
+        .clone();
+    assert_eq!(
+        rule["evidence_refs"],
+        serde_json::json!(["coverage:pruned:ext/ledger"])
+    );
+    let reason = rule["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("edits `ext/ledger` itself, which this rule does not cover"),
+        "{reason}"
+    );
+    let plan_path = temp.path().join("plan.json");
+    fs::write(&plan_path, &plan_json).unwrap();
+
+    // Move the submodule to a new commit.
+    git(
+        &repo.join("ext/ledger"),
+        &["commit", "--quiet", "--allow-empty", "-m", "bump"],
+    );
+    let verify = |evidence: Option<&str>| {
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .args(["--json", "verify", "--plan"])
+            .arg(&plan_path)
+            .arg("--git");
+        if let Some(evidence) = evidence {
+            command.args(["--evidence-ref", evidence]);
+        }
+        command.output().expect("verify should run")
+    };
+    let findings_at = |report: &serde_json::Value, field: &str, kind: &str| {
+        report[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|finding| finding["path"] == "ext/ledger" && finding["kind"] == kind)
+            .count()
+    };
+
+    let output = verify(None);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{stdout}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        report["changed_files"],
+        serde_json::json!(["ext/ledger"]),
+        "{stdout}"
+    );
+    assert_eq!(
+        findings_at(&report, "boundary_violations", "out_of_boundary"),
+        1,
+        "{stdout}"
+    );
+    assert_eq!(
+        findings_at(&report, "boundary_violations", "forbidden_boundary"),
+        0,
+        "{stdout}"
+    );
+
+    let output = verify(Some("coverage:pruned:ext/ledger"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        report["boundary_violations"].as_array().unwrap().is_empty(),
+        "{stdout}"
+    );
+    assert_eq!(
+        findings_at(&report, "warnings", "boundary_expansion"),
+        1,
+        "{stdout}"
+    );
+}
+
 /// An import that removes a path the local policy excludes leaves nothing on disk that names
 /// it (#549): not the facts other files hold about its symbols, which spell its module path
 /// (`internal::vault::keys::KeyAnchored`) where no path glob matches; not the graph nodes

@@ -4189,6 +4189,11 @@ pub enum PruneReason {
     Dependencies,
     /// A Python environment: `.venv` or `venv` holding `pyvenv.cfg` or `conda-meta`.
     VirtualEnv,
+    /// A nested Git work tree inside this repository: a checked-out submodule, or a repository
+    /// cloned or a worktree added inside it. Git records at most a gitlink for it, never its
+    /// files, so its content is another repository's source, and neither this repository's
+    /// diffs nor `ok verify` see an edit inside it.
+    Submodule,
 }
 
 impl PruneReason {
@@ -4199,13 +4204,17 @@ impl PruneReason {
             Self::UndeclaredBuildDir => "undeclared-build-dir",
             Self::Dependencies => "dependencies",
             Self::VirtualEnv => "virtual-env",
+            Self::Submodule => "submodule",
         }
     }
 
     /// Whether git-tracked source under a directory pruned for this reason is counted as
-    /// missing from the index. Only the weak rule's guess can hide real source.
+    /// missing from the index. Only the weak rule's guess can hide real source, and a nested
+    /// work tree that is not a submodule: Git tracks only a real submodule's gitlink, never a
+    /// file under it, so a tracked file there means this repository owns the directory and a
+    /// stray `.git` (a `git init`, a tool's scratch clone) cut it from the walk.
     pub fn counts_tracked_source(self) -> bool {
-        self == Self::UndeclaredBuildDir
+        matches!(self, Self::UndeclaredBuildDir | Self::Submodule)
     }
 }
 
@@ -4243,9 +4252,9 @@ impl PrunedDir {
 /// files under a `build` or `dist` pruned only because nothing declares it (each also skipped
 /// as `pruned`, so the index visibly lacks them). Two things the walk cannot see are counted
 /// beside the ratio so it is never read as more than it is: `pruned_dirs`, directories cut
-/// from the walk as build output or dependencies (`.git` and `.ok` are not counted, they are
-/// never user source), named in `pruned`; and `walk_errors`, directory reads that failed,
-/// whose files were never discovered. Untracked build output, and anything under a
+/// from the walk as build output, dependencies or submodules (`.git` and `.ok` are not counted,
+/// they are never user source), named in `pruned`; and `walk_errors`, directory reads that
+/// failed, whose files were never discovered. Untracked build output, and anything under a
 /// directory pruned on strong evidence (a cache tag, a build manifest beside it), is never
 /// counted against the ratio. Files
 /// whose language is unknown are not source files and are not counted; their skips remain
@@ -4264,7 +4273,8 @@ pub struct IndexCoverage {
     pub skipped: BTreeMap<SkipReason, usize>,
     #[serde(default)]
     pub by_language: BTreeMap<String, LanguageCoverage>,
-    /// Directories pruned before discovery as build output or dependencies, listed or not.
+    /// Directories pruned before discovery as build output, dependencies or submodules, listed
+    /// or not.
     #[serde(default)]
     pub pruned_dirs: usize,
     /// The pruned directories by path: undeclared build directories holding tracked source
@@ -4535,7 +4545,8 @@ impl IndexCoverage {
         self.skipped.get(&SkipReason::Pruned).copied().unwrap_or(0)
     }
 
-    /// Listed undeclared build directories that hold tracked source, most first.
+    /// Listed directories whose tracked source counts as missing (undeclared build directories,
+    /// and nested work trees that are not submodules) and that hold some, most first.
     pub fn pruned_source_dirs(&self) -> Vec<&PrunedDir> {
         self.pruned
             .iter()
@@ -4910,8 +4921,17 @@ impl IndexCoverage {
         let mut caveats = Vec::new();
         let source_dirs = self.pruned_source_dirs();
         if self.pruned_source_files() > 0 {
+            let nested = source_dirs
+                .iter()
+                .filter(|dir| dir.reason == PruneReason::Submodule)
+                .count();
+            let kind = match nested {
+                0 => "undeclared build",
+                all if all == source_dirs.len() => "nested repository",
+                _ => "pruned",
+            };
             caveats.push(format!(
-                "{} git-tracked source {} not indexed under undeclared build {}: {}",
+                "{} git-tracked source {} not indexed under {kind} {}: {}",
                 group_thousands(self.pruned_source_files()),
                 if self.pruned_source_files() == 1 {
                     "file"
@@ -4942,10 +4962,42 @@ impl IndexCoverage {
                     group_thousands(self.pruned_dirs)
                 ));
             } else {
+                // A submodule is another repository, not output: the lead names it only when one
+                // is listed, and among build directories each one says which it is.
+                let submodules = self
+                    .pruned
+                    .iter()
+                    .filter(|dir| dir.reason == PruneReason::Submodule)
+                    .count();
+                let (kinds, mark_submodules) = match submodules {
+                    0 => ("build output or dependencies", false),
+                    1 if self.pruned_dirs == 1 => ("a submodule", false),
+                    all if all == self.pruned.len() && self.pruned_unlisted == 0 => {
+                        ("submodules", false)
+                    }
+                    _ => ("build output, dependencies or submodules", true),
+                };
                 caveats.push(format!(
-                    "{} {noun} pruned as build output or dependencies: {}",
+                    "{} {noun} pruned as {kinds}: {}",
                     group_thousands(self.pruned_dirs),
-                    name_some(self.pruned.iter().map(PrunedDir::label), self.pruned_dirs)
+                    name_some(
+                        self.pruned.iter().map(|dir| {
+                            if !(mark_submodules && dir.reason == PruneReason::Submodule) {
+                                return dir.label();
+                            }
+                            // Keep the tracked count: on a submodule it says the `.git` is stray.
+                            match dir.tracked_source_files {
+                                Some(count) if count > 0 => format!(
+                                    "{}/ (submodule, {} tracked source {})",
+                                    dir.path,
+                                    group_thousands(count),
+                                    if count == 1 { "file" } else { "files" }
+                                ),
+                                _ => format!("{}/ (submodule)", dir.path),
+                            }
+                        }),
+                        self.pruned_dirs
+                    )
                 ));
             }
         }
@@ -8558,6 +8610,81 @@ mod index_coverage_tests {
         assert_eq!(coverage.pruned[3].label(), "aaa/node_modules/");
         assert_eq!(coverage.pruned[4].label(), "abc/build/");
         assert_eq!(coverage.pruned_unlisted, 1);
+    }
+
+    /// A submodule is another repository, not build output: the summary says so, and names
+    /// which directory is one when it lists build directories beside it (#677).
+    #[test]
+    fn pruned_submodules_are_not_called_build_output() {
+        let dir = |path: &str, reason| PrunedDir {
+            path: path.into(),
+            reason,
+            tracked_source_files: Some(0),
+        };
+        let mut coverage = IndexCoverage::default();
+        coverage.record_pruned_dirs(
+            vec![
+                dir("vendor/ledger", PruneReason::Submodule),
+                dir("vendor/store", PruneReason::Submodule),
+            ],
+            0,
+        );
+        assert!(coverage
+            .blind_spot_caveats()
+            .join("; ")
+            .ends_with("2 directories pruned as submodules: vendor/ledger/, vendor/store/"));
+
+        let mut coverage = IndexCoverage::default();
+        coverage.record_pruned_dirs(
+            vec![
+                dir("target", PruneReason::BuildOutput),
+                dir("vendor/ledger", PruneReason::Submodule),
+            ],
+            0,
+        );
+        assert!(coverage.blind_spot_caveats().join("; ").ends_with(
+            "2 directories pruned as build output, dependencies or submodules: target/, vendor/ledger/ (submodule)"
+        ), "{}", coverage.blind_spot_caveats().join("; "));
+
+        // An unnamed directory may be anything, so the lead cannot claim they are all submodules.
+        let mut coverage = IndexCoverage::default();
+        coverage.record_pruned_dirs(vec![dir("vendor/ledger", PruneReason::Submodule)], 1);
+        assert!(coverage.blind_spot_caveats().join("; ").contains(
+            "2 directories pruned as build output, dependencies or submodules: vendor/ledger/ (submodule)"
+        ), "{}", coverage.blind_spot_caveats().join("; "));
+        let mut coverage = IndexCoverage::default();
+        coverage.record_pruned_dirs(vec![dir("vendor/ledger", PruneReason::Submodule)], 0);
+        assert_eq!(
+            coverage.blind_spot_caveats(),
+            vec!["1 directory pruned as a submodule: vendor/ledger/".to_string()]
+        );
+        assert_eq!(PruneReason::Submodule.label(), "submodule");
+        assert!(PruneReason::Submodule.counts_tracked_source());
+
+        // Tracked source under a directory with its own `.git` says this repository owns it and
+        // the `.git` is stray: it is missing source, listed first, and named as such.
+        let mut coverage = IndexCoverage::default();
+        coverage.record_discovered(&Language::Rust);
+        coverage.record_skipped(&Language::Rust, SkipReason::Pruned);
+        coverage.record_pruned_dirs(
+            vec![
+                dir("target", PruneReason::BuildOutput),
+                PrunedDir {
+                    path: "tools/ledger".into(),
+                    reason: PruneReason::Submodule,
+                    tracked_source_files: Some(1),
+                },
+            ],
+            0,
+        );
+        assert_eq!(coverage.pruned_source_dirs()[0].path, "tools/ledger");
+        assert_eq!(
+            coverage.blind_spot_caveats(),
+            vec![
+                "1 git-tracked source file not indexed under nested repository directory: tools/ledger/".to_string(),
+                "2 directories pruned as build output, dependencies or submodules: tools/ledger/ (submodule, 1 tracked source file), target/".to_string(),
+            ]
+        );
     }
 
     /// The motivating shape of a real repository: every source file indexed, while

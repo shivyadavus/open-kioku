@@ -1140,6 +1140,194 @@ fn a_conda_marker_does_not_turn_sibling_generated_source_into_dependencies() {
     assert!(caps_a_python_selection(gap));
 }
 
+/// A checked-out submodule is another repository: `ok index` prunes it as `submodule` and names
+/// it in coverage instead of failing on `git check-ignore` ("Pathspec ... is in submodule",
+/// #677). Its files, a submodule nested in it, and a submodule under `node_modules` never reach
+/// the index; an uninitialised one is an empty directory with nothing to miss; and one at a
+/// secret-like path is counted without its name.
+#[test]
+fn a_checked_out_submodule_is_pruned_and_reported_not_a_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let sources = dir.path().join("sources");
+    let inner = sources.join("inner");
+    write(&inner, "inner.rs", "pub fn inner_ledger_marker() {}\n");
+    git_config(&inner, &["init", "--quiet"]);
+    git_config(&inner, &["add", "."]);
+    git_config(&inner, &["commit", "--quiet", "-m", "inner"]);
+    git_config(
+        &sources,
+        &["clone", "--quiet", "--bare", "inner", "inner.git"],
+    );
+    let ledger = sources.join("ledger");
+    write(&ledger, "lib.rs", "pub fn vendored_ledger_marker() {}\n");
+    git_config(&ledger, &["init", "--quiet"]);
+    git_config(&ledger, &["add", "."]);
+    submodule_add(&ledger, &sources.join("inner.git"), "deps/inner");
+    git_config(&ledger, &["commit", "--quiet", "-m", "ledger"]);
+    git_config(
+        &sources,
+        &["clone", "--quiet", "--bare", "ledger", "ledger.git"],
+    );
+    let ledger = sources.join("ledger.git");
+
+    let root = dir.path().join("app");
+    write(&root, "src/main.rs", "fn main() {}\n");
+    git_config(&root, &["init", "--quiet"]);
+    git_config(&root, &["add", "."]);
+    git_config(&root, &["commit", "--quiet", "-m", "app"]);
+    submodule_add(&root, &ledger, "libs/ledger");
+    submodule_add(&root, &ledger, "libs/pending");
+    submodule_add(&root, &ledger, "node_modules/ledger");
+    submodule_add(&root, &ledger, "ops/.ssh");
+    git_config(&root, &["commit", "--quiet", "-m", "submodules"]);
+    git_config(
+        &root,
+        &["submodule", "--quiet", "update", "--init", "--recursive"],
+    );
+    git_config(
+        &root,
+        &["submodule", "--quiet", "deinit", "-f", "libs/pending"],
+    );
+    assert!(root.join("libs/ledger/deps/inner/inner.rs").is_file());
+    assert!(root.join("libs/pending").is_dir());
+    assert!(!root.join("libs/pending/lib.rs").exists());
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    let snapshot = Indexer::default()
+        .index_repo(&root, &config)
+        .expect("a checked-out submodule does not fail the index");
+
+    let paths = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&PathBuf::from("src/main.rs")), "{paths:?}");
+    for file in &snapshot.files {
+        for outside in ["libs/", "node_modules/", "ops/"] {
+            assert!(
+                !file.path.starts_with(outside),
+                "{} is another repository's file",
+                file.path.display()
+            );
+        }
+    }
+    assert!(!snapshot.chunks.iter().any(|chunk| {
+        chunk.text.contains("vendored_ledger_marker") || chunk.text.contains("inner_ledger_marker")
+    }));
+
+    let coverage = snapshot.manifest.quality.coverage.as_ref().unwrap();
+    // The nested submodule sits inside `libs/ledger`, and the one under `node_modules` inside
+    // installed packages: each is cut at the outermost pruned directory.
+    assert_eq!(
+        coverage.pruned,
+        vec![
+            PrunedDir {
+                path: "libs/ledger".into(),
+                reason: PruneReason::Submodule,
+                tracked_source_files: Some(0),
+            },
+            PrunedDir {
+                path: "node_modules".into(),
+                reason: PruneReason::Dependencies,
+                tracked_source_files: Some(0),
+            },
+        ]
+    );
+    assert_eq!(coverage.pruned_dirs, 3);
+    assert_eq!(coverage.pruned_unlisted, 1);
+    assert_eq!(coverage.pruned_source_files(), 0);
+    assert_eq!(coverage.programming_percent(), Some(100.0));
+    assert!(
+        coverage.summary_line().contains(
+            "3 directories pruned as build output, dependencies or submodules: libs/ledger/ (submodule), node_modules/"
+        ),
+        "{}",
+        coverage.summary_line()
+    );
+    assert!(snapshot.skipped_paths.iter().any(|skipped| {
+        skipped.path == Path::new("libs/ledger")
+            && skipped.reason == SkipReason::Pruned
+            && skipped.safe_to_show
+    }));
+    assert!(!format!("{:?}", snapshot.skipped_paths).contains(".ssh"));
+    assert!(!format!("{coverage:?}").contains(".ssh"));
+    assert!(!format!("{:?}", snapshot.manifest.quality).contains(".ssh"));
+}
+
+/// A `.git` left inside a directory this repository tracks (a `git init`, a tool's scratch
+/// clone) cuts it from the walk like a submodule, but Git still tracks its files here, which it
+/// never does under a real submodule: they count as missing source, not as another
+/// repository's (#677).
+#[test]
+fn tracked_source_behind_a_stray_git_counts_as_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "src/main.rs", "fn main() {}\n");
+    write(root, "tools/ledger/lib.rs", "pub fn ledger_total() {}\n");
+    git_config(root, &["init", "--quiet"]);
+    git_config(root, &["add", "."]);
+    git_config(root, &["commit", "--quiet", "-m", "app"]);
+    git_config(&root.join("tools/ledger"), &["init", "--quiet"]);
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let coverage = snapshot.manifest.quality.coverage.as_ref().unwrap();
+    assert_eq!(
+        coverage.pruned,
+        vec![PrunedDir {
+            path: "tools/ledger".into(),
+            reason: PruneReason::Submodule,
+            tracked_source_files: Some(1),
+        }]
+    );
+    assert_eq!(coverage.pruned_source_files(), 1);
+    assert_eq!(coverage.programming_percent(), Some(50.0));
+    assert!(snapshot.skipped_paths.iter().any(|skipped| {
+        skipped.path == Path::new("tools/ledger/lib.rs") && skipped.reason == SkipReason::Pruned
+    }));
+    assert!(
+        coverage.summary_line().contains(
+            "1 git-tracked source file not indexed under nested repository directory: tools/ledger/"
+        ),
+        "{}",
+        coverage.summary_line()
+    );
+}
+
+/// `git` with an identity, unsigned commits, and local file transport allowed (Git refuses a
+/// `file://` submodule source by default since 2.38.1).
+fn git_config(root: &Path, args: &[&str]) {
+    fs::create_dir_all(root).unwrap();
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "protocol.file.allow=always",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?} failed");
+}
+
+fn submodule_add(root: &Path, source: &Path, path: &str) {
+    let source = source.to_str().unwrap();
+    git_config(root, &["submodule", "--quiet", "add", source, path]);
+}
+
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")

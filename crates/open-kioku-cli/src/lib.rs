@@ -570,6 +570,36 @@ mod tests {
                 && step.contains("`keep_dirs = [\"tools/build\"]`"),
             "{step}"
         );
+
+        // Committed source behind a stray `.git`: `keep_dirs` cannot walk it, so the next step
+        // names the `.git`, not the setting (#677).
+        coverage.record_pruned_dirs(
+            vec![
+                pruned("target", PruneReason::BuildOutput, 0),
+                pruned("tools/ledger", PruneReason::Submodule, 1),
+            ],
+            0,
+        );
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(
+            matches!(check.status, CheckStatus::Warn),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains(
+                "1 git-tracked source file not indexed under nested repository directory: tools/ledger/"
+            ),
+            "{}",
+            check.message
+        );
+        let step = step.expect("pruned source carries a next step");
+        assert!(
+            step.contains("discovery pruned `tools/ledger/` as nested repositories")
+                && step.contains("remove it")
+                && !step.contains("keep_dirs"),
+            "{step}"
+        );
     }
 
     #[test]
