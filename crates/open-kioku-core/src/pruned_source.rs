@@ -4,8 +4,10 @@
 //! nothing declares (`undeclared_build_dir`), a directory behind a stray `.git` (`submodule`
 //! with tracked files), and committed output beside its build manifest (`build_output`). The
 //! index never reads those files, so a name defined there is absent from the index without
-//! being absent from the repository. [`IndexCoverage::pruned_source_links`] decides, without
-//! reading any of those files, which of the directories a task may be about, and
+//! being absent from the repository. MSBuild output (`msbuild_output`) counts the same way:
+//! MSBuild commits nothing, so a tracked file under its `bin` or `obj` is a script or source
+//! sharing it. [`IndexCoverage::pruned_source_links`] decides, without reading any of those
+//! files, which of the directories a task may be about, and
 //! [`PrunedSourceLinks`] words and prices the result for context packs and plans alike.
 //!
 //! The link is deliberately narrow, so a repository with a pruned directory does not caveat
@@ -159,6 +161,7 @@ fn reason_phrase(reason: PruneReason) -> &'static str {
         // A tracked file under a nested work tree means its `.git` is stray: Git tracks no file
         // under a real submodule, and only directories holding tracked source are linked.
         PruneReason::Submodule => "nested repository",
+        PruneReason::MsbuildOutput => "MSBuild output",
         PruneReason::BuildOutput => "build output",
         PruneReason::Dependencies => "installed dependencies",
         PruneReason::VirtualEnv => "virtual environment",
@@ -363,6 +366,9 @@ impl PrunedSourceLinks {
             PruneReason::Submodule => format!(
                 "Search the files under `{path}/` directly (`git ls-files {path}`) before concluding a name is absent; this repository tracks them, so the `{path}/.git` that pruned them looks stray. If the directory is this repository's source, move that `.git` out of the tree rather than deleting it (it may hold another repository's unpushed history), then run `ok index .`."
             ),
+            PruneReason::MsbuildOutput => format!(
+                "Search the files under `{path}/` directly (`git ls-files {path}`) before concluding a name is absent; MSBuild commits nothing, so they are scripts or source sharing the build's output directory. Move them out of it (or point the project's output elsewhere), then run `ok index .`."
+            ),
             PruneReason::BuildOutput | PruneReason::Dependencies | PruneReason::VirtualEnv => {
                 format!(
                     "Search the files under `{path}/` directly (`git ls-files {path}`); the index pruned the directory on evidence that it is {}, so change its files through their source, generator or manifest.",
@@ -529,6 +535,28 @@ mod tests {
         assert!(coverage
             .pruned_source_links("fix compile_plan", Vec::new())
             .is_empty());
+    }
+
+    #[test]
+    fn msbuild_output_holding_tracked_source_links_like_an_undeclared_build_dir() {
+        let coverage = coverage(vec![dir(
+            "src/Ledger/bin",
+            PruneReason::MsbuildOutput,
+            Some(1),
+        )]);
+        assert!(coverage.may_hide_tracked_source());
+        let links = coverage.pruned_source_links("fix ReleaseTool", vec!["ReleaseTool".into()]);
+        assert_eq!(links.unresolved_dirs.len(), 1);
+        assert!(
+            links.caveats()[0].contains("src/Ledger/bin/: MSBuild output, 1 tracked source file")
+        );
+        let named = coverage.pruned_source_links("edit src/Ledger/bin/release_tool.py", Vec::new());
+        assert!(named.caps());
+        assert!(
+            NegativeEvidence::for_coverage("task", &CoverageInput::default(), &named)
+                .and_then(|item| item.suggested_next_probe)
+                .is_some_and(|probe| probe.contains("Move them out of it"))
+        );
     }
 
     #[test]

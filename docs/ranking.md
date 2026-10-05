@@ -374,7 +374,7 @@ on all of them would teach readers to ignore it.
 | Link | Fires when | Directories |
 | --- | --- | --- |
 | named by the task | a task token holding a `/` (`tools/build/plan.py`, `./build/`, `../tools/build/x`, `/tools/build/x`, `` `tools/build` ``) is the directory's path or a path below it, after any leading `./`, `../` or `/`. A bare word (`build`, `dist`) never counts, and neither does a sibling sharing a prefix (`tools/builder/`) or a URL (`https://tools/build/x`, whose host and path are not repository paths) | any listed directory holding tracked source, whatever its reason |
-| an undefined name | a named task identifier (`named_anchors`, never a hyphenated prose word) that no indexed symbol has as its name (`symbols_named`), whether or not the selected context spells it. The commonest case is indexed code calling a function only a pruned directory defines: the call site is selected and spells the name, and the definition is still absent | every listed directory pruned as `undeclared_build_dir` or `submodule` holding tracked source |
+| an undefined name | a named task identifier (`named_anchors`, never a hyphenated prose word) that no indexed symbol has as its name (`symbols_named`), whether or not the selected context spells it. The commonest case is indexed code calling a function only a pruned directory defines: the call site is selected and spells the name, and the definition is still absent | every listed directory pruned as `undeclared_build_dir`, `submodule` or `msbuild_output` holding tracked source |
 
 Directories pruned on strong evidence (`build_output` with a cache tag or a manifest beside
 it, `dependencies`, `virtual_env`) never link through an undefined name. Their committed files
@@ -382,7 +382,7 @@ are output or installed packages, so a missing name is not explained by them, ju
 never lower coverage. They link only when the task names their path. A directory with a
 tracked count of zero, or with no count (outside Git), never links. A secret-like path is
 never named: ingest does not list one, and the link skips any such entry an older or imported
-manifest holds. The symbol table is read only when a weak or stray-`.git` directory holding
+manifest holds. The symbol table is read only when a weak, stray-`.git` or MSBuild output directory holding
 tracked source is listed, once per named task identifier, as a `UNION` of two index searches. Any other repository looks nothing
 up.
 
@@ -406,7 +406,7 @@ A link is reported on context and plan alike, through `open_kioku_context::prune
 
 **Cap: 0.50 (`Low`)**, with the blocker `the task names a directory the index pruned:
 tools/build/ (1 tracked source file)`, only when the task names the path of a directory whose
-tracked source counts as missing (`undeclared_build_dir`, `submodule`). The task points at
+tracked source counts as missing (`undeclared_build_dir`, `submodule`, `msbuild_output`). The task points at
 files the index never read. A plan adds the risk reason `low confidence: the task names a
 directory the index pruned: …`, and `ok preflight` reads the plan's `Low` label as
 `insufficient_evidence`.
