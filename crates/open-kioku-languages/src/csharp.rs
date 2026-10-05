@@ -1,7 +1,8 @@
 //! C# facts that span files.
 
-use open_kioku_core::{Language, Symbol, SymbolKind, Visibility};
-use std::collections::BTreeMap;
+use open_kioku_core::{FileId, Language, Symbol, SymbolKind, Visibility};
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 /// Gives every part of a C# `partial` type the accessibility the type declares.
 ///
@@ -9,11 +10,16 @@ use std::collections::BTreeMap;
 /// Ledger` in one file and `partial class Ledger` in another declare one public type. A parser
 /// reads one file, so it records the part with no modifier at the default (`internal` at the top
 /// level). Parts are matched by qualified name, kind and type-parameter count, which C# requires
-/// every part to share. When the parts declare different accessibilities, which C# rejects, or
-/// declare none and still disagree, the type's accessibility is not known and every part records
-/// [`Visibility::Unknown`].
-pub fn unify_partial_type_visibility(symbols: &mut [Symbol]) {
-    let mut parts: BTreeMap<(String, bool, usize), Vec<usize>> = BTreeMap::new();
+/// every part to share, and by `projects`: the directory of the MSBuild project each file is
+/// in. Parts of one partial type are compiled into one assembly, so parts in two projects are
+/// two types even under one name. A file in no project is matched with every other such file;
+/// a project that compiles files outside its directory (`<Compile Include>`) is not read, so
+/// its parts are matched by directory alone. When the parts declare different accessibilities,
+/// which C# rejects, or declare none and still disagree, the type's accessibility is not known
+/// and every part records [`Visibility::Unknown`].
+pub fn unify_partial_type_visibility(symbols: &mut [Symbol], projects: &HashMap<FileId, PathBuf>) {
+    type PartKey = (Option<PathBuf>, String, bool, usize);
+    let mut parts: BTreeMap<PartKey, Vec<usize>> = BTreeMap::new();
     for (index, symbol) in symbols.iter().enumerate() {
         if symbol.language != Language::CSharp
             || !matches!(symbol.kind, SymbolKind::Class | SymbolKind::Interface)
@@ -26,6 +32,7 @@ pub fn unify_partial_type_visibility(symbols: &mut [Symbol]) {
         if header.partial {
             parts
                 .entry((
+                    projects.get(&symbol.file_id).cloned(),
                     symbol.qualified_name.clone(),
                     symbol.kind == SymbolKind::Interface,
                     header.arity,
@@ -197,7 +204,7 @@ mod tests {
             // Not partial: left alone.
             part("f", "Acme::Other", "class Other", Visibility::Crate),
         ];
-        unify_partial_type_visibility(&mut symbols);
+        unify_partial_type_visibility(&mut symbols, &HashMap::new());
         let visibility = symbols
             .iter()
             .map(|symbol| symbol.visibility)
@@ -231,7 +238,7 @@ mod tests {
                 Visibility::Crate,
             ),
         ];
-        unify_partial_type_visibility(&mut conflicting);
+        unify_partial_type_visibility(&mut conflicting, &HashMap::new());
         assert!(conflicting
             .iter()
             .all(|symbol| symbol.visibility == Visibility::Unknown));
@@ -252,10 +259,42 @@ mod tests {
                 Visibility::Private,
             ),
         ];
-        unify_partial_type_visibility(&mut disagreeing);
+        unify_partial_type_visibility(&mut disagreeing, &HashMap::new());
         assert!(disagreeing
             .iter()
             .all(|symbol| symbol.visibility == Visibility::Unknown));
+    }
+
+    #[test]
+    fn parts_in_two_projects_are_two_types() {
+        let mut symbols = vec![
+            part(
+                "a",
+                "Acme::Shared::Widget",
+                "public partial class Widget",
+                Visibility::Public,
+            ),
+            part(
+                "b",
+                "Acme::Shared::Widget",
+                "partial class Widget",
+                Visibility::Crate,
+            ),
+        ];
+        let projects = HashMap::from([
+            (FileId::new("a"), PathBuf::from("src/A")),
+            (FileId::new("b"), PathBuf::from("src/B")),
+        ]);
+        unify_partial_type_visibility(&mut symbols, &projects);
+        assert_eq!(symbols[0].visibility, Visibility::Public);
+        assert_eq!(symbols[1].visibility, Visibility::Crate);
+        // In one project, the same parts are one type.
+        let projects = HashMap::from([
+            (FileId::new("a"), PathBuf::from("src/A")),
+            (FileId::new("b"), PathBuf::from("src/A")),
+        ]);
+        unify_partial_type_visibility(&mut symbols, &projects);
+        assert_eq!(symbols[1].visibility, Visibility::Public);
     }
 
     #[test]

@@ -2421,13 +2421,6 @@ pub struct Symbol {
     pub alias_of: Option<TypeAliasTarget>,
 }
 
-/// A symbol together with as much of its definition as the index can actually
-/// prove, plus a plain statement of whatever it could not.
-///
-/// Every text field here is recovered from indexed chunk text. Nothing is read
-/// back from the working tree and nothing is inferred, so an empty field means
-/// the evidence is missing — which `caveats` says out loud rather than letting
-/// the caller read absence as a short definition.
 /// The definition a name lookup picked, with the others it passed over.
 ///
 /// A name can have several definitions: overloads, the parts of a C# `partial` type, `Entry`
@@ -2446,6 +2439,13 @@ pub struct SymbolDefinition {
     pub caveats: Vec<String>,
 }
 
+/// A symbol together with as much of its definition as the index can actually
+/// prove, plus a plain statement of whatever it could not.
+///
+/// Every text field here is recovered from indexed chunk text. Nothing is read
+/// back from the working tree and nothing is inferred, so an empty field means
+/// the evidence is missing — which `caveats` says out loud rather than letting
+/// the caller read absence as a short definition.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SymbolContext {
     pub symbol: Symbol,

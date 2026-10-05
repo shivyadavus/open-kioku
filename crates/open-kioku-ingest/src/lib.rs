@@ -770,8 +770,17 @@ impl Indexer {
             analysis_facts.extend(file.analysis_facts);
         }
         // A parser reads one file: a C# `partial` type's part that omits its accessibility takes
-        // the one another part declares.
-        open_kioku_languages::csharp::unify_partial_type_visibility(&mut symbols);
+        // the one another part of the same project declares.
+        let mut msbuild_dirs = HashMap::new();
+        let csharp_projects = files
+            .iter()
+            .filter(|file| file.language == Language::CSharp)
+            .filter_map(|file| {
+                prune::nearest_msbuild_project(&root, &file.path, &mut msbuild_dirs)
+                    .map(|project| (file.id.clone(), project))
+            })
+            .collect::<HashMap<_, _>>();
+        open_kioku_languages::csharp::unify_partial_type_visibility(&mut symbols, &csharp_projects);
         // Extraction applies the runners' default discovery rules; where a pytest
         // configuration changes them, its Python test files fall back to the test-path rule.
         let test_discovery_notes =

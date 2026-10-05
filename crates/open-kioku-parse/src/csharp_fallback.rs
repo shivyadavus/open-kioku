@@ -45,7 +45,31 @@ pub(crate) fn symbols(file: &File, content: &str) -> Vec<Symbol> {
     // A declaration claims the next `{` in code, on its line or a later one, unless a `;`
     // ends it first.
     let mut pending: Option<Frame> = None;
+    // The branch each open `#if` group is in: only a group's first branch is read, since
+    // branches that each repeat a header (`#if X` / `class Host : A {` / `#else` /
+    // `class Host : B {` / `#endif`) would otherwise open it twice.
+    let mut conditions: Vec<usize> = Vec::new();
     for (index, line) in masked.lines().enumerate() {
+        let directive = line.trim_start();
+        if let Some(directive) = directive.strip_prefix('#') {
+            let word = directive.split_whitespace().next().unwrap_or("");
+            match word {
+                "if" => conditions.push(0),
+                "elif" | "else" => {
+                    if let Some(branch) = conditions.last_mut() {
+                        *branch += 1;
+                    }
+                }
+                "endif" => {
+                    conditions.pop();
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if conditions.iter().any(|&branch| branch > 0) {
+            continue;
+        }
         if let Some(captures) = namespace_pattern().captures(line) {
             let levels = captures[1]
                 .split('.')
@@ -115,116 +139,160 @@ pub(crate) fn symbols(file: &File, content: &str) -> Vec<Symbol> {
 }
 
 /// `content` with every comment, string, verbatim string, raw string and character literal
-/// replaced by spaces, newlines kept, so line numbers and code columns are unchanged.
+/// replaced by spaces, newlines kept, so line numbers and code columns are unchanged. The holes
+/// of an interpolated string (`$"{a}"`, `$$"""{{a}}"""`) are blanked with it: a brace there is
+/// an expression's, never a declaration's.
 pub(crate) fn mask_comments_and_literals(content: &str) -> String {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Literal {
+        Regular,
+        Verbatim,
+        /// Closed by this many quotes.
+        Raw(usize),
+    }
     #[derive(Clone, Copy, PartialEq)]
     enum State {
         Code,
         LineComment,
         BlockComment,
-        Regular,
-        Verbatim,
-        Raw(usize),
+        /// A string; `dollars` is how many `{` open a hole in it (0: not interpolated).
+        Str {
+            literal: Literal,
+            dollars: usize,
+        },
         Char,
+        /// Code inside an interpolation hole, with the braces opened in it and the `}` count
+        /// that closes it.
+        Hole {
+            depth: usize,
+            close: usize,
+        },
     }
     let bytes = content.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
-    let mut state = State::Code;
+    let mut stack = vec![State::Code];
     let mut index = 0;
-    let blank = |out: &mut Vec<u8>, byte: u8| out.push(if byte == b'\n' { b'\n' } else { b' ' });
+    let run = |from: usize, byte: u8| bytes[from..].iter().take_while(|&&b| b == byte).count();
+    let blank = |out: &mut Vec<u8>, from: usize, len: usize| {
+        for &byte in &bytes[from..(from + len).min(bytes.len())] {
+            out.push(if byte == b'\n' { b'\n' } else { b' ' });
+        }
+    };
     while index < bytes.len() {
         let byte = bytes[index];
         let next = bytes.get(index + 1).copied();
+        let state = *stack.last().unwrap_or(&State::Code);
+        let mut step = 1;
         match state {
-            State::Code => match byte {
-                b'/' if next == Some(b'/') => {
-                    state = State::LineComment;
-                    blank(&mut out, byte);
+            State::Code | State::Hole { .. } => {
+                let in_hole = matches!(state, State::Hole { .. });
+                match byte {
+                    b'/' if next == Some(b'/') => stack.push(State::LineComment),
+                    b'/' if next == Some(b'*') => {
+                        stack.push(State::BlockComment);
+                        step = 2;
+                    }
+                    b'"' => {
+                        let quotes = run(index, b'"');
+                        let prefix = bytes[..index]
+                            .iter()
+                            .rev()
+                            .take_while(|&&b| b == b'$' || b == b'@')
+                            .copied()
+                            .collect::<Vec<_>>();
+                        let dollars = prefix.iter().filter(|&&b| b == b'$').count();
+                        let literal = if quotes >= 3 {
+                            step = quotes;
+                            Literal::Raw(quotes)
+                        } else if prefix.contains(&b'@') {
+                            Literal::Verbatim
+                        } else {
+                            Literal::Regular
+                        };
+                        stack.push(State::Str { literal, dollars });
+                    }
+                    b'\'' => stack.push(State::Char),
+                    b'{' if in_hole => {
+                        if let Some(State::Hole { depth, .. }) = stack.last_mut() {
+                            *depth += 1;
+                        }
+                    }
+                    b'}' if in_hole => {
+                        if let Some(State::Hole { depth, close }) = stack.last_mut() {
+                            if *depth == 0 {
+                                step = run(index, b'}').min(*close).max(1);
+                                stack.pop();
+                            } else {
+                                *depth -= 1;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                b'/' if next == Some(b'*') => {
-                    state = State::BlockComment;
-                    out.extend_from_slice(b"  ");
-                    index += 2;
-                    continue;
+                if in_hole || stack.len() > 1 && !matches!(stack.last(), Some(State::Code)) {
+                    blank(&mut out, index, step);
+                } else {
+                    out.extend_from_slice(&bytes[index..index + step]);
                 }
-                b'"' => {
-                    let quotes = bytes[index..].iter().take_while(|&&b| b == b'"').count();
-                    let verbatim = bytes[..index]
-                        .iter()
-                        .rev()
-                        .take_while(|&&b| b == b'$' || b == b'@')
-                        .any(|&b| b == b'@');
-                    state = if quotes >= 3 {
-                        State::Raw(quotes)
-                    } else if verbatim {
-                        State::Verbatim
-                    } else {
-                        State::Regular
-                    };
-                    let opened = if quotes >= 3 { quotes } else { 1 };
-                    out.extend(std::iter::repeat_n(b' ', opened));
-                    index += opened;
-                    continue;
-                }
-                b'\'' => {
-                    state = State::Char;
-                    blank(&mut out, byte);
-                }
-                _ => out.push(byte),
-            },
+            }
             State::LineComment => {
                 if byte == b'\n' {
-                    state = State::Code;
+                    stack.pop();
                 }
-                blank(&mut out, byte);
+                blank(&mut out, index, 1);
             }
             State::BlockComment => {
                 if byte == b'*' && next == Some(b'/') {
-                    state = State::Code;
-                    out.extend_from_slice(b"  ");
-                    index += 2;
-                    continue;
+                    stack.pop();
+                    step = 2;
                 }
-                blank(&mut out, byte);
+                blank(&mut out, index, step);
             }
-            State::Regular | State::Char => {
-                let close = if state == State::Regular { b'"' } else { b'\'' };
+            State::Char => {
                 if byte == b'\\' {
-                    blank(&mut out, byte);
-                    if let Some(escaped) = next {
-                        blank(&mut out, escaped);
+                    step = 2;
+                } else if byte == b'\'' || byte == b'\n' {
+                    stack.pop();
+                }
+                blank(&mut out, index, step);
+            }
+            State::Str { literal, dollars } => {
+                match (literal, byte) {
+                    (Literal::Regular, b'\\') => step = 2,
+                    (Literal::Regular, b'"' | b'\n') => {
+                        stack.pop();
                     }
-                    index += 2;
-                    continue;
+                    (Literal::Verbatim, b'"') if next == Some(b'"') => step = 2,
+                    (Literal::Verbatim, b'"') => {
+                        stack.pop();
+                    }
+                    (Literal::Raw(quotes), b'"') => {
+                        step = run(index, b'"');
+                        if step >= quotes {
+                            stack.pop();
+                        }
+                    }
+                    (_, b'{') if dollars > 0 => {
+                        let braces = run(index, b'{');
+                        let opens = match literal {
+                            // `{{` is a literal brace in a single-`$` string.
+                            Literal::Regular | Literal::Verbatim => braces % 2 == 1,
+                            Literal::Raw(_) => braces >= dollars,
+                        };
+                        step = braces;
+                        if opens {
+                            stack.push(State::Hole {
+                                depth: 0,
+                                close: dollars,
+                            });
+                        }
+                    }
+                    _ => {}
                 }
-                if byte == close || byte == b'\n' {
-                    state = State::Code;
-                }
-                blank(&mut out, byte);
-            }
-            State::Verbatim => {
-                if byte == b'"' && next == Some(b'"') {
-                    out.extend_from_slice(b"  ");
-                    index += 2;
-                    continue;
-                }
-                if byte == b'"' {
-                    state = State::Code;
-                }
-                blank(&mut out, byte);
-            }
-            State::Raw(quotes) => {
-                let run = bytes[index..].iter().take_while(|&&b| b == b'"').count();
-                if run >= quotes {
-                    out.extend(std::iter::repeat_n(b' ', run));
-                    index += run;
-                    state = State::Code;
-                    continue;
-                }
-                blank(&mut out, byte);
+                blank(&mut out, index, step);
             }
         }
-        index += 1;
+        index += step;
     }
     String::from_utf8_lossy(&out).into_owned()
 }
@@ -273,27 +341,27 @@ mod tests {
 
     #[test]
     fn nested_types_are_named_inside_their_enclosing_types() {
-        let source = "namespace Acme.Collections\n{\n    public class Dictionary2<TKey, TValue>\n    {\n        private struct Entry\n        {\n            public int Next;\n        }\n        public record Slot(int Index);\n        internal interface IProbe { }\n    }\n    sealed class Sibling\n    {\n        void Broken() { if (x { }\n    }\n";
+        let source = "namespace Acme.Collections\n{\n    public class SlotMap<TKey, TValue>\n    {\n        private struct Entry\n        {\n            public int Next;\n        }\n        public record Slot(int Index);\n        internal interface IProbe { }\n    }\n    sealed class Sibling\n    {\n        void Broken() { if (x { }\n    }\n";
         assert_eq!(
             found(source),
             vec![
                 (
-                    "Acme::Collections::Dictionary2".to_string(),
+                    "Acme::Collections::SlotMap".to_string(),
                     SymbolKind::Class,
                     3
                 ),
                 (
-                    "Acme::Collections::Dictionary2::Entry".to_string(),
+                    "Acme::Collections::SlotMap::Entry".to_string(),
                     SymbolKind::Class,
                     5
                 ),
                 (
-                    "Acme::Collections::Dictionary2::Slot".to_string(),
+                    "Acme::Collections::SlotMap::Slot".to_string(),
                     SymbolKind::Class,
                     9
                 ),
                 (
-                    "Acme::Collections::Dictionary2::IProbe".to_string(),
+                    "Acme::Collections::SlotMap::IProbe".to_string(),
                     SymbolKind::Interface,
                     10
                 ),
@@ -304,6 +372,29 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn only_the_first_branch_of_a_conditional_header_is_read() {
+        // Each branch repeats the namespace and class header: reading both opened them twice.
+        let source = "#if LEGACY\nnamespace Acme.Fall\n{\n    public class Host : OldBase\n    {\n#else\nnamespace Acme.Fall\n{\n    public class Host : NewBase\n    {\n#endif\n        string s = $\"{(flag ? \"{\" : \"}\")}\";\n        string r = $$\"\"\"\n            {{ \"{\" }}\n            \"\"\";\n        char c = '{';\n        public class Inner { }\n    }\n\n    public class After { }\n}\n";
+        assert_eq!(
+            found(source),
+            vec![
+                ("Acme::Fall::Host".to_string(), SymbolKind::Class, 4),
+                ("Acme::Fall::Host::Inner".to_string(), SymbolKind::Class, 17),
+                ("Acme::Fall::After".to_string(), SymbolKind::Class, 20),
+            ]
+        );
+    }
+
+    #[test]
+    fn interpolation_holes_are_blanked_with_their_string() {
+        let source = "var a = $\"{(x ? \"{\" : \"}\")} and {{literal}\"; var b = $$\"\"\"{{ new { Q = 1 } }}\"\"\"; var c = @$\"{y}\"\"\"; { }\n";
+        let masked = mask_comments_and_literals(source);
+        assert_eq!(masked.matches('{').count(), 1, "{masked}");
+        assert_eq!(masked.matches('}').count(), 1, "{masked}");
+        assert!(masked.contains("var c ="), "{masked}");
     }
 
     #[test]

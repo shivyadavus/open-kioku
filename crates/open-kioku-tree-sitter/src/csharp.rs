@@ -98,7 +98,12 @@ pub(crate) fn symbol(
         && names_its_type(node, source)
         && is_placed(node)
         && (node.kind() != "local_function_statement"
-            || local_function_is_placed(node, source, recovered))
+            || match extension_block_of(node, source) {
+                Some(block) => {
+                    owner(block).is_some_and(|owner| symbol(owner, source, recovered).is_some())
+                }
+                None => local_function_is_placed(node, source, recovered),
+            })
         && owner_is_a_symbol(node, source, recovered);
     valid.then_some((name, kind))
 }
@@ -227,6 +232,52 @@ fn names_its_type(node: Node<'_>, source: &[u8]) -> bool {
     own.is_some() && own == owner
 }
 
+/// A C# 14 extension block (`extension(string s) { public int Twice() => 2; }`), which this
+/// grammar reads as a constructor named `extension` whose body holds the members as local
+/// functions. It is not a symbol; its members are members of the static class declaring it.
+fn is_extension_block(node: Node<'_>, source: &[u8]) -> bool {
+    node.kind() == "constructor_declaration"
+        && node
+            .child_by_field_name("name")
+            .and_then(|name| name.utf8_text(source).ok())
+            == Some("extension")
+        && !names_its_type(node, source)
+}
+
+/// The extension block a member written directly in its body belongs to.
+fn extension_block_of<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
+    node.parent()
+        .filter(|parent| parent.kind() == "block")?
+        .parent()
+        .filter(|constructor| is_extension_block(*constructor, source))
+}
+
+/// Whether the tree holds a declaration this grammar misread without an error node: a
+/// constructor or finalizer not named after its type, which C# rejects, is a construct the
+/// grammar cannot read (a C# 14 extension block). The file is then read as one parsed with
+/// errors, so its symbols carry medium confidence and coverage names it.
+pub(crate) fn misreads_a_declaration(root: Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = root.walk();
+    loop {
+        let node = cursor.node();
+        if matches!(
+            node.kind(),
+            "constructor_declaration" | "destructor_declaration"
+        ) && !names_its_type(node, source)
+        {
+            return true;
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return false;
+            }
+        }
+    }
+}
+
 /// Modifiers a local function may carry; an access modifier is never one of them.
 const LOCAL_FUNCTION_MODIFIERS: &[&str] = &["static", "async", "unsafe", "extern"];
 
@@ -259,6 +310,10 @@ fn local_function_is_placed(node: Node<'_>, source: &[u8], recovered: bool) -> b
         }
         if names_local_functions(kind) {
             return symbol(current, source, recovered).is_some();
+        }
+        // A lambda in a field's initializer: the field is the member.
+        if matches!(kind, "field_declaration" | "event_field_declaration") {
+            return is_placed(current) && owner_is_a_symbol(current, source, recovered);
         }
         if kind == "ERROR"
             || is_type_declaration(kind)
@@ -308,6 +363,9 @@ fn declared(node: Node<'_>, source: &[u8]) -> Option<(String, SymbolKind)> {
             let target = node.child_by_field_name("type").and_then(text)?;
             let target = unalias(&target);
             Some((format!("{direction} operator {target}"), SymbolKind::Method))
+        }
+        "local_function_statement" if extension_block_of(node, source).is_some() => {
+            Some((name()?, SymbolKind::Method))
         }
         "local_function_statement" => Some((name()?, SymbolKind::Function)),
         "property_declaration" | "event_declaration" => {
@@ -488,7 +546,7 @@ pub(crate) fn qualified_name(node: Node<'_>, name: &str, source: &[u8]) -> Strin
                 .unwrap_or_default()
         } else if is_type_declaration(kind) {
             name_text(current, source).into_iter().collect()
-        } else if names_local_functions(kind) {
+        } else if names_local_functions(kind) && !is_extension_block(current, source) {
             declared(current, source)
                 .map(|(name, _)| vec![name])
                 .unwrap_or_default()
@@ -545,7 +603,7 @@ fn namespace_levels(name: &str) -> Vec<String> {
 /// level holding every type that can name it; `file` is [`Visibility::Private`], as a Rust item
 /// private to its module is. A namespace has no accessibility and is `Public`. The signature keeps
 /// the modifiers as written, so the exact level is never lost.
-pub(crate) fn visibility(node: Node<'_>) -> Visibility {
+pub(crate) fn visibility(node: Node<'_>, source: &[u8]) -> Visibility {
     let declaration = declaration_of(node);
     match declaration.kind() {
         "namespace_declaration" | FILE_SCOPED_NAMESPACE | "enum_member_declaration" => {
@@ -555,7 +613,10 @@ pub(crate) fn visibility(node: Node<'_>) -> Visibility {
         "parameter" => return Visibility::Public,
         // A local function is visible only inside the member that declares it, and a finalizer
         // or static constructor cannot be named at all.
-        "local_function_statement" | "destructor_declaration" => return Visibility::Private,
+        "local_function_statement" if extension_block_of(declaration, source).is_none() => {
+            return Visibility::Private;
+        }
+        "destructor_declaration" => return Visibility::Private,
         "constructor_declaration" if has_modifier(declaration, "static") => {
             return Visibility::Private;
         }
@@ -1363,6 +1424,8 @@ public class Platform
                 "Acme::Split",
                 "Acme::Split::Ext",
                 "Acme::Split::Ext::Before",
+                // An extension block's member is a member of the static class declaring it.
+                "Acme::Split::Ext::Twice",
                 "Acme::Split::Ext::After",
             ]
         );
@@ -1372,13 +1435,29 @@ public class Platform
     fn a_reserved_keyword_is_never_a_name() {
         // `#if` around an `else if` arm: recovery reads `if (..) { .. }` as a local function.
         let facts = parse(
-            "Grid.cs",
-            "namespace Acme;\npublic class Grid\n{\n    public bool TryGet(out int value)\n    {\n        if (instance is null)\n        {\n            value = 0;\n        }\n#if MODERN\n        else if (instance.GetType() == typeof(int[,]))\n        {\n            value = 1;\n        }\n#endif\n        else\n        {\n            value = 2;\n        }\n        return true;\n    }\n}\n",
+            "Tally.cs",
+            "namespace Acme;\npublic class Tally\n{\n    public bool Settle(out int total)\n    {\n        if (books is null)\n        {\n            total = 0;\n        }\n#if MODERN\n        else if (books.GetType() == typeof(int[,]))\n        {\n            total = 1;\n        }\n#endif\n        else\n        {\n            total = 2;\n        }\n        return true;\n    }\n}\n",
         );
         assert_eq!(
             qualified(&facts),
-            vec!["Acme", "Acme::Grid", "Acme::Grid::TryGet"]
+            vec!["Acme", "Acme::Tally", "Acme::Tally::Settle"]
         );
+        // The recovery this guards against is really there: a local function named `if`.
+        let source = "namespace Acme;\npublic class Tally\n{\n    public bool Settle(out int total)\n    {\n        if (books is null)\n        {\n            total = 0;\n        }\n#if MODERN\n        else if (books.GetType() == typeof(int[,]))\n        {\n            total = 1;\n        }\n#endif\n        else\n        {\n            total = 2;\n        }\n        return true;\n    }\n}\n";
+        let mut parser = crate::parser_for(&Language::CSharp).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut pending = vec![tree.root_node()];
+        let mut named_if = false;
+        while let Some(node) = pending.pop() {
+            named_if |= node.kind() == "local_function_statement"
+                && node
+                    .child_by_field_name("name")
+                    .and_then(|name| name.utf8_text(source.as_bytes()).ok())
+                    == Some("if");
+            let mut cursor = node.walk();
+            pending.extend(node.named_children(&mut cursor));
+        }
+        assert!(named_if);
     }
 
     #[test]
@@ -1441,9 +1520,68 @@ public class Platform
         // type early (here, spelled out) leaves its nested types there, under a qualified name
         // that skips their enclosing type.
         let facts = parse(
-            "Wrapper.cs",
-            "namespace Acme\n{\n    internal class Wrapper { }\n    private readonly struct Enumerator\n    {\n        public object Key => null;\n    }\n    protected class Hook { }\n}\n",
+            "Vault.cs",
+            "namespace Acme\n{\n    internal class Vault { }\n    private readonly struct Tumbler\n    {\n        public object Pin => null;\n    }\n    protected class Hook { }\n}\n",
         );
-        assert_eq!(qualified(&facts), vec!["Acme", "Acme::Wrapper"]);
+        assert_eq!(qualified(&facts), vec!["Acme", "Acme::Vault"]);
+    }
+
+    #[test]
+    fn extension_block_members_belong_to_their_class_and_mark_the_file_recovered() {
+        // No error node: the grammar reads the block as a constructor named `extension`.
+        let source = "namespace Acme.Ext;\n\npublic static class Clean\n{\n    public static int Before(this string s) => 1;\n\n    extension(string s)\n    {\n        public int Twice() => 2;\n        public static string Empty() => \"\";\n    }\n\n    public static int After(this string s) => 3;\n}\n";
+        let mut parser = crate::parser_for(&Language::CSharp).unwrap();
+        assert!(!parser.parse(source, None).unwrap().root_node().has_error());
+        let facts = parse("Clean.cs", source);
+        use SymbolKind::*;
+        use Visibility::Public;
+        assert_eq!(
+            table(&facts),
+            vec![
+                row("Acme::Ext", Package, Public, 1, 14),
+                row("Acme::Ext::Clean", Class, Public, 3, 14),
+                row("Acme::Ext::Clean::Before", Method, Public, 5, 5),
+                row("Acme::Ext::Clean::Twice", Method, Public, 9, 9),
+                row("Acme::Ext::Clean::Empty", Method, Public, 10, 10),
+                row("Acme::Ext::Clean::After", Method, Public, 13, 13),
+            ]
+        );
+        // What the file declares there is recovered: medium confidence, and coverage counts it.
+        assert!(facts.syntax_errors);
+        assert!(facts
+            .symbols
+            .iter()
+            .all(|symbol| symbol.confidence == Confidence::Medium));
+        let clean = find(&facts, "Acme::Ext::Clean");
+        assert_eq!(
+            find(&facts, "Acme::Ext::Clean::Twice")
+                .parent_symbol_id
+                .as_ref(),
+            Some(&clean.id)
+        );
+    }
+
+    #[test]
+    fn a_local_function_in_a_field_initializer_lambda_is_kept() {
+        let facts = parse(
+            "Holder.cs",
+            "namespace Acme.Locals;\n\npublic class Holder\n{\n    private static readonly Func<int, int> Scale = x =>\n    {\n        int Twice(int y) => y * 2;\n        return Twice(x);\n    };\n\n    public int Run()\n    {\n        int Local() => 1;\n        return Local();\n    }\n}\n",
+        );
+        assert!(!facts.syntax_errors);
+        assert_eq!(
+            qualified(&facts),
+            vec![
+                "Acme::Locals",
+                "Acme::Locals::Holder",
+                "Acme::Locals::Holder::Scale",
+                "Acme::Locals::Holder::Twice",
+                "Acme::Locals::Holder::Run",
+                "Acme::Locals::Holder::Run::Local",
+            ]
+        );
+        assert_eq!(
+            find(&facts, "Acme::Locals::Holder::Twice").kind,
+            SymbolKind::Function
+        );
     }
 }

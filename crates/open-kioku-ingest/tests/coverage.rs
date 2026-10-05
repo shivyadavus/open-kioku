@@ -1908,6 +1908,70 @@ fn csharp_recovery_generated_rules_and_partial_accessibility_are_recorded() {
         .all(|part| part.visibility == open_kioku_core::Visibility::Public));
 }
 
+/// Parts of one partial type compile into one assembly: a public part in one project does not
+/// make another project's same-named internal type public.
+#[test]
+fn csharp_partial_parts_are_unified_within_a_project_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/A/A.csproj",
+        "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+    );
+    write(
+        root,
+        "src/B/B.csproj",
+        "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+    );
+    write(
+        root,
+        "src/A/Shared.cs",
+        "namespace Acme.Shared\n{\n    public partial class Widget { }\n}\n",
+    );
+    write(
+        root,
+        "src/A/Widget.Part.cs",
+        "namespace Acme.Shared\n{\n    partial class Widget { }\n}\n",
+    );
+    write(
+        root,
+        "src/B/Shared.cs",
+        "namespace Acme.Shared\n{\n    partial class Widget { }\n}\n",
+    );
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let visibility = |path: &str| {
+        let file = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == Path::new(path))
+            .unwrap_or_else(|| panic!("{path} indexed"));
+        snapshot
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.file_id == file.id && symbol.qualified_name == "Acme::Shared::Widget"
+            })
+            .unwrap()
+            .visibility
+    };
+    assert_eq!(
+        visibility("src/A/Shared.cs"),
+        open_kioku_core::Visibility::Public
+    );
+    assert_eq!(
+        visibility("src/A/Widget.Part.cs"),
+        open_kioku_core::Visibility::Public
+    );
+    assert_eq!(
+        visibility("src/B/Shared.cs"),
+        open_kioku_core::Visibility::Crate
+    );
+}
+
 fn write(root: &Path, path: &str, content: &str) {
     let path = root.join(path);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

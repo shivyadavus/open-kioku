@@ -92,6 +92,11 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
             message: "tree-sitter parse contains syntax errors".into(),
         });
     }
+    // A construct the grammar misreads without an error node (a C# 14 extension block read as
+    // a constructor) is a syntax error all the same: what the file declares there is recovered.
+    let syntax_errors = syntax_errors
+        || (file.language == Language::CSharp
+            && csharp::misreads_a_declaration(tree.root_node(), content.as_bytes()));
 
     let mut out = SyntaxFacts::default();
     let mut ctx = ParseContext::new();
@@ -836,7 +841,7 @@ fn extract_symbol_visibility(
 ) -> Visibility {
     match file.language {
         Language::Java => java_visibility(node),
-        Language::CSharp => csharp::visibility(node),
+        Language::CSharp => csharp::visibility(node, content.as_bytes()),
         Language::Rust => match rust_associated_owner(node) {
             Some(owner) if owner.kind() == "trait_item" => rust_visibility(owner),
             Some(owner) if owner.child_by_field_name("trait").is_some() => {

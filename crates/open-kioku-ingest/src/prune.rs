@@ -268,10 +268,33 @@ const MSBUILD_PROJECT_EXTENSIONS: [&str; 3] = ["csproj", "fsproj", "vbproj"];
 /// Whether an MSBuild project file sits beside `path`. Project files are named after the
 /// project, so this reads the parent directory; only a `bin` or `obj` ever pays for it.
 fn beside_msbuild_project(path: &Path) -> bool {
-    let Some(entries) = path
-        .parent()
-        .and_then(|parent| std::fs::read_dir(parent).ok())
-    else {
+    path.parent().is_some_and(holds_msbuild_project)
+}
+
+/// The directory of the nearest MSBuild project file above the repository-relative `path`,
+/// relative to `root`: the project, and so the assembly, a C# file compiles into by the SDK's
+/// default globbing. `cache` holds each directory's answer, since a project holds many files.
+pub(crate) fn nearest_msbuild_project(
+    root: &Path,
+    path: &Path,
+    cache: &mut std::collections::HashMap<PathBuf, bool>,
+) -> Option<PathBuf> {
+    let mut dir = path.parent();
+    while let Some(current) = dir {
+        let holds = *cache
+            .entry(current.to_path_buf())
+            .or_insert_with(|| holds_msbuild_project(&root.join(current)));
+        if holds {
+            return Some(current.to_path_buf());
+        }
+        dir = current.parent();
+    }
+    None
+}
+
+/// Whether `dir` holds an MSBuild project file.
+fn holds_msbuild_project(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
     entries.filter_map(|entry| entry.ok()).any(|entry| {

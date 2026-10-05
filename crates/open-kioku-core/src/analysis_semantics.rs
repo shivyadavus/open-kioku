@@ -283,7 +283,12 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// qualified by namespace and type nesting, and chunked with each symbol's `///` documentation,
 /// read through syntax errors where recovery kept a declaration whole and in place; a v20
 /// index holds `.cs` files as unknown text with no symbols.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v21";
+/// v23: a C# 14 extension block, which the grammar reads as a constructor named `extension`,
+/// marks its file as parsed with errors and its members are methods of the declaring class; a
+/// local function in a field initializer's lambda is a symbol; a C# type the pattern fallback
+/// names is read from the first `#if` branch only. A v21 index records none of these. v22 is
+/// taken by an open change.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v23";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 
