@@ -240,19 +240,25 @@ A gap names the directories its missing files came from (`excluded_dirs`, at mos
 `COVERAGE_GAP_DIRS_LISTED` (3) of each class, most files first) and counts the missing files
 under installed dependencies (`dependency_files`, across every directory). Both come from
 `coverage.policy_excluded_dirs_by_language`, which ingest records per excluded file with no
-extra walk. A file counts under the outermost directory above it that evidence shows holds
-installed third-party packages, classed `dependencies` with that evidence; any other file
-counts under its top-level directory, classed `unclassified`. The evidence is a file a
-package tool writes, never a directory name:
+extra walk. A file below a directory a package tool installs into counts under that
+directory, classed `dependencies` with its evidence; any other file counts under its
+top-level directory, classed `unclassified`. The evidence is a file a package tool writes,
+never a directory name alone:
 
-| `evidence` | The directory holds |
+| `evidence` | The directory that is classed |
 | --- | --- |
-| `python_environment` | `pyvenv.cfg` (venv, virtualenv 20+) or `conda-meta/` (conda), whatever the directory is called |
-| `site_packages` | `*.dist-info` or `*.egg-info` metadata, and is named `site-packages` or `dist-packages` |
-| `go_vendor` | `modules.txt`, and is named `vendor` (`go mod vendor`) |
-| `composer_vendor` | `composer/installed.json`, and is named `vendor` (Composer) |
+| `python_environment` | `<env>/lib/python*/site-packages` or `<env>/Lib/site-packages`, where `<env>` holds `pyvenv.cfg` (venv, virtualenv 20+) or `conda-meta/` (conda), whatever `<env>` is called |
+| `site_packages` | a `site-packages` or `dist-packages` holding `*.dist-info` or `*.egg-info` metadata |
+| `go_vendor` | a `vendor` holding `modules.txt` (`go mod vendor`) |
+| `composer_vendor` | a `vendor` holding `composer/installed.json` (Composer) |
 
-A directory where any recorded file lacks the evidence is `unclassified`. `node_modules`, and
+Only the installation directory is classed, never the tree around a marker. `python -m venv
+.` run inside a first-party `services/api/` writes `pyvenv.cfg` beside the service's own
+code: `services/api/lib/python3.12/site-packages` is `dependencies`, while a git-ignored
+`services/api/generated/`, and the environment's own `bin/`, are `unclassified`. A
+`conda-meta/` beside a tool's generated code classes nothing but that environment's
+`site-packages`; conda's `pkgs/` cache is not read as evidence. Every file below a classed
+directory is classed alike, so a directory entry never holds both classes. `node_modules`, and
 a `.venv` or `venv` holding a marker, never appear: discovery prunes them before any file is
 seen. An `omitted` gap names no directory, because no exclusion rule chose its files. A
 manifest written before directories were recorded per language yields gaps with neither

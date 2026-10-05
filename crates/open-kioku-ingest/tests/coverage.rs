@@ -928,7 +928,7 @@ fn coverage_gap_names_excluded_dependency_and_source_trees_and_prices_them_apart
                 evidence: Some(DependencyEvidence::SitePackages),
             },
             CoverageGapDir {
-                path: "env".into(),
+                path: "env/lib/python3.12/site-packages".into(),
                 files: 10,
                 class: ExcludedDirClass::Dependencies,
                 evidence: Some(DependencyEvidence::PythonEnvironment),
@@ -940,7 +940,9 @@ fn coverage_gap_names_excluded_dependency_and_source_trees_and_prices_them_apart
         caveat.contains("generated/ (25 unclassified)")
             && caveat
                 .contains("venv/lib/python3.11/site-packages/ (25 dependencies: site-packages)")
-            && caveat.contains("env/ (10 dependencies: python-environment)"),
+            && caveat.contains(
+                "env/lib/python3.12/site-packages/ (10 dependencies: python-environment)"
+            ),
         "{caveat}"
     );
 
@@ -992,6 +994,150 @@ fn coverage_gap_names_excluded_dependency_and_source_trees_and_prices_them_apart
         .iter()
         .any(|component| component.signal == "index_coverage"
             && component.evidence_ids == vec!["coverage:python:git_ignore".to_string()]));
+}
+
+fn index_gaps(root: &Path) -> Vec<open_kioku_core::CoverageGap> {
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    snapshot.manifest.quality.coverage.as_ref().unwrap().gaps()
+}
+
+/// A selection in Python with complete evidence otherwise, priced against `gap`: whether the
+/// 0.74 language cap and its signal apply.
+fn caps_a_python_selection(gap: &open_kioku_core::CoverageGap) -> bool {
+    use open_kioku_core::{
+        ConfidenceBreakdown, ConfidenceSignalInput, CoverageInput,
+        COVERAGE_SELECTED_LANGUAGE_SIGNAL,
+    };
+    let breakdown = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+        primary_file_count: 2,
+        evidence_count: 8,
+        exact_reference_count: 2,
+        validation_count: 2,
+        validation_with_command_count: 2,
+        allowed_file_count: 2,
+        runtime_signal_count: 1,
+        task_relevance: 1.0,
+        primary_language_keys: vec!["python".into()],
+        coverage: CoverageInput::Recorded(vec![gap.clone()]),
+        ..Default::default()
+    });
+    let signal = breakdown
+        .components
+        .iter()
+        .any(|component| component.signal == COVERAGE_SELECTED_LANGUAGE_SIGNAL);
+    assert_eq!(signal, breakdown.overall_score <= 0.74, "{breakdown:?}");
+    signal
+}
+
+/// #503 review: an environment marker covers the environment's installed packages, not the
+/// directory holding it. `python -m venv .` run inside a first-party service writes
+/// `pyvenv.cfg` beside the service's code; its git-ignored `generated/` is first-party source
+/// and must still cap a Python selection, while the environment's `site-packages` does not.
+#[test]
+fn a_venv_created_inside_a_service_does_not_turn_its_generated_source_into_dependencies() {
+    use open_kioku_core::{DependencyEvidence, ExcludedDirClass};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        ".gitignore",
+        "services/api/lib/\nservices/api/bin/\nservices/api/generated/\n",
+    );
+    write(root, "services/api/pyvenv.cfg", "home = /usr/bin\n");
+    let site = "services/api/lib/python3.12/site-packages";
+    write(
+        root,
+        &format!("{site}/pip-24.0.dist-info/METADATA"),
+        "Name: pip\n",
+    );
+    for index in 0..20 {
+        write(
+            root,
+            &format!("{site}/pip/m{index}.py"),
+            "def run():\n    pass\n",
+        );
+    }
+    write(
+        root,
+        "services/api/bin/activate_this.py",
+        "def activate():\n    pass\n",
+    );
+    for index in 0..5 {
+        write(
+            root,
+            &format!("services/api/handler{index}.py"),
+            "def handle():\n    pass\n",
+        );
+    }
+    for index in 0..60 {
+        write(
+            root,
+            &format!("services/api/generated/ledger_pb{index}.py"),
+            "from services.api.handler0 import handle\n",
+        );
+    }
+
+    let gaps = index_gaps(root);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    let gap = &gaps[0];
+    assert_eq!((gap.missing_files, gap.language_files), (81, 86));
+    // Only the environment's installed packages; `bin/` and `generated/` stay source.
+    assert_eq!(gap.dependency_files, 20);
+    let site_dir = gap
+        .excluded_dirs
+        .iter()
+        .find(|dir| dir.path == site)
+        .unwrap_or_else(|| panic!("{gap:?}"));
+    assert_eq!(site_dir.class, ExcludedDirClass::Dependencies);
+    assert_eq!(
+        site_dir.evidence,
+        Some(DependencyEvidence::PythonEnvironment)
+    );
+    let services = gap
+        .excluded_dirs
+        .iter()
+        .find(|dir| dir.path == "services")
+        .unwrap_or_else(|| panic!("{gap:?}"));
+    assert_eq!(services.class, ExcludedDirClass::Unclassified);
+    assert_eq!(services.files, 61);
+    assert!(gap.is_source_majority());
+    assert!(caps_a_python_selection(gap));
+}
+
+/// #503 review: a `conda-meta/` beside a tool's git-ignored generated code says the directory
+/// is a conda environment root, not that everything under it was installed.
+#[test]
+fn a_conda_marker_does_not_turn_sibling_generated_source_into_dependencies() {
+    use open_kioku_core::ExcludedDirClass;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, ".gitignore", "tools/gen/\n");
+    write(root, "tools/conda-meta/history", "==> 2026-01-01 <==\n");
+    for index in 0..5 {
+        write(root, &format!("app/m{index}.py"), "def run():\n    pass\n");
+    }
+    for index in 0..30 {
+        write(
+            root,
+            &format!("tools/gen/emit{index}.py"),
+            "from app.m0 import run\n",
+        );
+    }
+
+    let gaps = index_gaps(root);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    let gap = &gaps[0];
+    assert_eq!(gap.missing_files, 30);
+    assert_eq!(gap.dependency_files, 0);
+    assert_eq!(gap.excluded_dirs.len(), 1, "{gap:?}");
+    assert_eq!(gap.excluded_dirs[0].path, "tools");
+    assert_eq!(gap.excluded_dirs[0].class, ExcludedDirClass::Unclassified);
+    assert!(caps_a_python_selection(gap));
 }
 
 fn git(root: &Path, args: &[&str]) {

@@ -52,12 +52,15 @@ can never drop files silently. `IndexQuality.coverage` (JSON: `quality.coverage`
 - `policy_excluded_dirs_by_language`: the same files per language key and directory, each
   directory with its counts by source and, when evidence shows it holds installed
   third-party packages, its `dependency` evidence
-  (`{"python": {"env": {"by_source": {"git_ignore": 340}, "dependency": "python_environment"},
-  "generated": {"by_source": {"git_ignore": 40}}}}`). A file under such a directory counts
-  under the outermost one (`env`, `svc/lib/python3.12/site-packages`); any other file under
-  its top-level directory. Ingest probes only the ancestors of excluded programming-language
-  files, each directory once per scan: `pyvenv.cfg` or `conda-meta/` in any directory,
-  `*.dist-info`/`*.egg-info` in a `site-packages` or `dist-packages`, `modules.txt` or
+  (`{"python": {"env/lib/python3.12/site-packages": {"by_source": {"git_ignore": 340},
+  "dependency": "python_environment"}, "generated": {"by_source": {"git_ignore": 40}}}}`).
+  A file under such a directory counts under it; any other file under its top-level
+  directory. Only the directory packages are installed into is classed: an environment
+  marker (`pyvenv.cfg`, `conda-meta/`) classes its `lib/python*/site-packages` or
+  `Lib/site-packages`, never the rest of the tree around it. Ingest probes only the ancestors
+  of excluded programming-language files, each directory once per scan, and only those named
+  `site-packages`, `dist-packages` or `vendor`: `*.dist-info`/`*.egg-info` inside, or an
+  environment marker at the root of the layout above it; `modules.txt` or
   `composer/installed.json` in a `vendor`. Redacted paths are not recorded, and secret-like
   directories are withheld like `policy_excluded_dirs`. Coverage gaps name their directories
   and price installed dependencies apart from it (`docs/ranking.md`, "Index coverage gaps").

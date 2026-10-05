@@ -3864,7 +3864,8 @@ pub struct CoverageGapDir {
 }
 
 impl CoverageGapDir {
-    /// `generated/ (40 unclassified)`, `env/ (340 dependencies: python-environment)`
+    /// `generated/ (40 unclassified)`, `env/lib/python3.12/site-packages/ (340 dependencies:
+    /// python-environment)`
     pub fn label(&self) -> String {
         let files = group_thousands(self.files);
         match self.evidence {
@@ -3908,8 +3909,11 @@ impl ExcludedDirClass {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyEvidence {
-    /// The directory holds `pyvenv.cfg` (venv, virtualenv 20+) or `conda-meta/` (conda): a
-    /// Python environment, whatever it is named.
+    /// The `lib/python*/site-packages` (or Windows `Lib/site-packages`) of a directory holding
+    /// `pyvenv.cfg` (venv, virtualenv 20+) or `conda-meta/` (conda): a Python environment's
+    /// installed packages, whatever the environment is named. The marker covers only that
+    /// directory: the environment's `bin/`, and anything else beside the marker, stay
+    /// unclassified.
     PythonEnvironment,
     /// A `site-packages` or `dist-packages` directory holding installed-distribution metadata
     /// (`*.dist-info`, `*.egg-info`), as pip and setuptools write it.
@@ -4013,8 +4017,8 @@ impl CoverageGap {
         format!("coverage:{}:{}", self.language, self.cause.key())
     }
 
-    /// `git-ignore`, or `git-ignore: env/ (340 dependencies: python-environment), generated/ (40
-    /// unclassified)` when the directories are known.
+    /// `git-ignore`, or `git-ignore: env/lib/python3.12/site-packages/ (340 dependencies:
+    /// python-environment), generated/ (40 unclassified)` when the directories are known.
     fn reason_detail(&self) -> String {
         if self.excluded_dirs.is_empty() {
             return self.reason.clone();
@@ -4295,11 +4299,11 @@ pub struct IndexCoverage {
     pub policy_excluded_by_language: BTreeMap<String, BTreeMap<SkipSource, usize>>,
     /// Policy-excluded source files per language key and directory, so a gap can name what was
     /// excluded and price installed dependencies apart from first-party source. A file under a
-    /// directory evidence shows holds installed packages counts under that directory (`env`,
-    /// `svc/lib/python3.12/site-packages`) with its [`DependencyEvidence`]; any other file under
-    /// its top-level directory, unclassified. Redacted paths are not recorded. Empty on
-    /// manifests written before it was recorded, which read as no per-language directory data:
-    /// every missing file is priced as first-party source, as before.
+    /// directory evidence shows holds installed packages counts under that directory
+    /// (`env/lib/python3.12/site-packages`, `svc/vendor`) with its [`DependencyEvidence`]; any
+    /// other file under its top-level directory, unclassified. Redacted paths are not recorded.
+    /// Empty on manifests written before it was recorded, which read as no per-language
+    /// directory data: every missing file is priced as first-party source, as before.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub policy_excluded_dirs_by_language: BTreeMap<String, BTreeMap<String, ExcludedDir>>,
 }
@@ -4407,8 +4411,11 @@ impl IndexCoverage {
             .or_default();
         let entry = match dirs.get_mut(dir) {
             Some(entry) => {
-                // One file without the evidence makes the directory unclassified: a class is
-                // claimed only for a directory every recorded file agrees on.
+                // Ingest never records one path both ways: a dependency entry is keyed by its
+                // evidence directory, every file below which is classified alike, and an
+                // unclassified entry by a top-level directory, which equals a dependency key
+                // only when that top-level directory is itself the evidence directory. A caller
+                // that mixes them gets the conservative answer.
                 if entry.dependency != evidence {
                     entry.dependency = None;
                 }
@@ -7009,8 +7016,8 @@ mod tests {
         assert_eq!(value["missing_files"], 25);
     }
 
-    /// `considered` indexed Python files beside git-ignored ones: `dependencies` under `env`, a
-    /// Python environment, and `generated` under `generated`, which nothing classifies.
+    /// `considered` indexed Python files beside git-ignored ones: `dependencies` in the
+    /// `site-packages` of `env`, a Python environment, and `generated` under `generated`, which nothing classifies.
     fn git_ignored_python(
         considered: usize,
         dependencies: usize,
@@ -7025,7 +7032,10 @@ mod tests {
             (
                 dependencies,
                 "env",
-                Some(("env", super::DependencyEvidence::PythonEnvironment)),
+                Some((
+                    "env/lib/python3.12/site-packages",
+                    super::DependencyEvidence::PythonEnvironment,
+                )),
             ),
             (generated, "generated", None),
         ] {
@@ -7058,7 +7068,7 @@ mod tests {
             gap.excluded_dirs,
             vec![
                 CoverageGapDir {
-                    path: "env".into(),
+                    path: "env/lib/python3.12/site-packages".into(),
                     files: 340,
                     class: ExcludedDirClass::Dependencies,
                     evidence: Some(DependencyEvidence::PythonEnvironment),
@@ -7073,11 +7083,11 @@ mod tests {
         );
         assert_eq!(
             gap.summary(),
-            "python (380 of 410 files, git-ignore: env/ (340 dependencies: python-environment), generated/ (40 unclassified))"
+            "python (380 of 410 files, git-ignore: env/lib/python3.12/site-packages/ (340 dependencies: python-environment), generated/ (40 unclassified))"
         );
         assert_eq!(
             gap.caveat(),
-            "index coverage: 380 of 410 python source files (92.7%) are not indexed (git-ignore: env/ (340 dependencies: python-environment), generated/ (40 unclassified)); 340 are installed dependencies, so 40 of 70 possibly first-party files (57.1%) are missing; an absence among them is not evidence"
+            "index coverage: 380 of 410 python source files (92.7%) are not indexed (git-ignore: env/lib/python3.12/site-packages/ (340 dependencies: python-environment), generated/ (40 unclassified)); 340 are installed dependencies, so 40 of 70 possibly first-party files (57.1%) are missing; an absence among them is not evidence"
         );
         // 40 of the 70 files that may be source are missing: still a majority, so it caps.
         assert!(gap.is_majority() && gap.is_source_majority());
@@ -7156,9 +7166,9 @@ mod tests {
                 installed.caveats.contains(&dependencies.caveat()),
                 "{installed:?}"
             );
-            assert!(dependencies
-                .caveat()
-                .contains("env/ (340 dependencies: python-environment)"));
+            assert!(dependencies.caveat().contains(
+                "env/lib/python3.12/site-packages/ (340 dependencies: python-environment)"
+            ));
             let component = installed
                 .components
                 .iter()
@@ -7172,17 +7182,19 @@ mod tests {
             .iter()
             .any(|blocker| blocker.contains("generated/ (40 unclassified)")));
 
-        // A directory one file shows no evidence for is unclassified, whatever the rest showed.
-        let mut disagreeing = git_ignored_python(2, 25, 0);
-        disagreeing.record_classified_policy_exclusion(
-            &Language::Python,
-            SkipSource::GitIgnore,
-            Some("env"),
-            None,
-        );
-        let dirs = &disagreeing.policy_excluded_dirs_by_language["python"];
-        assert_eq!(dirs["env"].dependency, None);
-        assert_eq!(dirs["env"].by_source[&SkipSource::GitIgnore], 26);
+        // A caller recording one path both classified and unclassified gets unclassified.
+        let mut disagreeing = IndexCoverage::default();
+        for dependency in [Some(("vendor", super::DependencyEvidence::GoVendor)), None] {
+            disagreeing.record_classified_policy_exclusion(
+                &Language::Go,
+                SkipSource::GitIgnore,
+                Some("vendor"),
+                dependency,
+            );
+        }
+        let dirs = &disagreeing.policy_excluded_dirs_by_language["go"];
+        assert_eq!(dirs["vendor"].dependency, None);
+        assert_eq!(dirs["vendor"].by_source[&SkipSource::GitIgnore], 2);
 
         // A manifest written before directories were recorded per language: same verdict and
         // price as before, every missing file counted as source.
