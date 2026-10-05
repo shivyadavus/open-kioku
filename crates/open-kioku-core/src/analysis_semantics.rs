@@ -264,7 +264,11 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// `impl` block's trait and generic coverage; a `let` initialized by `Name(..)` or a plain path
 /// records it; and a struct field typed by `Box`, `Rc` or `Arc` of a type parameter has no
 /// declared type. A v18 index records none of these.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v19";
+/// v20: a callable in a test-path file is a test (`test_file_symbol`) only when its language's
+/// runner discovers it as one, and a helper, fixture or lifecycle hook otherwise
+/// (`test_file_helper`), which is not validation evidence; a v19 index records every callable of
+/// a test file as a test, so a file of `setUp` and `withTempRepo` helpers reads as validation.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v20";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

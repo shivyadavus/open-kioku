@@ -1307,17 +1307,44 @@ fn is_overlap_stopword(term: &str) -> bool {
 /// none the runner would execute. It is decided from the indexed targets alone, never from a
 /// census of files, so the diagnostics can never call validation unavailable while the pack
 /// carries a validation target.
-fn validation_unavailable_reason(tests: &[TestTarget]) -> Option<&'static str> {
+fn validation_unavailable_reason(tests: &[TestTarget]) -> Option<String> {
     if tests.is_empty() {
-        return Some("no test targets are indexed for this repository");
+        return Some("no test targets are indexed for this repository".into());
     }
-    if !tests
+    let mut excluded = BTreeMap::new();
+    // A single target that can stand as evidence makes validation available.
+    for test in tests {
+        *excluded
+            .entry(test.validation_exclusion()?)
+            .or_insert(0usize) += 1;
+    }
+    open_kioku_core::every_test_target_excluded(&excluded)
+}
+
+/// Ids of the test-file callables matching no runner discovery rule whose names share a
+/// retrieval word with `task`. The validation stream votes only for targets that stand as
+/// evidence, so it never sees these; plans and packs count them so a test the rules missed,
+/// one the test selector links to no changed file, still reads as withheld rather than absent.
+pub(crate) fn helper_ids_overlapping_task(tests: &[TestTarget], task: &str) -> BTreeSet<String> {
+    let terms = task
+        .split_whitespace()
+        .map(|term| {
+            term.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                .to_ascii_lowercase()
+        })
+        .filter(|term| term.len() >= 3 && !is_overlap_stopword(term))
+        .collect::<Vec<_>>();
+    tests
         .iter()
-        .any(|test| test.counts_as_validation_evidence())
-    {
-        return Some("every indexed test target is a disabled test the runner skips");
-    }
-    None
+        .filter(|test| {
+            test.validation_exclusion() == Some(open_kioku_core::TestExclusionReason::Helper)
+        })
+        .filter(|test| {
+            let name = test.name.replace('_', "").to_ascii_lowercase();
+            terms.iter().any(|term| name.contains(term.as_str()))
+        })
+        .map(|test| test.id.clone())
+        .collect()
 }
 
 fn term_overlap(terms: &[String], haystack: &str) -> usize {

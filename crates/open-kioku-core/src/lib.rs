@@ -2565,9 +2565,18 @@ pub enum TestTargetOrigin {
     /// A declared symbol outside a test file, matched by a test annotation or naming convention.
     #[default]
     Symbol,
-    /// A declared symbol in a file the shared test-path rule recognises. The file is tests, so
-    /// the symbol is one whatever it is called: `shouldRoundHalfUp`, `roundsHalfUp`, `testRounds`.
+    /// A declared symbol in a file the shared test-path rule recognises that the language's
+    /// runner discovers as a test: a `#[test]` or `@Test` callable, a `test`-prefixed Python
+    /// function in a test module, a Go `TestX` in a `_test.go` file. The runner decides, not the
+    /// name, so a JUnit `shouldRoundHalfUp` is one.
     TestFileSymbol,
+    /// A declared symbol in a test-path file that matches no default runner discovery rule:
+    /// usually a helper, fixture, builder or lifecycle hook (`setUp`, `TestMain`, `makeClient`),
+    /// or any callable in a support module such as `conftest.py` or a `testutil/` package. It is
+    /// still test code, so it is kept, but it is not counted as validation. Runner configuration
+    /// is not read (beyond pytest's discovery options), so a test a configured runner collects
+    /// can carry this origin; surfaces report such targets as withheld, never as absent.
+    TestFileHelper,
     /// A JavaScript or TypeScript runner call such as `test("name", fn)`.
     RegistrationCall,
     /// A registration call the runner will not execute: `test.skip`, `it.todo`, `test.failing`.
@@ -2584,6 +2593,10 @@ pub enum TestTargetOrigin {
 pub enum TestExclusionReason {
     /// A registration the runner will not execute: `test.skip`, `it.todo`, `test.failing`.
     Disabled,
+    /// A test-file callable that matches no default runner discovery rule: usually a helper,
+    /// fixture or lifecycle hook. Runner configuration is not read, so a test a configured or
+    /// custom runner collects can land here too; surfaces say so rather than call it absent.
+    Helper,
 }
 
 impl TestExclusionReason {
@@ -2592,6 +2605,7 @@ impl TestExclusionReason {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Disabled => DISABLED_TEST_TARGET,
+            Self::Helper => HELPER_TEST_TARGET,
         }
     }
 
@@ -2601,12 +2615,78 @@ impl TestExclusionReason {
             Self::Disabled => {
                 "Enable the skipped tests (`test.skip`, `it.todo`, `test.failing`) before relying on validation recommendations."
             }
+            Self::Helper => {
+                "If your test runner is configured to collect these callables, run them yourself: runner configuration is not read. Otherwise add tests that match a default discovery rule (`#[test]`, `@Test`, `def test_*`, `func TestX`, `test(..)`/`it(..)`)."
+            }
+        }
+    }
+
+    /// Why a target excluded for this reason stays optional however strongly it overlaps a
+    /// change.
+    pub fn tier_justification(self) -> &'static str {
+        match self {
+            Self::Disabled => {
+                "the runner skips this test (`skip`, `todo`, `failing`), so running it validates nothing"
+            }
+            Self::Helper => {
+                "this test-file callable matches no default runner discovery rule (runner configuration is not read), so it is not counted as validation"
+            }
         }
     }
 }
 
+/// The disclosure a plan carries when it planned nothing and found no withheld callable near the
+/// change, but the index withheld some elsewhere: the selector may simply not link their files
+/// to the change. `None` when there were none.
+pub fn withheld_test_file_callables_in_index(count: usize) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "{count} indexed test-file callable(s) matched no default runner discovery rule (runner configuration is not read), none of them linked to this change"
+        )
+    })
+}
+
+/// The disclosure plans and context packs carry when test-file callables near a change were
+/// withheld as matching no discovery rule. A misclassified test must read as withheld, never as
+/// absent. `None` when there were none.
+pub fn withheld_test_file_callables(count: usize) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "{count} test-file callable(s) near this change matched no default runner discovery rule (runner configuration is not read)"
+        )
+    })
+}
+
 /// How a disabled registration is described wherever it is withheld from validation.
 pub const DISABLED_TEST_TARGET: &str = "disabled test the runner skips";
+
+/// How a test-file callable that matches no runner discovery rule is described wherever it is
+/// withheld from validation. It says what the index checked, not what a runner will do.
+pub const HELPER_TEST_TARGET: &str =
+    "test-file callable matching no default runner discovery rule (runner configuration is not read)";
+
+/// The sentence every surface uses when an index holds test targets and every one is excluded,
+/// so `ok status` and the context pack's validation caveat word one index one way. `None` when
+/// nothing is excluded.
+pub fn every_test_target_excluded(
+    excluded: &BTreeMap<TestExclusionReason, usize>,
+) -> Option<String> {
+    match excluded.keys().collect::<Vec<_>>().as_slice() {
+        [] => None,
+        [reason] => Some(format!(
+            "every indexed test target is a {}",
+            reason.describe()
+        )),
+        _ => Some(format!(
+            "every indexed test target is excluded ({})",
+            excluded
+                .iter()
+                .map(|(reason, count)| format!("{count} {}", reason.describe()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
 
 /// Selection strength for a validation candidate.
 ///
@@ -2641,8 +2721,9 @@ pub enum TestSelectionTier {
 
 impl TestTarget {
     /// Whether this target can stand as validation evidence. A disabled registration is a test
-    /// the runner skips, so counting it would let a file of `test.skip` calls satisfy a
-    /// task family that requires validation evidence.
+    /// the runner skips and a test-file helper is one it never runs, so counting either would
+    /// let a file of `test.skip` calls or `withTempRepo` helpers satisfy a task family that
+    /// requires validation evidence.
     pub fn counts_as_validation_evidence(&self) -> bool {
         self.validation_exclusion().is_none()
     }
@@ -2651,19 +2732,22 @@ impl TestTarget {
     pub fn validation_exclusion(&self) -> Option<TestExclusionReason> {
         match self.origin {
             TestTargetOrigin::DisabledRegistrationCall => Some(TestExclusionReason::Disabled),
+            TestTargetOrigin::TestFileHelper => Some(TestExclusionReason::Helper),
             TestTargetOrigin::Symbol
             | TestTargetOrigin::TestFileSymbol
             | TestTargetOrigin::RegistrationCall => None,
         }
     }
 
-    /// Whether provenance alone establishes that this is a test: the index extracted it from a
-    /// test file, or a runner call registered it. Only targets matched outside a test file, by
-    /// annotation or naming convention, need a name heuristic to judge them.
+    /// Whether provenance alone settles what this target is: the index extracted it from a test
+    /// file and judged it by the runner's discovery rule, or a runner call registered it. Only
+    /// targets matched outside a test file, by annotation or naming convention, need a name
+    /// heuristic to judge them.
     pub fn has_test_provenance(&self) -> bool {
         matches!(
             self.origin,
             TestTargetOrigin::TestFileSymbol
+                | TestTargetOrigin::TestFileHelper
                 | TestTargetOrigin::RegistrationCall
                 | TestTargetOrigin::DisabledRegistrationCall
         )
@@ -5132,6 +5216,9 @@ pub enum QualityNoteKind {
     RelationshipResolution,
     /// The git history scan skipped commits whose patch it could not read.
     GitHistory,
+    /// A test runner's configuration changes which callables it discovers, so test targets
+    /// under it are judged by the test-path rule instead of the runner's default rules.
+    TestDiscovery,
     /// A note from a manifest written before notes carried a kind.
     Unclassified,
 }

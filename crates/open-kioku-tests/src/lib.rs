@@ -461,6 +461,18 @@ impl<'a> TestSelector<'a> {
         Ok(self.ranked_with_evidence(path, limit)?.tests)
     }
 
+    /// [`Self::for_changed_path_with_evidence`], and the indexed targets matched to the change
+    /// that it withheld because they cannot stand as validation evidence. Plans and context
+    /// packs count these so a withheld target never reads as an absent one.
+    pub fn for_changed_path_with_withheld(
+        &self,
+        path: &Path,
+        limit: usize,
+    ) -> Result<(Vec<TestTarget>, Vec<TestTarget>)> {
+        let ranked = self.ranked_with_evidence(path, limit)?;
+        Ok((ranked.tests, ranked.excluded))
+    }
+
     /// The selection `ok tests` and `find_tests_for_change` report: the ranked targets of
     /// [`Self::for_changed_path_with_evidence`], plus an account of the indexed targets it
     /// withheld and a caveat whenever the list is empty, saying whether the change has no
@@ -673,15 +685,12 @@ impl<'a> TestSelector<'a> {
 /// evidence (collected in `strong_evidence`) can lift a test above Optional. Heuristic
 /// name/path similarity contributes to ranking but never to requiredness.
 fn assign_selection_tier(test: &mut TestTarget, score: f32, strong_evidence: Vec<String>) {
-    // Evidence that a disabled test overlaps the change says where it would run, not that it
-    // runs. Recommending it would read as "run this" for a test the runner skips, so it stays
-    // Optional and says why.
-    if !test.counts_as_validation_evidence() {
+    // Evidence that a disabled test or a helper overlaps the change says where it would run,
+    // not that it runs. Recommending it would read as "run this" for code the runner skips or
+    // never discovers, so it stays Optional and says why.
+    if let Some(reason) = test.validation_exclusion() {
         test.selection_tier = TestSelectionTier::Optional;
-        test.tier_justification = vec![
-            "the runner skips this test (`skip`, `todo`, `failing`), so running it validates nothing"
-                .into(),
-        ];
+        test.tier_justification = vec![reason.tier_justification().into()];
         return;
     }
     if strong_evidence.is_empty() {

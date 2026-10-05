@@ -1,0 +1,10 @@
+[package]
+name = "ledger"
+version = "0.1.0"
+edition = "2021"
+
+[[test]]
+name = "mimic"
+harness = false
+
+[workspace]

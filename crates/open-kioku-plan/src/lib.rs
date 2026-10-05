@@ -422,10 +422,13 @@ impl<'a> PlanEngine<'a> {
             impact.architecture_policy = context.architecture_policy.clone();
         }
         impact.reconcile_score_breakdown();
-        let ValidationSelection {
-            selected: mut validation,
-            omitted_by_cap,
-        } = self.validation_for_context(&primary_context, &context)?;
+        let (
+            ValidationSelection {
+                selected: mut validation,
+                omitted_by_cap,
+            },
+            withheld_helpers,
+        ) = self.validation_for_context(task, &primary_context, &context)?;
         let validation_omitted_ids = omitted_by_cap
             .into_iter()
             .map(|test| test.id)
@@ -495,6 +498,16 @@ impl<'a> PlanEngine<'a> {
         if let Some(reason) = validation_cap_reason(validation_omitted_ids.len()) {
             risk.reasons.push(reason);
         }
+        // A disclosure too: a test-file callable that matched no discovery rule may still be a
+        // test a configured runner collects, so it reads as withheld, never as absent.
+        let withheld_disclosure = withheld_validation_disclosure(
+            withheld_helpers,
+            validation.is_empty(),
+            manifest.as_ref(),
+        );
+        if let Some(reason) = &withheld_disclosure {
+            risk.reasons.push(reason.clone());
+        }
         if let Some(caveat) = manifest
             .as_ref()
             .and_then(|manifest| manifest.snapshot.as_ref())
@@ -538,6 +551,7 @@ impl<'a> PlanEngine<'a> {
             &impact,
             &validation,
             validation_omitted_ids.len(),
+            withheld_disclosure.as_deref(),
             &self.memory_facts,
         );
         let tool_calls = tool_calls(
@@ -712,20 +726,42 @@ impl<'a> PlanEngine<'a> {
 
     fn validation_for_context(
         &self,
+        task: &str,
         primary_context: &[SearchResult],
         context: &ContextPack,
-    ) -> Result<ValidationSelection> {
+    ) -> Result<(ValidationSelection, usize)> {
         let mut candidates = context.validation_plan.tests.clone();
         let selector = TestSelector::new(self.store as &dyn MetadataStore);
+        // Test-file callables near the change that match no runner discovery rule are withheld,
+        // and counted so the plan says so instead of reporting that no tests exist.
+        let mut withheld_helper_ids = std::collections::BTreeSet::new();
         for result in validation_source_results(primary_context)
             .into_iter()
             .take(5)
         {
-            candidates
-                .extend(selector.for_changed_path_with_evidence(&result.path, MAX_VALIDATION)?);
+            let (selected, withheld) =
+                selector.for_changed_path_with_withheld(&result.path, MAX_VALIDATION)?;
+            candidates.extend(selected);
+            withheld_helper_ids.extend(
+                withheld
+                    .into_iter()
+                    .filter(|test| {
+                        test.validation_exclusion()
+                            == Some(open_kioku_core::TestExclusionReason::Helper)
+                    })
+                    .map(|test| test.id),
+            );
         }
+        // So is one whose name shares a word with the task, wherever its file is.
+        withheld_helper_ids.extend(open_kioku_context::withheld_helper_ids_for_task(
+            self.store as &dyn MetadataStore,
+            task,
+        )?);
         let paths = validation_target_paths(self.store, &candidates)?;
-        Ok(select_validation_targets(candidates, &paths))
+        Ok((
+            select_validation_targets(candidates, &paths),
+            withheld_helper_ids.len(),
+        ))
     }
 }
 
@@ -873,10 +909,11 @@ fn validation_cap_reason(omitted: usize) -> Option<String> {
 }
 
 pub fn is_plausible_test(test: &TestTarget) -> bool {
-    // Provenance decides whenever the index knows where the target came from: a JUnit method in a
-    // test file (`shouldRoundHalfUp`) and a registered test ("rounds half up") are both tests no
-    // name heuristic recognises, and a disabled one is not evidence. The heuristics below judge
-    // only targets matched outside a test file, by annotation or naming convention.
+    // Provenance decides whenever the index knows where the target came from: a JUnit `@Test`
+    // method (`shouldRoundHalfUp`) and a registered test ("rounds half up") are both tests no
+    // name heuristic recognises, while a disabled registration and a test-file helper the
+    // runner never discovers (`setUp`, `withTempRepo`) are not evidence. The heuristics below
+    // judge only targets matched outside a test file, by annotation or naming convention.
     if test.has_test_provenance() {
         return test.counts_as_validation_evidence();
     }
@@ -2170,11 +2207,41 @@ fn stable_slug(value: &str) -> String {
         .join("-")
 }
 
+/// What the plan says about indexed targets it withheld from validation, if anything. Callables
+/// near the change come first. With nothing planned and none near, a repository whose index
+/// withheld callables anywhere, or whose every target is excluded, says that instead: "No
+/// indexed tests were found" would be false for a test the rules missed in a file no changed
+/// path links to (a custom harness, a wrapper-registered suite).
+fn withheld_validation_disclosure(
+    withheld_near_change: usize,
+    validation_is_empty: bool,
+    manifest: Option<&open_kioku_core::IndexManifest>,
+) -> Option<String> {
+    if let Some(near) = open_kioku_core::withheld_test_file_callables(withheld_near_change) {
+        return Some(near);
+    }
+    if !validation_is_empty {
+        return None;
+    }
+    let quality = &manifest?.quality;
+    let excluded = quality.excluded_test_targets.as_ref()?;
+    let helpers = excluded
+        .get(&open_kioku_core::TestExclusionReason::Helper)
+        .copied()
+        .unwrap_or(0);
+    open_kioku_core::withheld_test_file_callables_in_index(helpers).or_else(|| {
+        (quality.test_count == 0)
+            .then(|| open_kioku_core::every_test_target_excluded(excluded))
+            .flatten()
+    })
+}
+
 fn next_steps(
     primary_context: &[SearchResult],
     impact: &ImpactReport,
     validation: &[TestTarget],
     validation_omitted: usize,
+    withheld_disclosure: Option<&str>,
     memory_facts: &[MemorySearchResult],
 ) -> Vec<String> {
     let mut steps = Vec::new();
@@ -2191,7 +2258,13 @@ fn next_steps(
         steps.push("Check matched repo memory facts, but verify them against indexed code before relying on them.".into());
     }
     if validation.is_empty() {
-        steps.push("No indexed tests were found; choose a manual validation command.".into());
+        match withheld_disclosure {
+            Some(withheld) => steps.push(format!(
+                "No runnable indexed test was found, but {withheld}. If any of those are tests your runner runs, run them; otherwise choose a manual validation command."
+            )),
+            None => steps
+                .push("No indexed tests were found; choose a manual validation command.".into()),
+        }
     } else {
         steps.push("Run the recommended validation commands after the change.".into());
     }
@@ -5618,6 +5691,40 @@ mod tests {
         assert!(is_plausible_test(&enabled));
         let disabled = registration_test_target("skips stale rows", "test/rates_test.ts", true);
         assert!(!is_plausible_test(&disabled));
+    }
+
+    /// A helper's name passes every heuristic below the provenance check (`with_temp_repo` is
+    /// snake case, `TestServerBuilder` class-like and test-named), so only its provenance keeps
+    /// it out of the plan and out of `ok verify`'s expected tests.
+    #[test]
+    fn a_test_file_helper_is_never_plannable_whatever_its_name() {
+        let helpers = [
+            "withTempRepo",
+            "with_temp_repo",
+            "TestServerBuilder",
+            "setUp",
+        ]
+        .map(|name| TestTarget {
+            origin: open_kioku_core::TestTargetOrigin::TestFileHelper,
+            ..registration_test_target(name, "test/support_test.go", false)
+        });
+        for helper in &helpers {
+            assert!(!is_plausible_test(helper), "{}", helper.name);
+        }
+        let test = TestTarget {
+            origin: open_kioku_core::TestTargetOrigin::TestFileSymbol,
+            ..registration_test_target("TestPostsEntry", "test/support_test.go", false)
+        };
+        let mut candidates = helpers.to_vec();
+        candidates.push(test);
+        let selection = select_validation_targets(candidates, &BTreeMap::new());
+        let names = selection
+            .selected
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["TestPostsEntry"]);
+        assert!(selection.omitted_by_cap.is_empty());
     }
 
     /// The task shares vocabulary with the registered name, so the validation stream votes and
