@@ -9,8 +9,9 @@
 //! Qualified names keep language entrypoint conventions stable: Python
 //! `__init__.py`, JavaScript/TypeScript `index.*`, and Rust `mod.rs` resolve to
 //! their parent module; Java prefers declared packages; Go prefers declared
-//! package names. Nested/default/anonymous symbols should pass their represented
-//! symbol name through `qualified_name` so the same module prefixing rules apply.
+//! package names; C# uses its declared namespace and never its path.
+//! Nested/default/anonymous symbols should pass their represented symbol name
+//! through `qualified_name` so the same module prefixing rules apply.
 
 use crate::{EdgeId, GraphEdgeType, GraphNodeType, Language, NodeId, Symbol, SymbolId, TestTarget};
 use open_kioku_errors::{OkError, Result};
@@ -163,6 +164,15 @@ pub fn qualified_name(
     let mut parts = match language {
         Language::Java => java_qualified_parts(path, content)?,
         Language::Go => go_qualified_parts(path, content)?,
+        Language::CSharp => csharp_namespace(content)
+            .map(|namespace| {
+                namespace
+                    .split('.')
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
         _ => path_qualified_parts(path, language)?,
     };
     if parts.last().map(|part| part.as_str()) != Some(name) {
@@ -265,6 +275,21 @@ fn go_package(content: Option<&str>) -> Option<String> {
             .map(str::trim)
             .filter(|value| !value.is_empty() && *value != "_")
             .map(str::to_string)
+    })
+}
+
+/// The first namespace a C# file declares, block (`namespace Acme.Ledger {`) or file-scoped
+/// (`namespace Acme.Ledger;`). A C# name belongs to its namespace, not its directory: a type
+/// outside every namespace is in the global namespace and has no prefix at all.
+fn csharp_namespace(content: Option<&str>) -> Option<String> {
+    content?.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("namespace ")?;
+        let name = rest
+            .split([';', '{', '/'])
+            .next()?
+            .split_whitespace()
+            .collect::<String>();
+        (!name.is_empty()).then_some(name)
     })
 }
 
@@ -443,6 +468,37 @@ mod tests {
             )
             .unwrap(),
             "orders::Load"
+        );
+        assert_eq!(
+            qualified_name(
+                Path::new("src/Ledger/Posting.cs"),
+                &Language::CSharp,
+                Some("using System;\nnamespace Acme.Ledger;\nclass Posting {}"),
+                "Posting"
+            )
+            .unwrap(),
+            "Acme::Ledger::Posting"
+        );
+        assert_eq!(
+            qualified_name(
+                Path::new("src/Ledger/Posting.cs"),
+                &Language::CSharp,
+                Some("namespace Acme . Ledger // books\n{\n}"),
+                "Posting"
+            )
+            .unwrap(),
+            "Acme::Ledger::Posting"
+        );
+        // The global namespace prefixes nothing, wherever the file sits.
+        assert_eq!(
+            qualified_name(
+                Path::new("src/Program.cs"),
+                &Language::CSharp,
+                Some("class Program {}"),
+                "Program"
+            )
+            .unwrap(),
+            "Program"
         );
     }
 
