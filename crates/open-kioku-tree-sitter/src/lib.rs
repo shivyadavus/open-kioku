@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tree_sitter::{Language as TsLanguage, Node, Parser, TreeCursor};
 
+mod csharp;
+
 pub struct ParseContext {
     pub scope_stack: Vec<ScopeId>,
     pub symbol_stack: Vec<SymbolId>,
@@ -19,6 +21,9 @@ pub struct ParseContext {
     /// Visibility of the Rust traits and types the file declares, by name; built on the first
     /// trait `impl` member, since only those need it. See [`rust_declared_visibility`].
     rust_declared_visibility: Option<HashMap<String, Option<Visibility>>>,
+    /// The file parsed with syntax errors, so its symbols are what error recovery left whole: they
+    /// are recorded at medium confidence. Only C# is read through errors; see [`parse_file`].
+    syntax_errors: bool,
 }
 
 impl ParseContext {
@@ -30,6 +35,7 @@ impl ParseContext {
             type_stack: Vec::new(),
             next_scope_counter: 0,
             rust_declared_visibility: None,
+            syntax_errors: false,
         }
     }
 
@@ -73,7 +79,14 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
         path: file.path.clone(),
         message: "tree-sitter returned no parse tree".into(),
     })?;
-    if tree.root_node().has_error() {
+    // A C# file is read through its syntax errors. The grammar rejects constructs the compiler
+    // accepts (a contextual keyword used as a name: `async`, `[property]`; some `#if` regions), and
+    // rejecting the whole file left ~9% of the files of one C# repository with no symbol at all.
+    // Declarations recovery left whole and in place are still exact; they are recorded at medium
+    // confidence; nothing inside an error node is read, and a declaration recovery moved out of
+    // its type is dropped (`csharp::is_placed`).
+    let syntax_errors = tree.root_node().has_error();
+    if syntax_errors && file.language != Language::CSharp {
         return Err(OkError::Parse {
             path: file.path.clone(),
             message: "tree-sitter parse contains syntax errors".into(),
@@ -82,6 +95,7 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
 
     let mut out = SyntaxFacts::default();
     let mut ctx = ParseContext::new();
+    ctx.syntax_errors = syntax_errors;
 
     let file_scope_id = ScopeId::new(format!("{}:scope:file:0", file.path.display()));
     let file_scope = Scope {
@@ -371,6 +385,7 @@ pub fn tree_sitter_language(language: &Language) -> Result<TsLanguage> {
         Language::JavaScript => Ok(tree_sitter_javascript::LANGUAGE.into()),
         Language::Python => Ok(tree_sitter_python::LANGUAGE.into()),
         Language::Go => Ok(tree_sitter_go::LANGUAGE.into()),
+        Language::CSharp => Ok(tree_sitter_c_sharp::LANGUAGE.into()),
         Language::Yaml => Ok(tree_sitter_yaml::LANGUAGE.into()),
         Language::Json => Ok(tree_sitter_json::LANGUAGE.into()),
         _ => Err(OkError::Unsupported(format!(
@@ -434,82 +449,169 @@ fn is_scope_node(file: &File, node: Node<'_>) -> Option<ScopeKind> {
             "block" => Some(ScopeKind::Block),
             _ => None,
         },
+        Language::CSharp => csharp::scope_kind(kind),
         _ => None,
     }
 }
 
+/// What [`enter`] pushed onto the context for one node, for [`leave`] to pop.
+#[derive(Default)]
+struct Entered {
+    symbol: Option<SymbolId>,
+    scope: Option<ScopeId>,
+    callable: Option<SymbolId>,
+    type_: Option<SymbolId>,
+}
+
 fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out: &mut SyntaxFacts) {
-    let mut pushed_symbol: Option<SymbolId> = None;
-    let mut pushed_scope: Option<ScopeId> = None;
-    let mut pushed_callable: Option<SymbolId> = None;
-    let mut pushed_type: Option<SymbolId> = None;
+    // Nothing inside a C# error node is read: recovery decides what it holds, not the source.
+    if file.language == Language::CSharp && node.is_error() {
+        return;
+    }
+    let entered = enter(file, content, node, ctx, out);
 
-    if let Some((name_node, symbol_kind)) = symbol_name_node(file, node, ctx) {
-        if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
-            if !name.is_empty() {
-                let line_range = LineRange {
-                    start: (node.start_position().row + 1) as u32,
-                    end: (node.end_position().row + 1) as u32,
-                };
-                let qualified_name = qualified_name(file, name);
-                let symbol_id = SymbolId::new(stable_id(&format!(
-                    "{}:{}:{}",
-                    file.path.display(),
-                    line_range.start,
-                    qualified_name
-                )));
-
-                let signature = extract_symbol_signature(file, content, node);
-                let visibility = extract_symbol_visibility(file, content, node, ctx);
-
-                let symbol = Symbol {
-                    id: symbol_id.clone(),
-                    name: name.to_string(),
-                    qualified_name,
-                    kind: symbol_kind.clone(),
-                    file_id: file.id.clone(),
-                    range: Some(line_range),
-                    language: file.language.clone(),
-                    confidence: Confidence::High,
-                    provenance: EvidenceSourceType::TreeSitter,
-                    module_id: None,
-                    parent_symbol_id: ctx.current_type().or_else(|| ctx.current_symbol()),
-                    scope_id: ctx.current_scope(),
-                    signature,
-                    visibility,
-                    alias_of: None,
-                };
-
-                out.symbols.push(symbol);
-                if file.language == Language::Rust {
-                    record_rust_type_item(content.as_bytes(), node, &symbol_id, out);
-                }
-                if file.language == Language::Go && node.kind() == "type_alias" {
-                    out.type_aliases
-                        .push(go_type_alias_site(content, node, symbol_id.clone()));
-                }
-                ctx.symbol_stack.push(symbol_id.clone());
-                pushed_symbol = Some(symbol_id.clone());
-
-                let is_callable = matches!(symbol_kind, SymbolKind::Function | SymbolKind::Method);
-                let is_type = matches!(
-                    symbol_kind,
-                    SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait
-                );
-
-                if is_callable {
-                    ctx.callable_stack.push(symbol_id.clone());
-                    pushed_callable = Some(symbol_id.clone());
-                }
-                if is_type {
-                    ctx.type_stack.push(symbol_id.clone());
-                    pushed_type = Some(symbol_id);
-                }
+    let mut cursor = node.walk();
+    let children = named_children(&mut cursor);
+    if file.language == Language::CSharp && node.kind() == "compilation_unit" {
+        // A file-scoped namespace (`namespace Acme.Ledger;`) is a leaf of the grammar, but every
+        // declaration after it is in it: it stays entered until the end of the file.
+        let mut namespace = None;
+        for child in children {
+            if child.kind() == csharp::FILE_SCOPED_NAMESPACE && namespace.is_none() {
+                namespace = Some(enter(file, content, child, ctx, out));
+            } else {
+                walk(file, content, child, ctx, out);
             }
+        }
+        if let Some(namespace) = namespace {
+            leave(namespace, ctx);
+        }
+    } else {
+        for child in children {
+            walk(file, content, child, ctx, out);
         }
     }
 
-    if file.language == Language::Rust && node.kind() == "impl_item" && pushed_type.is_none() {
+    leave(entered, ctx);
+}
+
+fn leave(entered: Entered, ctx: &mut ParseContext) {
+    if entered.scope.is_some() {
+        ctx.scope_stack.pop();
+    }
+    if entered.type_.is_some() {
+        ctx.type_stack.pop();
+    }
+    if entered.callable.is_some() {
+        ctx.callable_stack.pop();
+    }
+    if entered.symbol.is_some() {
+        ctx.symbol_stack.pop();
+    }
+}
+
+/// Records the symbol and scope `node` declares and the facts it holds, and pushes them for its
+/// children.
+fn enter(
+    file: &File,
+    content: &str,
+    node: Node<'_>,
+    ctx: &mut ParseContext,
+    out: &mut SyntaxFacts,
+) -> Entered {
+    let mut entered = Entered::default();
+
+    let named = if file.language == Language::CSharp {
+        csharp::symbol(node, content.as_bytes())
+    } else {
+        symbol_name_node(file, node, ctx).and_then(|(name_node, symbol_kind)| {
+            let name = name_node.utf8_text(content.as_bytes()).ok()?;
+            Some((name.to_string(), symbol_kind))
+        })
+    };
+    if let Some((name, symbol_kind)) = named.filter(|(name, _)| !name.is_empty()) {
+        let line_range = if file.language == Language::CSharp {
+            csharp::line_range(node)
+        } else {
+            LineRange {
+                start: (node.start_position().row + 1) as u32,
+                end: (node.end_position().row + 1) as u32,
+            }
+        };
+        let qualified_name = if file.language == Language::CSharp {
+            csharp::qualified_name(node, &name, content.as_bytes())
+        } else {
+            qualified_name(file, &name)
+        };
+        let symbol_id = SymbolId::new(stable_id(&format!(
+            "{}:{}:{}",
+            file.path.display(),
+            line_range.start,
+            qualified_name
+        )));
+
+        let signature = extract_symbol_signature(file, content, node);
+        let visibility = extract_symbol_visibility(file, content, node, ctx);
+        // A C# local function belongs to the member declaring it, not to that member's type.
+        let parent_symbol_id =
+            if file.language == Language::CSharp && symbol_kind == SymbolKind::Function {
+                ctx.current_callable()
+                    .or_else(|| ctx.current_type())
+                    .or_else(|| ctx.current_symbol())
+            } else {
+                ctx.current_type().or_else(|| ctx.current_symbol())
+            };
+
+        let symbol = Symbol {
+            id: symbol_id.clone(),
+            name,
+            qualified_name,
+            kind: symbol_kind.clone(),
+            file_id: file.id.clone(),
+            range: Some(line_range),
+            language: file.language.clone(),
+            confidence: if ctx.syntax_errors {
+                Confidence::Medium
+            } else {
+                Confidence::High
+            },
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id,
+            scope_id: ctx.current_scope(),
+            signature,
+            visibility,
+            alias_of: None,
+        };
+
+        out.symbols.push(symbol);
+        if file.language == Language::Rust {
+            record_rust_type_item(content.as_bytes(), node, &symbol_id, out);
+        }
+        if file.language == Language::Go && node.kind() == "type_alias" {
+            out.type_aliases
+                .push(go_type_alias_site(content, node, symbol_id.clone()));
+        }
+        ctx.symbol_stack.push(symbol_id.clone());
+        entered.symbol = Some(symbol_id.clone());
+
+        let is_callable = matches!(symbol_kind, SymbolKind::Function | SymbolKind::Method);
+        let is_type = matches!(
+            symbol_kind,
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait
+        );
+
+        if is_callable {
+            ctx.callable_stack.push(symbol_id.clone());
+            entered.callable = Some(symbol_id.clone());
+        }
+        if is_type {
+            ctx.type_stack.push(symbol_id.clone());
+            entered.type_ = Some(symbol_id);
+        }
+    }
+
+    if file.language == Language::Rust && node.kind() == "impl_item" && entered.type_.is_none() {
         let source_bytes = content.as_bytes();
         if let Some(type_node) = node.child_by_field_name("type") {
             if let Some(type_name) = rust_impl_owner_name(content, type_node) {
@@ -532,7 +634,7 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
                 }
 
                 ctx.type_stack.push(type_sym_id.clone());
-                pushed_type = Some(type_sym_id);
+                entered.type_ = Some(type_sym_id);
             }
         }
     }
@@ -551,13 +653,20 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
             node.start_position().row + 1,
             ctx.next_scope_counter
         ));
+        let mut range = node_source_range(node);
+        if node.kind() == csharp::FILE_SCOPED_NAMESPACE {
+            if let Some(unit) = node.parent() {
+                range.end_line = csharp::last_line_of(unit);
+                range.end_column = 1;
+            }
+        }
         let scope = Scope {
             id: scope_id.clone(),
             file_id: file.id.clone(),
             parent_id: ctx.current_scope(),
             owner_symbol_id: ctx.current_symbol(),
             kind: scope_kind,
-            range: node_source_range(node),
+            range,
         };
         out.scopes.push(scope);
         if file.language == Language::Rust && node.kind() == "impl_item" {
@@ -565,7 +674,7 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
                 .push(rust_impl_block(content.as_bytes(), node, &scope_id));
         }
         ctx.scope_stack.push(scope_id.clone());
-        pushed_scope = Some(scope_id);
+        entered.scope = Some(scope_id);
     }
 
     extract_import(file, content, node, ctx, out);
@@ -574,23 +683,7 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
     extract_call(file, content, node, ctx, out);
     extract_inheritance(file, content, node, ctx, out);
 
-    let mut cursor = node.walk();
-    for child in named_children(&mut cursor) {
-        walk(file, content, child, ctx, out);
-    }
-
-    if pushed_scope.is_some() {
-        ctx.scope_stack.pop();
-    }
-    if pushed_type.is_some() {
-        ctx.type_stack.pop();
-    }
-    if pushed_callable.is_some() {
-        ctx.callable_stack.pop();
-    }
-    if pushed_symbol.is_some() {
-        ctx.symbol_stack.pop();
-    }
+    entered
 }
 
 /// The package a Java or Go file declares, read from its top-level `package` declaration or
@@ -655,6 +748,7 @@ fn go_type_alias_site(content: &str, node: Node<'_>, symbol_id: SymbolId) -> Typ
 fn extract_symbol_signature(file: &File, content: &str, node: Node<'_>) -> Option<String> {
     let source_bytes = content.as_bytes();
     match file.language {
+        Language::CSharp => csharp::signature(node, source_bytes),
         Language::Java => {
             if let Some(params) = node.child_by_field_name("parameters") {
                 let text = params.utf8_text(source_bytes).ok()?;
@@ -741,6 +835,7 @@ fn extract_symbol_visibility(
 ) -> Visibility {
     match file.language {
         Language::Java => java_visibility(node),
+        Language::CSharp => csharp::visibility(node),
         Language::Rust => match rust_associated_owner(node) {
             Some(owner) if owner.kind() == "trait_item" => rust_visibility(owner),
             Some(owner) if owner.child_by_field_name("trait").is_some() => {

@@ -34,6 +34,14 @@ impl Parser for HeuristicParser {
         let mut syntax = open_kioku_tree_sitter::parse_file(file, content).unwrap_or_default();
         if syntax.symbols.is_empty() {
             syntax.symbols = extract_symbols(file, content);
+        } else if file.language == Language::CSharp
+            && syntax.symbols.iter().all(|symbol| {
+                symbol.kind == SymbolKind::Package && symbol.confidence == Confidence::Medium
+            })
+        {
+            // A C# file read through syntax errors where recovery kept only the namespace: its
+            // types were all inside error nodes. Patterns name them at heuristic provenance.
+            syntax.symbols.extend(pattern_symbols(file, content));
         }
         dedupe_symbols(&mut syntax.symbols);
 
@@ -67,6 +75,11 @@ pub fn extract_symbols(file: &File, content: &str) -> Vec<Symbol> {
             return symbols;
         }
     }
+    pattern_symbols(file, content)
+}
+
+/// Declarations matched line by line, for a file tree-sitter could not read.
+fn pattern_symbols(file: &File, content: &str) -> Vec<Symbol> {
     match file.language {
         Language::Rust => extract_with_patterns(
             file,
@@ -184,6 +197,24 @@ pub fn extract_symbols(file: &File, content: &str) -> Vec<Symbol> {
                 ),
                 (
                     r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+interface",
+                    SymbolKind::Interface,
+                    1,
+                ),
+            ],
+        ),
+        // Reached only when tree-sitter left no declaration whole. Type declarations alone: a
+        // C# member line has no keyword a pattern could tell from a statement.
+        Language::CSharp => extract_with_patterns(
+            file,
+            content,
+            &[
+                (
+                    r"^\s*(?:[a-z]+\s+)*(?:class|struct|enum|record(?:\s+class|\s+struct)?)\s+([A-Za-z_][A-Za-z0-9_]*)",
+                    SymbolKind::Class,
+                    1,
+                ),
+                (
+                    r"^\s*(?:[a-z]+\s+)*interface\s+([A-Za-z_][A-Za-z0-9_]*)",
                     SymbolKind::Interface,
                     1,
                 ),
@@ -1105,10 +1136,12 @@ pub fn extract_chunks(file: &File, content: &str, symbols: &[Symbol]) -> Vec<Cod
     let mut starts = symbols
         .iter()
         .filter_map(|symbol| {
-            symbol
-                .range
-                .as_ref()
-                .map(|range| (range.start as usize, symbol.id.clone()))
+            symbol.range.as_ref().map(|range| {
+                (
+                    chunk_start(file, &lines, range.start as usize),
+                    symbol.id.clone(),
+                )
+            })
         })
         .collect::<Vec<_>>();
     starts.sort_by_key(|(line, _)| *line);
@@ -1151,6 +1184,25 @@ pub fn extract_chunks(file: &File, content: &str, symbols: &[Symbol]) -> Vec<Cod
         });
     }
     chunks
+}
+
+/// The line a symbol's chunk starts on: the symbol's first line or, in C#, the first line of the
+/// `///` documentation comment right above it. C# attributes are inside the declaration, as Java
+/// annotations are, but its documentation precedes it; without this, a symbol's documentation
+/// would be searched as the tail of the chunk before it.
+fn chunk_start(file: &File, lines: &[&str], start: usize) -> usize {
+    if file.language != Language::CSharp {
+        return start;
+    }
+    let mut first = start;
+    while first > 1
+        && lines
+            .get(first - 2)
+            .is_some_and(|line| line.trim_start().starts_with("///"))
+    {
+        first -= 1;
+    }
+    first
 }
 
 pub fn extract_tests(
@@ -1887,6 +1939,104 @@ endpoint = "https://orders.example.com/v1/orders"
         // Each symbol becomes a chunk boundary.
         assert!(!chunks.is_empty());
         assert!(chunks.iter().all(|c| c.symbol_id.is_some()));
+    }
+
+    fn csharp_file() -> File {
+        File {
+            id: FileId::new("file-cs"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/Ledger/Entry.cs".into(),
+            language: Language::CSharp,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        }
+    }
+
+    #[test]
+    fn a_csharp_symbol_chunk_carries_its_documentation_comment() {
+        let file = csharp_file();
+        let src = "namespace Acme.Ledger;\n\n/// <summary>Settles a reconciled ledger.</summary>\n/// <remarks>Idempotent.</remarks>\n[Serializable]\npublic class Entry\n{\n    /// Books the entry.\n    public void Post() { }\n}\n";
+        let symbols = extract_symbols(&file, src);
+        let chunks = extract_chunks(&file, src, &symbols);
+        let chunk_of = |name: &str| {
+            let symbol = symbols.iter().find(|symbol| symbol.name == name).unwrap();
+            chunks
+                .iter()
+                .find(|chunk| chunk.symbol_id.as_ref() == Some(&symbol.id))
+                .unwrap()
+        };
+        let entry = chunk_of("Entry");
+        assert_eq!((entry.range.start, entry.range.end), (3, 7));
+        assert!(entry
+            .text
+            .starts_with("/// <summary>Settles a reconciled ledger."));
+        let post = chunk_of("Post");
+        assert_eq!((post.range.start, post.range.end), (8, 10));
+        assert!(post.text.contains("Books the entry."));
+        // The namespace chunk ends where the documentation starts.
+        let namespace = chunk_of("Acme.Ledger");
+        assert!(!namespace.text.contains("Settles"));
+        // Symbol ranges stay the declaration's own.
+        let symbol = symbols
+            .iter()
+            .find(|symbol| symbol.name == "Entry")
+            .unwrap();
+        assert_eq!(symbol.range.as_ref().map(|range| range.start), Some(5));
+    }
+
+    #[test]
+    fn rust_chunks_still_start_at_the_symbol() {
+        let file = rust_file();
+        let src = "/// Adds.\npub fn alpha() {}\n/// Subtracts.\npub fn beta() {}\n";
+        let symbols = extract_symbols(&file, src);
+        let chunks = extract_chunks(&file, src, &symbols);
+        let starts = chunks
+            .iter()
+            .map(|chunk| chunk.range.start)
+            .collect::<Vec<_>>();
+        assert_eq!(starts, vec![2, 4]);
+    }
+
+    #[test]
+    fn csharp_types_recovery_could_not_keep_are_named_by_pattern() {
+        use crate::{HeuristicParser, Parser};
+        let file = csharp_file();
+        // The unbalanced brace leaves the class inside an error node, keeping only the namespace.
+        let src = "namespace Acme;\npublic sealed class Broken\n{\n    public void Lost() { if (x { }\n    interface IHidden { }\n";
+        let parsed = HeuristicParser.parse_with_hint(&file, src, None);
+        let found = parsed
+            .syntax
+            .symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.qualified_name.as_str(),
+                    symbol.kind.clone(),
+                    symbol.provenance.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            vec![
+                ("Acme", SymbolKind::Package, EvidenceSourceType::TreeSitter),
+                (
+                    "Acme::Broken",
+                    SymbolKind::Class,
+                    EvidenceSourceType::Heuristic
+                ),
+                (
+                    "Acme::IHidden",
+                    SymbolKind::Interface,
+                    EvidenceSourceType::Heuristic
+                ),
+            ]
+        );
+        // A file read whole keeps tree-sitter's symbols alone.
+        let whole = HeuristicParser.parse_with_hint(&file, "namespace Acme;\n", None);
+        assert_eq!(whole.syntax.symbols.len(), 1);
     }
 
     #[test]

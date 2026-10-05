@@ -9,7 +9,7 @@
 7. Fingerprint indexed files with SHA-256.
 8. Detect language from extension.
 9. Replace secret-like values in data, config, and prose files (YAML, JSON, TOML, Markdown, plain text, and document-corpus files) with `[REDACTED]`, within their lines, so nothing below ever sees the value; unlabelled high-entropy tokens are replaced only in config and data formats, not in prose, and programming-language source is not changed. Rules and limits: `docs/security-model.md`, "Secret-value redaction". The count of files with a replaced value is `IndexQuality.redacted_files`.
-10. Extract imports, symbols, chunks, test candidates, and symbol occurrences. Supported code languages use tree-sitter grammars first and regex heuristics only as fallback. A file that cannot be read (removed or permission-denied between discovery and parsing) or that crashes a grammar is dropped from the index, recorded as a `SkipReason::Error` entry in `skip_counts` / `skipped_paths` with source `filesystem` or `parser`, and surfaced as a phase warning. No single file aborts the index.
+10. Extract imports, symbols, chunks, test candidates, and symbol occurrences. Supported code languages use tree-sitter grammars first and regex heuristics only as fallback. A file with syntax errors falls back whole, except a C# file: its declarations that error recovery left whole and in place are kept at medium confidence, nothing inside an error node is read, and patterns name its types only when recovery kept none. A file that cannot be read (removed or permission-denied between discovery and parsing) or that crashes a grammar is dropped from the index, recorded as a `SkipReason::Error` entry in `skip_counts` / `skipped_paths` with source `filesystem` or `parser`, and surfaced as a phase warning. No single file aborts the index.
 11. Import configured SCIP indexes when present, merging SCIP symbols and occurrences with extracted facts.
 12. Store files, symbols, chunks, tests, imports, and occurrences in SQLite, in one transaction that also removes the previous index manifest.
 13. Build and persist graph nodes and edges in SQLite.
@@ -121,7 +121,7 @@ What is counted:
   document-corpus files the generated-content detector rejects are skipped as `generated`.
 
 Two ratios are reported, and only one of them is judged. The **programming-language
-ratio** counts files in rust, java, typescript, javascript, python, go, and sql — the
+ratio** counts files in rust, java, typescript, javascript, python, go, c_sharp, and sql — the
 languages whose omission costs an agent evidence — and is what a warning is measured
 against. The **all-languages ratio** counts every recognised language and is always
 reported beside it. Config and prose files (yaml, json, toml, markdown, text) are

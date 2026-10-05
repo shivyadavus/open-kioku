@@ -577,6 +577,7 @@ fn language_from_scip(language: &str) -> Language {
         "javascript" | "js" => Language::JavaScript,
         "python" | "py" => Language::Python,
         "go" => Language::Go,
+        "csharp" | "c#" | "c_sharp" => Language::CSharp,
         "json" => Language::Json,
         "yaml" | "yml" => Language::Yaml,
         "toml" => Language::Toml,
@@ -876,6 +877,15 @@ mod tests {
 #[cfg(test)]
 mod ri3_exact_reference_tests {
     use super::*;
+
+    #[test]
+    fn scip_document_languages_name_csharp() {
+        // SCIP spells the language `CSharp`; its documents are C#, not unknown text.
+        for name in ["CSharp", "csharp", "C#"] {
+            assert_eq!(language_from_scip(name), Language::CSharp, "{name}");
+        }
+        assert_eq!(language_from_scip("FSharp"), Language::Unknown);
+    }
 
     fn occurrence(column: u32) -> SymbolOccurrence {
         SymbolOccurrence {

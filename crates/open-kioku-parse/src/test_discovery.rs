@@ -86,6 +86,9 @@ impl<'a> TestFileDiscovery<'a> {
             Language::TypeScript | Language::JavaScript => {
                 declares_registered_test(self.lines, symbol)
             }
+            // No C# runner (xUnit, NUnit, MSTest) is read yet, so no C# callable is proven to
+            // run as a test: it stays a helper, which is not validation evidence.
+            Language::CSharp => false,
             Language::Yaml
             | Language::Json
             | Language::Toml

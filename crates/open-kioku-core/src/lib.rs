@@ -1973,6 +1973,7 @@ pub enum Language {
     JavaScript,
     Python,
     Go,
+    CSharp,
     Yaml,
     Json,
     Toml,
@@ -1994,6 +1995,7 @@ impl Language {
                 | Self::JavaScript
                 | Self::Python
                 | Self::Go
+                | Self::CSharp
                 | Self::Sql
         )
     }
@@ -2008,6 +2010,7 @@ impl Language {
             Self::JavaScript => "java_script",
             Self::Python => "python",
             Self::Go => "go",
+            Self::CSharp => "c_sharp",
             Self::Yaml => "yaml",
             Self::Json => "json",
             Self::Toml => "toml",
@@ -5367,7 +5370,7 @@ impl IndexCoverage {
 fn language_key_is_programming(key: &str) -> bool {
     matches!(
         key,
-        "rust" | "java" | "type_script" | "java_script" | "python" | "go" | "sql"
+        "rust" | "java" | "type_script" | "java_script" | "python" | "go" | "c_sharp" | "sql"
     )
 }
 
@@ -9113,6 +9116,7 @@ mod index_coverage_tests {
             Language::JavaScript,
             Language::Python,
             Language::Go,
+            Language::CSharp,
             Language::Yaml,
             Language::Json,
             Language::Toml,
@@ -9146,6 +9150,7 @@ mod index_coverage_tests {
             Language::JavaScript,
             Language::Python,
             Language::Go,
+            Language::CSharp,
             Language::Yaml,
             Language::Json,
             Language::Toml,
