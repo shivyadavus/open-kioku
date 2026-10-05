@@ -487,7 +487,13 @@ impl<'a> PlanEngine<'a> {
             .as_ref()
             .and_then(|manifest| manifest.quality.coverage.as_ref())
         {
-            Some(record) => open_kioku_context::pruned_source_links(self.store, record, task)?,
+            Some(record) => open_kioku_context::pruned_source_links(
+                self.store,
+                record,
+                task,
+                &context.primary_files,
+                &context.supporting_files,
+            )?,
             None => PrunedSourceLinks::default(),
         };
         let mut evidence_quality = evidence_quality_for_store(

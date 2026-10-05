@@ -8748,6 +8748,10 @@ fn a_name_called_from_indexed_code_but_defined_only_in_a_pruned_dir_points_at_it
                 "from tools.build.manifest import render_manifest\n\n\ndef post_entry(ledger, amount):\n    ledger.append(amount)\n    return sum(ledger)\n\n\ndef rate_limit(requests_per_minute):\n    return max(1, requests_per_minute)\n\n\ndef publish(ledger):\n    return render_manifest(ledger)\n",
             ),
             (
+                "ledger/events.py",
+                "def emit(name, payload):\n    return (name, payload)\n\n\ndef posted(entry):\n    return emit(\"ledger_posted\", entry)\n",
+            ),
+            (
                 "tools/build/manifest.py",
                 "def render_manifest(ledger):\n    return {\"entries\": list(ledger)}\n",
             ),
@@ -8791,6 +8795,9 @@ fn a_name_called_from_indexed_code_but_defined_only_in_a_pruned_dir_points_at_it
         repo,
         "fetch rates for rate_limit from https://tools/build/rates.json",
     );
+    // A name the selection spells only as data (an event name in a string) defines nothing,
+    // so its absence from the symbol table says nothing about the pruned directory.
+    assert_task_reaches_no_pruned_source(repo, "fix ledger_posted event emission in posted");
 }
 
 /// The human surfaces print the gap beside the coverage summary. Without this, a refactor

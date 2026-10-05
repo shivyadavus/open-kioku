@@ -899,7 +899,9 @@ impl<'a> ContextPackBuilder<'a> {
             Err(_) => CoverageInput::Unreadable,
         };
         let pruned_source = match &coverage_record {
-            Ok(Some(record)) => pruned_source_links(self.store, record, task)?,
+            Ok(Some(record)) => {
+                pruned_source_links(self.store, record, task, &primary_files, &supporting_files)?
+            }
             _ => PrunedSourceLinks::default(),
         };
         let primary_languages = primary_language_keys(self.store, coverage.gaps(), &primary_files)?;
@@ -1685,26 +1687,41 @@ fn anchor_miss_probe(
 }
 
 /// The pruned directories holding git-tracked source that `task` reaches, per
-/// [`open_kioku_core::IndexCoverage::pruned_source_links`]. A named task identifier counts as
-/// undefined when no indexed symbol has that name, whether or not the selected context spells
-/// it. The commonest case is indexed code calling a function that only a pruned directory
-/// defines: the selection spells the name at the call site, and the definition is still absent.
-/// The symbol table is read only when a directory pruned on the weak rule or behind a stray
-/// `.git` holds tracked source, so most repositories look nothing up. Plans call this too, so
-/// both surfaces link a task to the same directories.
+/// [`open_kioku_core::IndexCoverage::pruned_source_links`]. A named task identifier is a
+/// candidate in two cases:
+/// - the top selected context does not spell it, or nothing was selected (the anchor miss);
+/// - the selected context spells it as code that uses a definition, a call (`name(`) or an
+///   import or `use` line. The commonest case is indexed code calling a function that only a
+///   pruned directory defines: the selection spells the name at the call site, and the
+///   definition is still absent.
+///
+/// A name the selection spells only as data (an event name in a string, a tool name in a
+/// schema) is not a candidate: nothing shows a definition is missing. A candidate counts as
+/// undefined when no indexed symbol has that name. The symbol table is read only when a
+/// directory whose tracked source counts as missing is listed, so most repositories look
+/// nothing up. Context and plan pass the same pack selection, so both surfaces link a task to
+/// the same directories.
 pub fn pruned_source_links(
     store: &dyn OkStore,
     coverage: &open_kioku_core::IndexCoverage,
     task: &str,
+    primary: &[SearchResult],
+    supporting: &[SearchResult],
 ) -> Result<PrunedSourceLinks> {
     let mut undefined = Vec::new();
     if coverage.may_hide_tracked_source() {
+        let unmatched = open_kioku_core::unmatched_named_anchors(task, primary);
         // `named_anchors` leaves out hyphenated prose words. A hyphenated anchor the task marks
         // as code (`--dry-run`, `X-Request-Id`) is a flag, header or package name, never a
         // symbol name in an indexed language, so no symbol table could define it.
         for identifier in open_kioku_core::named_anchors(task)
             .into_iter()
             .filter(|identifier| !identifier.contains('-'))
+            .filter(|identifier| {
+                primary.is_empty()
+                    || unmatched.contains(identifier)
+                    || spelled_as_a_use(identifier, primary.iter().chain(supporting))
+            })
         {
             if store.symbols_named(&identifier, 1)?.is_empty() {
                 undefined.push(identifier);
@@ -1712,6 +1729,40 @@ pub fn pruned_source_links(
         }
     }
     Ok(coverage.pruned_source_links(task, undefined))
+}
+
+/// Whether a selected snippet spells `name` as a use of a definition: a call (`name(`, the
+/// name as a whole word), or a line that imports it (`import`, `use `, `require`). Lexical,
+/// and so deliberately narrow: it separates a call site from the same word in a string or a
+/// comment, and adds no relationship fact.
+fn spelled_as_a_use<'a>(name: &str, selected: impl Iterator<Item = &'a SearchResult>) -> bool {
+    let is_word = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+    let whole_word_at = |line: &str, start: usize| {
+        let before = line[..start].chars().next_back();
+        let after = line[start + name.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    };
+    selected
+        .flat_map(|result| result.snippet.lines())
+        .any(|line| {
+            line.match_indices(name).any(|(start, _)| {
+                if !whole_word_at(line, start) {
+                    return false;
+                }
+                let rest = line[start + name.len()..].trim_start();
+                let before = &line[..start];
+                // `"name"` or `'name'` is data, whatever the line.
+                if before.ends_with(['"', '\'']) {
+                    return false;
+                }
+                rest.starts_with('(')
+                    || line.trim_start().starts_with("import ")
+                    || line.trim_start().starts_with("from ")
+                    || line.trim_start().starts_with("use ")
+                    || line.trim_start().starts_with("pub use ")
+                    || line.contains("require(")
+            })
+        })
 }
 
 fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<NegativeEvidence> {
@@ -7607,6 +7658,27 @@ mod selection_ledger_tests {
             score_breakdown: Vec::new(),
             exact_reference_provenance: None,
         }
+    }
+
+    #[test]
+    fn a_name_is_a_pruned_source_candidate_only_where_the_selection_uses_it_as_code() {
+        let uses = |snippet: &str| {
+            spelled_as_a_use(
+                "render_manifest",
+                std::iter::once(&result("ledger/app.py", snippet)),
+            )
+        };
+        assert!(uses("    return render_manifest(ledger)"));
+        assert!(uses("    return render_manifest (ledger)"));
+        assert!(uses("from tools.build.manifest import render_manifest"));
+        assert!(uses("use crate::build::render_manifest;"));
+        assert!(uses("const { render_manifest } = require(\"./build\");"));
+        // Data and prose are not uses.
+        assert!(!uses("    emit(\"render_manifest\", payload)"));
+        assert!(!uses("    emit('render_manifest')"));
+        assert!(!uses("# render_manifest is slow"));
+        assert!(!uses("    value = render_manifest_cache[0]"));
+        assert!(!uses("    pre_render_manifest(x)"));
     }
 
     #[test]
