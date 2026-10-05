@@ -3,8 +3,9 @@ use open_kioku_core::{
     BoundaryExpansionRequirement, BoundaryFileRule, BoundaryForbiddenRule, BoundarySignalHooks,
     ChangeBoundary, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack,
     CoverageGap, CoverageInput, EvidenceQuality, EvidenceSourceType, FileId, ImpactReport,
-    MemorySearchResult, NegativeEvidence, PlanReport, PolicyCheckReport, RiskReport, RuntimeSignal,
-    ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+    MemorySearchResult, NegativeEvidence, PlanReport, PolicyCheckReport, PrunedSourceLinks,
+    RiskReport, RuntimeSignal, ScoreComponent, SearchResult, Symbol, TestTarget,
+    ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -474,6 +475,19 @@ impl<'a> PlanEngine<'a> {
             coverage.gaps(),
             &primary_context,
         )?;
+        let pruned_source = match manifest
+            .as_ref()
+            .and_then(|manifest| manifest.quality.coverage.as_ref())
+        {
+            Some(record) => open_kioku_context::pruned_source_links(
+                self.store,
+                record,
+                task,
+                &primary_context,
+                &unmatched_anchors,
+            )?,
+            None => PrunedSourceLinks::default(),
+        };
         let mut evidence_quality = evidence_quality_for_store(
             self.store,
             manifest.as_ref(),
@@ -489,6 +503,11 @@ impl<'a> PlanEngine<'a> {
             &unmatched_anchors,
             &open_kioku_core::weak_named_anchors(task),
         ) {
+            if !risk.reasons.contains(&reason) {
+                risk.reasons.push(reason);
+            }
+        }
+        if let Some(reason) = pruned_source.risk_reason() {
             if !risk.reasons.contains(&reason) {
                 risk.reasons.push(reason);
             }
@@ -571,6 +590,7 @@ impl<'a> PlanEngine<'a> {
             exact_reference_count,
             unmatched_anchors: &unmatched_anchors,
             coverage: &coverage,
+            pruned_source: &pruned_source,
         });
         let history_components =
             history_score_components_for_plan(&primary_context, &impact, &validation);
@@ -597,6 +617,7 @@ impl<'a> PlanEngine<'a> {
             context_runtime_signal_count: context.runtime_signals.len(),
             coverage: &coverage,
             primary_language_keys: &primary_languages,
+            pruned_source: &pruned_source,
         });
         apply_evidence_quality_to_confidence(
             &mut confidence_breakdown,
@@ -1006,14 +1027,22 @@ fn anchor_miss_reason(identifiers: &[&str], words: &[&str]) -> String {
 }
 
 /// With a majority coverage gap the index never read most of a language, so a name it does
-/// not hold is not thereby absent from the repository. Worded as the context pack words it.
-fn anchor_miss_probe(identifiers: &[&str], excluded_source: bool) -> &'static str {
+/// not hold is not thereby absent from the repository; beside a pruned directory holding
+/// tracked source that the task reaches, the probe names that directory instead. Worded as the
+/// context pack words it.
+fn anchor_miss_probe(
+    identifiers: &[&str],
+    excluded_source: bool,
+    pruned_source: &PrunedSourceLinks,
+) -> String {
     if identifiers.is_empty() {
-        "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository."
+        "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository.".into()
+    } else if let Some(probe) = pruned_source.anchor_probe() {
+        probe
     } else if excluded_source {
-        "Run `ok search <identifier>` for each name; the index excluded most of a language's source (see the `coverage` negative evidence), so a name it does not hold may be defined in those files."
+        "Run `ok search <identifier>` for each name; the index excluded most of a language's source (see the `coverage` negative evidence), so a name it does not hold may be defined in those files.".into()
     } else {
-        "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`."
+        "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`.".into()
     }
 }
 
@@ -1145,6 +1174,7 @@ struct PlanConfidenceInputs<'a> {
     context_runtime_signal_count: usize,
     coverage: &'a CoverageInput,
     primary_language_keys: &'a [String],
+    pruned_source: &'a PrunedSourceLinks,
 }
 
 fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown {
@@ -1161,6 +1191,7 @@ fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown 
         context_runtime_signal_count,
         coverage,
         primary_language_keys,
+        pruned_source,
     } = inputs;
     ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
         task_relevance: open_kioku_core::task_relevance_score(task, primary_context),
@@ -1187,6 +1218,7 @@ fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown 
         weak_anchors: open_kioku_core::weak_named_anchors(task),
         coverage: coverage.clone(),
         primary_language_keys: primary_language_keys.to_vec(),
+        pruned_source: pruned_source.clone(),
     })
 }
 
@@ -1202,6 +1234,7 @@ struct PlanNegativeEvidenceInputs<'a> {
     exact_reference_count: usize,
     unmatched_anchors: &'a [String],
     coverage: &'a CoverageInput,
+    pruned_source: &'a PrunedSourceLinks,
 }
 
 fn negative_evidence_for_plan(inputs: PlanNegativeEvidenceInputs<'_>) -> Vec<NegativeEvidence> {
@@ -1214,8 +1247,18 @@ fn negative_evidence_for_plan(inputs: PlanNegativeEvidenceInputs<'_>) -> Vec<Neg
         exact_reference_count,
         unmatched_anchors,
         coverage,
+        pruned_source,
     } = inputs;
     let mut items = context.negative_evidence.clone();
+    // The plan links the task to pruned directories from its own selection. When it links any,
+    // its own anchor and coverage items replace the pack's, so the probe and the coverage
+    // reason name the directories its confidence was capped for.
+    if !pruned_source.is_empty() {
+        items.retain(|item| {
+            item.scope != open_kioku_core::negative_evidence_scope::ANCHOR
+                && item.scope != open_kioku_core::negative_evidence_scope::COVERAGE
+        });
+    }
     // A context pack does not count proven cross-file dependents, so its "no exact evidence"
     // item contradicts a plan that found exact references of its own.
     if exact_reference_count > 0 {
@@ -1351,18 +1394,16 @@ fn negative_evidence_for_plan(inputs: PlanNegativeEvidenceInputs<'_>) -> Vec<Neg
                 ],
                 reason: anchor_miss_reason(&identifiers, &words),
                 confidence: 0.85,
-                suggested_next_probe: Some(
-                    anchor_miss_probe(
-                        &identifiers,
-                        coverage.gaps().iter().any(CoverageGap::is_majority),
-                    )
-                    .into(),
-                ),
+                suggested_next_probe: Some(anchor_miss_probe(
+                    &identifiers,
+                    coverage.gaps().iter().any(CoverageGap::is_majority),
+                    pruned_source,
+                )),
             },
         );
     }
     // A context pack from the same index already lists it; one built elsewhere may not.
-    if let Some(item) = NegativeEvidence::for_coverage_input(task, coverage) {
+    if let Some(item) = NegativeEvidence::for_coverage(task, coverage, pruned_source) {
         push_unique_negative_evidence(&mut items, item);
     }
     items.sort_by(|a, b| {
@@ -3616,6 +3657,7 @@ mod tests {
             exact_reference_count: 0,
             unmatched_anchors: &["TokenIssuer".to_string()],
             coverage: &CoverageInput::default(),
+            pruned_source: &PrunedSourceLinks::default(),
         });
         let scopes = items
             .iter()
@@ -4833,6 +4875,7 @@ mod tests {
                 exact_reference_count: 1,
                 unmatched_anchors: unmatched,
                 coverage: &CoverageInput::default(),
+                pruned_source: &PrunedSourceLinks::default(),
             })
             .into_iter()
             .find(|item| item.scope == "anchor")
@@ -5241,6 +5284,7 @@ mod tests {
                 exact_reference_count,
                 unmatched_anchors: &[],
                 coverage: &CoverageInput::default(),
+                pruned_source: &PrunedSourceLinks::default(),
             })
             .into_iter()
             .filter(|item| item.scope == open_kioku_core::negative_evidence_scope::EXACT_REFERENCES)
@@ -5274,6 +5318,7 @@ mod tests {
             exact_reference_count: exact,
             unmatched_anchors: &[],
             coverage: &CoverageInput::default(),
+            pruned_source: &PrunedSourceLinks::default(),
         });
         assert!(negative.iter().any(|item| item.scope == "exact_references"));
         let breakdown = confidence_for_plan(PlanConfidenceInputs {
@@ -5289,6 +5334,7 @@ mod tests {
             context_runtime_signal_count: 0,
             coverage: &CoverageInput::default(),
             primary_language_keys: &[],
+            pruned_source: &PrunedSourceLinks::default(),
         });
         assert_ne!(breakdown.overall_enum, Confidence::Exact);
         assert!(breakdown.overall_score <= 0.74, "{breakdown:?}");

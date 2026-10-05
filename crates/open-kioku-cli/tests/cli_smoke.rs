@@ -8378,6 +8378,328 @@ fn a_git_ignored_tree_of_installed_packages_is_reported_without_capping() {
     assert_eq!(value["verdict"], "safe_to_start", "{value}");
 }
 
+/// Write `files` under `repo`, commit them, turn each of `stray_git` into a nested work tree
+/// with `git init` (which discovery prunes as `submodule`; the files stay tracked here), then
+/// `ok init` and `ok index`.
+fn pruned_source_fixture(files: &[(&str, &str)], stray_git: &[&str]) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    for (path, content) in files {
+        let path = repo.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    commit_all(repo, "initial");
+    for dir in stray_git {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo.join(dir))
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init {dir}");
+    }
+    for step in ["init", "index"] {
+        run({
+            let mut command = ok();
+            command.arg(step).arg(repo);
+            command
+        });
+    }
+    temp
+}
+
+/// Every caveat, blocker and negative evidence text of a context or plan report.
+fn report_texts(report: &serde_json::Value) -> Vec<String> {
+    let breakdown = &report["confidence_breakdown"];
+    let strings = |value: &serde_json::Value| -> Vec<String> {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut texts = strings(&breakdown["caveats"]);
+    texts.extend(strings(&breakdown["blockers"]));
+    for item in report["negative_evidence"]
+        .as_array()
+        .expect("negative_evidence")
+    {
+        texts.push(item["reason"].as_str().unwrap_or_default().to_owned());
+        texts.push(
+            item["suggested_next_probe"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        );
+    }
+    texts
+}
+
+fn has_pruned_source_signal(report: &serde_json::Value) -> bool {
+    report["confidence_breakdown"]["components"]
+        .as_array()
+        .expect("components")
+        .iter()
+        .any(|component| component["signal"] == open_kioku_core::PRUNED_SOURCE_SIGNAL)
+}
+
+/// The `anchor` item's next probe, when the report has one.
+fn anchor_probe(report: &serde_json::Value) -> Option<String> {
+    report["negative_evidence"]
+        .as_array()
+        .expect("negative_evidence")
+        .iter()
+        .find(|item| item["scope"] == "anchor")
+        .and_then(|item| item["suggested_next_probe"].as_str())
+        .map(str::to_owned)
+}
+
+/// Asserts that context and plan, on the CLI and over MCP, link `task` to `dir`: a coverage
+/// caveat naming it, the zero-weight signal citing `coverage:pruned:<dir>`, the `coverage`
+/// item, a probe that says the name may be in `dir` instead of that it does not exist, and the
+/// 0.50 cap with its blocker. CLI and MCP report the same caveats and score.
+fn assert_task_reaches_pruned_source(repo: &std::path::Path, task: &str, dir: &str) {
+    let (cli, mcp) = coverage_surfaces(repo, task);
+    for (index, kind) in [(0, "context"), (1, "plan")] {
+        for (surface, report) in [("cli", &cli[index]), ("mcp", &mcp[index])] {
+            let label = format!("{surface} {kind} for {task:?}");
+            let breakdown = &report["confidence_breakdown"];
+            assert!(
+                coverage_caveats(report)
+                    .iter()
+                    .any(|caveat| caveat.contains(&format!("{dir}/"))
+                        && caveat.contains("which the index pruned")),
+                "{label}: no caveat naming {dir}/: {breakdown}"
+            );
+            assert!(has_pruned_source_signal(report), "{label}: {breakdown}");
+            assert!(
+                breakdown["components"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(
+                        |component| component["evidence_ids"].as_array().is_some_and(|ids| ids
+                            .iter()
+                            .any(|id| *id == format!("coverage:pruned:{dir}")))
+                    ),
+                "{label}: {breakdown}"
+            );
+            assert!(
+                breakdown["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|blocker| blocker.as_str().is_some_and(|text| text
+                        .starts_with("the task may name code in a directory the index pruned: ")
+                        && text.contains(&format!("{dir}/")))),
+                "{label}: {breakdown}"
+            );
+            assert!(
+                breakdown["overall_score"].as_f64().unwrap() <= 0.50 + 1e-6,
+                "{label}: {breakdown}"
+            );
+            let item = coverage_negative_evidence(report)
+                .unwrap_or_else(|| panic!("{label}: no coverage item: {report}"));
+            assert!(
+                item["inspected_sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|source| *source == format!("coverage:pruned:{dir}")),
+                "{label}: {item}"
+            );
+            if let Some(probe) = anchor_probe(report) {
+                assert!(
+                    probe.contains(&format!("may be in {dir}/, which the index pruned")),
+                    "{label}: {probe}"
+                );
+            }
+            for text in report_texts(report) {
+                assert!(
+                    !text.contains("does not exist in this repository"),
+                    "{label}: {text}"
+                );
+            }
+        }
+        assert_eq!(
+            cli[index]["confidence_breakdown"]["caveats"],
+            mcp[index]["confidence_breakdown"]["caveats"],
+            "{kind}: CLI and MCP disagree"
+        );
+        // The CLI prints the f32 score at its own precision and MCP widens it to f64.
+        let score = |report: &serde_json::Value| {
+            report["confidence_breakdown"]["overall_score"]
+                .as_f64()
+                .unwrap()
+        };
+        assert!(
+            (score(&cli[index]) - score(&mcp[index])).abs() < 1e-6,
+            "{kind}: CLI and MCP disagree"
+        );
+    }
+}
+
+/// Asserts that neither context nor plan, on either surface, reports a pruned directory for
+/// `task`.
+fn assert_task_reaches_no_pruned_source(repo: &std::path::Path, task: &str) {
+    let (cli, mcp) = coverage_surfaces(repo, task);
+    for (index, kind) in [(0, "context"), (1, "plan")] {
+        for (surface, report) in [("cli", &cli[index]), ("mcp", &mcp[index])] {
+            let label = format!("{surface} {kind} for {task:?}");
+            assert!(!has_pruned_source_signal(report), "{label}: {report}");
+            for text in report_texts(report) {
+                assert!(!text.contains("which the index pruned"), "{label}: {text}");
+                assert!(
+                    !text.contains("a directory the index pruned"),
+                    "{label}: {text}"
+                );
+            }
+        }
+    }
+}
+
+/// #679: a tracked directory behind a stray `.git` is pruned as a nested repository, and its
+/// committed source counts as missing. A task naming a function defined only there must not be
+/// told the name does not exist: context and plan name the directory and cap at 0.50, on the CLI
+/// and over MCP. A task whose names the index defines gets nothing, and a stray `.git` at a
+/// secret-like path is never named, though it holds tracked source too.
+#[test]
+fn a_name_in_tracked_source_behind_a_stray_git_points_at_the_pruned_directory() {
+    let temp = pruned_source_fixture(
+        &[
+            (
+                "src/lib.rs",
+                "pub mod billing;\n\npub fn live_entry() -> u32 {\n    billing::invoice_total()\n}\n",
+            ),
+            (
+                "src/billing.rs",
+                "pub fn invoice_total() -> u32 {\n    7\n}\n",
+            ),
+            (
+                "tools/ledger/lib.rs",
+                "pub fn ledger_rollover_total() -> u32 {\n    1\n}\n",
+            ),
+            (
+                "ops/.ssh/keyring/lib.rs",
+                "pub fn rotate_keyring_entry() -> u32 {\n    2\n}\n",
+            ),
+        ],
+        &["tools/ledger", "ops/.ssh/keyring"],
+    );
+    let repo = temp.path();
+    let status = status_json(repo);
+    let pruned = &status["coverage"]["pruned"];
+    assert_eq!(pruned[0]["path"], "tools/ledger", "{status}");
+    assert_eq!(pruned[0]["reason"], "submodule");
+    assert_eq!(pruned[0]["tracked_source_files"], 1);
+
+    assert_task_reaches_pruned_source(
+        repo,
+        "fix ledger_rollover_total rounding in the invoice path",
+        "tools/ledger",
+    );
+    // Named by path rather than by an identifier.
+    assert_task_reaches_pruned_source(repo, "explain tools/ledger/lib.rs", "tools/ledger");
+    // A name the index defines is answered from indexed code.
+    assert_task_reaches_no_pruned_source(repo, "fix invoice_total rounding in live_entry");
+
+    // The secret-like directory holds the only definition of this name. The task still reaches
+    // `tools/ledger/` (the name may be there), but `.ssh` is named nowhere, on any surface.
+    let (cli, mcp) = coverage_surfaces(repo, "fix rotate_keyring_entry expiry");
+    for reports in [&cli, &mcp] {
+        for report in reports.iter() {
+            assert!(!report.to_string().contains(".ssh"), "{report}");
+        }
+    }
+}
+
+/// #679: an undeclared `build/` holding committed source is pruned on the weak rule. A task
+/// naming a function defined only there, or naming the directory's path, is told the name may
+/// be there, with the cap. A committed `dist/` beside `package.json` is build output on strong
+/// evidence: a name missing from the index never links to it, and a task naming it is told so
+/// without the cap.
+#[test]
+fn an_undeclared_build_dir_with_tracked_source_is_named_and_strong_build_output_is_not() {
+    let temp = pruned_source_fixture(
+        &[
+            (
+                "app/main.py",
+                "from tools.build.plan import compile_release_plan\n\n\ndef run_release():\n    return compile_release_plan()\n",
+            ),
+            (
+                "tools/build/plan.py",
+                "def compile_release_plan():\n    return 1\n",
+            ),
+        ],
+        &[],
+    );
+    let repo = temp.path();
+    let status = status_json(repo);
+    assert_eq!(
+        status["coverage"]["pruned"][0]["path"], "tools/build",
+        "{status}"
+    );
+    assert_eq!(
+        status["coverage"]["pruned"][0]["reason"],
+        "undeclared_build_dir"
+    );
+    assert_task_reaches_pruned_source(repo, "fix compile_release_plan ordering", "tools/build");
+    assert_task_reaches_pruned_source(repo, "what does tools/build/plan.py return", "tools/build");
+    assert_task_reaches_no_pruned_source(repo, "fix run_release error handling");
+    // A prose mention of "build" names no directory.
+    assert_task_reaches_no_pruned_source(repo, "fix the build step in run_release");
+
+    let bundle = pruned_source_fixture(
+        &[
+            (
+                "package.json",
+                "{\"name\": \"ledger-web\", \"version\": \"1.0.0\"}\n",
+            ),
+            (
+                "src/index.js",
+                "export function renderLedgerPage() {\n  return 1;\n}\n",
+            ),
+            (
+                "dist/bundle.js",
+                "function bundledLedgerHelper() {\n  return 2;\n}\n",
+            ),
+        ],
+        &[],
+    );
+    let repo = bundle.path();
+    let status = status_json(repo);
+    assert_eq!(status["coverage"]["pruned"][0]["path"], "dist", "{status}");
+    assert_eq!(status["coverage"]["pruned"][0]["reason"], "build_output");
+    assert_eq!(status["coverage"]["pruned"][0]["tracked_source_files"], 1);
+    // Defined only in the bundle, and still not linked: strong evidence says it is output.
+    assert_task_reaches_no_pruned_source(repo, "fix bundledLedgerHelper in renderLedgerPage");
+    // Named by path: reported, never capped.
+    let (cli, mcp) =
+        coverage_surfaces(repo, "why does dist/bundle.js differ from renderLedgerPage");
+    for (index, kind) in [(0, "context"), (1, "plan")] {
+        for (surface, report) in [("cli", &cli[index]), ("mcp", &mcp[index])] {
+            let label = format!("{surface} {kind}");
+            assert!(
+                coverage_caveats(report).iter().any(|caveat| caveat
+                    == "index coverage: the task names dist/, which the index pruned (dist/: build output, 1 tracked source file); the index never read those files"),
+                "{label}: {report}"
+            );
+            assert!(has_pruned_source_signal(report), "{label}");
+            assert!(
+                report_texts(report)
+                    .iter()
+                    .all(|text| !text.contains("a directory the index pruned")),
+                "{label}: {report}"
+            );
+        }
+    }
+}
+
 /// The human surfaces print the gap beside the coverage summary. Without this, a refactor
 /// collapsing the coverage print back into a single `summary_line()` call passes fmt, clippy,
 /// every test and every snapshot family, and the defect returns silently: the summary ratio is

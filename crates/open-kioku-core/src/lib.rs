@@ -10,9 +10,11 @@ pub mod analysis_semantics;
 pub mod cargo_manifest;
 pub mod identity;
 pub mod process;
+mod pruned_source;
 pub mod relationship;
 
 pub use analysis_semantics::*;
+pub use pruned_source::{task_names_directory, PrunedSourceLinks, PRUNED_SOURCE_SIGNAL};
 
 pub use relationship::{
     graph_edge_authority, graph_edge_window_key, graph_edge_window_rank, graph_edge_window_tier,
@@ -585,6 +587,10 @@ pub struct ConfidenceSignalInput {
     /// compared with each majority coverage gap's language. Callers fill it only when a majority
     /// gap exists, the only case that reads it, so a pack without one looks nothing up.
     pub primary_language_keys: Vec<String>,
+    /// Pruned directories holding git-tracked source that the task names or may name code in,
+    /// per [`IndexCoverage::pruned_source_links`]. Empty for most tasks; see
+    /// [`PRUNED_SOURCE_SIGNAL`] for how they are reported and priced.
+    pub pruned_source: PrunedSourceLinks,
     /// Fraction of the task's content terms that appear anywhere in the selected
     /// context, in 0..=1. See [`task_relevance_score`].
     ///
@@ -1102,7 +1108,17 @@ impl ConfidenceBreakdown {
                 .collect::<Vec<_>>()
         };
         // Reported, never capping on their own; merged into `caveats` after the 0.94 decision.
-        let coverage_caveats = gaps.iter().map(CoverageGap::caveat).collect::<Vec<_>>();
+        // A pruned directory holding tracked source that the task reaches is a coverage fact of
+        // the same kind, named by path rather than by language.
+        let pruned_source = &input.pruned_source;
+        let coverage_caveats = gaps
+            .iter()
+            .map(CoverageGap::caveat)
+            .chain(pruned_source.caveats())
+            .collect::<Vec<_>>();
+        if let Some(blocker) = pruned_source.blocker() {
+            blockers.push(blocker);
+        }
         // An index that measured nothing is not an index that found nothing, and this caveat
         // caps like any other: the pack cannot claim completeness it never checked.
         if let Some(caveat) = input.coverage.caveat() {
@@ -1278,6 +1294,19 @@ impl ConfidenceBreakdown {
                 "a majority coverage gap in the selected context's language; the right file may be among those the index did not read",
             ));
         }
+        // Zero weight, present only when the task reaches a pruned directory holding tracked
+        // source; its value is 0.0 because the index read none of those files.
+        if !pruned_source.is_empty() {
+            components.push(ScoreComponent::new(
+                PRUNED_SOURCE_SIGNAL,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                pruned_source.evidence_ids(),
+                "the task names, or names code that may be in, a pruned directory holding git-tracked source; priced by caps, not weight",
+            ));
+        }
         components.sort_by(|a, b| a.signal.cmp(&b.signal));
         let mut overall_score = score_component_total(&components).clamp(0.0, 1.0);
         if input.primary_file_count == 0 {
@@ -1325,6 +1354,12 @@ impl ConfidenceBreakdown {
             overall_score = overall_score.min(0.50);
         } else if !gaps_in_selected_languages.is_empty() {
             overall_score = overall_score.min(0.74);
+        }
+        // The absence symptom cap, for a directory: the task names it, or names code no indexed
+        // symbol defines while it holds tracked source the index counts as missing. A directory
+        // pruned on strong evidence is reported and caps nothing.
+        if pruned_source.caps() {
+            overall_score = overall_score.min(0.50);
         }
 
         blockers.sort();
@@ -8074,6 +8109,7 @@ mod tests {
             weak_anchors: Vec::new(),
             coverage: CoverageInput::default(),
             primary_language_keys: Vec::new(),
+            pruned_source: crate::PrunedSourceLinks::default(),
         };
         let all_missing = ConfidenceBreakdown::from_signals(base.clone());
         assert_eq!(all_missing.overall_enum, Confidence::Low);
@@ -8310,6 +8346,7 @@ mod tests {
             weak_anchors: vec!["re-index".into(), "drive-by".into()],
             coverage: CoverageInput::default(),
             primary_language_keys: Vec::new(),
+            pruned_source: crate::PrunedSourceLinks::default(),
         };
         let names_identifier_blocker = |breakdown: &ConfidenceBreakdown| -> bool {
             breakdown

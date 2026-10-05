@@ -5,9 +5,9 @@ use open_kioku_core::{
     ConfidenceBreakdown, ConfidenceSignalInput, ContextBudget, ContextPack, ContextSelectedUnit,
     ContextUnitKind, CoverageGap, CoverageInput, Evidence, EvidenceId, EvidenceSourceType, File,
     FileRange, GraphEdge, GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence,
-    RetrievalAuthority, RetrievalDiagnostics, RetrievalSourceCount, RetrievalSourceKind,
-    RetrievalTrace, RetrievalUnitKey, RiskReport, RuntimeSignal, ScoreComponent, SearchResult,
-    Symbol, ValidationPlan,
+    PrunedSourceLinks, RetrievalAuthority, RetrievalDiagnostics, RetrievalSourceCount,
+    RetrievalSourceKind, RetrievalTrace, RetrievalUnitKey, RiskReport, RuntimeSignal,
+    ScoreComponent, SearchResult, Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -889,13 +889,20 @@ impl<'a> ContextPackBuilder<'a> {
         // manifest that cannot be read at all, are both reported as unavailable rather than as
         // full coverage; the read never fails the pack, which built without consulting the
         // manifest before this.
-        let coverage = match self.store.index_coverage() {
+        let coverage_record = self.store.index_coverage();
+        let coverage = match &coverage_record {
             Ok(Some(coverage)) => CoverageInput::Recorded(coverage.gaps()),
             Ok(None) => CoverageInput::Unavailable,
             // The read failed rather than the index having published nothing; the pack says so
             // instead of claiming the index omitted nothing, and still builds. `ok plan` takes
             // the full manifest and still fails on this state.
             Err(_) => CoverageInput::Unreadable,
+        };
+        let pruned_source = match &coverage_record {
+            Ok(Some(record)) => {
+                pruned_source_links(self.store, record, task, &primary_files, &unmatched_anchors)?
+            }
+            _ => PrunedSourceLinks::default(),
         };
         let primary_languages = primary_language_keys(self.store, coverage.gaps(), &primary_files)?;
         // Negative evidence is built first: the confidence breakdown counts the items it
@@ -910,6 +917,7 @@ impl<'a> ContextPackBuilder<'a> {
             unmatched_anchors: &unmatched_anchors,
             coverage: &coverage,
             withheld_helper_count: withheld_helper_ids.len(),
+            pruned_source: &pruned_source,
         });
         let mut confidence_breakdown = confidence_for_context(ContextConfidenceInputs {
             task,
@@ -924,6 +932,7 @@ impl<'a> ContextPackBuilder<'a> {
             runtime_signal_count_value: runtime_signals.len(),
             coverage: &coverage,
             primary_language_keys: &primary_languages,
+            pruned_source: &pruned_source,
         });
         if let Some(missing) = retrieval_diagnostics
             .selection
@@ -1624,6 +1633,7 @@ struct NegativeEvidenceInputs<'a> {
     coverage: &'a CoverageInput,
     /// Distinct test-file callables near the change withheld as matching no discovery rule.
     withheld_helper_count: usize,
+    pruned_source: &'a PrunedSourceLinks,
 }
 
 /// `unmatched` anchors split into (hyphenated task words, identifiers), each in task order.
@@ -1658,15 +1668,58 @@ fn anchor_miss_reason(identifiers: &[&str], words: &[&str]) -> String {
 }
 
 /// With a majority coverage gap the index never read most of a language, so a name it does
-/// not hold is not thereby absent from the repository.
-fn anchor_miss_probe(identifiers: &[&str], excluded_source: bool) -> &'static str {
+/// not hold is not thereby absent from the repository; beside a pruned directory holding
+/// tracked source that the task reaches, the probe names that directory instead.
+fn anchor_miss_probe(
+    identifiers: &[&str],
+    excluded_source: bool,
+    pruned_source: &PrunedSourceLinks,
+) -> String {
     if identifiers.is_empty() {
-        "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository."
+        "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository.".into()
+    } else if let Some(probe) = pruned_source.anchor_probe() {
+        probe
     } else if excluded_source {
-        "Run `ok search <identifier>` for each name; the index excluded most of a language's source (see the `coverage` negative evidence), so a name it does not hold may be defined in those files."
+        "Run `ok search <identifier>` for each name; the index excluded most of a language's source (see the `coverage` negative evidence), so a name it does not hold may be defined in those files.".into()
     } else {
-        "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`."
+        "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`.".into()
     }
+}
+
+/// The pruned directories holding git-tracked source that `task` reaches, per
+/// [`open_kioku_core::IndexCoverage::pruned_source_links`]. A task identifier counts as
+/// undefined when the selected context does not spell it (or nothing was selected) and no
+/// indexed symbol has that name; the symbol table is read only when a directory pruned on the
+/// weak rule or behind a stray `.git` holds tracked source, so most repositories look nothing
+/// up. Plans call this too, so both surfaces link a task to the same directories.
+pub fn pruned_source_links(
+    store: &dyn OkStore,
+    coverage: &open_kioku_core::IndexCoverage,
+    task: &str,
+    selected: &[SearchResult],
+    unmatched_anchors: &[String],
+) -> Result<PrunedSourceLinks> {
+    let mut undefined = Vec::new();
+    if coverage.may_hide_tracked_source() {
+        // `unmatched_named_anchors` is empty over an empty selection, where every named
+        // identifier is unmatched.
+        let candidates = if selected.is_empty() {
+            open_kioku_core::named_anchors(task)
+        } else {
+            let weak = open_kioku_core::weak_named_anchors(task);
+            unmatched_anchors
+                .iter()
+                .filter(|anchor| !weak.contains(anchor))
+                .cloned()
+                .collect()
+        };
+        for identifier in candidates {
+            if store.symbols_named(&identifier, 1)?.is_empty() {
+                undefined.push(identifier);
+            }
+        }
+    }
+    Ok(coverage.pruned_source_links(task, undefined))
 }
 
 fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<NegativeEvidence> {
@@ -1680,6 +1733,7 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
         unmatched_anchors,
         coverage,
         withheld_helper_count,
+        pruned_source,
     } = inputs;
     let mut items = Vec::new();
     if primary_files.is_empty() {
@@ -1705,18 +1759,21 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
             ],
             reason: anchor_miss_reason(&identifiers, &words),
             confidence: 0.85,
-            suggested_next_probe: Some(
-                anchor_miss_probe(
-                    &identifiers,
-                    coverage.gaps().iter().any(CoverageGap::is_majority),
-                )
-                .into(),
-            ),
+            suggested_next_probe: Some(anchor_miss_probe(
+                &identifiers,
+                coverage.gaps().iter().any(CoverageGap::is_majority),
+                pruned_source,
+            )),
         });
     }
     // A gap says what is missing; no record says nobody measured; an unreadable one says the
-    // read failed. One item covers whichever holds.
-    items.extend(NegativeEvidence::for_coverage_input(task, coverage));
+    // read failed; a pruned directory the task reaches says where. One item covers whichever
+    // holds.
+    items.extend(NegativeEvidence::for_coverage(
+        task,
+        coverage,
+        pruned_source,
+    ));
     if exact_reference_count == 0 {
         items.push(NegativeEvidence {
             query: task.into(),
@@ -1809,6 +1866,7 @@ struct ContextConfidenceInputs<'a> {
     runtime_signal_count_value: usize,
     coverage: &'a CoverageInput,
     primary_language_keys: &'a [String],
+    pruned_source: &'a PrunedSourceLinks,
 }
 
 /// Language keys (`rust`, `python`) of `selected`, sorted and deduplicated, for the coverage-gap
@@ -1857,6 +1915,7 @@ fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBrea
         runtime_signal_count_value,
         coverage,
         primary_language_keys,
+        pruned_source,
     } = inputs;
     // Relevance is measured over what the caller will actually be handed.
     let mut selected = primary_files.to_vec();
@@ -1883,6 +1942,7 @@ fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBrea
         weak_anchors: open_kioku_core::weak_named_anchors(task),
         coverage: coverage.clone(),
         primary_language_keys: primary_language_keys.to_vec(),
+        pruned_source: pruned_source.clone(),
     })
 }
 
@@ -7104,6 +7164,7 @@ mod tests {
             unmatched_anchors: &[],
             coverage: &CoverageInput::default(),
             withheld_helper_count: 0,
+            pruned_source: &PrunedSourceLinks::default(),
         });
         assert!(negative
             .iter()
@@ -7122,6 +7183,7 @@ mod tests {
             runtime_signal_count_value: 0,
             coverage: &CoverageInput::default(),
             primary_language_keys: &[],
+            pruned_source: &PrunedSourceLinks::default(),
         });
         assert_ne!(breakdown.overall_enum, Confidence::Exact);
         assert!(breakdown.overall_score <= 0.74, "{breakdown:?}");
@@ -7177,6 +7239,7 @@ mod tests {
                 unmatched_anchors: unmatched,
                 coverage: &CoverageInput::default(),
                 withheld_helper_count: 0,
+                pruned_source: &PrunedSourceLinks::default(),
             })
             .into_iter()
             .find(|item| item.scope == negative_evidence_scope::ANCHOR)
@@ -7288,6 +7351,7 @@ mod tests {
             unmatched_anchors: &unmatched,
             coverage: &CoverageInput::default(),
             withheld_helper_count: 0,
+            pruned_source: &PrunedSourceLinks::default(),
         });
         let anchor = negative
             .iter()
@@ -7315,6 +7379,7 @@ mod tests {
             runtime_signal_count_value: 0,
             coverage: &CoverageInput::default(),
             primary_language_keys: &[],
+            pruned_source: &PrunedSourceLinks::default(),
         });
         assert_eq!(breakdown.overall_enum, Confidence::Low);
         assert!(breakdown.overall_score <= 0.50, "{breakdown:?}");
@@ -7346,6 +7411,7 @@ mod tests {
             unmatched_anchors: &unmatched,
             coverage: &CoverageInput::default(),
             withheld_helper_count: 0,
+            pruned_source: &PrunedSourceLinks::default(),
         });
         assert_eq!(
             open_kioku_core::negative_evidence_signal_count(&negative),
@@ -7364,6 +7430,7 @@ mod tests {
             runtime_signal_count_value: 0,
             coverage: &CoverageInput::default(),
             primary_language_keys: &[],
+            pruned_source: &PrunedSourceLinks::default(),
         });
         assert!(breakdown.overall_score <= 0.60, "{breakdown:?}");
         assert!(breakdown
@@ -7417,6 +7484,7 @@ mod tests {
                 unmatched_anchors: &unmatched,
                 coverage,
                 withheld_helper_count: 0,
+                pruned_source: &PrunedSourceLinks::default(),
             });
             let breakdown = confidence_for_context(ContextConfidenceInputs {
                 task,
@@ -7431,6 +7499,7 @@ mod tests {
                 runtime_signal_count_value: 0,
                 coverage,
                 primary_language_keys: &[],
+                pruned_source: &PrunedSourceLinks::default(),
             });
             (negative, breakdown)
         };
