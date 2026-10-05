@@ -5455,12 +5455,33 @@ fn private_keys_in_source_never_reach_the_index_search_or_snapshot() {
     };
     let (python, rust, renamed, fixture, csharp) =
         (body(1), body(11), body(21), body(31), body(41));
-    let lines = [&python, &rust, &renamed, &fixture, &csharp]
-        .into_iter()
-        .flatten()
-        .cloned()
+    // The shapes the #689 review found the first source rule kept.
+    let (concatenated, commented, statements, lower, spaced) =
+        (body(51), body(61), body(71), body(81), body(91));
+    let lines = [
+        &python,
+        &rust,
+        &renamed,
+        &fixture,
+        &csharp,
+        &concatenated,
+        &commented,
+        &statements,
+        &lower,
+        &spaced,
+    ]
+    .into_iter()
+    .flatten()
+    .cloned()
+    .collect::<Vec<_>>();
+    // No 20-character stretch of any key line may survive anywhere, not only whole lines.
+    let windows = lines
+        .iter()
+        .flat_map(|line| {
+            (0..=line.len() - 20).map(move |start| line[start..start + 20].to_string())
+        })
         .collect::<Vec<_>>();
-    let secrets = lines.iter().map(String::as_str).collect::<Vec<_>>();
+    let secrets = windows.iter().map(String::as_str).collect::<Vec<_>>();
 
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
@@ -5512,6 +5533,48 @@ fn private_keys_in_source_never_reach_the_index_search_or_snapshot() {
         ),
     )
     .unwrap();
+    // Two literals concatenated per line, a trailing comment per line, and a BEGIN constant
+    // followed by code with the body in later statements.
+    fs::write(
+        repo.join("src/ledger_keys.js"),
+        format!(
+            "export const concatenated =\n  '-----BEGIN RSA PRIVATE KEY-----\\n' +\n{}  '-----END RSA PRIVATE KEY-----';\n\nexport const parts = [\n  '-----BEGIN PRIVATE KEY-----',\n{}  '-----END PRIVATE KEY-----',\n];\n\nconst KEY = '-----BEGIN RSA PRIVATE KEY-----'; const X = 1;\n{}const END = '-----END RSA PRIVATE KEY-----';\n\nexport function ledgerKeyParts() {{\n  return parts;\n}}\n",
+            concatenated
+                .iter()
+                .map(|line| {
+                    let (left, right) = line.split_at(line.len() / 2);
+                    format!("  '{left}' + '{right}\\n' +\n")
+                })
+                .collect::<String>(),
+            commented
+                .iter()
+                .enumerate()
+                .map(|(index, line)| format!("  '{line}', // part {index}\n"))
+                .collect::<String>(),
+            statements
+                .iter()
+                .enumerate()
+                .map(|(index, line)| format!("const BODY{index} = '{line}';\n"))
+                .collect::<String>()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("tests/fixtures/lower_key.py"),
+        format!(
+            "LOWER_KEY = \"\"\"-----begin rsa private key-----\n{}\n-----end rsa private key-----\"\"\"\n\n\ndef lower_ledger_key():\n    return LOWER_KEY\n",
+            lower.join("\n")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/spaced_key.rs"),
+        format!(
+            "pub const SPACED_KEY: &str = \"-----BEGIN RSA  PRIVATE KEY-----\n{}\n-----END RSA  PRIVATE KEY-----\";\n\npub fn spaced_ledger_key() -> &'static str {{\n    SPACED_KEY\n}}\n",
+            spaced.join("\n")
+        ),
+    )
+    .unwrap();
 
     run({
         let mut command = ok();
@@ -5529,6 +5592,9 @@ fn private_keys_in_source_never_reach_the_index_search_or_snapshot() {
         ("load_ledger_key", "keys/id_rsa.py"),
         ("ledger_key", "src/id_rsa.rs"),
         ("fixture_ledger_key", "tests/fixtures/keys_fixture.py"),
+        ("ledgerKeyParts", "src/ledger_keys.js"),
+        ("lower_ledger_key", "tests/fixtures/lower_key.py"),
+        ("spaced_ledger_key", "src/spaced_key.rs"),
     ] {
         let found = run({
             let mut command = ok();

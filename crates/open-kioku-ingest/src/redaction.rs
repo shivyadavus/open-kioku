@@ -145,6 +145,7 @@ pub fn redact_secret_values(content: &str, kind: ContentKind) -> RedactedText {
         block: Block::None,
         kind,
         source: false,
+        key_block_lines: 0,
     };
     let mut text = String::with_capacity(content.len());
     for line in content.split_inclusive('\n') {
@@ -159,18 +160,20 @@ pub fn redact_secret_values(content: &str, kind: ContentKind) -> RedactedText {
 }
 
 /// Replaces the body of every private-key PEM block in programming-language source, the one
-/// rule source is held to: anything else in it is indexed as written. Text with no
-/// `-----BEGIN` is returned as it is, without a scan.
+/// rule source is held to: anything else in it is indexed as written. Text with no `-----BEGIN`
+/// (in any case) is returned as it is, without a scan.
 ///
-/// The rule is stricter here than in data and prose, because source also holds code that
-/// handles PEM text: a boundary's label must be spelled in capitals, digits and spaces
-/// (`RSA PRIVATE KEY`, not `") && line.contains("PRIVATE KEY`), and a line inside a block is
-/// replaced only while it reads as key material once string-literal punctuation is set aside
-/// (one base64 word, or a `Proc-Type:`, `DEK-Info:` or `Comment:` header). The first line
-/// that does not ends the block, so a BEGIN constant far from its END constant never hides the
-/// code between them.
+/// A BEGIN boundary is read loosely (any case, any whitespace, `PRIVATE` anywhere before
+/// `KEY`) but its label must be letters, digits and whitespace, so code that names a boundary
+/// in pieces (`"-----BEGIN ") && line.contains("PRIVATE KEY`) is not one. After it, every
+/// key-shaped run on each line is replaced, keeping the code, quotes, concatenation and
+/// comments around it: a run of [`KEY_RUN_MIN_LEN`] or more base64 characters that is not
+/// code-shaped ([`is_code_like_run`]), so identifiers and paths in PEM-handling code stay. The
+/// block ends at its END boundary, at the first line with no such run that is not filler
+/// (blank, punctuation only, or a `Proc-Type:`/`DEK-Info:` header), or after
+/// [`MAX_KEY_BLOCK_LINES`] lines, so a BEGIN constant never hides the code after it.
 pub fn redact_private_keys(content: String) -> RedactedText {
-    if !content.contains("-----BEGIN") {
+    if !contains_begin_boundary(&content) {
         return RedactedText {
             text: content,
             redactions: 0,
@@ -181,6 +184,7 @@ pub fn redact_private_keys(content: String) -> RedactedText {
         block: Block::None,
         kind: ContentKind::Prose,
         source: true,
+        key_block_lines: 0,
     };
     let mut text = String::with_capacity(content.len());
     for line in content.split_inclusive('\n') {
@@ -201,8 +205,11 @@ struct Redactor {
     redactions: usize,
     block: Block,
     kind: ContentKind,
-    /// Programming-language source: only the private-key rule applies, in its strict form.
+    /// Programming-language source: only the private-key rule applies, in its source form.
     source: bool,
+    /// Lines read inside the current private-key block in source, bounded by
+    /// [`MAX_KEY_BLOCK_LINES`].
+    key_block_lines: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -274,9 +281,9 @@ impl Redactor {
     }
 
     /// The private-key rule for `line`, or `None` when the line is not part of a key: outside
-    /// a block with no BEGIN boundary, or (in source) a line inside a block that does not read
-    /// as key material, which ends the block. Boundaries are kept; the body between them is
-    /// replaced, whether it fills whole lines or shares a line with a boundary.
+    /// a block with no BEGIN boundary, or (in source) a line inside a block with no key-shaped
+    /// run that is not filler, which ends the block. Boundaries are kept; the body between them
+    /// is replaced, whether it fills whole lines or shares a line with a boundary.
     fn private_key_line(&mut self, line: &str) -> Option<String> {
         let inside = self.block == Block::PrivateKey;
         if !inside && private_key_begin(line, self.source).is_none() {
@@ -286,28 +293,40 @@ impl Redactor {
             if !self.source {
                 return Some(self.replace_line(line));
             }
-            if !is_key_material_line(line) {
+            // In source, every key-shaped run on the line goes, whatever code or comment
+            // surrounds it (`'MIIC..' + 'qvqO..' +`, `'MIIC..', // part 0`). The block ends
+            // at a line with no such run that is not filler, or after MAX_KEY_BLOCK_LINES.
+            self.key_block_lines += 1;
+            if self.key_block_lines > MAX_KEY_BLOCK_LINES {
                 self.block = Block::None;
                 return None;
             }
-            if key_tokens(line).is_empty() && !is_key_header_line(line) {
+            let (redacted, runs) = self.redact_key_runs(line, false);
+            if runs > 0 {
+                return Some(redacted);
+            }
+            if is_key_filler_line(line) {
                 return Some(line.to_string());
             }
-            return Some(self.replace_line(line));
+            self.block = Block::None;
+            return None;
         }
         let mut out = String::with_capacity(line.len());
         let mut rest = line;
+        // A span right after a BEGIN boundary on this line starts inside the string literal
+        // that boundary is written in; one at the start of the line does not.
+        let mut after_begin = false;
         loop {
             if self.block == Block::PrivateKey {
                 match private_key_end(rest, self.source) {
                     Some((start, end)) => {
-                        self.push_key_span(&mut out, &rest[..start]);
+                        self.push_key_span(&mut out, &rest[..start], after_begin);
                         out.push_str(&rest[start..end]);
                         rest = &rest[end..];
                         self.block = Block::None;
                     }
                     None => {
-                        self.push_key_span(&mut out, rest);
+                        self.push_key_span(&mut out, rest, after_begin);
                         break;
                     }
                 }
@@ -317,6 +336,8 @@ impl Redactor {
                         out.push_str(&rest[..end]);
                         rest = &rest[end..];
                         self.block = Block::PrivateKey;
+                        self.key_block_lines = 0;
+                        after_begin = true;
                     }
                     None => {
                         out.push_str(rest);
@@ -330,24 +351,76 @@ impl Redactor {
 
     /// Writes `span`, the part of a boundary line inside a key block, replaced when it holds
     /// key material: text after BEGIN (`\nMIIE...`) or before END on the same line.
-    fn push_key_span(&mut self, out: &mut String, span: &str) {
-        // Source keeps a span that is not wholly key material, or too short to be a key's
-        // body, so code sharing a line with a boundary (`const END = "-----END ...`) stays; a
-        // key written on one line has its whole body in one span. Data and prose replace any
-        // base64 run.
-        let holds_key = if self.source {
-            let tokens = key_tokens(span);
-            tokens.iter().map(String::len).sum::<usize>() >= 16
-                && tokens.iter().all(|token| token.chars().all(is_base64_char))
-        } else {
-            longest_base64_run(&without_escapes(span)) >= 4
-        };
-        if holds_key {
+    fn push_key_span(&mut self, out: &mut String, span: &str, in_quote: bool) {
+        // Source replaces each key-shaped run and keeps the code around it, so
+        // `const KEY = '-----BEGIN ..-----'; const X = 1;` keeps `const X = 1;`. Data and prose
+        // replace the whole span when it holds any base64 run, as the line rule always did.
+        if self.source {
+            self.push_source_key_span(out, span, in_quote);
+        } else if longest_base64_run(&without_escapes(span)) >= 4 {
             self.redactions += 1;
             out.push_str(REDACTION_MARKER);
         } else {
             out.push_str(span);
         }
+    }
+
+    /// A boundary line's span in source, read as the lines its `\n` escapes write: a key on
+    /// one line (`"-----BEGIN ..-----\nMIIE..\nqvqO..\n-----END ..-----"`) has each escaped
+    /// line replaced, and an escaped line of code (a PEM parser embedded in a string) ends the
+    /// block, as a real line would. The first escaped line, the rest of the boundary's own
+    /// line, never ends it (`'-----BEGIN ..-----'; const X = 1;`).
+    fn push_source_key_span(&mut self, out: &mut String, span: &str, in_quote: bool) {
+        let mut rest = span;
+        let mut first = true;
+        loop {
+            let (segment, tail) = match rest.find("\\n") {
+                Some(at) => (&rest[..at], Some(&rest[at..])),
+                None => (rest, None),
+            };
+            let (redacted, runs) = self.redact_key_runs(segment, first && in_quote);
+            if runs == 0 && !first && !is_key_filler_line(segment) {
+                self.block = Block::None;
+                out.push_str(rest);
+                return;
+            }
+            out.push_str(&redacted);
+            let Some(tail) = tail else {
+                return;
+            };
+            out.push_str("\\n");
+            rest = &tail[2..];
+            first = false;
+        }
+    }
+
+    /// `text` with every key-shaped run inside a private-key block replaced, and how many were.
+    /// A run is key-shaped when it is [`KEY_RUN_MIN_LEN`] or more base64 characters, not
+    /// code-shaped ([`is_code_like_run`]), and written where key material is: inside a string
+    /// literal on the line (`'MIIC..' + 'qvqO..'`, `'MIIC..', // part 0`), on a line holding
+    /// nothing else (a multi-line string's body line), or in an encrypted key's header. An
+    /// identifier in the code after a BEGIN constant (`parsePkcs8PrivateKey(...)`) is none of
+    /// these. `in_quote` says whether `text` starts inside a literal. A backslash and the
+    /// character after it are an escape, so `\nMIIE..` replaces the body and keeps the `\n`.
+    fn redact_key_runs(&mut self, text: &str, in_quote: bool) -> (String, usize) {
+        let runs = key_runs(text, in_quote);
+        let bare = runs.iter().all(|run| run.key_shaped);
+        let header = is_key_header_line(text);
+        let mut out = String::with_capacity(text.len());
+        let mut copied = 0;
+        let mut replaced = 0;
+        for run in runs
+            .iter()
+            .filter(|run| run.key_shaped && (run.in_quote || bare || header))
+        {
+            out.push_str(&text[copied..run.start]);
+            out.push_str(REDACTION_MARKER);
+            copied = run.end;
+            replaced += 1;
+        }
+        out.push_str(&text[copied..]);
+        self.redactions += replaced;
+        (out, replaced)
     }
 
     fn redact_keyed_values(&mut self, line: &str, mut force: bool) -> String {
@@ -574,41 +647,110 @@ impl Redactor {
     }
 }
 
-/// A token that looks machine-generated rather than written: at least
-/// [`ENTROPY_MIN_TOKEN_LEN`] characters, at least two of lower-case letters, upper-case letters
-/// and digits, Shannon entropy of at least [`ENTROPY_MIN_BITS_PER_CHAR`] bits per character,
-/// and at least one piece between `+ / = _ -` separators that is not word-like (see
-/// [`is_word_like_segment`]). The last condition is what spares `docs/large-java-2026-08-31`,
-/// `aarch64-unknown-linux-gnu` and `ConfidenceSignalInput`, whose entropy is as high as a short
-/// random key's.
-/// Labels a private-key boundary may carry: `RSA PRIVATE KEY`, `EC PRIVATE KEY`,
-/// `DSA PRIVATE KEY`, `OPENSSH PRIVATE KEY`, `ENCRYPTED PRIVATE KEY`, `PRIVATE KEY`, and
-/// `PGP PRIVATE KEY BLOCK`.
-fn is_private_key_label(label: &str) -> bool {
-    let label = label.trim();
-    label.ends_with("PRIVATE KEY") || label.ends_with("PRIVATE KEY BLOCK")
+/// A run of base64 characters on a line inside a private-key block in source.
+struct KeyRun {
+    start: usize,
+    end: usize,
+    /// [`KEY_RUN_MIN_LEN`] or more characters and not code-shaped.
+    key_shaped: bool,
+    /// Inside a string literal opened on the line (or before `text`, when `in_quote`).
+    in_quote: bool,
 }
 
-/// A label as a PEM writer spells it: capitals, digits and single spaces. Source requires it,
-/// so code that names a boundary in pieces (`"-----BEGIN ") && line.contains("PRIVATE KEY`)
-/// is not read as one.
+/// Every base64 run in `text`, with whether it is key-shaped and inside a string literal.
+/// Quotes (`"`, `'`, `` ` ``) open and close literals; a backslash escapes the next character,
+/// which is not part of a run.
+fn key_runs(text: &str, in_quote: bool) -> Vec<KeyRun> {
+    // `Some(0)`: inside a literal opened before `text`, closed by any quote.
+    let mut open: Option<u8> = in_quote.then_some(0);
+    let bytes = text.as_bytes();
+    let mut runs = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        if byte == b'\\' {
+            at += 2;
+            continue;
+        }
+        if matches!(byte, b'"' | b'\'' | b'`') {
+            open = match open {
+                None => Some(byte),
+                Some(quote) if quote == 0 || quote == byte => None,
+                other => other,
+            };
+            at += 1;
+            continue;
+        }
+        if !is_base64_char(char::from(byte)) {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < bytes.len() && is_base64_char(char::from(bytes[at])) {
+            at += 1;
+        }
+        let run = &text[start..at];
+        runs.push(KeyRun {
+            start,
+            end: at,
+            key_shaped: run.len() >= KEY_RUN_MIN_LEN && !is_code_like_run(run),
+            in_quote: open.is_some(),
+        });
+    }
+    runs
+}
+
+/// Shortest run of base64 characters the private-key rule replaces in source. A key body line
+/// is 64 characters and its last line rarely shorter; an identifier this long in PEM-handling
+/// code is spared by [`is_code_like_run`] instead.
+pub const KEY_RUN_MIN_LEN: usize = 16;
+
+/// Lines a private-key block in source may run without an END boundary. A PEM body is at most
+/// a few dozen lines (a 16384-bit RSA key is under 200); past this the block is read as a BEGIN
+/// constant followed by code, which is left as written.
+pub const MAX_KEY_BLOCK_LINES: usize = 200;
+
+/// `text` contains `-----BEGIN` in any case: the only text the private-key rule scans.
+fn contains_begin_boundary(text: &str) -> bool {
+    text.match_indices("-----").any(|(at, _)| {
+        text.as_bytes()
+            .get(at + 5..at + 10)
+            .is_some_and(|word| word.eq_ignore_ascii_case(b"begin"))
+    })
+}
+
+/// A private-key label, read loosely: any case, any whitespace, `PRIVATE` anywhere before
+/// `KEY` (`RSA PRIVATE KEY`, `rsa  private key`, `ENCRYPTED PRIVATE KEY`,
+/// `PGP PRIVATE KEY BLOCK`). In source the label must also be only letters, digits and
+/// whitespace, so code that names a boundary in pieces is not one.
+fn is_private_key_label(label: &str, strict: bool) -> bool {
+    let lower = label.to_ascii_lowercase();
+    let names_private_key = lower
+        .find("private")
+        .is_some_and(|at| lower[at + "private".len()..].contains("key"));
+    names_private_key && (!strict || is_pem_label(label))
+}
+
+/// A label of letters, digits and whitespace, as a PEM writer spells one in any case.
 fn is_pem_label(label: &str) -> bool {
-    !label.is_empty()
-        && !label.starts_with(' ')
-        && !label.ends_with(' ')
-        && !label.contains("  ")
+    !label.trim().is_empty()
         && label
             .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b' ')
+            .all(|byte| byte.is_ascii_alphanumeric() || byte.is_ascii_whitespace())
 }
 
-/// Where a `-----<opener> <label>-----` boundary in `line` begins and ends, for the first
-/// label `accept` takes.
+/// Where a `-----<opener><label>-----` boundary in `line` begins and ends, `opener` matched in
+/// any case and followed by whitespace, for the first label `accept` takes.
 fn pem_boundary(line: &str, opener: &str, accept: impl Fn(&str) -> bool) -> Option<(usize, usize)> {
+    let lower = line.to_ascii_lowercase();
     let mut from = 0;
-    while let Some(found) = line[from..].find(opener) {
+    while let Some(found) = lower[from..].find(opener) {
         let start = from + found;
         let label_start = start + opener.len();
+        if !line[label_start..].starts_with(|ch: char| ch.is_ascii_whitespace()) {
+            from = label_start;
+            continue;
+        }
         let close = line[label_start..].find("-----")?;
         if accept(&line[label_start..label_start + close]) {
             return Some((start, label_start + close + "-----".len()));
@@ -620,8 +762,8 @@ fn pem_boundary(line: &str, opener: &str, accept: impl Fn(&str) -> bool) -> Opti
 
 /// The end of the first private-key BEGIN boundary in `line`.
 fn private_key_begin(line: &str, strict: bool) -> Option<usize> {
-    pem_boundary(line, "-----BEGIN ", |label| {
-        is_private_key_label(label) && (!strict || is_pem_label(label))
+    pem_boundary(line, "-----begin", |label| {
+        is_private_key_label(label, strict)
     })
     .map(|(_, end)| end)
 }
@@ -630,14 +772,25 @@ fn private_key_begin(line: &str, strict: bool) -> Option<usize> {
 /// as the end, to the line's end when it is not closed, as they always have.
 fn private_key_end(line: &str, strict: bool) -> Option<(usize, usize)> {
     if strict {
-        return pem_boundary(line, "-----END ", is_pem_label);
+        return pem_boundary(line, "-----end", is_pem_label);
     }
-    let start = line.find("-----END ")?;
-    let label_start = start + "-----END ".len();
+    let start = line.to_ascii_lowercase().find("-----end ")?;
+    let label_start = start + "-----end ".len();
     let end = line[label_start..]
         .find("-----")
         .map_or(line.len(), |close| label_start + close + "-----".len());
     Some((start, end))
+}
+
+/// A base64-character run that reads as code rather than key material: every piece between
+/// `/`, `+` and `=` is word-like ([`is_word_like_segment`]), as an identifier
+/// (`ParsePrivateKeyBlock`, `privateKeyBoundary`) or a path (`crypto/x509/pem/decode`) is. A
+/// random key line almost never is: 64 base64 characters with no digit, `+` or `/`, and capitals
+/// only before lower-case letters.
+fn is_code_like_run(run: &str) -> bool {
+    run.split(['/', '+', '='])
+        .filter(|piece| !piece.is_empty())
+        .all(is_word_like_segment)
 }
 
 fn without_escapes(text: &str) -> String {
@@ -646,20 +799,14 @@ fn without_escapes(text: &str) -> String {
         .replace("\\t", "")
 }
 
-/// The words of `text` once what a string literal wraps key material in is set aside: `\n`,
-/// `\r` and `\t` escapes, quotes and `+` concatenation anywhere, and separators (`, ;`),
-/// line-continuation backslashes and parentheses at a word's edges. A key body line leaves one
-/// base64 word (a Python `b"MIIE..."` keeps its `b`, still base64); a line of code leaves
-/// several, or one with punctuation base64 has no place for (`striding(ALNUM`).
-fn key_tokens(text: &str) -> Vec<String> {
-    without_escapes(text)
-        .chars()
-        .filter(|ch| !matches!(ch, '"' | '\'' | '`' | '+'))
-        .collect::<String>()
-        .split_whitespace()
-        .map(|word| word.trim_matches([',', ';', '\\', '(', ')']).to_string())
-        .filter(|word| !word.is_empty())
-        .collect()
+/// A line inside a key block that neither holds key material nor ends the block: blank, only
+/// string-literal punctuation (`"`, `"\n" +`, `` ` ``), or an encrypted key's header
+/// (`Proc-Type: 4,ENCRYPTED`, whose IV after `DEK-Info:` is replaced as a run).
+fn is_key_filler_line(line: &str) -> bool {
+    let punctuation_only = without_escapes(line).chars().all(|ch| {
+        ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '+' | ',' | ';' | '\\' | '(' | ')')
+    });
+    punctuation_only || is_key_header_line(line)
 }
 
 fn is_base64_char(ch: char) -> bool {
@@ -681,15 +828,13 @@ fn is_key_header_line(line: &str) -> bool {
         .any(|header| line.starts_with(header))
 }
 
-/// A line inside a key block in source reads as key material: one base64 word (or nothing)
-/// once string-literal punctuation is set aside, or a PEM header. `let x = f(a, b);` is
-/// several words and ends the block.
-fn is_key_material_line(line: &str) -> bool {
-    let tokens = key_tokens(line);
-    is_key_header_line(line)
-        || (tokens.len() <= 1 && tokens.iter().all(|token| token.chars().all(is_base64_char)))
-}
-
+/// A token that looks machine-generated rather than written: at least
+/// [`ENTROPY_MIN_TOKEN_LEN`] characters, at least two of lower-case letters, upper-case letters
+/// and digits, Shannon entropy of at least [`ENTROPY_MIN_BITS_PER_CHAR`] bits per character,
+/// and at least one piece between `+ / = _ -` separators that is not word-like (see
+/// [`is_word_like_segment`]). The last condition is what spares `docs/large-java-2026-08-31`,
+/// `aarch64-unknown-linux-gnu` and `ConfidenceSignalInput`, whose entropy is as high as a short
+/// random key's.
 pub fn is_high_entropy_token(token: &str) -> bool {
     if token.len() < ENTROPY_MIN_TOKEN_LEN {
         return false;
@@ -1588,6 +1733,91 @@ mod tests {
         assert!(result.redactions > 0, "{}", result.text);
     }
 
+    /// No 20-character stretch of any body line survives.
+    fn assert_no_key_window(result: &RedactedText, body: &[String]) {
+        for line in body {
+            for start in 0..line.len().saturating_sub(19) {
+                let window = &line[start..start + 20];
+                assert!(
+                    !result.text.contains(window),
+                    "`{window}` survived:\n{}",
+                    result.text
+                );
+            }
+        }
+    }
+
+    /// The shapes the line-shaped source rule kept (#689 review): two literals concatenated on
+    /// one line, a body line with a trailing comment, a BEGIN constant followed by code and the
+    /// body in later statements, a lower-case label, and a label with a double space.
+    #[test]
+    fn source_private_keys_in_every_reviewed_shape_are_redacted() {
+        let body = key_body(23);
+        let halves = body
+            .iter()
+            .map(|line| line.split_at(line.len() / 2))
+            .collect::<Vec<_>>();
+        let concatenated = format!(
+            "const KEY =\n  '-----BEGIN RSA PRIVATE KEY-----\\n' +\n{}  '-----END RSA PRIVATE KEY-----';\nconst after = 1;\n",
+            halves
+                .iter()
+                .map(|(left, right)| format!("  '{left}' + '{right}\\n' +\n"))
+                .collect::<String>()
+        );
+        let commented = format!(
+            "const PARTS = [\n  '-----BEGIN PRIVATE KEY-----',\n{}  '-----END PRIVATE KEY-----',\n];\n",
+            body.iter()
+                .enumerate()
+                .map(|(index, line)| format!("  '{line}', // part {index}\n"))
+                .collect::<String>()
+        );
+        let statements = format!(
+            "const KEY = '-----BEGIN RSA PRIVATE KEY-----'; const X = 1;\n{}const END = '-----END RSA PRIVATE KEY-----';\n",
+            body.iter()
+                .enumerate()
+                .map(|(index, line)| format!("const BODY{index} = '{line}';\n"))
+                .collect::<String>()
+        );
+        let lower = format!(
+            "KEY = \"\"\"-----begin rsa private key-----\n{}\n-----end rsa private key-----\"\"\"\n",
+            body.join("\n")
+        );
+        let spaced = format!(
+            "let key = \"-----BEGIN RSA  PRIVATE KEY-----\n{}\n-----END RSA  PRIVATE KEY-----\";\n",
+            body.join("\n")
+        );
+        for text in [&concatenated, &commented, &statements, &lower, &spaced] {
+            let result = source(text);
+            assert_no_key_window(&result, &body);
+            assert_eq!(result.text.lines().count(), text.lines().count());
+        }
+        assert!(source(&commented).text.contains("// part 0"));
+        assert!(source(&statements).text.contains("const X = 1;"));
+        assert!(source(&concatenated).text.contains("const after = 1;"));
+    }
+
+    /// A PEM parser, the code most likely to sit after a BEGIN constant, is indexed as written:
+    /// its identifiers (`parsePkcs8PrivateKey`, `ParsePrivateKeyBlock`) and messages are code,
+    /// not key material, and the block a BEGIN constant opens ends at the first line of code.
+    #[test]
+    fn pem_parser_source_is_indexed_as_written() {
+        let fixtures = [
+            "package pemutil\n\nimport (\n\t\"encoding/base64\"\n\t\"errors\"\n\t\"strings\"\n)\n\nconst rsaBegin = \"-----BEGIN RSA PRIVATE KEY-----\"\n\n// ParsePrivateKeyBlock returns the decoded body between the boundaries.\nfunc ParsePrivateKeyBlock(text string) ([]byte, error) {\n\tstart := strings.Index(text, rsaBegin)\n\tif start < 0 {\n\t\treturn nil, errors.New(\"noPrivateKeyBlockFound\")\n\t}\n\tbody := strings.TrimSpace(text[start+len(rsaBegin):])\n\treturn base64.StdEncoding.DecodeString(body)\n}\n\nconst rsaEnd = \"-----END RSA PRIVATE KEY-----\"\n",
+            "import java.security.GeneralSecurityException;\n\nfinal class Pkcs8 {\n    private static final String BEGIN = \"-----BEGIN PRIVATE KEY-----\";\n    public static PrivateKey parsePkcs8PrivateKey(String pem) throws GeneralSecurityException {\n        String body = pem.replace(BEGIN, \"\").replace(\"-----END PRIVATE KEY-----\", \"\");\n        return KeyFactory.getInstance(\"RSA\").generatePrivate(new PKCS8EncodedKeySpec(decodeBase64Body(body)));\n    }\n}\n",
+            "BEGIN_MARKER = \"-----BEGIN OPENSSH PRIVATE KEY-----\"\n\n\ndef decode_private_key_block(text: str) -> bytes:\n    body = text.split(BEGIN_MARKER, 1)[1]\n    return base64.b64decode(body.strip())\n",
+            "const begin = '-----begin ec private key-----';\nexport function readPrivateKeyMaterial(pemText) {\n  return pemText.slice(pemText.indexOf(begin) + begin.length);\n}\n",
+            // A parser embedded in one string with `\n` escapes, as a test holds one: each
+            // escaped line is read as a line, so its code ends the block.
+            r#"let java = "final class K {\n    static final String BEGIN = \"-----BEGIN PRIVATE KEY-----\";\n    static PrivateKey parsePkcs8PrivateKey(String pem) { return null; }\n}\n";
+"#,
+        ];
+        for fixture in fixtures {
+            let result = source(fixture);
+            assert_eq!(result.text, fixture);
+            assert_eq!(result.redactions, 0);
+        }
+    }
+
     /// Every label a PEM writer gives a private key, as source commonly holds one: a Python
     /// triple-quoted string, with the headers an encrypted key carries.
     #[test]
@@ -1605,13 +1835,14 @@ mod tests {
         .enumerate()
         {
             let body = key_body(index as u64 * 31);
+            let iv = pseudo_random(b"0123456789ABCDEF", 32, index as u64 + 5);
             let text = format!(
-                "def load():\n    return \"\"\"-----BEGIN {label}-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00FF\n\n{}\n-----END {label}-----\"\"\"\n\n\ndef after():\n    return 1\n",
+                "def load():\n    return \"\"\"-----BEGIN {label}-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,{iv}\n\n{}\n-----END {label}-----\"\"\"\n\n\ndef after():\n    return 1\n",
                 body.join("\n")
             );
             let result = source(&text);
             assert_no_body(&result, &body);
-            assert!(!result.text.contains("AES-128-CBC"), "{}", result.text);
+            assert!(!result.text.contains(&iv), "{}", result.text);
             assert!(
                 result.text.contains(&format!("-----BEGIN {label}-----")),
                 "{}",
@@ -1634,7 +1865,7 @@ mod tests {
         assert_no_body(&result, &body);
         assert_eq!(
             result.text,
-            "const KEY: &str = \"-----BEGIN RSA PRIVATE KEY-----[REDACTED]-----END RSA PRIVATE KEY-----\\n\";\n"
+            "const KEY: &str = \"-----BEGIN RSA PRIVATE KEY-----\\n[REDACTED]\\n[REDACTED]\\n[REDACTED]\\n[REDACTED]\\n[REDACTED]\\n-----END RSA PRIVATE KEY-----\\n\";\n"
         );
 
         let concatenated = format!(

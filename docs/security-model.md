@@ -107,7 +107,7 @@ Files in a data, config, or prose format (YAML, JSON, TOML, Markdown, plain text
 A value is replaced when:
 
 1. **Its key names a secret.** The key, reduced to lower-case letters and digits, contains `password`, `passwd`, `passphrase`, `secret`, `token` (not inside `tokenizer`), `credential`, `apikey`, `privatekey`, `accesskey`, or `authorization`, or its last word is `key` (`signing_key`, `encryptionKey`). This covers `key: value`, `"key": "value"`, `key = "value"`, `KEY=value`, `--key=value`, `key := value`, and `key => value`. A quoted value is replaced inside its quotes, an unquoted one to the end of the line, comment included. When the value is not on the key's line (a YAML block scalar, a nested mapping or list, a pretty-printed JSON object or array), every value indented deeper than the key is replaced and the nested keys are kept; in an INI or TOML section whose header names a secret, every value up to the next header is replaced.
-2. **It is a private-key PEM block**: the body between a `-----BEGIN ... PRIVATE KEY-----` (or `-----BEGIN PGP PRIVATE KEY BLOCK-----`) boundary and its END boundary, whole lines and any body text sharing a line with a boundary, so a key written on one line with `\n` escapes is caught too. The boundaries stay.
+2. **It is a private-key PEM block**: the body between a `-----BEGIN ... PRIVATE KEY-----` (or `-----BEGIN PGP PRIVATE KEY BLOCK-----`; any case, any whitespace in the label) boundary and its END boundary, whole lines and any body text sharing a line with a boundary, so a key written on one line with `\n` escapes is caught too. The boundaries stay.
 3. **It is the password of a URL**: `scheme://user:password@host` becomes `scheme://user:[REDACTED]@host`.
 4. **It looks machine-generated, in a config or data file** (YAML, JSON, TOML, Terraform/HCL, Dockerfile): a run of `A-Z a-z 0-9 + / = _ -` at least 20 characters long (separators trimmed from its ends) that uses at least two of lower-case letters, upper-case letters, and digits, has Shannon entropy of at least 3.0 bits per character, and is not made only of word-like pieces between `+ / = _ -`. A piece is word-like when it is all digits, at most four characters, or letters in one case, Title case, or camelCase followed by at most four digits; this is what keeps paths, URLs, slugs, and names such as `aarch64-unknown-linux-gnu` or `ConfidenceSignalInput` readable. Calibrated on 4,000 random tokens per alphabet and length: at 24 characters or more the rule catches 99.5-100% of base64, base64url, alphanumeric, upper-case-plus-digit, lower-case-plus-digit, and hex tokens; at exactly 20 characters it catches 94% of base64 and 97-100% of the rest. Markdown, plain text, and document-corpus files get rules 1-3 but not this one, so commit hashes and digests cited in prose stay searchable. The exception is a file whose *name* says it holds credentials (a path component containing `secret`, `credential` or `password`, or ending in `_key`): `docs/SECRETS.md`, `notes/credentials.md` and `secret_key.txt` are read under the config rules, because the name rule no longer keeps them out of the index and a token pasted there carries no key, URL or PEM header for the other rules to match.
 
@@ -120,14 +120,21 @@ Rule 2 is the one rule programming-language source is held to
 holds no key: a key pasted into a test fixture (`tests/fixtures/keys_fixture.py`) or into a
 file named after a key type (`id_rsa.py`) would otherwise be stored as written in
 `.ok/index.sqlite`, the Tantivy index, `ok search` output and `ok snapshot export` artifacts.
-Its body is replaced before the parser sees the file, in every form source holds one: a
-multi-line string (Python `"""`, Go and JavaScript backticks, C# `@"..."`), one string with `\n`
-escapes, or literals concatenated line by line. Text with no `-----BEGIN` is not scanned. The
-rule is stricter in source than in data and prose, so code that handles PEM text keeps its
-lines: a boundary's label must be spelled as a PEM writer spells it (capitals, digits, single
-spaces), and a line inside a block is replaced only while it reads as key material once
-string-literal punctuation is set aside (one base64 word, or a `Proc-Type:`, `DEK-Info:` or
-`Comment:` header); the first line of code ends the block. A file whose body was replaced counts toward
+The body is replaced before the parser sees the file. A BEGIN boundary is read loosely: any
+case, any whitespace, and `PRIVATE` anywhere before `KEY` (`-----begin rsa private key-----`,
+`RSA  PRIVATE KEY`). In source its label must also be only letters, digits and whitespace, so
+code that names a boundary in pieces is not one. After it, every key-shaped run on each line
+is replaced and the code, quotes, concatenation and comments around it are kept. A key-shaped
+run is 16 or more base64 characters that is not code-shaped (every piece between `/`, `+` and
+`=` word-like, as an identifier or a path is), written where key material is: inside a string
+literal (`'MIIC..' + 'qvqO..' +`, `'MIIC..', // part 0`, `const BODY = '..'`), on a line
+holding nothing else (a multi-line string's body line: Python `"""`, Go and JavaScript
+backticks, C# `@"..."`), between `\n` escapes on a boundary's line, or in an encrypted key's
+`DEK-Info:` header. The block ends at its END boundary, at the first line with no key-shaped
+run that is not blank, punctuation or a header, or after 200 lines without an END, so code
+after a BEGIN constant keeps its lines (`parsePkcs8PrivateKey(...)`, `ParsePrivateKeyBlock`).
+Text with no `-----BEGIN`, in any case, is not scanned. A key's last body line, when shorter
+than 16 characters, can remain. A file whose body was replaced counts toward
 `quality.redacted_files`. Public keys and certificates (`-----BEGIN PUBLIC KEY-----`,
 `-----BEGIN CERTIFICATE-----`) are not secrets and are kept.
 
