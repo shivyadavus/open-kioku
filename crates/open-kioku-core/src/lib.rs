@@ -2635,6 +2635,17 @@ impl TestExclusionReason {
     }
 }
 
+/// The disclosure a plan carries when it planned nothing and found no withheld callable near the
+/// change, but the index withheld some elsewhere: the selector may simply not link their files
+/// to the change. `None` when there were none.
+pub fn withheld_test_file_callables_in_index(count: usize) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "{count} indexed test-file callable(s) matched no default runner discovery rule (runner configuration is not read), none of them linked to this change"
+        )
+    })
+}
+
 /// The disclosure plans and context packs carry when test-file callables near a change were
 /// withheld as matching no discovery rule. A misclassified test must read as withheld, never as
 /// absent. `None` when there were none.

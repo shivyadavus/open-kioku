@@ -428,7 +428,7 @@ impl<'a> PlanEngine<'a> {
                 omitted_by_cap,
             },
             withheld_helpers,
-        ) = self.validation_for_context(&primary_context, &context)?;
+        ) = self.validation_for_context(task, &primary_context, &context)?;
         let validation_omitted_ids = omitted_by_cap
             .into_iter()
             .map(|test| test.id)
@@ -500,8 +500,13 @@ impl<'a> PlanEngine<'a> {
         }
         // A disclosure too: a test-file callable that matched no discovery rule may still be a
         // test a configured runner collects, so it reads as withheld, never as absent.
-        if let Some(reason) = open_kioku_core::withheld_test_file_callables(withheld_helpers) {
-            risk.reasons.push(reason);
+        let withheld_disclosure = withheld_validation_disclosure(
+            withheld_helpers,
+            validation.is_empty(),
+            manifest.as_ref(),
+        );
+        if let Some(reason) = &withheld_disclosure {
+            risk.reasons.push(reason.clone());
         }
         if let Some(caveat) = manifest
             .as_ref()
@@ -546,7 +551,7 @@ impl<'a> PlanEngine<'a> {
             &impact,
             &validation,
             validation_omitted_ids.len(),
-            withheld_helpers,
+            withheld_disclosure.as_deref(),
             &self.memory_facts,
         );
         let tool_calls = tool_calls(
@@ -721,6 +726,7 @@ impl<'a> PlanEngine<'a> {
 
     fn validation_for_context(
         &self,
+        task: &str,
         primary_context: &[SearchResult],
         context: &ContextPack,
     ) -> Result<(ValidationSelection, usize)> {
@@ -746,6 +752,11 @@ impl<'a> PlanEngine<'a> {
                     .map(|test| test.id),
             );
         }
+        // So is one whose name shares a word with the task, wherever its file is.
+        withheld_helper_ids.extend(open_kioku_context::withheld_helper_ids_for_task(
+            self.store as &dyn MetadataStore,
+            task,
+        )?);
         let paths = validation_target_paths(self.store, &candidates)?;
         Ok((
             select_validation_targets(candidates, &paths),
@@ -2196,12 +2207,41 @@ fn stable_slug(value: &str) -> String {
         .join("-")
 }
 
+/// What the plan says about indexed targets it withheld from validation, if anything. Callables
+/// near the change come first. With nothing planned and none near, a repository whose index
+/// withheld callables anywhere, or whose every target is excluded, says that instead: "No
+/// indexed tests were found" would be false for a test the rules missed in a file no changed
+/// path links to (a custom harness, a wrapper-registered suite).
+fn withheld_validation_disclosure(
+    withheld_near_change: usize,
+    validation_is_empty: bool,
+    manifest: Option<&open_kioku_core::IndexManifest>,
+) -> Option<String> {
+    if let Some(near) = open_kioku_core::withheld_test_file_callables(withheld_near_change) {
+        return Some(near);
+    }
+    if !validation_is_empty {
+        return None;
+    }
+    let quality = &manifest?.quality;
+    let excluded = quality.excluded_test_targets.as_ref()?;
+    let helpers = excluded
+        .get(&open_kioku_core::TestExclusionReason::Helper)
+        .copied()
+        .unwrap_or(0);
+    open_kioku_core::withheld_test_file_callables_in_index(helpers).or_else(|| {
+        (quality.test_count == 0)
+            .then(|| open_kioku_core::every_test_target_excluded(excluded))
+            .flatten()
+    })
+}
+
 fn next_steps(
     primary_context: &[SearchResult],
     impact: &ImpactReport,
     validation: &[TestTarget],
     validation_omitted: usize,
-    withheld_helpers: usize,
+    withheld_disclosure: Option<&str>,
     memory_facts: &[MemorySearchResult],
 ) -> Vec<String> {
     let mut steps = Vec::new();
@@ -2218,9 +2258,9 @@ fn next_steps(
         steps.push("Check matched repo memory facts, but verify them against indexed code before relying on them.".into());
     }
     if validation.is_empty() {
-        match open_kioku_core::withheld_test_file_callables(withheld_helpers) {
+        match withheld_disclosure {
             Some(withheld) => steps.push(format!(
-                "No runnable indexed test was found, but {withheld}: if your runner collects them, run them; otherwise choose a manual validation command."
+                "No runnable indexed test was found, but {withheld}. If any of those are tests your runner runs, run them; otherwise choose a manual validation command."
             )),
             None => steps
                 .push("No indexed tests were found; choose a manual validation command.".into()),

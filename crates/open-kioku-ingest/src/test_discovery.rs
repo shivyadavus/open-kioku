@@ -20,9 +20,12 @@ use std::path::{Path, PathBuf};
 const PYTEST_DISCOVERY_OPTIONS: [&str; 3] = ["python_files", "python_classes", "python_functions"];
 
 /// pytest's configuration files, in the order it prefers them in one directory, with the
-/// section that holds its options in each.
-const PYTEST_CONFIG_FILES: [(&str, &str); 4] = [
+/// section that holds its options in each: pytest 9 reads a native `[tool.pytest]` table in
+/// `pyproject.toml` before the `[tool.pytest.ini_options]` one earlier versions read.
+const PYTEST_CONFIG_FILES: [(&str, &str); 6] = [
     ("pytest.ini", "[pytest]"),
+    (".pytest.ini", "[pytest]"),
+    ("pyproject.toml", "[tool.pytest]"),
     ("pyproject.toml", "[tool.pytest.ini_options]"),
     ("tox.ini", "[pytest]"),
     ("setup.cfg", "[tool:pytest]"),
@@ -178,6 +181,13 @@ mod tests {
             discovery_options(toml, "[tool.pytest.ini_options]"),
             Some(vec!["python_classes", "python_functions"])
         );
+        // pytest 9's native table, and the older table is not mistaken for it.
+        let native = "[tool.pytest]\npython_files = [\"*_checks.py\"]\n";
+        assert_eq!(
+            discovery_options(native, "[tool.pytest]"),
+            Some(vec!["python_files"])
+        );
+        assert_eq!(discovery_options(native, "[tool.pytest.ini_options]"), None);
         assert_eq!(
             discovery_options("[pytest]\naddopts = -q\n", "[pytest]"),
             Some(vec![])

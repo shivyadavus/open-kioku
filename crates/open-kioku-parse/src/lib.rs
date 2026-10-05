@@ -2686,6 +2686,15 @@ fn plain_helper() -> Vec<i64> {
                 ("testPackagePrivate", false),
             ],
         );
+        // JUnit 4 and 5 ignore JUnit 3 naming: in a file written for them, an unannotated
+        // `public void test*()` in a subclass is a helper.
+        let jupiter = "package com.acme;\n\nimport org.junit.jupiter.api.Test;\n\npublic class LedgerJupiterTest extends LedgerFixtures {\n  @Test\n  void postsEntry() {}\n\n  public void testFixtureLoads() {}\n}\n";
+        assert_runnable(
+            "src/test/java/com/acme/LedgerJupiterTest.java",
+            Language::Java,
+            jupiter,
+            &[("postsEntry", true), ("testFixtureLoads", false)],
+        );
         let python = "from tests.base import LedgerCase\n\n\nclass PostTests(LedgerCase):\n    def test_posts(self):\n        pass\n\n\nclass TestWithInit:\n    def __init__(self):\n        self.ledger = []\n\n    def test_skipped_by_pytest(self):\n        pass\n\n\nclass Plain(object):\n    def test_not_collected(self):\n        pass\n";
         assert_runnable(
             "tests/test_posts.py",

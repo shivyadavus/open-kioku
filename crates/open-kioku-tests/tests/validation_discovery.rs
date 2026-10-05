@@ -362,6 +362,66 @@ fn a_junit3_test_inheriting_test_case_through_an_abstract_base_is_planned() {
     );
 }
 
+/// The plan for `task` plans nothing, discloses the withheld callables, and never claims that
+/// no tests exist. The fixture may hold runnable targets too (the wrapper fixture's interpolated
+/// `it(..)` inside a helper) that the selector does not link to the change.
+fn assert_withheld_disclosed(fixture: &str, task: &str) {
+    let repo = indexed_copy(fixture);
+    let origins = target_origins(repo.path());
+    assert!(
+        origins.values().any(|origin| origin == HELPER),
+        "{fixture}: {origins:?}"
+    );
+    let plan = ok_json(repo.path(), &["plan", task, "--format", "json"]);
+    assert_eq!(plan["validation"], serde_json::json!([]), "{fixture}");
+    let disclosed = |text: &str| text.contains("matched no default runner discovery rule");
+    assert!(
+        plan["risk"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| disclosed(reason.as_str().unwrap())),
+        "{fixture}: {}",
+        plan["risk"]["reasons"]
+    );
+    let steps = plan["recommended_next_steps"].as_array().unwrap();
+    assert!(
+        steps.iter().any(|step| {
+            let step = step.as_str().unwrap();
+            step.starts_with("No runnable indexed test was found, but") && disclosed(step)
+        }),
+        "{fixture}: {steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|step| step
+            .as_str()
+            .unwrap()
+            .contains("No indexed tests were found")),
+        "{fixture}: {steps:?}"
+    );
+}
+
+/// A `harness = false` test target runs `main` under a custom harness such as libtest-mimic,
+/// which no default rule recognises. The test selector links `tests/mimic.rs` to no changed
+/// file, so only the index-wide count can disclose it.
+#[test]
+fn a_custom_harness_test_reads_as_withheld_not_absent() {
+    assert_withheld_disclosed(
+        "rust-custom-harness-fixture",
+        "change post_entry to reject zero amounts",
+    );
+}
+
+/// Tests registered through wrapper functions (`itPosts(1, 1)`) are calls of a helper, which no
+/// default rule recognises; the plan must say they were withheld.
+#[test]
+fn wrapper_registered_typescript_tests_read_as_withheld_not_absent() {
+    assert_withheld_disclosed(
+        "typescript-wrapper-fixture",
+        "change postEntry to reject zero amounts",
+    );
+}
+
 /// `pytest.ini` tells pytest to collect `check_*.py` and `*_tests.py`, `*Suite` classes and
 /// `should_*` functions. The index does not interpret those options, so it falls back to the
 /// test-path rule there and says so, instead of calling pytest's tests helpers.

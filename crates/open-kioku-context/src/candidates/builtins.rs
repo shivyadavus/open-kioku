@@ -1321,6 +1321,32 @@ fn validation_unavailable_reason(tests: &[TestTarget]) -> Option<String> {
     open_kioku_core::every_test_target_excluded(&excluded)
 }
 
+/// Ids of the test-file callables matching no runner discovery rule whose names share a
+/// retrieval word with `task`. The validation stream votes only for targets that stand as
+/// evidence, so it never sees these; plans and packs count them so a test the rules missed,
+/// one the test selector links to no changed file, still reads as withheld rather than absent.
+pub(crate) fn helper_ids_overlapping_task(tests: &[TestTarget], task: &str) -> BTreeSet<String> {
+    let terms = task
+        .split_whitespace()
+        .map(|term| {
+            term.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                .to_ascii_lowercase()
+        })
+        .filter(|term| term.len() >= 3 && !is_overlap_stopword(term))
+        .collect::<Vec<_>>();
+    tests
+        .iter()
+        .filter(|test| {
+            test.validation_exclusion() == Some(open_kioku_core::TestExclusionReason::Helper)
+        })
+        .filter(|test| {
+            let name = test.name.replace('_', "").to_ascii_lowercase();
+            terms.iter().any(|term| name.contains(term.as_str()))
+        })
+        .map(|test| test.id.clone())
+        .collect()
+}
+
 fn term_overlap(terms: &[String], haystack: &str) -> usize {
     terms
         .iter()

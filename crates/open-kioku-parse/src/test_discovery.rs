@@ -6,9 +6,9 @@
 //! heuristic and not by the file alone:
 //!
 //! - Rust: a test attribute in the attribute stack, directly or through `cfg_attr`: one whose
-//!   last path segment is `test` or ends in `_test` (`#[tokio::test]`, `#[pg_test]`), or
-//!   `rstest`, `test_case`, `proptest`, `quickcheck` or rstest_reuse's `apply`; never a
-//!   function rstest_reuse marks `#[template]`.
+//!   last path segment is `test` (`#[tokio::test]`), `rstest`, `test_case`, `proptest`,
+//!   `quickcheck`, `wasm_bindgen_test`, `pg_test` or rstest_reuse's `apply`; never a function
+//!   marked `#[template]` or `#[fixture]`.
 //! - Java: a JUnit or TestNG test annotation (`@Test`, `@ParameterizedTest`), a JUnit 3
 //!   `public void test*()` of a class that extends another (the `TestCase` may sit behind an
 //!   abstract base in another file), or a public method of a class TestNG annotates `@Test`
@@ -47,6 +47,10 @@ pub(crate) struct TestFileDiscovery<'a> {
     lines: &'a [&'a str],
     symbols: &'a [Symbol],
     by_id: HashMap<&'a SymbolId, &'a Symbol>,
+    /// A Java file written for JUnit 4 or 5: it imports `org.junit.Test` or `org.junit.jupiter`,
+    /// or annotates something `@Test`. Those runners ignore JUnit 3 naming, so a `test*`
+    /// method there is a test only when annotated.
+    annotation_junit: bool,
 }
 
 impl<'a> TestFileDiscovery<'a> {
@@ -59,6 +63,13 @@ impl<'a> TestFileDiscovery<'a> {
             lines,
             symbols,
             by_id: symbols.iter().map(|symbol| (&symbol.id, symbol)).collect(),
+            annotation_junit: file.language == Language::Java
+                && lines.iter().map(|line| line.trim()).any(|line| {
+                    line.starts_with("import org.junit.jupiter")
+                        || line.starts_with("import static org.junit.jupiter")
+                        || line.starts_with("import org.junit.Test")
+                        || java_annotation_name(line) == Some("Test")
+                }),
         }
     }
 
@@ -94,8 +105,9 @@ impl<'a> TestFileDiscovery<'a> {
         };
         // JUnit 3 runs every public no-argument `void test*()` of a `TestCase` subclass. The
         // `TestCase` may be reached through an abstract base in another file, so any class that
-        // extends something qualifies.
-        if has_test_name_prefix(&symbol.name)
+        // extends something qualifies. A file written for JUnit 4 or 5 does not.
+        if !self.annotation_junit
+            && has_test_name_prefix(&symbol.name)
             && symbol.visibility == Visibility::Public
             && self.declares_no_argument_void(symbol)
             && self.declaration_mentions(class, "extends")
@@ -314,18 +326,24 @@ fn rust_attribute_path(line: &str) -> Option<&str> {
     )
 }
 
-/// Whether an attribute path generates a test: its last segment is `test` or ends in `_test`
-/// (`#[tokio::test]`, `#[googletest::test]`, `#[wasm_bindgen_test]`, `#[pg_test]`), or names a
-/// test-generating attribute of a common crate (`#[rstest]`, `#[test_case(..)]`, `#[proptest]`,
-/// `#[quickcheck]`, rstest_reuse's `#[apply(..)]`), qualified or not.
+/// Whether an attribute path generates a test: its last segment is `test` (`#[tokio::test]`,
+/// `#[googletest::test]`) or one of an explicit list of test-generating attributes of common
+/// crates, qualified or not: `rstest`, `test_case`, `proptest`, `quickcheck`,
+/// `wasm_bindgen_test`, pgrx's `pg_test` and rstest_reuse's `apply`. A list, not a `_test`
+/// suffix rule, because `#[skip_test]` or `#[my_crate::not_a_test]` would read as tests; an
+/// unlisted test macro reads as a withheld callable instead, which plans disclose.
 fn is_rust_test_attribute_path(path: &str) -> bool {
-    let last = path.rsplit("::").next().unwrap_or(path).trim();
-    last == "test"
-        || last.ends_with("_test")
-        || matches!(
-            last,
-            "rstest" | "test_case" | "proptest" | "quickcheck" | "apply"
-        )
+    matches!(
+        path.rsplit("::").next().unwrap_or(path).trim(),
+        "test"
+            | "rstest"
+            | "test_case"
+            | "proptest"
+            | "quickcheck"
+            | "wasm_bindgen_test"
+            | "pg_test"
+            | "apply"
+    )
 }
 
 /// A test attribute, directly or through `cfg_attr`: `#[cfg_attr(not(miri), test)]`.
@@ -337,7 +355,9 @@ fn is_rust_test_attribute(line: &str) -> bool {
         return false;
     };
     if path != "cfg_attr" {
-        return is_rust_test_attribute_path(path);
+        // rstest_reuse applies a template by name; an argument spelling a macro call is not one.
+        return is_rust_test_attribute_path(path)
+            && !(path.ends_with("apply") && line.contains('!'));
     }
     let Some(arguments) = line
         .strip_prefix("#[")
@@ -377,11 +397,16 @@ fn top_level_arguments(arguments: &str) -> Vec<&str> {
     parts
 }
 
-/// rstest_reuse's `#[template]`: the function is a case list `#[apply(..)]` expands elsewhere,
-/// never a test itself, though an `#[rstest]` sits below it.
+/// rstest_reuse's `#[template]`, a case list `#[apply(..)]` expands elsewhere, and rstest's
+/// `#[fixture]`, a value tests take: neither is a test itself, though an `#[rstest]` may sit
+/// beside it.
 fn is_rust_template_attribute(line: &str) -> bool {
-    rust_attribute_path(line)
-        .is_some_and(|path| path.rsplit("::").next().unwrap_or(path).trim() == "template")
+    rust_attribute_path(line).is_some_and(|path| {
+        matches!(
+            path.rsplit("::").next().unwrap_or(path).trim(),
+            "template" | "fixture"
+        )
+    })
 }
 
 /// The simple name of a Java annotation on `line`: `Test` for `@Test` and
@@ -477,7 +502,16 @@ mod tests {
         assert!(!is_rust_test_attribute("#[cfg_attr(test, derive(Debug))]"));
         assert!(is_rust_template_attribute("#[template]"));
         assert!(is_rust_template_attribute("#[rstest_reuse::template]"));
-        for line in ["#[cfg(test)]", "#[testing]", "#[should_panic]", "#[serial]"] {
+        assert!(is_rust_template_attribute("#[rstest::fixture]"));
+        for line in [
+            "#[cfg(test)]",
+            "#[testing]",
+            "#[should_panic]",
+            "#[serial]",
+            "#[skip_test]",
+            "#[my_crate::not_a_test]",
+            "#[apply(cases!())]",
+        ] {
             assert!(!is_rust_test_attribute(line), "{line}");
         }
     }

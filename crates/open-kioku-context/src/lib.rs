@@ -511,6 +511,19 @@ pub struct ContextPackBuilder<'a> {
     abstention_policy: Option<open_kioku_core::abstention::RuntimeAbstentionPolicy>,
 }
 
+/// Ids of the indexed test-file callables matching no default runner discovery rule whose
+/// names share a word with `task`. Plans and packs add these to the callables withheld near a
+/// change, so a test the rules missed in a file no changed path links to is still disclosed.
+pub fn withheld_helper_ids_for_task(
+    store: &dyn open_kioku_storage::MetadataStore,
+    task: &str,
+) -> Result<std::collections::BTreeSet<String>> {
+    Ok(candidates::builtins::helper_ids_overlapping_task(
+        &store.tests()?,
+        task,
+    ))
+}
+
 pub fn expanded_task_search_terms(task: &str) -> Vec<String> {
     TaskSearchIntent::parse(task).search_terms(task)
 }
@@ -814,6 +827,9 @@ impl<'a> ContextPackBuilder<'a> {
                 tests_by_id.entry(test.id.clone()).or_insert(test);
             }
         }
+        // A callable whose name shares a word with the task is near it too, even when no
+        // changed path links its file.
+        withheld_helper_ids.extend(withheld_helper_ids_for_task(self.store, task)?);
         let mut tests = tests_by_id.into_values().collect::<Vec<_>>();
         tests.sort_by(|left, right| {
             right
