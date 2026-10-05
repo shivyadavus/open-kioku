@@ -65,6 +65,15 @@
       "policy_excluded_dirs": {
         "src": 25
       },
+      "policy_excluded_dirs_by_language": {
+        "rust": {
+          "src": {
+            "by_source": {
+              "git_ignore": 25
+            }
+          }
+        }
+      },
       "pruned_dirs": 0,
       "skipped": {
         "ignored": 25
@@ -74,6 +83,13 @@
     "coverage_gaps": [
       {
         "cause": "git_ignore",
+        "excluded_dirs": [
+          {
+            "class": "unclassified",
+            "files": 25,
+            "path": "src"
+          }
+        ],
         "governing_setting": "git ignore rules (`.gitignore`, `.git/info/exclude`, or `core.excludesFile`)",
         "language": "rust",
         "language_files": 27,
@@ -119,6 +135,15 @@
         },
         "policy_excluded_dirs": {
           "src": 25
+        },
+        "policy_excluded_dirs_by_language": {
+          "rust": {
+            "src": {
+              "by_source": {
+                "git_ignore": 25
+              }
+            }
+          }
         },
         "pruned_dirs": 0,
         "skipped": {

@@ -29,6 +29,7 @@ use std::time::Instant;
 
 mod cargo_facts;
 mod cycle_memo;
+mod dependency_trees;
 pub mod derived;
 mod git_ignore;
 pub mod path_policy;
@@ -1828,6 +1829,7 @@ impl Indexer {
         let ScanLedger {
             skipped_paths,
             coverage,
+            dependency_trees: _,
         } = ledger;
         let skipped = skipped_paths.len();
         // The walk yields directory entries in filesystem order, which differs between copies
@@ -1874,6 +1876,8 @@ struct ScanResult {
 struct ScanLedger {
     skipped_paths: Vec<SkippedPath>,
     coverage: IndexCoverage,
+    /// Which directories of excluded files hold installed packages, probed once each.
+    dependency_trees: dependency_trees::DependencyTrees,
 }
 
 impl ScanLedger {
@@ -1910,11 +1914,21 @@ impl ScanLedger {
             self.coverage.record_skipped(language, reason);
             if reason.is_policy() {
                 // The directory is named only when the path itself may be shown.
-                let top_dir = safe_to_show
-                    .then(|| top_level_dir(path.strip_prefix(root).unwrap_or(path)))
+                let rel = path.strip_prefix(root).unwrap_or(path);
+                let top_dir = safe_to_show.then(|| top_level_dir(rel)).flatten();
+                // Only programming-language source can be a gap; a hidden `.github/*.yml` is
+                // never probed for.
+                let dependency = (top_dir.is_some() && language.is_programming())
+                    .then(|| self.dependency_trees.enclosing(root, rel))
                     .flatten();
-                self.coverage
-                    .record_policy_exclusion(language, source, top_dir.as_deref());
+                self.coverage.record_classified_policy_exclusion(
+                    language,
+                    source,
+                    top_dir.as_deref(),
+                    dependency
+                        .as_ref()
+                        .map(|(dir, evidence)| (dir.as_str(), *evidence)),
+                );
             }
         }
     }

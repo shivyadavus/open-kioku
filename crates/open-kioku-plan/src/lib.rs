@@ -991,7 +991,7 @@ fn coverage_gap_risk_reason(
     let (_, identifiers) = split_unmatched_anchors(unmatched_anchors, weak_anchors);
     let majority = gaps
         .iter()
-        .filter(|gap| gap.is_majority())
+        .filter(|gap| gap.is_source_majority())
         .map(CoverageGap::summary)
         .collect::<Vec<_>>();
     if identifiers.is_empty() || majority.is_empty() {
@@ -4656,7 +4656,7 @@ mod tests {
             .expect("coverage negative evidence");
         assert!(
             item.reason
-                .contains("25 of 28 rust source files (89.3%) are not indexed (git-ignore)"),
+                .contains("25 of 28 rust source files (89.3%) are not indexed (git-ignore: src/ (25 unclassified))"),
             "{}",
             item.reason
         );
@@ -4685,7 +4685,7 @@ mod tests {
         }));
         assert!(
             gapped.risk.reasons.iter().any(|reason| reason
-                == "low confidence: named task anchor(s) FrobnicateRegistry may be defined in source the index excluded: rust (25 of 28 files, git-ignore)"),
+                == "low confidence: named task anchor(s) FrobnicateRegistry may be defined in source the index excluded: rust (25 of 28 files, git-ignore: src/ (25 unclassified))"),
             "{:?}",
             gapped.risk.reasons
         );
