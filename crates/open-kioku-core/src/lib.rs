@@ -3616,14 +3616,24 @@ pub struct SkippedPath {
 pub const SSH_KEY_STEMS: &[&str] = &["id_dsa", "id_ecdsa", "id_ed25519", "id_rsa", "id_xmss"];
 
 /// Programming-language source extensions the indexer reads. A name that starts with an
-/// [`SSH_KEY_STEMS`] stem and ends in one of these (`id_rsa_loader.py`) is source, not a key:
-/// no tool writes a key under a source extension, while every other suffix (`.pub`, `.bak`,
-/// `.old`, `.txt`, `-cert.pub`, `_deploy`, `4096`) is how a key is copied or renamed. Every
-/// entry must be an extension `open-kioku-languages::detect_language` reads as a programming
-/// language; a test there holds the two together.
+/// [`SSH_KEY_STEMS`] stem and ends in one of these (`id_rsa_loader.py`) is read as source,
+/// while every other suffix (`.pub`, `.bak`, `.old`, `.txt`, `-cert.pub`, `_deploy`, `4096`) is how
+/// a key is copied or renamed. A name alone cannot prove a file holds no key, so source is not
+/// trusted on its name: `open-kioku-ingest::redaction::redact_private_keys` replaces any
+/// private-key PEM body in programming-language source before it is indexed. Every entry must
+/// be an extension `open-kioku-languages::detect_language` reads as a programming language, or
+/// one it does not read at all, which discovery never indexes (`cs` until C# is supported); a
+/// test there holds the two together, so no entry can name data, config or prose.
 pub const KEY_STEM_SOURCE_EXTENSIONS: &[&str] = &[
-    "cjs", "go", "java", "js", "jsx", "mjs", "py", "rs", "ts", "tsx",
+    "cjs", "cs", "go", "java", "js", "jsx", "mjs", "py", "rs", "ts", "tsx",
 ];
+
+/// Extensions of key and certificate material, a .NET strong-name key pair (`snk`) included.
+/// A name carrying one as any extension, the last or an earlier one, matches: `server.key`,
+/// but also `id_rsa.pem.ts`, `x.key.js` and `Ledger.snk.md`, a key renamed with another
+/// extension appended.
+pub const KEY_MATERIAL_EXTENSIONS: &[&str] =
+    &["jks", "key", "keystore", "p12", "pem", "pfx", "snk"];
 
 /// Paths that match a secret-path pattern, which are never read, whatever the file's language.
 /// A path matches when any component is one of:
@@ -3633,8 +3643,11 @@ pub const KEY_STEM_SOURCE_EXTENSIONS: &[&str] = &[
 /// - an SSH key: a name starting with an [`SSH_KEY_STEMS`] stem (`id_rsa`, `id_rsa.pub`,
 ///   `id_ed25519_deploy`, `id_rsa4096`), unless it ends in a [`KEY_STEM_SOURCE_EXTENSIONS`]
 ///   extension (`id_rsa_loader.py` is code; #676);
-/// - key or certificate material by extension: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`,
-///   `*.keystore`.
+/// - key or certificate material by extension ([`KEY_MATERIAL_EXTENSIONS`]): `*.pem`, `*.key`,
+///   `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.snk`, as the last extension or an earlier one
+///   (`id_rsa.pem.ts`, `x.key.js`).
+///
+/// A .NET user-secrets store (`UserSecrets/<id>/secrets.json`) matches as well (#684).
 ///
 /// Discovery skips them as `secret_policy` and the semantic corpus excludes them: one rule for
 /// both. The rule judges a path by its name alone and cannot know what a file holds, so a
@@ -3651,14 +3664,17 @@ pub fn is_secret_like_path(path: &Path) -> bool {
             || value.starts_with(".env.")
             || matches!(value.as_str(), ".aws" | ".ssh")
             || names_ssh_key(&value)
-            || value.ends_with(".pem")
-            || value.ends_with(".key")
-            || value.ends_with(".p12")
-            || value.ends_with(".pfx")
-            || value.ends_with(".jks")
-            || value.ends_with(".keystore")
-            || value.ends_with(".snk")
+            || has_key_material_extension(&value)
     }) || is_user_secrets_store(path)
+}
+
+/// `value` (lower-case) has a [`KEY_MATERIAL_EXTENSIONS`] entry as any of its extensions: a
+/// segment after a `.` that is not the name's first.
+fn has_key_material_extension(value: &str) -> bool {
+    value
+        .split('.')
+        .skip(1)
+        .any(|extension| KEY_MATERIAL_EXTENSIONS.contains(&extension))
 }
 
 /// `value` (lower-case) starts with an SSH key stem and does not end in a source extension.
@@ -3684,7 +3700,7 @@ pub fn redaction_search_caveat(redacted_files: Option<usize>) -> Option<String> 
     let redacted = redacted_files?;
     (redacted > 0).then(|| {
         format!(
-            "{redacted} data, config, or prose file(s) are indexed with secret-like values replaced by `[REDACTED]`, so a redacted value cannot be found by searching for it"
+            "{redacted} file(s) are indexed with secret-like values replaced by `[REDACTED]`, so a redacted value cannot be found by searching for it"
         )
     })
 }
@@ -3738,6 +3754,8 @@ mod secret_path_tests {
             "UserSecrets/7f3c2a1e-0b4d-4e8a-9c61-5d2f8e0a7b13/secrets.json",
             "ops/Microsoft/UserSecrets/ledger-dev/secrets.json",
             "ops/usersecrets/secrets.JSON",
+            // A key extension before the last is still one (#676), as for `id_rsa.pem.ts`.
+            "src/Ledger/Ledger.snk.md",
         ] {
             assert!(is_secret_like_path(Path::new(blocked)), "{blocked}");
         }
@@ -3751,7 +3769,6 @@ mod secret_path_tests {
             "UserSecrets",
             "docs/snk/notes.md",
             "src/Ledger/snk.cs",
-            "src/Ledger/Ledger.snk.md",
         ] {
             assert!(!is_secret_like_path(Path::new(indexed)), "{indexed}");
         }
@@ -3861,6 +3878,14 @@ mod secret_path_tests {
             "certs/client.pfx",
             "android/release.jks",
             "android/release.keystore",
+            // A key extension before the last one: a key renamed with a source extension.
+            "keys/id_rsa.pem.ts",
+            "keys/x.key.js",
+            "certs/client.p12.py",
+            "android/release.jks.java",
+            "keys/id_rsa.key.cs",
+            "keys/ID_RSA.PEM.TS",
+            "certs/.pem",
         ];
         for blocked in must_stay_blocked {
             assert!(
@@ -3883,6 +3908,7 @@ mod secret_path_tests {
             "lib/id_ecdsa_util.cjs",
             "ui/id_rsa_view.jsx",
             "codec/id_rsa_codec.java",
+            "src/IdRsa/id_rsa_loader.cs",
             "loaders/ID_RSA_LOADER.PY",
         ];
         for source in now_pass {
@@ -3910,6 +3936,9 @@ mod secret_path_tests {
             "docs/key.md",
             "src/pem_reader.rs",
             "src/identity.rs",
+            "src/key.rs",
+            "src/pem.ts",
+            "src/keys.pemfile.rs",
         ];
         for ordinary in still_pass {
             assert!(
@@ -5692,9 +5721,10 @@ pub struct IndexQuality {
     /// rather than treat absence as full coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<IndexCoverage>,
-    /// Data, config and prose files indexed with at least one secret-like value replaced by
-    /// `[REDACTED]` before storage (`docs/security-model.md`). `null` on manifests written
-    /// before redaction existed: those indexes stored such files' values as read. Serialized
+    /// Files indexed with at least one secret-like value replaced by `[REDACTED]` before
+    /// storage: data, config and prose files, and source holding a private-key PEM block
+    /// (`docs/security-model.md`). `null` on manifests written before redaction existed: those
+    /// indexes stored such files' values as read. Serialized
     /// even when absent, so a client reading `quality.redacted_files ?? 0` cannot render an
     /// unredacted index as one with nothing to redact.
     #[serde(default)]

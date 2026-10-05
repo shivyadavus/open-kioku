@@ -69,12 +69,16 @@ A path is skipped as `secret_policy`, never read, and never named when any of it
 - the `.aws` or `.ssh` directory, whatever is under it;
 - an SSH key: a name starting with one of `ssh-keygen`'s default stems (`id_dsa`, `id_ecdsa`,
   `id_ed25519`, `id_rsa`, `id_xmss`; `open_kioku_core::SSH_KEY_STEMS`), unless the name ends
-  in a programming-source extension (`.cjs`, `.go`, `.java`, `.js`, `.jsx`, `.mjs`, `.py`,
-  `.rs`, `.ts`, `.tsx`; `KEY_STEM_SOURCE_EXTENSIONS`). The stem is a prefix because keys are
-  renamed and copied (`id_rsa_github`, `id_rsa4096`, `id_rsa.bak`); a source extension is
-  the one suffix no key is written under, so `loaders/id_rsa_loader.py` is code;
+  in a programming-source extension (`.cjs`, `.cs`, `.go`, `.java`, `.js`, `.jsx`, `.mjs`,
+  `.py`, `.rs`, `.ts`, `.tsx`; `KEY_STEM_SOURCE_EXTENSIONS`). The stem is a prefix because
+  keys are renamed and copied (`id_rsa_github`, `id_rsa4096`, `id_rsa.bak`). A source
+  extension says the file is read as code, so `loaders/id_rsa_loader.py` is indexed; it does
+  not prove the file holds no key, which no name can. A key pasted into such a file, or into
+  any other source file, is caught by content instead: programming-language source has every
+  private-key PEM body replaced before it is indexed (see "Private keys in source" below);
 - key or certificate material by extension: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`,
-  `*.keystore`.
+  `*.keystore`, as the last extension or an earlier one, so a key renamed with a source
+  extension appended (`id_rsa.pem.ts`, `x.key.js`) stays blocked.
 
 | Path | Result |
 |---|---|
@@ -84,7 +88,8 @@ A path is skipped as `secret_policy`, never read, and never named when any of it
 | `keys/id_rsa_github`, `keys/id_rsa4096`, `keys/id_rsa-cert.pub`, `keys/id_rsa.bak`, `keys/id_rsa.txt`, `keys/id_rsa.json` | blocked |
 | `id_rsa/loader.py`, `src/.env.rs` | blocked (a matching component anywhere in the path) |
 | `config/server.key`, `certs/tls.PEM`, `certs/client.p12`, `certs/client.pfx`, `android/release.jks`, `android/release.keystore` | blocked |
-| `loaders/id_rsa_loader.py`, `src/id_rsa.rs`, `pkg/id_ed25519_signer.go`, `web/id_rsa_parser.ts`, `lib/id_dsa.js`, `codec/id_rsa_codec.java` | indexed |
+| `keys/id_rsa.pem.ts`, `keys/x.key.js`, `certs/client.p12.py`, `keys/id_rsa.key.cs` | blocked (a key extension before the last) |
+| `loaders/id_rsa_loader.py`, `src/id_rsa.rs`, `pkg/id_ed25519_signer.go`, `web/id_rsa_parser.ts`, `lib/id_dsa.js`, `codec/id_rsa_codec.java`, `src/id_rsa_loader.cs` (once C# is indexed) | indexed, any private-key PEM body replaced |
 | `secrets.yaml`, `credentials.json`, `docs/SECRETS.md`, `secret_key.txt` | indexed, secret-like values redacted |
 | `internal/secrets.go`, `src/CredentialsProvider.java` | indexed as written |
 | `.envrc`, `config/.environment.yaml`, `src/keyboard.rs`, `docs/key.md` | not matched (a hidden file still needs `allow_hidden_files`) |
@@ -97,16 +102,34 @@ reports `RebuildRequired`.
 
 ## Secret-value redaction
 
-Files in a data, config, or prose format (YAML, JSON, TOML, Markdown, plain text, and every document-corpus file) are indexed with secret-like values replaced by `[REDACTED]` before anything is derived from their text (`open-kioku-ingest::redaction`). Chunks, symbols, analysis facts, test candidates, and document sections are built from the redacted text, and `.ok/index.sqlite`, the Tantivy index, `ok snapshot export` artifacts, the semantic vector store (`.ok/vectors`, whose target text and embeddings come from stored chunks, never from files read from disk), `ok search` output, and MCP results are built from those, so none of them holds the value. Redaction changes text within a line and never adds or removes a line, so evidence line ranges still match the file on disk. Programming-language source is indexed as written: a credential hard-coded in a `.rs` or `.py` file is searchable, as it was before.
+Files in a data, config, or prose format (YAML, JSON, TOML, Markdown, plain text, and every document-corpus file) are indexed with secret-like values replaced by `[REDACTED]` before anything is derived from their text (`open-kioku-ingest::redaction`). Chunks, symbols, analysis facts, test candidates, and document sections are built from the redacted text, and `.ok/index.sqlite`, the Tantivy index, `ok snapshot export` artifacts, the semantic vector store (`.ok/vectors`, whose target text and embeddings come from stored chunks, never from files read from disk), `ok search` output, and MCP results are built from those, so none of them holds the value. Redaction changes text within a line and never adds or removes a line, so evidence line ranges still match the file on disk. Programming-language source is indexed as written, with one exception: a private-key PEM body is replaced (see "Private keys in source" below). Any other credential hard-coded in a `.rs` or `.py` file is searchable, as it was before.
 
 A value is replaced when:
 
 1. **Its key names a secret.** The key, reduced to lower-case letters and digits, contains `password`, `passwd`, `passphrase`, `secret`, `token` (not inside `tokenizer`), `credential`, `apikey`, `privatekey`, `accesskey`, or `authorization`, or its last word is `key` (`signing_key`, `encryptionKey`). This covers `key: value`, `"key": "value"`, `key = "value"`, `KEY=value`, `--key=value`, `key := value`, and `key => value`. A quoted value is replaced inside its quotes, an unquoted one to the end of the line, comment included. When the value is not on the key's line (a YAML block scalar, a nested mapping or list, a pretty-printed JSON object or array), every value indented deeper than the key is replaced and the nested keys are kept; in an INI or TOML section whose header names a secret, every value up to the next header is replaced.
-2. **It is a private-key PEM block**: every line between `-----BEGIN ... PRIVATE KEY-----` and its END line.
+2. **It is a private-key PEM block**: the body between a `-----BEGIN ... PRIVATE KEY-----` (or `-----BEGIN PGP PRIVATE KEY BLOCK-----`) boundary and its END boundary, whole lines and any body text sharing a line with a boundary, so a key written on one line with `\n` escapes is caught too. The boundaries stay.
 3. **It is the password of a URL**: `scheme://user:password@host` becomes `scheme://user:[REDACTED]@host`.
 4. **It looks machine-generated, in a config or data file** (YAML, JSON, TOML, Terraform/HCL, Dockerfile): a run of `A-Z a-z 0-9 + / = _ -` at least 20 characters long (separators trimmed from its ends) that uses at least two of lower-case letters, upper-case letters, and digits, has Shannon entropy of at least 3.0 bits per character, and is not made only of word-like pieces between `+ / = _ -`. A piece is word-like when it is all digits, at most four characters, or letters in one case, Title case, or camelCase followed by at most four digits; this is what keeps paths, URLs, slugs, and names such as `aarch64-unknown-linux-gnu` or `ConfidenceSignalInput` readable. Calibrated on 4,000 random tokens per alphabet and length: at 24 characters or more the rule catches 99.5-100% of base64, base64url, alphanumeric, upper-case-plus-digit, lower-case-plus-digit, and hex tokens; at exactly 20 characters it catches 94% of base64 and 97-100% of the rest. Markdown, plain text, and document-corpus files get rules 1-3 but not this one, so commit hashes and digests cited in prose stay searchable. The exception is a file whose *name* says it holds credentials (a path component containing `secret`, `credential` or `password`, or ending in `_key`): `docs/SECRETS.md`, `notes/credentials.md` and `secret_key.txt` are read under the config rules, because the name rule no longer keeps them out of the index and a token pasted there carries no key, URL or PEM header for the other rules to match.
 
 Not replaced: a value that names where a secret lives rather than holding one. That takes three things at once, because an exemption must never be the only rule protecting a value: a key whose **last word** is `env`, `var`, `variable`, `file`, `path` or `name`, where words are split on `_`, `-`, `.` and camelCase humps, so `POSTGRES_PASSWORD_FILE`, `auth_token_env` and `secretName` are locator keys while the single words `profile`, `username`, `hostname`, `filename`, `logfile` and `classpath` are not; a value that parses **wholly** as a locator, meaning an environment variable name of at least two upper-case `_`-separated segments each at most twelve letters (`SENTRY_AUTH_TOKEN`, which this repository's own `ok.toml` contains) or a path that is absolute or explicitly relative with word-like segments (`/run/secrets/db`, `./secrets/db.yaml`); and nothing inside that value that looks machine-generated, so `token_file: /var/run/<random token>` is replaced despite its shape. The exemption applies only in config and data formats, where the entropy rule also runs, so no prose file can hold a value with no rule covering it. Everything else under such a key is replaced — `password_file: hunter2`, `token_path: abc123`, `password_file: 4859`, `password_file: s3cret/pw`, `token_path: a/b`, `password_file: "CORRECTHORSEBATTERYSTAPLE"`, `secretName: JBSWY3DPEHPK3PXP`, `token_env: TOKEN` — because a separator somewhere is not a path, one upper-case run is not an environment variable name, and none of these are long enough or mixed enough for the entropy rule to see, empty values, `null`, `~`, booleans, an unquoted number under a key that names a quantity (`max_tokens: 4096`, `token_limit: 12`, `token_ttl_seconds: 3.5`, `port: 5432` — the key must contain one of `max`, `min`, `limit`, `count`, `size`, `length`, `ttl`, `timeout`, `expiry`, `expires`, `seconds`, `minutes`, `hours`, `days`, `bytes`, `port`, `retry`, `retries`, `interval`, `budget`, `threshold`, `rotation`, `version`, `window`, `quota` or `tokens`; a number under any other secret-named key, such as `password: 123456` or `access_token: 9876543210`, is replaced, as is a quoted `"123456"`), a bare variable reference (`${DB_PASSWORD}`, `$DB_PASSWORD`, so where a secret is injected stays searchable), and a digest that names its algorithm at exactly that algorithm's length: `sha512-<base64>` (Subresource Integrity, as lockfiles write it), `sha256:<hex>`, or hex under a key ending in the algorithm name (`"sha256": "<hex>"`). An unlabelled hex string such as a commit hash is replaced, because a 40-character hex value can equally be an access token.
+
+### Private keys in source
+
+Rule 2 is the one rule programming-language source is held to
+(`open-kioku-ingest::redaction::redact_private_keys`), because a name cannot prove a file
+holds no key: a key pasted into a test fixture (`tests/fixtures/keys_fixture.py`) or into a
+file named after a key type (`id_rsa.py`) would otherwise be stored as written in
+`.ok/index.sqlite`, the Tantivy index, `ok search` output and `ok snapshot export` artifacts.
+Its body is replaced before the parser sees the file, in every form source holds one: a
+multi-line string (Python `"""`, Go and JavaScript backticks, C# `@"..."`), one string with `\n`
+escapes, or literals concatenated line by line. Text with no `-----BEGIN` is not scanned. The
+rule is stricter in source than in data and prose, so code that handles PEM text keeps its
+lines: a boundary's label must be spelled as a PEM writer spells it (capitals, digits, single
+spaces), and a line inside a block is replaced only while it reads as key material once
+string-literal punctuation is set aside (one base64 word, or a `Proc-Type:`, `DEK-Info:` or
+`Comment:` header); the first line of code ends the block. A file whose body was replaced counts toward
+`quality.redacted_files`. Public keys and certificates (`-----BEGIN PUBLIC KEY-----`,
+`-----BEGIN CERTIFICATE-----`) are not secrets and are kept.
 
 Limits:
 

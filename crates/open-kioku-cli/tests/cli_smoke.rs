@@ -5439,6 +5439,180 @@ fn source_named_after_a_key_type_is_reported_and_an_env_file_beside_it_is_withhe
     assert!(!mcp_plan.contains(".env.production"), "{mcp_plan}");
 }
 
+/// A private key pasted into source never reaches a store or an output, whatever the file is
+/// named: a file named after a key type (`id_rsa.py`, `id_rsa.rs`) and an ordinary test
+/// fixture are indexed with the key's body replaced, a key renamed with a source extension
+/// appended (`id_rsa.pem.ts`) is not indexed at all, and C# source (`id_rsa_loader.cs`) holds
+/// no key body whether or not C# is indexed (#676).
+#[test]
+fn private_keys_in_source_never_reach_the_index_search_or_snapshot() {
+    const BASE64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    // Key bodies built at run time, so no string in the repository reads as a key.
+    let body = |seed: usize| {
+        (0..3)
+            .map(|line| striding_token(BASE64, 64, 7 + 2 * line, seed + line))
+            .collect::<Vec<_>>()
+    };
+    let (python, rust, renamed, fixture, csharp) =
+        (body(1), body(11), body(21), body(31), body(41));
+    let lines = [&python, &rust, &renamed, &fixture, &csharp]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    let secrets = lines.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    for dir in ["keys", "src", "tests/fixtures"] {
+        fs::create_dir_all(repo.join(dir)).unwrap();
+    }
+    fs::write(
+        repo.join("keys/id_rsa.py"),
+        format!(
+            "KEY = \"\"\"-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----\"\"\"\n\n\ndef load_ledger_key():\n    return KEY\n",
+            python.join("\n")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/id_rsa.rs"),
+        format!(
+            "pub const LEDGER_KEY: &str = \"-----BEGIN PRIVATE KEY-----\\n{}\\n-----END PRIVATE KEY-----\\n\";\n\npub fn ledger_key() -> &'static str {{\n    LEDGER_KEY\n}}\n",
+            rust.join("\\n")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("keys/id_rsa.pem.ts"),
+        format!(
+            "export const renamedLedgerKey = `-----BEGIN EC PRIVATE KEY-----\n{}\n-----END EC PRIVATE KEY-----`;\n",
+            renamed.join("\n")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("tests/fixtures/keys_fixture.py"),
+        format!(
+            "FIXTURE_KEY = (\n    \"-----BEGIN OPENSSH PRIVATE KEY-----\\n\"\n{}    \"-----END OPENSSH PRIVATE KEY-----\\n\"\n)\n\n\ndef fixture_ledger_key():\n    return FIXTURE_KEY\n",
+            fixture
+                .iter()
+                .map(|line| format!("    \"{line}\\n\"\n"))
+                .collect::<String>()
+        ),
+    )
+    .unwrap();
+    // C# source named after a key type: indexed once C# is a language the index reads, and
+    // then with the key's body replaced like any other source; never stored as written.
+    fs::write(
+        repo.join("src/id_rsa_loader.cs"),
+        format!(
+            "public static class LedgerKeys\n{{\n    private const string Key = @\"-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----\";\n}}\n",
+            csharp.join("\n")
+        ),
+    )
+    .unwrap();
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    // The source files are indexed and their code is searchable; the renamed key is not.
+    for (query, path) in [
+        ("load_ledger_key", "keys/id_rsa.py"),
+        ("ledger_key", "src/id_rsa.rs"),
+        ("fixture_ledger_key", "tests/fixtures/keys_fixture.py"),
+    ] {
+        let found = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", query]);
+            command
+        });
+        assert!(found.contains(path), "{query}: {found}");
+        assert_secrets_absent(&format!("ok search {query}"), &found, &secrets);
+    }
+    let renamed_search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["--json", "search", "renamedLedgerKey"]);
+        command
+    });
+    assert!(
+        !renamed_search.contains("id_rsa.pem.ts"),
+        "{renamed_search}"
+    );
+    for line in &lines {
+        let by_value = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .args(["--json", "search", line]);
+            command
+        });
+        assert_secrets_absent("ok search by key line", &by_value, &secrets);
+    }
+
+    // SQLite and its WAL hold chunk text uncompressed, so their bytes are checked directly.
+    for entry in walkdir::WalkDir::new(repo.join(".ok")) {
+        let entry = entry.unwrap();
+        if entry.file_type().is_file() {
+            let bytes = fs::read(entry.path()).unwrap();
+            assert_secrets_absent(
+                &entry.path().display().to_string(),
+                &String::from_utf8_lossy(&bytes),
+                &secrets,
+            );
+        }
+    }
+    let lexical =
+        tantivy_stored_texts_and_terms(&open_kioku_search_tantivy::default_index_dir(repo));
+    assert!(
+        lexical.iter().any(|text| text.contains("load_ledger_key")),
+        "the lexical index holds the source"
+    );
+    assert_secrets_absent("tantivy", &lexical.join("\n"), &secrets);
+
+    for quality in ["best", "fast"] {
+        let exported = run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).args([
+                "--json",
+                "snapshot",
+                "export",
+                "--quality",
+                quality,
+            ]);
+            command
+        });
+        assert_secrets_absent("snapshot export report", &exported, &secrets);
+        let artifact = fs::File::open(repo.join(".ok/artifacts/index.snapshot.zst")).unwrap();
+        let database = zstd::decode_all(artifact).unwrap();
+        let database = String::from_utf8_lossy(&database);
+        assert!(
+            database.contains("load_ledger_key"),
+            "the artifact holds the source"
+        );
+        assert_secrets_absent(
+            &format!("snapshot artifact ({quality})"),
+            &database,
+            &secrets,
+        );
+    }
+}
+
 #[test]
 fn index_mode_is_reported_by_index_and_status_json() {
     let temp = tempfile::tempdir().unwrap();
@@ -10940,7 +11114,7 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
     });
     assert!(
         indexed.contains(
-            "redaction: 1 data, config, or prose file(s) indexed with secret-like values replaced by [REDACTED]"
+            "redaction: 1 file(s) indexed with secret-like values replaced by [REDACTED]"
         ),
         "{indexed}"
     );
@@ -11112,10 +11286,7 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
         .expect("doctor has a redaction check");
     assert_eq!(check["status"], "pass", "{check}");
     assert!(
-        check["message"]
-            .as_str()
-            .unwrap()
-            .starts_with("1 data, config, or prose file(s)"),
+        check["message"].as_str().unwrap().starts_with("1 file(s)"),
         "{check}"
     );
 

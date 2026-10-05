@@ -193,13 +193,18 @@ mod tests {
 
     /// The secret-path rule lets a name starting with an SSH key stem through only under a
     /// programming-source extension; a data, config, or prose extension there would let a
-    /// copied key (`id_rsa.txt`) into the index.
+    /// copied key (`id_rsa.txt`) into the index. An extension no language reads yet (`cs`
+    /// before C# support) is never indexed, so it lets nothing in; once read, it must be read
+    /// as programming source, which the private-key rule covers.
     #[test]
     fn key_stem_source_extensions_are_programming_source() {
         for extension in open_kioku_core::KEY_STEM_SOURCE_EXTENSIONS {
             let path = format!("loader.{extension}");
             let language = detect_language(Path::new(&path));
-            assert!(language.is_programming(), "{path} reads as {language:?}");
+            assert!(
+                language.is_programming() || !is_supported_code(&language),
+                "{path} reads as {language:?}"
+            );
         }
     }
 

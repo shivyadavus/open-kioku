@@ -416,10 +416,14 @@ impl Indexer {
         // Data, config and prose files are redacted before the parser sees them, so no chunk,
         // symbol, fact or test derived from the text, and nothing stored or searched from
         // those, can carry a secret-like value (#379). Programming-language source is indexed
-        // as written.
+        // as written, except a private key's PEM body, which no file name can be trusted to
+        // keep out (#676).
         let (content, redacted) = match redaction::ContentKind::for_file(&file.path, &file.language)
         {
-            None => (content, false),
+            None => {
+                let redacted = redaction::redact_private_keys(content);
+                (redacted.text, redacted.redactions > 0)
+            }
             Some(kind) => {
                 let redacted = redaction::redact_secret_values(&content, kind);
                 (redacted.text, redacted.redactions > 0)
