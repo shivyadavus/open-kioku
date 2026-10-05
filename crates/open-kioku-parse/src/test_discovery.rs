@@ -5,18 +5,29 @@
 //! language's callables are judged by the rule its runner discovers tests by, not by a name
 //! heuristic and not by the file alone:
 //!
-//! - Rust: a test attribute in the attribute stack (`#[test]`, `#[tokio::test]`, `#[rstest]`).
+//! - Rust: a test attribute in the attribute stack, directly or through `cfg_attr`: one whose
+//!   last path segment is `test` or ends in `_test` (`#[tokio::test]`, `#[pg_test]`), or
+//!   `rstest`, `test_case`, `proptest`, `quickcheck` or rstest_reuse's `apply`; never a
+//!   function rstest_reuse marks `#[template]`.
 //! - Java: a JUnit or TestNG test annotation (`@Test`, `@ParameterizedTest`), a JUnit 3
-//!   `test*` method of a `TestCase` class, or a public method of a class TestNG annotates
-//!   `@Test` that no lifecycle or data-provider annotation marks.
+//!   `public void test*()` of a class that extends another (the `TestCase` may sit behind an
+//!   abstract base in another file), or a public method of a class TestNG annotates `@Test`
+//!   that no lifecycle or data-provider annotation marks.
 //! - Python: a `test*` function of a module pytest or `unittest` collects (`test*.py`,
-//!   `*_test.py`), at module level or in a `Test*` or `TestCase` class, and not a fixture.
+//!   `*_test.py`), at module level, in a `Test*` class without `__init__`, or in a class with a
+//!   base (a `TestCase`, perhaps through a base in another module), and not a fixture.
 //! - Go: `TestX` and `FuzzX` in a `_test.go` file, and an `ExampleX` with an output comment;
 //!   `TestMain` is the package's lifecycle hook.
 //! - JavaScript and TypeScript: tests are registration calls, so a declared callable is a test
 //!   only when its own declaration is one.
 //!
-//! A language with no runner model here keeps the file rule: every callable is a test.
+//! These are the runners' default rules. Runner configuration is not read here, so a callable
+//! that matches none of them is reported as matching no default rule, never as one no runner
+//! executes; ingest widens Python back to the file rule where a pytest configuration changes
+//! discovery. Known misses: a Rust `harness = false` target (libtest-mimic and similar custom
+//! harnesses), a JUnit 5 meta-annotation standing for `@Test`, a JS/TS test registered through
+//! a wrapper function rather than `test(..)`/`it(..)`, and Kotlin and Scala, which are not
+//! indexed. A language with no runner model here keeps the file rule: every callable is a test.
 
 use crate::{
     declares_registered_test, has_adjacent_annotation, has_test_name_prefix,
@@ -54,7 +65,10 @@ impl<'a> TestFileDiscovery<'a> {
     /// Whether the runner executes `symbol`, a callable of this file, as a test.
     pub(crate) fn runs(&self, symbol: &Symbol) -> bool {
         match self.language {
-            Language::Rust => has_adjacent_annotation(self.lines, symbol, is_rust_test_attribute),
+            Language::Rust => {
+                has_adjacent_annotation(self.lines, symbol, is_rust_test_attribute)
+                    && !has_adjacent_annotation(self.lines, symbol, is_rust_template_attribute)
+            }
             Language::Java => self.runs_java(symbol),
             Language::Python => self.runs_python(symbol),
             Language::Go => self.runs_go(symbol),
@@ -78,8 +92,14 @@ impl<'a> TestFileDiscovery<'a> {
         let Some(class) = self.enclosing_type(symbol) else {
             return false;
         };
-        // JUnit 3 runs every `test*` method of a `TestCase`.
-        if has_test_name_prefix(&symbol.name) && self.declaration_mentions(class, "TestCase") {
+        // JUnit 3 runs every public no-argument `void test*()` of a `TestCase` subclass. The
+        // `TestCase` may be reached through an abstract base in another file, so any class that
+        // extends something qualifies.
+        if has_test_name_prefix(&symbol.name)
+            && symbol.visibility == Visibility::Public
+            && self.declares_no_argument_void(symbol)
+            && self.declaration_mentions(class, "extends")
+        {
             return true;
         }
         // TestNG runs every public method of a class annotated `@Test`, except its
@@ -107,12 +127,80 @@ impl<'a> TestFileDiscovery<'a> {
         }
         match self.enclosing(symbol) {
             None => true,
+            // pytest collects a `Test*` class without `__init__`; `unittest` collects a
+            // `TestCase` subclass, which may inherit it through a base in another module, so a
+            // class with any base but `object` qualifies.
             Some(parent) if is_type_kind(&parent.kind) => {
-                parent.name.starts_with("Test") || self.declaration_mentions(parent, "TestCase")
+                (parent.name.starts_with("Test") && !self.defines_init(parent))
+                    || self.has_python_base(parent)
             }
             // A function nested in another is never collected.
             Some(_) => false,
         }
+    }
+
+    /// Whether the Python class declares `__init__`, which makes pytest skip it.
+    fn defines_init(&self, class: &Symbol) -> bool {
+        self.symbols.iter().any(|candidate| {
+            candidate.name == "__init__"
+                && self
+                    .enclosing(candidate)
+                    .is_some_and(|parent| parent.id == class.id)
+        })
+    }
+
+    /// Whether the Python class names a base other than `object` (a metaclass is not one).
+    fn has_python_base(&self, class: &Symbol) -> bool {
+        let Some(range) = &class.range else {
+            return false;
+        };
+        let declaration = self
+            .lines
+            .iter()
+            .skip((range.start as usize).saturating_sub(1))
+            .take(DECLARATION_LINE_LIMIT)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // The header ends at the first `:` outside the base list; the body's calls are not bases.
+        let mut depth = 0i32;
+        let mut bases = String::new();
+        for character in declaration.chars() {
+            match character {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                ':' if depth == 0 => break,
+                _ => {}
+            }
+            bases.push(character);
+        }
+        let Some(open) = bases.find('(') else {
+            return false;
+        };
+        let close = bases.rfind(')').unwrap_or(bases.len());
+        bases
+            .get(open + 1..close)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .any(|base| !base.is_empty() && base != "object" && !base.contains('='))
+    }
+
+    /// Whether the Java method is declared `void name()`, the shape JUnit 3 runs.
+    fn declares_no_argument_void(&self, symbol: &Symbol) -> bool {
+        let Some(range) = &symbol.range else {
+            return false;
+        };
+        let call = format!("{}(", symbol.name);
+        self.lines
+            .iter()
+            .skip((range.start as usize).saturating_sub(1))
+            .take(DECLARATION_LINE_LIMIT)
+            .find(|line| line.contains(&call))
+            .is_some_and(|line| {
+                let after = &line[line.find(&call).unwrap_or_default() + call.len()..];
+                line.contains("void ") && after.trim_start().starts_with(')')
+            })
     }
 
     fn runs_go(&self, symbol: &Symbol) -> bool {
@@ -214,26 +302,86 @@ fn go_test_function_name(name: &str, prefix: &str) -> bool {
         .is_some_and(|rest| !rest.starts_with(|character: char| character.is_lowercase()))
 }
 
-/// An attribute whose path is `test` or ends in `::test` (`#[tokio::test]`, `#[sqlx::test]`), or
-/// one of the test-generating attributes of common crates.
+/// The path of the Rust attribute on `line`: `tokio::test` for `#[tokio::test(flavor = ..)]`.
+fn rust_attribute_path(line: &str) -> Option<&str> {
+    let attribute = line.strip_prefix("#[")?;
+    Some(
+        attribute
+            .split(['(', ']'])
+            .next()
+            .unwrap_or_default()
+            .trim(),
+    )
+}
+
+/// Whether an attribute path generates a test: its last segment is `test` or ends in `_test`
+/// (`#[tokio::test]`, `#[googletest::test]`, `#[wasm_bindgen_test]`, `#[pg_test]`), or names a
+/// test-generating attribute of a common crate (`#[rstest]`, `#[test_case(..)]`, `#[proptest]`,
+/// `#[quickcheck]`, rstest_reuse's `#[apply(..)]`), qualified or not.
+fn is_rust_test_attribute_path(path: &str) -> bool {
+    let last = path.rsplit("::").next().unwrap_or(path).trim();
+    last == "test"
+        || last.ends_with("_test")
+        || matches!(
+            last,
+            "rstest" | "test_case" | "proptest" | "quickcheck" | "apply"
+        )
+}
+
+/// A test attribute, directly or through `cfg_attr`: `#[cfg_attr(not(miri), test)]`.
 fn is_rust_test_attribute(line: &str) -> bool {
     if is_stacked_test_annotation(line) {
         return true;
     }
-    let Some(attribute) = line.strip_prefix("#[") else {
+    let Some(path) = rust_attribute_path(line) else {
         return false;
     };
-    let path = attribute
-        .split(['(', ']'])
-        .next()
-        .unwrap_or_default()
-        .trim();
-    path == "test"
-        || path.ends_with("::test")
-        || matches!(
-            path,
-            "rstest" | "test_case" | "wasm_bindgen_test" | "quickcheck"
-        )
+    if path != "cfg_attr" {
+        return is_rust_test_attribute_path(path);
+    }
+    let Some(arguments) = line
+        .strip_prefix("#[")
+        .and_then(|attribute| attribute.trim_end().strip_suffix(']'))
+        .and_then(|attribute| attribute.strip_prefix("cfg_attr"))
+        .and_then(|attribute| attribute.trim().strip_prefix('('))
+        .and_then(|attribute| attribute.strip_suffix(')'))
+    else {
+        return false;
+    };
+    // The first argument is the predicate; every later one is an attribute it applies.
+    top_level_arguments(arguments)
+        .into_iter()
+        .skip(1)
+        .any(|attribute| {
+            is_rust_test_attribute_path(attribute.split('(').next().unwrap_or_default())
+        })
+}
+
+/// `arguments` split at the commas outside any brackets.
+fn top_level_arguments(arguments: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (index, character) in arguments.char_indices() {
+        match character {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(arguments[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(arguments[start..].trim());
+    parts
+}
+
+/// rstest_reuse's `#[template]`: the function is a case list `#[apply(..)]` expands elsewhere,
+/// never a test itself, though an `#[rstest]` sits below it.
+fn is_rust_template_attribute(line: &str) -> bool {
+    rust_attribute_path(line)
+        .is_some_and(|path| path.rsplit("::").next().unwrap_or(path).trim() == "template")
 }
 
 /// The simple name of a Java annotation on `line`: `Test` for `@Test` and
@@ -314,9 +462,21 @@ mod tests {
             "#[rstest]",
             "#[test_case(1, 2)]",
             "#[wasm_bindgen_test]",
+            "#[wasm_bindgen_test::wasm_bindgen_test]",
+            "#[rstest::rstest]",
+            "#[test_case::test_case(1, 1 ; \"one\")]",
+            "#[test_strategy::proptest]",
+            "#[quickcheck_macros::quickcheck]",
+            "#[pg_test]",
+            "#[apply(amounts)]",
+            "#[cfg_attr(not(miri), test)]",
+            "#[cfg_attr(feature = \"async\", tokio::test(flavor = \"current_thread\"))]",
         ] {
             assert!(is_rust_test_attribute(line), "{line}");
         }
+        assert!(!is_rust_test_attribute("#[cfg_attr(test, derive(Debug))]"));
+        assert!(is_rust_template_attribute("#[template]"));
+        assert!(is_rust_template_attribute("#[rstest_reuse::template]"));
         for line in ["#[cfg(test)]", "#[testing]", "#[should_panic]", "#[serial]"] {
             assert!(!is_rust_test_attribute(line), "{line}");
         }

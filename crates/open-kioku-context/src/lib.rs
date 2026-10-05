@@ -789,8 +789,21 @@ impl<'a> ContextPackBuilder<'a> {
 
         let selector = TestSelector::new(self.store as &dyn open_kioku_storage::MetadataStore);
         let mut tests_by_id = std::collections::BTreeMap::new();
+        // Test-file callables near the change that match no runner discovery rule. A runner
+        // configured to collect them would run them, so they are counted, never dropped silently.
+        let mut withheld_helper_ids = std::collections::BTreeSet::new();
         for result in validation_seed_results(&primary_files, &supporting_files, 5) {
-            for test in selector.for_changed_path_with_evidence(&result.path, 5)? {
+            let (selected, withheld) = selector.for_changed_path_with_withheld(&result.path, 5)?;
+            withheld_helper_ids.extend(
+                withheld
+                    .into_iter()
+                    .filter(|test| {
+                        test.validation_exclusion()
+                            == Some(open_kioku_core::TestExclusionReason::Helper)
+                    })
+                    .map(|test| test.id),
+            );
+            for test in selected {
                 // A disabled test is not evidence, and admitting one here would let the pack
                 // carry a validation target while the diagnostics call validation unavailable.
                 if !test.counts_as_validation_evidence() {
@@ -880,6 +893,7 @@ impl<'a> ContextPackBuilder<'a> {
             exact_reference_count,
             unmatched_anchors: &unmatched_anchors,
             coverage: &coverage,
+            withheld_helper_count: withheld_helper_ids.len(),
         });
         let mut confidence_breakdown = confidence_for_context(ContextConfidenceInputs {
             task,
@@ -1592,6 +1606,8 @@ struct NegativeEvidenceInputs<'a> {
     exact_reference_count: usize,
     unmatched_anchors: &'a [String],
     coverage: &'a CoverageInput,
+    /// Distinct test-file callables near the change withheld as matching no discovery rule.
+    withheld_helper_count: usize,
 }
 
 /// `unmatched` anchors split into (hyphenated task words, identifiers), each in task order.
@@ -1647,6 +1663,7 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
         exact_reference_count,
         unmatched_anchors,
         coverage,
+        withheld_helper_count,
     } = inputs;
     let mut items = Vec::new();
     if primary_files.is_empty() {
@@ -1701,15 +1718,21 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
         });
     }
     // A disabled test is written but never run, so a pack holding only those has no validation.
+    // Test-file callables that matched no discovery rule are named beside the absence: one of
+    // them may be a test a configured runner collects.
     if !tests
         .iter()
         .any(|test| test.counts_as_validation_evidence())
     {
+        let reason = match open_kioku_core::withheld_test_file_callables(withheld_helper_count) {
+            Some(withheld) => format!("no nearby validation target was selected; {withheld}"),
+            None => "no nearby validation target was selected".into(),
+        };
         items.push(NegativeEvidence {
             query: task.into(),
             scope: negative_evidence_scope::VALIDATION.into(),
             inspected_sources: vec!["indexed_tests".into(), "test_selector".into()],
-            reason: "no nearby validation target was selected".into(),
+            reason,
             confidence: 0.80,
             suggested_next_probe: primary_files.first().map(|result| {
                 format!(
@@ -7064,6 +7087,7 @@ mod tests {
             exact_reference_count: exact,
             unmatched_anchors: &[],
             coverage: &CoverageInput::default(),
+            withheld_helper_count: 0,
         });
         assert!(negative
             .iter()
@@ -7136,6 +7160,7 @@ mod tests {
                 exact_reference_count: 1,
                 unmatched_anchors: unmatched,
                 coverage: &CoverageInput::default(),
+                withheld_helper_count: 0,
             })
             .into_iter()
             .find(|item| item.scope == negative_evidence_scope::ANCHOR)
@@ -7246,6 +7271,7 @@ mod tests {
             exact_reference_count: 0,
             unmatched_anchors: &unmatched,
             coverage: &CoverageInput::default(),
+            withheld_helper_count: 0,
         });
         let anchor = negative
             .iter()
@@ -7303,6 +7329,7 @@ mod tests {
             exact_reference_count: 0,
             unmatched_anchors: &unmatched,
             coverage: &CoverageInput::default(),
+            withheld_helper_count: 0,
         });
         assert_eq!(
             open_kioku_core::negative_evidence_signal_count(&negative),
@@ -7373,6 +7400,7 @@ mod tests {
                 exact_reference_count: 0,
                 unmatched_anchors: &unmatched,
                 coverage,
+                withheld_helper_count: 0,
             });
             let breakdown = confidence_for_context(ContextConfidenceInputs {
                 task,

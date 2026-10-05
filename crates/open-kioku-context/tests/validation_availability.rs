@@ -353,7 +353,7 @@ fn code_to_test_whose_only_targets_are_disabled_keeps_its_primary_result_with_a_
 fn code_to_test_whose_only_targets_are_helpers_keeps_its_primary_result_with_a_caveat() {
     assert_validation_unavailable(
         &pack(Targets::OnlyHelpers),
-        "every indexed test target is a helper or lifecycle hook no test runner executes",
+        "every indexed test target is a test-file callable matching no default runner discovery rule (runner configuration is not read)",
     );
 }
 
@@ -361,7 +361,7 @@ fn code_to_test_whose_only_targets_are_helpers_keeps_its_primary_result_with_a_c
 fn code_to_test_whose_targets_are_helpers_and_disabled_names_both_reasons() {
     assert_validation_unavailable(
         &pack(Targets::OnlyHelpersAndDisabled),
-        "every indexed test target is excluded (1 disabled test the runner skips, 1 helper or lifecycle hook no test runner executes)",
+        "every indexed test target is excluded (1 disabled test the runner skips, 1 test-file callable matching no default runner discovery rule (runner configuration is not read))",
     );
 }
 

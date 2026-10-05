@@ -54,6 +54,7 @@ pub mod resolver;
 pub mod runtime;
 mod rust_use_path;
 pub mod symbol_registry;
+mod test_discovery;
 pub mod validation;
 
 pub use open_kioku_core::{RelationshipResolutionQuality, ResolutionQualityReport};
@@ -758,6 +759,10 @@ impl Indexer {
             tests.extend(file.tests);
             analysis_facts.extend(file.analysis_facts);
         }
+        // Extraction applies the runners' default discovery rules; where a pytest
+        // configuration changes them, its Python test files fall back to the test-path rule.
+        let test_discovery_notes =
+            test_discovery::widen_configured_python_tests(&root, &files, &mut tests);
         dedupe_symbols(&mut symbols);
         let imports = extract_imports_from_syntax(&import_sites);
         emit_progress(
@@ -1429,6 +1434,7 @@ impl Indexer {
         let mut mode_notes = mode_quality_notes(mode);
         mode_notes.extend(resolver_quality_notes);
         mode_notes.extend(git_history.quality_notes.iter().cloned());
+        mode_notes.extend(test_discovery_notes);
         let mut quality = index_quality(IndexQualityInput {
             root: &root,
             config,

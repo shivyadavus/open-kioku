@@ -2570,10 +2570,12 @@ pub enum TestTargetOrigin {
     /// function in a test module, a Go `TestX` in a `_test.go` file. The runner decides, not the
     /// name, so a JUnit `shouldRoundHalfUp` is one.
     TestFileSymbol,
-    /// A declared symbol in a test-path file that no runner discovers as a test: a helper,
-    /// fixture, builder or lifecycle hook (`setUp`, `TestMain`, `makeClient`), or any callable in
-    /// a support module such as `conftest.py` or a `testutil/` package. It is still test code,
-    /// so it is kept, but running it validates nothing.
+    /// A declared symbol in a test-path file that matches no default runner discovery rule:
+    /// usually a helper, fixture, builder or lifecycle hook (`setUp`, `TestMain`, `makeClient`),
+    /// or any callable in a support module such as `conftest.py` or a `testutil/` package. It is
+    /// still test code, so it is kept, but it is not counted as validation. Runner configuration
+    /// is not read (beyond pytest's discovery options), so a test a configured runner collects
+    /// can carry this origin; surfaces report such targets as withheld, never as absent.
     TestFileHelper,
     /// A JavaScript or TypeScript runner call such as `test("name", fn)`.
     RegistrationCall,
@@ -2591,7 +2593,9 @@ pub enum TestTargetOrigin {
 pub enum TestExclusionReason {
     /// A registration the runner will not execute: `test.skip`, `it.todo`, `test.failing`.
     Disabled,
-    /// Test code no runner executes as a test: a helper, fixture or lifecycle hook.
+    /// A test-file callable that matches no default runner discovery rule: usually a helper,
+    /// fixture or lifecycle hook. Runner configuration is not read, so a test a configured or
+    /// custom runner collects can land here too; surfaces say so rather than call it absent.
     Helper,
 }
 
@@ -2612,7 +2616,7 @@ impl TestExclusionReason {
                 "Enable the skipped tests (`test.skip`, `it.todo`, `test.failing`) before relying on validation recommendations."
             }
             Self::Helper => {
-                "Add tests a runner executes (`#[test]`, `@Test`, `def test_*`, `func TestX`, `test(..)`/`it(..)`); helpers and lifecycle hooks in test files validate nothing on their own."
+                "If your test runner is configured to collect these callables, run them yourself: runner configuration is not read. Otherwise add tests that match a default discovery rule (`#[test]`, `@Test`, `def test_*`, `func TestX`, `test(..)`/`it(..)`)."
             }
         }
     }
@@ -2625,18 +2629,30 @@ impl TestExclusionReason {
                 "the runner skips this test (`skip`, `todo`, `failing`), so running it validates nothing"
             }
             Self::Helper => {
-                "no runner executes this helper or lifecycle hook as a test, so it validates nothing"
+                "this test-file callable matches no default runner discovery rule (runner configuration is not read), so it is not counted as validation"
             }
         }
     }
 }
 
+/// The disclosure plans and context packs carry when test-file callables near a change were
+/// withheld as matching no discovery rule. A misclassified test must read as withheld, never as
+/// absent. `None` when there were none.
+pub fn withheld_test_file_callables(count: usize) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "{count} test-file callable(s) near this change matched no default runner discovery rule (runner configuration is not read)"
+        )
+    })
+}
+
 /// How a disabled registration is described wherever it is withheld from validation.
 pub const DISABLED_TEST_TARGET: &str = "disabled test the runner skips";
 
-/// How a test-file helper or lifecycle hook is described wherever it is withheld from
-/// validation.
-pub const HELPER_TEST_TARGET: &str = "helper or lifecycle hook no test runner executes";
+/// How a test-file callable that matches no runner discovery rule is described wherever it is
+/// withheld from validation. It says what the index checked, not what a runner will do.
+pub const HELPER_TEST_TARGET: &str =
+    "test-file callable matching no default runner discovery rule (runner configuration is not read)";
 
 /// The sentence every surface uses when an index holds test targets and every one is excluded,
 /// so `ok status` and the context pack's validation caveat word one index one way. `None` when
@@ -5189,6 +5205,9 @@ pub enum QualityNoteKind {
     RelationshipResolution,
     /// The git history scan skipped commits whose patch it could not read.
     GitHistory,
+    /// A test runner's configuration changes which callables it discovers, so test targets
+    /// under it are judged by the test-path rule instead of the runner's default rules.
+    TestDiscovery,
     /// A note from a manifest written before notes carried a kind.
     Unclassified,
 }

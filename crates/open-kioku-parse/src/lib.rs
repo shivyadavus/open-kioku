@@ -1199,7 +1199,7 @@ pub fn extract_tests(
 
 const SYMBOL_TEST_REASON: &str = "test-like path, annotation, or naming convention";
 const HELPER_REASON: &str =
-    "helper or lifecycle callable in a test-path file that no test runner discovers as a test";
+    "callable in a test-path file matching no default runner discovery rule";
 
 fn symbol_target(
     file: &File,
@@ -2564,5 +2564,139 @@ endpoint = "https://orders.example.com/v1/orders"
                 "{path}"
             );
         }
+    }
+
+    /// The attribute forms common test crates generate tests with, qualified and bare, through
+    /// `cfg_attr`, split over lines, and with doc comments and other attributes between them. An
+    /// rstest_reuse `#[template]` carries `#[rstest]` but is a case list, not a test.
+    const RUST_TEST_ATTRIBUTES: &str = r##"use ledger::{post_entry, rounds_half_up};
+
+#[test_strategy::proptest]
+fn strategy_proptest_rounds(#[strategy(0.0f64..10.0)] value: f64) {
+    assert!(rounds_half_up(value) >= 0);
+}
+
+#[proptest]
+fn bare_proptest_rounds(value: u8) {
+    assert!(rounds_half_up(value as f64) >= 0);
+}
+
+#[rstest::rstest]
+fn qualified_rstest_posts() {
+    assert_eq!(post_entry(&mut vec![], 1), 1);
+}
+
+#[test_case::test_case(1, 1 ; "one")]
+fn qualified_test_case_posts(amount: i64, expected: i64) {
+    assert_eq!(post_entry(&mut vec![], amount), expected);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test]
+fn qualified_wasm_posts() {
+    assert_eq!(post_entry(&mut vec![], 1), 1);
+}
+
+#[quickcheck_macros::quickcheck]
+fn qualified_quickcheck_rounds(value: u8) -> bool {
+    rounds_half_up(value as f64) >= 0
+}
+
+#[template]
+#[rstest::rstest]
+#[case(1)]
+fn amounts(#[case] amount: i64) {}
+
+#[apply(amounts)]
+fn reused_template_posts(#[case] amount: i64) {
+    assert_eq!(post_entry(&mut vec![], amount), amount);
+}
+
+#[pg_test]
+fn pgrx_posts() {
+    assert_eq!(post_entry(&mut vec![], 1), 1);
+}
+
+#[googletest::test]
+fn googletest_posts() {
+    assert_eq!(post_entry(&mut vec![], 1), 1);
+}
+
+#[cfg_attr(not(miri), test)]
+fn cfg_attr_posts() {
+    assert_eq!(post_entry(&mut vec![], 1), 1);
+}
+
+#[tokio::test(
+    flavor = "multi_thread",
+    worker_threads = 2
+)]
+async fn multiline_tokio_posts() {
+    assert_eq!(post_entry(&mut vec![], 1), 1);
+}
+
+#[test]
+/// Documented after the attribute.
+#[allow(clippy::unit_cmp)]
+fn attributed_through_a_stack_posts() {
+    assert_eq!(post_entry(&mut vec![], 1), 1);
+}
+
+fn plain_helper() -> Vec<i64> {
+    Vec::new()
+}
+"##;
+
+    #[test]
+    fn rust_test_crate_attributes_make_tests_and_an_rstest_template_does_not() {
+        assert_runnable(
+            "tests/attrs.rs",
+            Language::Rust,
+            RUST_TEST_ATTRIBUTES,
+            &[
+                ("strategy_proptest_rounds", true),
+                ("bare_proptest_rounds", true),
+                ("qualified_rstest_posts", true),
+                ("qualified_test_case_posts", true),
+                ("qualified_wasm_posts", true),
+                ("qualified_quickcheck_rounds", true),
+                ("amounts", false),
+                ("reused_template_posts", true),
+                ("pgrx_posts", true),
+                ("googletest_posts", true),
+                ("cfg_attr_posts", true),
+                ("multiline_tokio_posts", true),
+                ("attributed_through_a_stack_posts", true),
+                ("plain_helper", false),
+            ],
+        );
+    }
+
+    /// JUnit 3 runs `public void test*()` of a `TestCase` subclass, and the `TestCase` is often
+    /// behind an abstract base in another file, as `unittest`'s is behind a shared base class.
+    #[test]
+    fn junit3_and_unittest_tests_inherited_through_a_base_in_another_file_are_tests() {
+        let java = "package com.acme;\n\npublic class LedgerLegacyTest extends AbstractLedgerTest {\n  public void testPostsLegacy() {\n    assertEquals(1, new Ledger().post(1));\n  }\n\n  public Ledger testLedger(long opening) {\n    return new Ledger();\n  }\n\n  void testPackagePrivate() {}\n}\n";
+        assert_runnable(
+            "src/test/java/com/acme/LedgerLegacyTest.java",
+            Language::Java,
+            java,
+            &[
+                ("testPostsLegacy", true),
+                ("testLedger", false),
+                ("testPackagePrivate", false),
+            ],
+        );
+        let python = "from tests.base import LedgerCase\n\n\nclass PostTests(LedgerCase):\n    def test_posts(self):\n        pass\n\n\nclass TestWithInit:\n    def __init__(self):\n        self.ledger = []\n\n    def test_skipped_by_pytest(self):\n        pass\n\n\nclass Plain(object):\n    def test_not_collected(self):\n        pass\n";
+        assert_runnable(
+            "tests/test_posts.py",
+            Language::Python,
+            python,
+            &[
+                ("test_posts", true),
+                ("__init__", false),
+                ("test_skipped_by_pytest", false),
+                ("test_not_collected", false),
+            ],
+        );
     }
 }

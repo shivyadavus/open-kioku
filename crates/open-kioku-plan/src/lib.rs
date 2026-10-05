@@ -422,10 +422,13 @@ impl<'a> PlanEngine<'a> {
             impact.architecture_policy = context.architecture_policy.clone();
         }
         impact.reconcile_score_breakdown();
-        let ValidationSelection {
-            selected: mut validation,
-            omitted_by_cap,
-        } = self.validation_for_context(&primary_context, &context)?;
+        let (
+            ValidationSelection {
+                selected: mut validation,
+                omitted_by_cap,
+            },
+            withheld_helpers,
+        ) = self.validation_for_context(&primary_context, &context)?;
         let validation_omitted_ids = omitted_by_cap
             .into_iter()
             .map(|test| test.id)
@@ -495,6 +498,11 @@ impl<'a> PlanEngine<'a> {
         if let Some(reason) = validation_cap_reason(validation_omitted_ids.len()) {
             risk.reasons.push(reason);
         }
+        // A disclosure too: a test-file callable that matched no discovery rule may still be a
+        // test a configured runner collects, so it reads as withheld, never as absent.
+        if let Some(reason) = open_kioku_core::withheld_test_file_callables(withheld_helpers) {
+            risk.reasons.push(reason);
+        }
         if let Some(caveat) = manifest
             .as_ref()
             .and_then(|manifest| manifest.snapshot.as_ref())
@@ -538,6 +546,7 @@ impl<'a> PlanEngine<'a> {
             &impact,
             &validation,
             validation_omitted_ids.len(),
+            withheld_helpers,
             &self.memory_facts,
         );
         let tool_calls = tool_calls(
@@ -714,18 +723,34 @@ impl<'a> PlanEngine<'a> {
         &self,
         primary_context: &[SearchResult],
         context: &ContextPack,
-    ) -> Result<ValidationSelection> {
+    ) -> Result<(ValidationSelection, usize)> {
         let mut candidates = context.validation_plan.tests.clone();
         let selector = TestSelector::new(self.store as &dyn MetadataStore);
+        // Test-file callables near the change that match no runner discovery rule are withheld,
+        // and counted so the plan says so instead of reporting that no tests exist.
+        let mut withheld_helper_ids = std::collections::BTreeSet::new();
         for result in validation_source_results(primary_context)
             .into_iter()
             .take(5)
         {
-            candidates
-                .extend(selector.for_changed_path_with_evidence(&result.path, MAX_VALIDATION)?);
+            let (selected, withheld) =
+                selector.for_changed_path_with_withheld(&result.path, MAX_VALIDATION)?;
+            candidates.extend(selected);
+            withheld_helper_ids.extend(
+                withheld
+                    .into_iter()
+                    .filter(|test| {
+                        test.validation_exclusion()
+                            == Some(open_kioku_core::TestExclusionReason::Helper)
+                    })
+                    .map(|test| test.id),
+            );
         }
         let paths = validation_target_paths(self.store, &candidates)?;
-        Ok(select_validation_targets(candidates, &paths))
+        Ok((
+            select_validation_targets(candidates, &paths),
+            withheld_helper_ids.len(),
+        ))
     }
 }
 
@@ -2176,6 +2201,7 @@ fn next_steps(
     impact: &ImpactReport,
     validation: &[TestTarget],
     validation_omitted: usize,
+    withheld_helpers: usize,
     memory_facts: &[MemorySearchResult],
 ) -> Vec<String> {
     let mut steps = Vec::new();
@@ -2192,7 +2218,13 @@ fn next_steps(
         steps.push("Check matched repo memory facts, but verify them against indexed code before relying on them.".into());
     }
     if validation.is_empty() {
-        steps.push("No indexed tests were found; choose a manual validation command.".into());
+        match open_kioku_core::withheld_test_file_callables(withheld_helpers) {
+            Some(withheld) => steps.push(format!(
+                "No runnable indexed test was found, but {withheld}: if your runner collects them, run them; otherwise choose a manual validation command."
+            )),
+            None => steps
+                .push("No indexed tests were found; choose a manual validation command.".into()),
+        }
     } else {
         steps.push("Run the recommended validation commands after the change.".into());
     }

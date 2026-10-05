@@ -251,14 +251,51 @@ fn a_repository_of_only_helpers_and_hooks_has_no_validation() {
         "{origins:?}"
     );
 
-    let validation = planned_validation(repo.path(), "change postEntry to reject zero amounts");
-    assert!(validation.is_empty(), "{validation:?}");
+    // The plan plans none of them, but says it withheld the test-file callable beside the
+    // change rather than claim no test exists: a configured runner may collect it.
+    let plan = ok_json(
+        repo.path(),
+        &[
+            "plan",
+            "change postEntry to reject zero amounts",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(plan["validation"], serde_json::json!([]), "{plan}");
+    let withheld = "1 test-file callable(s) near this change matched no default runner discovery rule (runner configuration is not read)";
+    assert!(
+        plan["risk"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == withheld),
+        "{}",
+        plan["risk"]["reasons"]
+    );
+    let steps = plan["recommended_next_steps"].as_array().unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|step| step.as_str().unwrap().starts_with(&format!(
+                "No runnable indexed test was found, but {withheld}"
+            ))),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|step| step
+            .as_str()
+            .unwrap()
+            .starts_with("No indexed tests were found")),
+        "{steps:?}"
+    );
 
     let pack = ok_json(
         repo.path(),
         &["--json", "context", "add tests for postEntry zero amounts"],
     );
-    let reason = "every indexed test target is a helper or lifecycle hook no test runner executes";
+    // What the index checked, not a claim about what a runner will do.
+    let reason = "every indexed test target is a test-file callable matching no default runner discovery rule (runner configuration is not read)";
     let caveats = &pack["retrieval_diagnostics"]["caveats"];
     assert!(
         caveats
@@ -297,4 +334,74 @@ fn a_repository_of_only_helpers_and_hooks_has_no_validation() {
         .stdout;
     let audit = String::from_utf8_lossy(&audit);
     assert!(audit.contains(reason), "{audit}");
+}
+
+/// A JUnit 3 test reaches `TestCase` through an abstract base in another file. Main planned
+/// `testPostsLegacy`; a rule that required `TestCase` on the class itself withheld it, and the
+/// plan then said no tests existed.
+#[test]
+fn a_junit3_test_inheriting_test_case_through_an_abstract_base_is_planned() {
+    assert_runner_discovery(
+        "java-junit3-fixture",
+        &[
+            (
+                "src/test/java/com/acme/AbstractLedgerTest.java::ledger",
+                HELPER,
+            ),
+            (
+                "src/test/java/com/acme/JournalTest.java::replaysEntries",
+                TEST,
+            ),
+            (
+                "src/test/java/com/acme/LedgerLegacyTest.java::testPostsLegacy",
+                TEST,
+            ),
+        ],
+        "change Ledger post to reject negative amounts",
+        "testPostsLegacy",
+    );
+}
+
+/// `pytest.ini` tells pytest to collect `check_*.py` and `*_tests.py`, `*Suite` classes and
+/// `should_*` functions. The index does not interpret those options, so it falls back to the
+/// test-path rule there and says so, instead of calling pytest's tests helpers.
+#[test]
+fn a_pytest_configuration_that_changes_discovery_keeps_its_tests_and_says_why() {
+    let repo = indexed_copy("pytest-config-fixture");
+    assert_eq!(
+        target_origins(repo.path()),
+        expected(&[
+            ("tests/check_balance.py::should_sum_balance", TEST),
+            ("tests/ledger_tests.py::should_post_entry", TEST),
+            ("tests/ledger_tests.py::should_balance", TEST),
+        ])
+    );
+    let validation = planned_validation(repo.path(), "change post_entry to reject zero amounts");
+    assert!(
+        validation.iter().any(|name| name == "should_post_entry"),
+        "{validation:?}"
+    );
+
+    let pack = ok_json(
+        repo.path(),
+        &["--json", "context", "add tests for post_entry zero amounts"],
+    );
+    let caveats = pack["retrieval_diagnostics"]["caveats"].as_array().unwrap();
+    assert!(
+        !caveats.iter().any(|caveat| caveat
+            .as_str()
+            .unwrap()
+            .starts_with("every indexed test target")),
+        "{caveats:?}"
+    );
+
+    let status = ok_json(repo.path(), &["--json", "status", "."]);
+    assert_eq!(status["quality"]["test_count"], 3, "{status}");
+    let notes = status["quality"]["quality_notes"].to_string();
+    assert!(
+        notes.contains(
+            "pytest configuration `pytest.ini` sets python_files, python_classes, python_functions"
+        ),
+        "{notes}"
+    );
 }

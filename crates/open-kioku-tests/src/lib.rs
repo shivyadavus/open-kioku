@@ -461,6 +461,18 @@ impl<'a> TestSelector<'a> {
         Ok(self.ranked_with_evidence(path, limit)?.tests)
     }
 
+    /// [`Self::for_changed_path_with_evidence`], and the indexed targets matched to the change
+    /// that it withheld because they cannot stand as validation evidence. Plans and context
+    /// packs count these so a withheld target never reads as an absent one.
+    pub fn for_changed_path_with_withheld(
+        &self,
+        path: &Path,
+        limit: usize,
+    ) -> Result<(Vec<TestTarget>, Vec<TestTarget>)> {
+        let ranked = self.ranked_with_evidence(path, limit)?;
+        Ok((ranked.tests, ranked.excluded))
+    }
+
     /// The selection `ok tests` and `find_tests_for_change` report: the ranked targets of
     /// [`Self::for_changed_path_with_evidence`], plus an account of the indexed targets it
     /// withheld and a caveat whenever the list is empty, saying whether the change has no
