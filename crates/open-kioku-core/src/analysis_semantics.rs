@@ -18,7 +18,12 @@ pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v2";
 /// clone or a linked worktree inside the repository) as `submodule`, so neither its files nor its
 /// manifests are read. v2 indexed a nested clone or worktree as this repository's source, its
 /// manifests included, and failed outright on a checked-out submodule (#677).
-pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v3";
+/// v5: discovery prunes MSBuild output as `msbuild_output`: a `bin` beside an MSBuild project
+/// file (`*.csproj`, `*.fsproj`, `*.vbproj`) holding build artifacts, and an `obj` holding a
+/// NuGet restore's output or, beside a project file, a `Debug`/`Release` directory, so neither
+/// its files nor its manifests are read; earlier versions indexed the JSON and other supported
+/// files MSBuild copies there (#684). v4 is taken by an open change.
+pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v5";
 /// v3: a Rust `use` path inside the importing file's own crate resolves through that crate's
 /// declared module tree, so its `IMPORTS` edge names the file declaring the module or the item;
 /// v2 resolved such a path against the repository-root `src/` and fell back to the crate root,

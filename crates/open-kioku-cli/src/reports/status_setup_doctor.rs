@@ -2014,6 +2014,21 @@ fn coverage_next_step(coverage: &IndexCoverage) -> String {
             stray_git.join(", ")
         );
     }
+    let msbuild = coverage
+        .pruned_source_dirs()
+        .into_iter()
+        .filter(|dir| dir.reason == open_kioku_core::PruneReason::MsbuildOutput)
+        .take(3)
+        .map(|dir| format!("`{}/`", dir.path))
+        .collect::<Vec<_>>();
+    if coverage.pruned_source_files() > 0 && !msbuild.is_empty() {
+        // `keep_dirs` takes only `build` and `dist`; the build's own artifacts pruned these.
+        return format!(
+            "Coverage: {} git-tracked source file(s) are not indexed because discovery pruned {} as MSBuild output: each sits beside a project file and holds build artifacts, yet this repository tracks files under it. Move committed scripts and source out of the build's output directory (or point the project's output elsewhere), then run `ok index .`; until then an absence among them is not evidence. The files are listed in `ok --json status --full` `quality.skipped_paths` with reason `pruned`.",
+            group_thousands(coverage.pruned_source_files()),
+            msbuild.join(", ")
+        );
+    }
     if coverage.pruned_source_files() > 0 {
         let dirs = coverage
             .pruned_source_dirs()

@@ -26,6 +26,13 @@
 //! - `target`: pruned when it holds `CACHEDIR.TAG` (Cargo writes one) or sits beside a
 //!   `Cargo.toml`, `pom.xml`, `build.sbt`, `build.properties` (sbt's `project/`) or
 //!   `project.clj`. A `target` package under `src/main/java` is walked.
+//! - `bin`, `obj`: pruned as `msbuild_output` on what MSBuild writes. A `bin` needs both an
+//!   MSBuild project file (`*.csproj`, `*.fsproj`, `*.vbproj`) beside it and build artifacts
+//!   inside (`*.dll`, `*.pdb`, `*.exe`, `*.deps.json`, or a `Debug`/`Release` directory); an
+//!   `obj` needs a NuGet restore's output inside (`project.assets.json`, `*.nuget.g.props`), or
+//!   a project file beside it and a `Debug`/`Release` directory inside. `bin` is where most
+//!   ecosystems keep first-party scripts, and one can share the directory with the build, so
+//!   git-tracked source under either counts as missing, as under an undeclared build directory.
 //! - `build`, `dist`: walked when a module or package declares them: a `mod.rs`, an
 //!   `__init__.py` or a `.go` file directly inside; a Rust `<name>.rs` beside them that is not a
 //!   Cargo build script; or a place under a `src/` directory with no build manifest beside
@@ -165,6 +172,22 @@ impl DiscoveryPruner {
                     DirVerdict::Walk
                 }
             }
+            "bin" => {
+                if beside_msbuild_project(path) && holds_build_artifacts(path, true) {
+                    DirVerdict::Prune(PruneReason::MsbuildOutput)
+                } else {
+                    DirVerdict::Walk
+                }
+            }
+            "obj" => {
+                if holds_restore_output(path)
+                    || (beside_msbuild_project(path) && holds_build_artifacts(path, false))
+                {
+                    DirVerdict::Prune(PruneReason::MsbuildOutput)
+                } else {
+                    DirVerdict::Walk
+                }
+            }
             "build" | "dist" => {
                 if self.is_kept(path) {
                     // The user's statement outranks the guess, the cache tag's included: they
@@ -235,6 +258,77 @@ fn beside_any(path: &Path, manifests: &[&str]) -> bool {
         manifests
             .iter()
             .any(|manifest| parent.join(manifest).is_file())
+    })
+}
+
+/// Project-file extensions of the MSBuild SDKs that write `bin/` and `obj/` beside the project:
+/// C#, F# and Visual Basic.
+const MSBUILD_PROJECT_EXTENSIONS: [&str; 3] = ["csproj", "fsproj", "vbproj"];
+
+/// Whether an MSBuild project file sits beside `path`. Project files are named after the
+/// project, so this reads the parent directory; only a `bin` or `obj` ever pays for it.
+fn beside_msbuild_project(path: &Path) -> bool {
+    let Some(entries) = path
+        .parent()
+        .and_then(|parent| std::fs::read_dir(parent).ok())
+    else {
+        return false;
+    };
+    entries.filter_map(|entry| entry.ok()).any(|entry| {
+        let name = entry.file_name();
+        Path::new(&name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                MSBUILD_PROJECT_EXTENSIONS
+                    .iter()
+                    .any(|known| ext.eq_ignore_ascii_case(known))
+            })
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+    })
+}
+
+/// Whether `path` holds what an MSBuild build writes into it: a `Debug` or `Release`
+/// configuration directory (any case), and, when `binaries` is set, a `*.dll`, `*.pdb`,
+/// `*.exe` or `*.deps.json` directly inside, as a custom `OutputPath` leaves them. A project
+/// file beside a `bin/` of scripts is not enough: the scripts' directory has the same name.
+fn holds_build_artifacts(path: &Path, binaries: bool) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    entries.filter_map(|entry| entry.ok()).any(|entry| {
+        let Ok(kind) = entry.file_type() else {
+            return false;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        if kind.is_dir() {
+            return matches!(name.as_str(), "debug" | "release");
+        }
+        binaries
+            && kind.is_file()
+            && [".dll", ".pdb", ".exe", ".deps.json"]
+                .iter()
+                .any(|suffix| name.len() > suffix.len() && name.ends_with(suffix))
+    })
+}
+
+/// Whether `path` holds what a NuGet restore writes into a project's intermediate directory:
+/// `project.assets.json`, or `<project>.nuget.g.props`. Evidence for an `obj` whose project
+/// file lies elsewhere (a `BaseIntermediateOutputPath` shared by a solution).
+fn holds_restore_output(path: &Path) -> bool {
+    if path.join("project.assets.json").is_file() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    entries.filter_map(|entry| entry.ok()).any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".nuget.g.props")
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
     })
 }
 
@@ -526,6 +620,119 @@ mod tests {
                 DirVerdict::Walk
             );
         }
+    }
+
+    const MSBUILD_OUTPUT: DirVerdict = DirVerdict::Prune(PruneReason::MsbuildOutput);
+
+    /// MSBuild writes `bin/Debug/...` and `obj/` beside the project file, and a NuGet restore
+    /// leaves its assets file in `obj/`. Each needs what the build wrote, not the name (#684).
+    #[test]
+    fn dotnet_bin_and_obj_are_pruned_on_what_the_build_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "Ledger.sln");
+        write(root, "src/Ledger/Ledger.csproj");
+        write(root, "src/Ledger/Entry.cs");
+        write(root, "src/Ledger/bin/Debug/net8.0/Ledger.dll");
+        write(root, "src/Ledger/obj/project.assets.json");
+        write(root, "src/Ledger/obj/Debug/net8.0/Ledger.AssemblyInfo.cs");
+        write(root, "src/Store/Store.fsproj");
+        write(root, "src/Store/bin/Release/Store.dll");
+        write(root, "src/Store/obj/Store.fsproj.nuget.g.props");
+        // A custom `OutputPath`: binaries directly in `bin/`, each kind on its own.
+        write(root, "legacy/Legacy.VBPROJ");
+        write(root, "legacy/bin/Legacy.EXE");
+        write(root, "legacy/obj/release/Legacy.dll");
+        write(root, "pdb/Pdb.csproj");
+        write(root, "pdb/bin/Pdb.pdb");
+        write(root, "deps/Deps.csproj");
+        write(root, "deps/bin/Deps.deps.json");
+        // A solution-wide intermediate directory: no project beside it, restore output inside.
+        write(root, "artifacts/obj/project.assets.json");
+        write(root, "shared/obj/Journal.csproj.nuget.g.props");
+
+        for pruned in [
+            "src/Ledger/bin",
+            "src/Ledger/obj",
+            "src/Store/bin",
+            "src/Store/obj",
+            "legacy/bin",
+            "legacy/obj",
+            "pdb/bin",
+            "deps/bin",
+            "artifacts/obj",
+            "shared/obj",
+        ] {
+            assert_eq!(verdict(root, pruned), MSBUILD_OUTPUT, "{pruned}");
+        }
+        let pruner = DiscoveryPruner::evidence_only(root);
+        assert_eq!(
+            pruner.pruned_at(Path::new(
+                "src/Ledger/obj/Debug/net8.0/Ledger.AssemblyInfo.cs"
+            )),
+            Some((
+                PathBuf::from("src/Ledger/obj"),
+                Some(PruneReason::MsbuildOutput)
+            ))
+        );
+        assert!(!pruner.is_pruned(Path::new("src/Ledger/Entry.cs")));
+        assert!(PruneReason::MsbuildOutput.counts_tracked_source());
+    }
+
+    /// A `bin/` of scripts beside a project file is walked until the build writes into it; with
+    /// no project, a `.sln` alone, or a project file inside rather than beside, it is always
+    /// walked, and so is an `obj/` nothing accounts for.
+    #[test]
+    fn bin_and_obj_without_build_output_are_walked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Scripts beside a project the build has not written into.
+        write(root, "App.csproj");
+        write(root, "bin/release_tool.py");
+        write(root, "bin/release.sh");
+        write(root, "bin/tools.json");
+        // An empty `obj/` beside a project, and one of source.
+        fs::create_dir_all(root.join("obj")).unwrap();
+        write(root, "render/Render.csproj");
+        write(root, "render/obj/mesh.py");
+        // First-party executables beside other ecosystems' manifests and a solution file.
+        write(root, "tools/Cargo.toml");
+        write(root, "tools/bin/gen.rs");
+        write(root, "tools/bin/Debug/x.dll");
+        write(root, "dotnet/Ledger.sln");
+        write(root, "dotnet/bin/Debug/x.dll");
+        // A restore marker's name on a directory or a sibling.
+        write(root, "notes/obj/project.assets.json/readme.md");
+        write(root, "notes/obj.nuget.g.props");
+        // A project file under `bin/` says nothing about `bin/` itself.
+        write(root, "scripts/bin/Tool.csproj");
+        write(root, "scripts/bin/Debug/x.dll");
+        // `.csproj` as a directory name is not a project file; `debug.dll` as a directory is
+        // not a binary.
+        fs::create_dir_all(root.join("odd/Ledger.csproj")).unwrap();
+        write(root, "odd/bin/Debug/x.dll");
+        write(root, "dirs/Dirs.csproj");
+        fs::create_dir_all(root.join("dirs/bin/Dirs.dll")).unwrap();
+
+        for walked in [
+            "bin",
+            "obj",
+            "render/obj",
+            "tools/bin",
+            "dotnet/bin",
+            "notes/obj",
+            "scripts/bin",
+            "odd/bin",
+            "dirs/bin",
+        ] {
+            assert_eq!(verdict(root, walked), DirVerdict::Walk, "{walked}");
+        }
+        assert!(!is_under_pruned_dir(root, Path::new("bin/release_tool.py")));
+
+        // Once the build writes into it, the same `bin/` is MSBuild output; its committed
+        // script is then counted as missing rather than hidden (`counts_tracked_source`).
+        write(root, "bin/Debug/net8.0/App.dll");
+        assert_eq!(verdict(root, "bin"), MSBUILD_OUTPUT);
     }
 
     /// A nested work tree is another repository: pruned as a submodule whatever its name, a

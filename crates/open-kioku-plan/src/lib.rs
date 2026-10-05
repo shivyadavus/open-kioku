@@ -2087,6 +2087,9 @@ fn pruned_dir_forbidden_rules(
                     "discovery pruned a submodule: the files under it belong to another repository and change there; moving the commit this repository records for it edits `{}` itself, which this rule does not cover, so evidence can admit it",
                     dir.path
                 ),
+                PruneReason::MsbuildOutput => {
+                    "discovery pruned MSBuild output (build artifacts beside a project file, or a package restore's output); change the project instead".to_owned()
+                }
             };
             Some(BoundaryForbiddenRule {
                 pattern: format!("{}/**", dir.path),
@@ -4133,6 +4136,8 @@ mod tests {
                 dir("py/.venv", PruneReason::VirtualEnv, Some(0)),
                 dir("vendor/ledger", PruneReason::Submodule, Some(0)),
                 dir("tools/ledger", PruneReason::Submodule, Some(2)),
+                dir("App/bin", PruneReason::MsbuildOutput, Some(0)),
+                dir("Tool/bin", PruneReason::MsbuildOutput, Some(1)),
             ],
             0,
         );
@@ -4151,6 +4156,7 @@ mod tests {
             ("svc/node_modules/**", "coverage:pruned:svc/node_modules"),
             ("py/.venv/**", "coverage:pruned:py/.venv"),
             ("vendor/ledger/**", "coverage:pruned:vendor/ledger"),
+            ("App/bin/**", "coverage:pruned:App/bin"),
         ] {
             let rule = rules
                 .iter()
@@ -4167,6 +4173,8 @@ mod tests {
         assert!(!patterns(&boundary).contains(&"tools/build/**".to_string()));
         // A `.git` over tracked source is stray: the files are this repository's.
         assert!(!patterns(&boundary).contains(&"tools/ledger/**".to_string()));
+        // A committed script beside MSBuild's output is source, not output (#684).
+        assert!(!patterns(&boundary).contains(&"Tool/bin/**".to_string()));
         assert!(!patterns(&boundary).contains(&"build/**".to_string()));
         // The patterns stay sorted and unique.
         let mut sorted = patterns(&boundary);

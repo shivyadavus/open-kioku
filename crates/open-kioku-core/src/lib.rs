@@ -3633,7 +3633,8 @@ pub fn is_secret_like_path(path: &Path) -> bool {
             || value.ends_with(".pfx")
             || value.ends_with(".jks")
             || value.ends_with(".keystore")
-    })
+            || value.ends_with(".snk")
+    }) || is_user_secrets_store(path)
 }
 
 /// The caveat every search surface attaches when the index holds redacted values. A query for
@@ -3666,10 +3667,57 @@ pub fn is_secret_named_path(path: &Path) -> bool {
     })
 }
 
+/// A .NET user-secrets store, which [`is_secret_like_path`] blocks like key material:
+/// `UserSecrets/<id>/secrets.json` as `dotnet user-secrets` writes it, copied into a
+/// repository, or a `secrets.json` anywhere below a `UserSecrets` directory. A `secrets.json`
+/// elsewhere is a config file named for secrets, indexed with its values redacted like
+/// `credentials.json` (#684).
+fn is_user_secrets_store(path: &Path) -> bool {
+    let is_store = path
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("secrets.json"));
+    is_store
+        && path.parent().is_some_and(|parent| {
+            parent
+                .components()
+                .any(|part| part.as_os_str().eq_ignore_ascii_case("usersecrets"))
+        })
+}
+
 #[cfg(test)]
 mod secret_path_tests {
     use super::{is_secret_like_path, is_secret_named_path};
     use std::path::Path;
+
+    /// .NET key material and user-secrets stores are blocked; files that only share a name with
+    /// them are not (#684).
+    #[test]
+    fn dotnet_key_pairs_and_user_secrets_stores_are_secret_like() {
+        for blocked in [
+            "src/Ledger/Ledger.snk",
+            "keys/Signing.SNK",
+            "certs/ledger.pfx",
+            "UserSecrets/7f3c2a1e-0b4d-4e8a-9c61-5d2f8e0a7b13/secrets.json",
+            "ops/Microsoft/UserSecrets/ledger-dev/secrets.json",
+            "ops/usersecrets/secrets.JSON",
+        ] {
+            assert!(is_secret_like_path(Path::new(blocked)), "{blocked}");
+        }
+        for indexed in [
+            "config/secrets.json",
+            "secrets.json",
+            "UserSecrets/readme.md",
+            "UserSecrets/ledger-dev/appsettings.json",
+            "src/UserSecretsLoader/secrets.json",
+            "src/Ledger/UserSecrets.cs",
+            "UserSecrets",
+            "docs/snk/notes.md",
+            "src/Ledger/snk.cs",
+            "src/Ledger/Ledger.snk.md",
+        ] {
+            assert!(!is_secret_like_path(Path::new(indexed)), "{indexed}");
+        }
+    }
 
     #[test]
     fn secret_path_rule_blocks_key_material_and_environment_entries_only() {
@@ -4006,6 +4054,15 @@ pub enum DependencyEvidence {
     GoVendor,
     /// A `vendor` directory holding `composer/installed.json`, which Composer writes.
     ComposerVendor,
+    /// A package directory `<Id>.<Version>/` directly inside a `packages` directory, in NuGet's
+    /// `packages.config` layout: it holds the `<Id>.<Version>.nupkg` or `<Id>.nuspec` restore
+    /// extracted. Only that package is classed; the rest of `packages/` stays unclassified.
+    NugetPackages,
+    /// A package directory `<id>/` directly inside a `packages` or `.packages` directory, in the
+    /// layout of NuGet's global packages folder: a `<version>/` under it holds the
+    /// `.nupkg.metadata` or `<id>.<version>.nupkg.sha512` restore writes, as when
+    /// `globalPackagesFolder` or `NUGET_PACKAGES` points inside the repository.
+    NugetGlobalPackages,
 }
 
 impl DependencyEvidence {
@@ -4016,6 +4073,8 @@ impl DependencyEvidence {
             Self::SitePackages => "site-packages",
             Self::GoVendor => "go-vendor",
             Self::ComposerVendor => "composer-vendor",
+            Self::NugetPackages => "nuget-packages",
+            Self::NugetGlobalPackages => "nuget-global-packages",
         }
     }
 }
@@ -4278,6 +4337,15 @@ pub enum PruneReason {
     /// files, so its content is another repository's source, and neither this repository's
     /// diffs nor `ok verify` see an edit inside it.
     Submodule,
+    /// MSBuild output: a `bin` beside an MSBuild project file (`*.csproj`, `*.fsproj`,
+    /// `*.vbproj`) holding build artifacts (`*.dll`, `*.pdb`, `*.exe`, `*.deps.json`, or a
+    /// `Debug`/`Release` directory), or an `obj` holding a NuGet restore's output
+    /// (`project.assets.json`, `*.nuget.g.props`) or a `Debug`/`Release` directory beside a
+    /// project file. `bin` is also where scripts are kept, and MSBuild writes nothing a script
+    /// directory lacks the name of, so git-tracked source under it counts as missing and is not
+    /// forbidden, as under an undeclared build directory: a committed `bin/release_tool.py`
+    /// beside the build's `bin/Debug/` is source the index does not hold.
+    MsbuildOutput,
 }
 
 impl PruneReason {
@@ -4289,6 +4357,7 @@ impl PruneReason {
             Self::Dependencies => "dependencies",
             Self::VirtualEnv => "virtual-env",
             Self::Submodule => "submodule",
+            Self::MsbuildOutput => "msbuild-output",
         }
     }
 
@@ -4296,9 +4365,14 @@ impl PruneReason {
     /// missing from the index. Only the weak rule's guess can hide real source, and a nested
     /// work tree that is not a submodule: Git tracks only a real submodule's gitlink, never a
     /// file under it, so a tracked file there means this repository owns the directory and a
-    /// stray `.git` (a `git init`, a tool's scratch clone) cut it from the walk.
+    /// stray `.git` (a `git init`, a tool's scratch clone) cut it from the walk. MSBuild output
+    /// counts too: MSBuild commits nothing, so a tracked file under its `bin` or `obj` is
+    /// someone's script or source sharing the directory with the build (#684).
     pub fn counts_tracked_source(self) -> bool {
-        matches!(self, Self::UndeclaredBuildDir | Self::Submodule)
+        matches!(
+            self,
+            Self::UndeclaredBuildDir | Self::Submodule | Self::MsbuildOutput
+        )
     }
 }
 
@@ -5005,14 +5079,21 @@ impl IndexCoverage {
         let mut caveats = Vec::new();
         let source_dirs = self.pruned_source_dirs();
         if self.pruned_source_files() > 0 {
-            let nested = source_dirs
-                .iter()
-                .filter(|dir| dir.reason == PruneReason::Submodule)
-                .count();
-            let kind = match nested {
-                0 => "undeclared build",
-                all if all == source_dirs.len() => "nested repository",
-                _ => "pruned",
+            let count_of = |reason| {
+                source_dirs
+                    .iter()
+                    .filter(|dir| dir.reason == reason)
+                    .count()
+            };
+            let all = source_dirs.len();
+            let kind = if count_of(PruneReason::UndeclaredBuildDir) == all {
+                "undeclared build"
+            } else if count_of(PruneReason::Submodule) == all {
+                "nested repository"
+            } else if count_of(PruneReason::MsbuildOutput) == all {
+                "MSBuild output"
+            } else {
+                "pruned"
             };
             caveats.push(format!(
                 "{} git-tracked source {} not indexed under {kind} {}: {}",

@@ -11,7 +11,12 @@
 //!   `pyvenv.cfg` or `conda-meta/` is a Python environment's installed packages, whatever the
 //!   environment is called (`env/`, `py311/`);
 //! - a `vendor` directory holding `modules.txt` (`go mod vendor`) or `composer/installed.json`
-//!   (Composer) is vendored dependencies.
+//!   (Composer) is vendored dependencies;
+//! - a package directory directly inside a `packages` or `.packages` directory is a restored
+//!   NuGet package when it is in the `packages.config` layout (`<Id>.<Version>/` holding
+//!   `<Id>.<Version>.nupkg` or `<Id>.nuspec`) or the global packages folder's (`<id>/` with a
+//!   `<version>/` holding `.nupkg.metadata` or `<id>.<version>.nupkg.sha512`). Each package is
+//!   classed on its own, never the `packages/` holding it: its other entries stay unclassified.
 //!
 //! A marker does not reclassify the directory holding it. `python -m venv .` run inside a
 //! first-party `services/api/` writes `pyvenv.cfg` there beside the service's own code; only its
@@ -26,7 +31,8 @@
 //!
 //! Only the ancestors of an excluded file are probed, each once per scan. A directory is probed
 //! only when its name is `site-packages`, `dist-packages` or `vendor`, with at most one directory
-//! read and a few `stat`s.
+//! read and a few `stat`s, or when its parent is named `packages` or `.packages`, with one read
+//! of it and two `stat`s per directory inside it.
 
 use open_kioku_core::DependencyEvidence;
 use std::collections::HashMap;
@@ -77,7 +83,17 @@ impl DependencyTrees {
 /// The evidence that the directory at `path` holds installed packages, if any. Only a directory
 /// a package tool installs into can qualify; a marker elsewhere says nothing about its siblings.
 fn probe(path: &Path) -> Option<DependencyEvidence> {
-    match path.file_name().and_then(|name| name.to_str()) {
+    let name = path.file_name().and_then(|name| name.to_str());
+    let in_packages = path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|parent| parent == "packages" || parent == ".packages");
+    if let (true, Some(name)) = (in_packages, name) {
+        if let Some(evidence) = nuget_package(path, name) {
+            return Some(evidence);
+        }
+    }
+    match name {
         Some("site-packages" | "dist-packages") => {
             if environment_root(path).is_some_and(is_python_environment) {
                 Some(DependencyEvidence::PythonEnvironment)
@@ -93,6 +109,72 @@ fn probe(path: &Path) -> Option<DependencyEvidence> {
         }
         _ => None,
     }
+}
+
+/// The NuGet layout the package directory `package` (named `name`, directly inside a
+/// `packages` or `.packages`) was restored in, read from the files a restore writes into it,
+/// never from a `.nupkg` or `.nuspec` alone. Only that package directory is classed, never the
+/// `packages/` around it: a JavaScript workspace's `packages/` can hold a git-ignored
+/// first-party `web-gen/` beside one restored package, and a first-party
+/// `packages/Ledger/Ledger.nuspec` that packs this repository's own code is authored, not
+/// restored, and fits neither layout.
+fn nuget_package(package: &Path, name: &str) -> Option<DependencyEvidence> {
+    if is_packages_config_package(package, name) {
+        Some(DependencyEvidence::NugetPackages)
+    } else if is_global_packages_entry(package, name) {
+        Some(DependencyEvidence::NugetGlobalPackages)
+    } else {
+        None
+    }
+}
+
+/// `packages/<Id>.<Version>/`, as `packages.config` restore extracts a package: it holds
+/// `<Id>.<Version>.nupkg`, or `<Id>.nuspec` where the directory name is that id followed by a
+/// version.
+fn is_packages_config_package(package: &Path, name: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(package) else {
+        return false;
+    };
+    entries.filter_map(|entry| entry.ok()).any(|entry| {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            return false;
+        }
+        let file = entry.file_name();
+        let file = file.to_string_lossy();
+        if let Some(stem) = file.strip_suffix(".nupkg") {
+            return stem.eq_ignore_ascii_case(name);
+        }
+        file.strip_suffix(".nuspec").is_some_and(|id| {
+            name.len() > id.len() + 1
+                && name.is_char_boundary(id.len())
+                && name[..id.len()].eq_ignore_ascii_case(id)
+                && name[id.len()..].starts_with('.')
+                && name[id.len() + 1..].starts_with(|c: char| c.is_ascii_digit())
+        })
+    })
+}
+
+/// `<id>/` of a global packages folder: a `<version>/` under it holds the `.nupkg.metadata`
+/// (NuGet 4.x and later) or `<id>.<version>.nupkg.sha512` restore writes once a package is
+/// complete.
+fn is_global_packages_entry(package: &Path, id: &str) -> bool {
+    subdirectories(package).any(|version| {
+        version.join(".nupkg.metadata").is_file()
+            || version
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| version.join(format!("{id}.{name}.nupkg.sha512")).is_file())
+    })
+}
+
+/// The directories directly inside `path`, symlinks not followed.
+fn subdirectories(path: &Path) -> impl Iterator<Item = PathBuf> {
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
 }
 
 /// The environment directory a `site-packages` at `path` belongs to by layout:
@@ -244,6 +326,126 @@ mod tests {
             Some((
                 "services/api/lib/python3.12/site-packages".into(),
                 DependencyEvidence::PythonEnvironment
+            ))
+        );
+    }
+
+    /// Both NuGet install layouts, by what restore writes into each package directory (#684).
+    #[test]
+    fn restored_nuget_packages_are_recognised_in_either_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // packages.config: `<Id>.<Version>/` with the package file, or with `<Id>.nuspec`.
+        write(root, "packages/Acme.Ledger.2.1.0/Acme.Ledger.2.1.0.nupkg");
+        write(root, "packages/Acme.Ledger.2.1.0/content/Entry.cs.pp");
+        write(root, "legacy/packages/Store.1.0.0/Store.nuspec");
+        write(root, "legacy/packages/Store.1.0.0/tools/install.ps1");
+        // A global packages folder inside the repository: `.nuget/packages`, or `.packages`.
+        write(root, ".nuget/packages/acme.ledger/2.1.0/.nupkg.metadata");
+        write(root, ".nuget/packages/acme.ledger/2.1.0/src/Entry.cs");
+        write(root, ".packages/store/1.0.0/store.1.0.0.nupkg.sha512");
+        write(root, ".packages/store/1.0.0/lib/Store.cs");
+
+        for (rel, tree, evidence) in [
+            (
+                "packages/Acme.Ledger.2.1.0/content/Entry.cs.pp",
+                "packages/Acme.Ledger.2.1.0",
+                DependencyEvidence::NugetPackages,
+            ),
+            (
+                "legacy/packages/Store.1.0.0/tools/install.ps1",
+                "legacy/packages/Store.1.0.0",
+                DependencyEvidence::NugetPackages,
+            ),
+            (
+                ".nuget/packages/acme.ledger/2.1.0/src/Entry.cs",
+                ".nuget/packages/acme.ledger",
+                DependencyEvidence::NugetGlobalPackages,
+            ),
+            (
+                ".packages/store/1.0.0/lib/Store.cs",
+                ".packages/store",
+                DependencyEvidence::NugetGlobalPackages,
+            ),
+        ] {
+            assert_eq!(enclosing(root, rel), Some((tree.into(), evidence)), "{rel}");
+        }
+    }
+
+    /// A `packages/` NuGet did not restore stays first-party: a JavaScript workspace, a
+    /// project that packs its own code with an authored `.nuspec`, a loose `.nupkg`, and an
+    /// unfinished global-folder entry.
+    #[test]
+    fn packages_directories_without_restore_layout_are_not_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "web/packages/ledger/package.json");
+        write(root, "web/packages/ledger/src/index.ts");
+        write(root, "nuget/packages/Ledger/Ledger.nuspec");
+        write(root, "nuget/packages/Ledger/src/Entry.cs");
+        write(root, "nuget/packages/Ledger.Core/Ledger.nuspec");
+        write(root, "nuget/packages/Ledger.Core/Entry.cs");
+        write(root, "feed/packages/Ledger.1.0.0.nupkg");
+        write(root, "feed/packages/tools/emit.py");
+        // The package file under another name, and a version directory with no metadata.
+        write(root, "odd/packages/Ledger.1.0.0/Store.1.0.0.nupkg");
+        write(root, "odd/packages/Ledger.1.0.0/emit.py");
+        write(root, "cache/packages/ledger/1.0.0/ledger.nuspec");
+        write(root, "cache/packages/ledger/1.0.0/emit.py");
+        // A `.nupkg` directory is not a package file.
+        fs::create_dir_all(root.join("dirs/packages/Store.1.0.0/Store.1.0.0.nupkg")).unwrap();
+        write(root, "dirs/packages/Store.1.0.0/emit.py");
+
+        for rel in [
+            "web/packages/ledger/src/index.ts",
+            "nuget/packages/Ledger/src/Entry.cs",
+            "nuget/packages/Ledger.Core/Entry.cs",
+            "feed/packages/tools/emit.py",
+            "odd/packages/Ledger.1.0.0/emit.py",
+            "cache/packages/ledger/1.0.0/emit.py",
+            "dirs/packages/Store.1.0.0/emit.py",
+        ] {
+            assert_eq!(enclosing(root, rel), None, "{rel}");
+        }
+    }
+
+    /// One restored package classes itself, not the `packages/` around it: a JavaScript
+    /// workspace's first-party `web-gen/` beside it stays unclassified, in either layout.
+    #[test]
+    fn a_restored_package_does_not_reclassify_its_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "packages/Newtonsoft.Json.13.0.1/Newtonsoft.Json.13.0.1.nupkg",
+        );
+        write(root, "packages/Newtonsoft.Json.13.0.1/tools/init.js");
+        write(root, "packages/web-gen/src/client.ts");
+        write(root, "packages/ui/package.json");
+        write(root, "packages/ui/src/button.ts");
+        write(root, ".packages/acme.grid/1.0.0/.nupkg.metadata");
+        write(root, ".packages/acme.grid/1.0.0/content/grid.js");
+        write(root, ".packages/web-gen/client.ts");
+
+        for rel in [
+            "packages/web-gen/src/client.ts",
+            "packages/ui/src/button.ts",
+            ".packages/web-gen/client.ts",
+        ] {
+            assert_eq!(enclosing(root, rel), None, "{rel}");
+        }
+        assert_eq!(
+            enclosing(root, "packages/Newtonsoft.Json.13.0.1/tools/init.js"),
+            Some((
+                "packages/Newtonsoft.Json.13.0.1".into(),
+                DependencyEvidence::NugetPackages
+            ))
+        );
+        assert_eq!(
+            enclosing(root, ".packages/acme.grid/1.0.0/content/grid.js"),
+            Some((
+                ".packages/acme.grid".into(),
+                DependencyEvidence::NugetGlobalPackages
             ))
         );
     }

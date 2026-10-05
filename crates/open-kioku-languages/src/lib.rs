@@ -98,6 +98,31 @@ pub fn likely_generated(content: &str) -> bool {
         || head.contains("do not edit")
 }
 
+/// A file whose name says a .NET build tool wrote it, which [`likely_generated`] cannot see
+/// because these tools write no banner it reads, or one outside its eight lines: `*.g.cs` and
+/// `*.g.i.cs` (source generators, XAML and Razor compilers), `*.Designer.cs` (the WinForms and
+/// resource designers), and `*.AssemblyInfo.cs` under an `obj/` directory, which the SDK writes
+/// there on every build. An `AssemblyInfo.cs` elsewhere is the project's own, as are a
+/// `Ledger.g.rs` or `Designer.cs` (a class named `Designer`). Matched case-insensitively:
+/// `Resources.designer.cs` is common.
+pub fn likely_generated_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    let generated_suffix = [".g.cs", ".g.i.cs", ".designer.cs"]
+        .iter()
+        .any(|suffix| name.len() > suffix.len() && name.ends_with(suffix));
+    if generated_suffix {
+        return true;
+    }
+    name.len() > ".assemblyinfo.cs".len()
+        && name.ends_with(".assemblyinfo.cs")
+        && path
+            .parent()
+            .is_some_and(|parent| parent.components().any(|part| part.as_os_str() == "obj"))
+}
+
 /// The origin a generated file's own header names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedOrigin {
@@ -184,6 +209,34 @@ mod tests {
             Some("api/openapi.yaml".into())
         );
         assert!(likely_generated(banner));
+    }
+
+    #[test]
+    fn dotnet_generated_sources_are_recognised_by_name() {
+        for generated in [
+            "src/Ledger/obj/Debug/net8.0/Ledger.GlobalUsings.g.cs",
+            "src/Ledger/Views/MainWindow.g.cs",
+            "src/Ledger/Views/MainWindow.g.i.cs",
+            "src/Ledger/Forms/EntryForm.Designer.cs",
+            "src/Ledger/Properties/Resources.designer.cs",
+            "src/Ledger/obj/Debug/net8.0/Ledger.AssemblyInfo.cs",
+            "obj/Release/Ledger.AssemblyInfo.cs",
+        ] {
+            assert!(likely_generated_path(Path::new(generated)), "{generated}");
+        }
+        for source in [
+            "src/Ledger/Entry.cs",
+            "src/Ledger/Properties/AssemblyInfo.cs",
+            "src/Ledger/Ledger.AssemblyInfo.cs",
+            "src/objects/Ledger.AssemblyInfo.cs",
+            "src/Ledger/Designer.cs",
+            "src/Ledger/.g.cs",
+            "src/Ledger/Catalog.g.rs",
+            "src/Ledger/Entry.designer.ts",
+            "src/Ledger/Entry.gcs",
+        ] {
+            assert!(!likely_generated_path(Path::new(source)), "{source}");
+        }
     }
 
     #[test]
