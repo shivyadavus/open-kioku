@@ -453,7 +453,7 @@ the first `N` commits that pass these rules, reimplemented in Rust in
 
 - The commit has a parent.
 - It modifies (`M`; not added, deleted, or renamed) between one and five files in a programming
-  language: Rust, Java, TypeScript, JavaScript, Python, Go, or SQL, detected by extension. Those
+  language: Rust, Java, TypeScript, JavaScript, Python, Go, C#, or SQL, detected by extension. Those
   files are the gold set; other modified files are ignored.
 - The subject names no modified path: no token contains `/`, no token equals a modified file's
   name or stem, and no conventional-commit scope (`fix(search):`, `[search]`) matches a segment

@@ -3861,6 +3861,7 @@ mod tests {
                 content_hash: "handler".into(),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             };
             let fact = AnalysisFact {
                 id: "runtime-incident".into(),
@@ -3936,6 +3937,7 @@ mod tests {
                 content_hash: format!("hash-{path}"),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             };
             self.files.push(file.clone());
             file

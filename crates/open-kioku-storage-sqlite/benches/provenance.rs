@@ -21,6 +21,7 @@ fn provenance_lookup(c: &mut Criterion) {
         content_hash: "hash".into(),
         is_generated: false,
         is_vendor: false,
+        generated_by: None,
     };
     let symbol = Symbol {
         id: SymbolId::new("symbol"),

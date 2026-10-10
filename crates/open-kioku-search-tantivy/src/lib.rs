@@ -937,6 +937,7 @@ mod order_tests {
                 content_hash: format!("hash-{index:02}"),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             })
             .collect::<Vec<_>>();
         let chunks = files
@@ -1123,6 +1124,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbol = Symbol {
             id: SymbolId::new("symbol-1"),
@@ -1177,6 +1179,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let chunk = CodeChunk {
             id: "chunk-1".into(),
@@ -1225,6 +1228,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbol = Symbol {
             id: SymbolId::new("symbol-route"),
@@ -1311,6 +1315,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbol = Symbol {
             id: SymbolId::new("symbol-exact"),
@@ -1420,6 +1425,7 @@ mod determinism_tests {
                 content_hash: format!("hash-{file_index:03}"),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             };
             for chunk_index in 0..6u32 {
                 let words = 8 + next(max_words);
@@ -1580,6 +1586,7 @@ mod symbol_text_tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 

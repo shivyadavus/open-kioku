@@ -580,6 +580,7 @@ mod tests {
                 content_hash: format!("hash-{index:03}"),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             })
             .collect::<Vec<_>>();
         let chunks = files

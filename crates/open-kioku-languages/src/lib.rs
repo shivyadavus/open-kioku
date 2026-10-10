@@ -1,3 +1,4 @@
+pub mod csharp;
 pub mod go;
 pub mod java;
 pub mod python;
@@ -29,6 +30,7 @@ pub fn detect_language(path: &Path) -> Language {
         "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
         "py" => Language::Python,
         "go" => Language::Go,
+        "cs" => Language::CSharp,
         "yaml" | "yml" => Language::Yaml,
         "json" => Language::Json,
         "toml" => Language::Toml,
@@ -49,6 +51,7 @@ pub fn is_supported_code(language: &Language) -> bool {
             | Language::JavaScript
             | Language::Python
             | Language::Go
+            | Language::CSharp
             | Language::Yaml
             | Language::Json
             | Language::Toml
@@ -292,6 +295,25 @@ mod tests {
         for lang in &langs {
             assert!(semantics_for(lang).is_some());
         }
+    }
+
+    #[test]
+    fn csharp_source_is_detected_and_has_no_relationship_adapter_yet() {
+        assert_eq!(
+            detect_language(Path::new("src/Ledger/Entry.cs")),
+            Language::CSharp
+        );
+        assert!(is_supported_code(&Language::CSharp));
+        assert!(Language::CSharp.is_programming());
+        // A C# script holds `#r` and `#load` directives the grammar does not read; it stays text
+        // the index does not parse.
+        assert_eq!(
+            detect_language(Path::new("tools/build.csx")),
+            Language::Unknown
+        );
+        // Calls and type relationships are resolved only through a registered adapter; C# has
+        // none, so it records symbols and no relationship.
+        assert!(semantics_for(&Language::CSharp).is_none());
     }
 
     #[test]

@@ -2660,6 +2660,12 @@ impl CodeLexer {
                 triple_quotes: true,
                 ..c_like
             },
+            // `"""` opens a C# raw string literal. A verbatim `@"..."` literal escapes `"` as `""`,
+            // not `\"`, so one ending in a backslash runs to the end of its line instead.
+            Language::CSharp => LexicalSyntax {
+                triple_quotes: true,
+                ..c_like
+            },
             Language::Go => LexicalSyntax {
                 backtick: Backtick::Raw,
                 ..c_like
@@ -3824,6 +3830,41 @@ mod tests {
     }
 
     #[test]
+    fn csharp_comments_and_literals_resolve_to_nothing() {
+        let symbols = [
+            symbol("caller", "entry", "Main", "Acme::Main", SymbolKind::Method),
+            symbol(
+                "target",
+                "util",
+                "Settle",
+                "Acme::Ledger::Settle",
+                SymbolKind::Method,
+            ),
+        ]
+        .into_iter()
+        .map(|symbol| with_language(symbol, Language::CSharp))
+        .collect::<Vec<_>>();
+        let text = "/// <summary>Calls Settle() first.</summary>\n// Settle()\n/* Settle() */\nLog(\"Settle() failed\");\nLog(\"\"\"\nSettle()\n\"\"\");";
+        let report = resolve_symbol_edges(
+            &[chunk_in(Language::CSharp, text)],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(targets(&report), vec![], "{:?}", report.analysis_facts);
+        // Code after the literals is still read.
+        let report = resolve_symbol_edges(
+            &[chunk_in(Language::CSharp, "Log(\"x\"); Settle();")],
+            &symbols,
+            &[],
+            false,
+            None,
+        );
+        assert_eq!(targets(&report).len(), 1, "{:?}", report.analysis_facts);
+    }
+
+    #[test]
     fn tokens_in_string_literals_resolve_to_nothing() {
         let symbols = vec![
             symbol("caller", "entry", "main", "app::main", SymbolKind::Function),
@@ -4472,6 +4513,7 @@ mod tests {
                 content_hash: String::new(),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             })
             .collect::<Vec<_>>();
         let resolutions = resolutions

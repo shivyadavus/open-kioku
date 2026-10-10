@@ -15,3 +15,6 @@ open-kioku-core = { version = "4.0.0", path = "../open-kioku-core" }
 open-kioku-errors = { version = "4.0.0", path = "../open-kioku-errors" }
 open-kioku-storage = { version = "4.0.0", path = "../open-kioku-storage" }
 
+
+[dev-dependencies]
+serde_json.workspace = true

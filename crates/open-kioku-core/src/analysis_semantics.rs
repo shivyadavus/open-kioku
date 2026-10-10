@@ -279,9 +279,22 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// runner discovers it as one, and a helper, fixture or lifecycle hook otherwise
 /// (`test_file_helper`), which is not validation evidence; a v19 index records every callable of
 /// a test file as a test, so a file of `setUp` and `withTempRepo` helpers reads as validation.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v20";
+/// v21: a `.cs` file is C#, parsed by tree-sitter into namespace, type and member symbols
+/// qualified by namespace and type nesting, and chunked with each symbol's `///` documentation,
+/// read through syntax errors where recovery kept a declaration whole and in place; a v20
+/// index holds `.cs` files as unknown text with no symbols.
+/// v23: a C# 14 extension block, which the grammar reads as a constructor named `extension`,
+/// marks its file as parsed with errors and its members are methods of the declaring class; a
+/// local function in a field initializer's lambda is a symbol; a C# type the pattern fallback
+/// names is read from the first `#if` branch only. A v21 index records none of these. v22 is
+/// taken by an open change.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v23";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
+
+/// Languages parsed into symbols that have no relationship adapter yet: they carry parser
+/// semantics but no language adapter version, since no relationship is resolved for them.
+const PARSED_ONLY_LANGUAGES: [&str; 1] = ["csharp"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AnalysisSemanticsDescriptor {
@@ -310,6 +323,7 @@ impl AnalysisSemanticsDescriptor {
 pub fn current_analysis_semantics_descriptor() -> AnalysisSemanticsDescriptor {
     let parser_semantics = TIER1_LANGUAGES
         .into_iter()
+        .chain(PARSED_ONLY_LANGUAGES)
         .map(|language| (language.to_string(), PARSER_SEMANTICS_VERSION.to_string()))
         .collect();
     let language_adapter_versions = TIER1_LANGUAGES

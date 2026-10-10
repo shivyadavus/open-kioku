@@ -989,7 +989,7 @@ async fn dispatch(
                     engine.context(query, SYMBOL_CONTEXT_SURROUNDING_LINES)?
                 ));
             }
-            Ok(json!(engine.definition(query)?))
+            Ok(json!(engine.definition_report(query)?))
         }
         "get_references" => {
             require_authoritative_relationships(store)?;
@@ -5040,6 +5040,7 @@ mod tests {
                 content_hash: "hash-billing".into(),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             };
             let other_file = File {
                 id: FileId::new("file-routes"),
@@ -5050,6 +5051,7 @@ mod tests {
                 content_hash: "hash-routes".into(),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             };
             let symbol = Symbol {
                 id: SymbolId::new("symbol-publish"),
@@ -5121,6 +5123,7 @@ mod tests {
                 content_hash: "hash-billing-test".into(),
                 is_generated: false,
                 is_vendor: false,
+                generated_by: None,
             };
             let skipped_test = open_kioku_core::TestTarget {
                 id: "test-billing-skipped".into(),
@@ -5479,6 +5482,7 @@ mod tests {
             content_hash: "hash-wide".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         // Comfortably more matching lines than the fetch cap can return.
         let line_count = MAX_MCP_FETCH + 200;
@@ -5582,6 +5586,7 @@ mod tests {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         // The context pack only reads the graph once a primary file is selected, so the
         // task must match indexed text or the refusal is never reached.

@@ -682,6 +682,12 @@ impl Indexer {
             match outcome {
                 Ok((parsed_file, redacted)) => {
                     redacted_files += usize::from(redacted);
+                    if parsed_file.syntax.syntax_errors {
+                        let by_pattern = parsed_file.syntax.symbols.iter().any(|symbol| {
+                            symbol.provenance == open_kioku_core::EvidenceSourceType::Heuristic
+                        });
+                        coverage.record_parsed_with_errors(&file.language, by_pattern);
+                    }
                     rust_type_only_items
                         .extend(parsed_file.syntax.rust_type_only_items.iter().cloned());
                     rust_enum_variants
@@ -763,6 +769,19 @@ impl Indexer {
             tests.extend(file.tests);
             analysis_facts.extend(file.analysis_facts);
         }
+        // A parser reads one file: a C# `partial` type's part that omits its accessibility takes
+        // the one another part of the same project declares. A file under no project file (a
+        // shared project's) is left out of the map and joins every project with a part of its type.
+        let mut msbuild_dirs = HashMap::new();
+        let csharp_projects = files
+            .iter()
+            .filter(|file| file.language == Language::CSharp)
+            .filter_map(|file| {
+                prune::nearest_msbuild_project(&root, &file.path, &mut msbuild_dirs)
+                    .map(|project| (file.id.clone(), project))
+            })
+            .collect::<HashMap<_, _>>();
+        open_kioku_languages::csharp::unify_partial_type_visibility(&mut symbols, &csharp_projects);
         // Extraction applies the runners' default discovery rules; where a pytest
         // configuration changes them, its Python test files fall back to the test-path rule.
         let test_discovery_notes =
@@ -1785,7 +1804,14 @@ impl Indexer {
             // 394 files and a tenth of the files real commits went on to change. Ranking
             // decides what a generated file is worth; the index must still know it exists.
             // .NET build tools name what they write rather than mark it (`*.g.cs`, `*.Designer.cs`).
-            let is_generated = likely_generated(&content) || likely_generated_path(&rel);
+            let generated_by = if likely_generated(&content) {
+                Some(open_kioku_core::GeneratedBy::Banner)
+            } else if likely_generated_path(&rel) {
+                Some(open_kioku_core::GeneratedBy::BuildToolName)
+            } else {
+                None
+            };
+            let is_generated = generated_by.is_some();
             let content_hash = hash_bytes(&bytes);
             ledger.indexed(&language, is_generated);
             files.push(File {
@@ -1797,6 +1823,7 @@ impl Indexer {
                 content_hash,
                 is_generated,
                 is_vendor: false,
+                generated_by,
             });
             if should_emit_progress(scanned_files, 0) {
                 progress.emit_transient(
@@ -5844,6 +5871,7 @@ class Util {
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let symbols = vec![
             Symbol {
@@ -6196,6 +6224,7 @@ mod per_file_failure_tests {
             content_hash: String::new(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         };
         let failure = Indexer::default()
             .parse_file(dir.path(), &file, None)

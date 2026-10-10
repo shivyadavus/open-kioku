@@ -168,6 +168,155 @@ fn test_java_fixture_lifecycle() {
 }
 
 #[test]
+fn test_csharp_fixture_lifecycle() {
+    run_lifecycle_test("csharp-fixture", "Reconcile", "src/Ledger/Reconciler.cs");
+}
+
+/// One MCP `tools/call` against `repo`, returning its `structuredContent`.
+fn mcp_call(repo: &std::path::Path, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments },
+    });
+    let output = Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(repo)
+        .args(["mcp", "serve", "--repo", "."])
+        .write_stdin(request.to_string())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8_lossy(&output);
+    let last = stdout
+        .lines()
+        .rfind(|line| line.starts_with('{'))
+        .expect("MCP answers with JSON");
+    let response: serde_json::Value = serde_json::from_str(last).unwrap();
+    response["result"]["structuredContent"].clone()
+}
+
+/// C# symbols reach every surface an agent reads them through: lexical search, `ok symbol
+/// find`, and MCP `search_symbols` and `get_definition`, qualified by namespace and type, with
+/// both parts of a partial type under one qualified name.
+#[test]
+fn csharp_symbols_are_found_through_search_cli_and_mcp() {
+    let temp = std::env::temp_dir().join(format!("kioku-test-csharp-{}", uuid::Uuid::new_v4()));
+    copy_dir_recursive(&fixture_dir("csharp-fixture"), &temp);
+    for args in [["init", "."], ["index", "."]] {
+        Command::cargo_bin("ok")
+            .unwrap()
+            .current_dir(&temp)
+            .args(args)
+            .assert()
+            .success();
+    }
+
+    // Lexical search reaches the documentation the chunk carries with its symbol.
+    Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["search", "bank statement"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("src/Ledger/Reconciler.cs"));
+
+    // `ok symbol find` lists both declarations of the partial `Ledger`.
+    let found = Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["--json", "symbol", "find", "Ledger"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let found: serde_json::Value = serde_json::from_slice(&found).expect("symbol find is JSON");
+    let parts = found
+        .as_array()
+        .expect("symbol find lists symbols")
+        .iter()
+        .filter(|symbol| symbol["qualified_name"] == "Acme::Ledger::Ledger")
+        .collect::<Vec<_>>();
+    assert_eq!(parts.len(), 2, "{found:#}");
+    assert!(parts
+        .iter()
+        .all(|part| part["kind"] == "class" && part["language"] == "c_sharp"));
+    // `Ledger.Audit.cs` spells no accessibility; the type is public because `Ledger.cs` says so.
+    assert!(
+        parts.iter().all(|part| part["visibility"] == "public"),
+        "{found:#}"
+    );
+
+    let symbols = mcp_call(
+        &temp,
+        "search_symbols",
+        serde_json::json!({ "query": "Reconcile" }),
+    );
+    let reconcile = symbols["symbols"]
+        .as_array()
+        .expect("search_symbols lists symbols")
+        .iter()
+        .find(|symbol| symbol["qualified_name"] == "Acme::Ledger::Reconciler::Reconcile")
+        .unwrap_or_else(|| panic!("Reconcile in {symbols:#}"))
+        .clone();
+    assert_eq!(reconcile["kind"], "method");
+    assert_eq!(reconcile["visibility"], "public");
+    assert_eq!(
+        reconcile["signature"],
+        "public bool Reconcile(Statement statement)"
+    );
+
+    let definition = mcp_call(
+        &temp,
+        "get_definition",
+        serde_json::json!({ "query": "Acme::Ledger::Reconciler::Reconcile" }),
+    );
+    let text = definition.to_string();
+    assert!(text.contains("src/Ledger/Reconciler.cs"), "{definition:#}");
+    assert!(
+        text.contains("Acme::Ledger::Reconciler::Reconcile"),
+        "{definition:#}"
+    );
+    assert!(definition.get("caveats").is_none(), "{definition:#}");
+
+    // A partial type has a definition per part: the one returned says the other exists.
+    let partial = mcp_call(
+        &temp,
+        "get_definition",
+        serde_json::json!({ "query": "Acme::Ledger::Ledger" }),
+    );
+    assert_eq!(
+        partial["qualified_name"], "Acme::Ledger::Ledger",
+        "{partial:#}"
+    );
+    assert_eq!(partial["visibility"], "public", "{partial:#}");
+    assert_eq!(partial["other_definitions"], 1, "{partial:#}");
+    assert!(
+        partial["caveats"][0]
+            .as_str()
+            .is_some_and(|caveat| caveat.contains("1 of them under the same qualified name")),
+        "{partial:#}"
+    );
+    let cli = Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["--json", "symbol", "definition", "Acme::Ledger::Ledger"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli: serde_json::Value = serde_json::from_slice(&cli).expect("symbol def is JSON");
+    assert_eq!(cli["other_definitions"], 1, "{cli:#}");
+
+    std::fs::remove_dir_all(&temp).unwrap();
+}
+
+#[test]
 fn test_mcp_tools_list_snapshot() {
     let temp = std::env::temp_dir().join(format!("kioku-test-mcp-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp).unwrap();

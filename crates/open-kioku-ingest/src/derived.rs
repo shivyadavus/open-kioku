@@ -426,6 +426,7 @@ mod tests {
             content_hash: path.into(),
             is_generated,
             is_vendor: false,
+            generated_by: None,
         }
     }
 

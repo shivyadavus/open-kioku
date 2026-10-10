@@ -484,6 +484,7 @@ mod tests {
             content_hash: id.into(),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 

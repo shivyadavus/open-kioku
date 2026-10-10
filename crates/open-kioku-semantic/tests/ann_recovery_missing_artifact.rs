@@ -38,6 +38,7 @@ fn persist_snapshot(repo: &Path, store: &SqliteStore) {
         content_hash: "missing-ann-recovery-v1".into(),
         is_generated: false,
         is_vendor: false,
+        generated_by: None,
     };
     let chunk = CodeChunk {
         id: "chunk:file_missing_ann_recovery".into(),

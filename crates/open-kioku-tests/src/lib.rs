@@ -2000,6 +2000,7 @@ mod tests {
             content_hash: format!("hash-{id}"),
             is_generated: false,
             is_vendor: false,
+            generated_by: None,
         }
     }
 
