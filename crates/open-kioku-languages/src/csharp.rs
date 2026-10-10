@@ -12,14 +12,29 @@ use std::path::PathBuf;
 /// level). Parts are matched by qualified name, kind and type-parameter count, which C# requires
 /// every part to share, and by `projects`: the directory of the MSBuild project each file is
 /// in. Parts of one partial type are compiled into one assembly, so parts in two projects are
-/// two types even under one name. A file in no project is matched with every other such file;
-/// a project that compiles files outside its directory (`<Compile Include>`) is not read, so
-/// its parts are matched by directory alone. When the parts declare different accessibilities,
-/// which C# rejects, or declare none and still disagree, the type's accessibility is not known
-/// and every part records [`Visibility::Unknown`].
+/// two types even under one name.
+///
+/// A file in no project's directory is read as one a project compiles from outside it, such as
+/// a shared project's (`.shproj`/`.projitems`) file, which every importing project compiles. Such
+/// a part joins the parts of each project that has a part of the type, and, with no project
+/// part of the type at all, the other parts outside a project, which is the whole repository's
+/// type when it holds no project file. A part outside a project that joins several projects
+/// takes their common accessibility, or [`Visibility::Unknown`] when they differ. Project files
+/// are not read, so a file a project compiles from inside another project's directory is
+/// matched with that other project.
+///
+/// When the parts declare different accessibilities, which C# rejects, or declare none and
+/// still disagree, the type's accessibility is not known and every part records
+/// [`Visibility::Unknown`].
 pub fn unify_partial_type_visibility(symbols: &mut [Symbol], projects: &HashMap<FileId, PathBuf>) {
-    type PartKey = (Option<PathBuf>, String, bool, usize);
-    let mut parts: BTreeMap<PartKey, Vec<usize>> = BTreeMap::new();
+    /// One type's parts: by the project each file is in, and outside any project.
+    #[derive(Default)]
+    struct Parts<'a> {
+        in_project: BTreeMap<&'a PathBuf, Vec<usize>>,
+        outside: Vec<usize>,
+    }
+    type TypeKey = (String, bool, usize);
+    let mut types: BTreeMap<TypeKey, Parts<'_>> = BTreeMap::new();
     for (index, symbol) in symbols.iter().enumerate() {
         if symbol.language != Language::CSharp
             || !matches!(symbol.kind, SymbolKind::Class | SymbolKind::Interface)
@@ -29,46 +44,82 @@ pub fn unify_partial_type_visibility(symbols: &mut [Symbol], projects: &HashMap<
         let Some(header) = symbol.signature.as_deref().and_then(TypeHeader::read) else {
             continue;
         };
-        if header.partial {
-            parts
-                .entry((
-                    projects.get(&symbol.file_id).cloned(),
-                    symbol.qualified_name.clone(),
-                    symbol.kind == SymbolKind::Interface,
-                    header.arity,
-                ))
-                .or_default()
-                .push(index);
+        if !header.partial {
+            continue;
+        }
+        let parts = types
+            .entry((
+                symbol.qualified_name.clone(),
+                symbol.kind == SymbolKind::Interface,
+                header.arity,
+            ))
+            .or_default();
+        match projects.get(&symbol.file_id) {
+            Some(project) => parts.in_project.entry(project).or_default().push(index),
+            None => parts.outside.push(index),
         }
     }
-    for indices in parts.values().filter(|indices| indices.len() > 1) {
-        let declared = indices
-            .iter()
-            .filter_map(|&index| {
-                symbols[index]
-                    .signature
-                    .as_deref()
-                    .and_then(TypeHeader::read)
-                    .and_then(|header| header.declared)
-            })
-            .collect::<Vec<_>>();
-        let unified = match declared.split_first() {
-            Some((first, rest)) if rest.iter().all(|other| other == first) => *first,
-            Some(_) => Visibility::Unknown,
-            None => {
-                let first = symbols[indices[0]].visibility;
-                if indices
-                    .iter()
-                    .all(|&index| symbols[index].visibility == first)
-                {
-                    first
+    // Every group is read from the parsed visibilities before any is written, so a part outside
+    // a project that joins several groups cannot carry one group's answer into the next.
+    let mut unified: Vec<(usize, Visibility)> = Vec::new();
+    for parts in types.values() {
+        let groups = if parts.in_project.is_empty() {
+            vec![parts.outside.clone()]
+        } else {
+            parts
+                .in_project
+                .values()
+                .map(|indices| [indices.as_slice(), parts.outside.as_slice()].concat())
+                .collect()
+        };
+        let mut outside: Option<Visibility> = None;
+        for group in groups.iter().filter(|group| group.len() > 1) {
+            let visibility = group_visibility(symbols, group);
+            for &index in group {
+                if parts.outside.contains(&index) {
+                    outside = Some(match outside {
+                        Some(seen) if seen != visibility => Visibility::Unknown,
+                        _ => visibility,
+                    });
                 } else {
-                    Visibility::Unknown
+                    unified.push((index, visibility));
                 }
             }
-        };
-        for &index in indices {
-            symbols[index].visibility = unified;
+        }
+        if let Some(visibility) = outside {
+            unified.extend(parts.outside.iter().map(|&index| (index, visibility)));
+        }
+    }
+    for (index, visibility) in unified {
+        symbols[index].visibility = visibility;
+    }
+}
+
+/// The accessibility one assembly's parts of a partial type give it.
+fn group_visibility(symbols: &[Symbol], group: &[usize]) -> Visibility {
+    let declared = group
+        .iter()
+        .filter_map(|&index| {
+            symbols[index]
+                .signature
+                .as_deref()
+                .and_then(TypeHeader::read)
+                .and_then(|header| header.declared)
+        })
+        .collect::<Vec<_>>();
+    match declared.split_first() {
+        Some((first, rest)) if rest.iter().all(|other| other == first) => *first,
+        Some(_) => Visibility::Unknown,
+        None => {
+            let first = symbols[group[0]].visibility;
+            if group
+                .iter()
+                .all(|&index| symbols[index].visibility == first)
+            {
+                first
+            } else {
+                Visibility::Unknown
+            }
         }
     }
 }
@@ -295,6 +346,154 @@ mod tests {
         ]);
         unify_partial_type_visibility(&mut symbols, &projects);
         assert_eq!(symbols[1].visibility, Visibility::Public);
+    }
+
+    /// A shared project's file sits under no project file; the project importing it compiles
+    /// the shared part and its own part into one type.
+    #[test]
+    fn a_shared_project_part_joins_the_project_that_imports_it() {
+        let mut symbols = vec![
+            part(
+                "shared",
+                "Acme::Ledger::Entry",
+                "public partial class Entry",
+                Visibility::Public,
+            ),
+            part(
+                "app",
+                "Acme::Ledger::Entry",
+                "partial class Entry",
+                Visibility::Crate,
+            ),
+        ];
+        let projects = HashMap::from([(FileId::new("app"), PathBuf::from("App"))]);
+        unify_partial_type_visibility(&mut symbols, &projects);
+        assert_eq!(symbols[0].visibility, Visibility::Public);
+        assert_eq!(symbols[1].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn a_part_outside_a_project_is_read_with_each_project_it_joins() {
+        // The shared part declares `internal`: with the app's `public` part that is C#'s
+        // conflict, so the app's type is unknown; the library's part omits its accessibility,
+        // so the library's type is internal. The shared part is in both, and they differ.
+        let mut conflicting = vec![
+            part(
+                "shared",
+                "Acme::Ledger::Entry",
+                "internal partial class Entry",
+                Visibility::Crate,
+            ),
+            part(
+                "app",
+                "Acme::Ledger::Entry",
+                "public partial class Entry",
+                Visibility::Public,
+            ),
+            part(
+                "lib",
+                "Acme::Ledger::Entry",
+                "partial class Entry",
+                Visibility::Crate,
+            ),
+        ];
+        let projects = HashMap::from([
+            (FileId::new("app"), PathBuf::from("App")),
+            (FileId::new("lib"), PathBuf::from("Lib")),
+        ]);
+        unify_partial_type_visibility(&mut conflicting, &projects);
+        let visibility = |symbols: &[Symbol]| {
+            symbols
+                .iter()
+                .map(|symbol| symbol.visibility)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            visibility(&conflicting),
+            vec![Visibility::Unknown, Visibility::Unknown, Visibility::Crate]
+        );
+
+        // The shared part omits its accessibility: the app's type is public, the library's
+        // internal, and the one shared declaration is both.
+        let mut differing = vec![
+            part(
+                "shared",
+                "Acme::Ledger::Entry",
+                "partial class Entry",
+                Visibility::Crate,
+            ),
+            part(
+                "app",
+                "Acme::Ledger::Entry",
+                "public partial class Entry",
+                Visibility::Public,
+            ),
+            part(
+                "lib",
+                "Acme::Ledger::Entry",
+                "partial class Entry",
+                Visibility::Crate,
+            ),
+        ];
+        unify_partial_type_visibility(&mut differing, &projects);
+        assert_eq!(
+            visibility(&differing),
+            vec![Visibility::Unknown, Visibility::Public, Visibility::Crate]
+        );
+
+        // Both projects give the type one accessibility: so does the shared part.
+        let mut agreeing = vec![
+            part(
+                "shared",
+                "Acme::Ledger::Entry",
+                "partial class Entry",
+                Visibility::Crate,
+            ),
+            part(
+                "app",
+                "Acme::Ledger::Entry",
+                "public partial class Entry",
+                Visibility::Public,
+            ),
+            part(
+                "lib",
+                "Acme::Ledger::Entry",
+                "public partial class Entry",
+                Visibility::Public,
+            ),
+        ];
+        unify_partial_type_visibility(&mut agreeing, &projects);
+        assert_eq!(visibility(&agreeing), vec![Visibility::Public; 3]);
+    }
+
+    /// With no project file in the repository every part is outside a project, and the parts of
+    /// a type are matched across the repository, as before parts were scoped by project.
+    #[test]
+    fn without_project_files_parts_are_matched_across_the_repository() {
+        let mut symbols = vec![
+            part(
+                "a",
+                "Acme::Ledger::Entry",
+                "public partial class Entry",
+                Visibility::Public,
+            ),
+            part(
+                "b",
+                "Acme::Ledger::Entry",
+                "partial class Entry",
+                Visibility::Crate,
+            ),
+            part(
+                "c",
+                "Acme::Ledger::Entry",
+                "partial class Entry",
+                Visibility::Crate,
+            ),
+        ];
+        unify_partial_type_visibility(&mut symbols, &HashMap::new());
+        assert!(symbols
+            .iter()
+            .all(|symbol| symbol.visibility == Visibility::Public));
     }
 
     #[test]

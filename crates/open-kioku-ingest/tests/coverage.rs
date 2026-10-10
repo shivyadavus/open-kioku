@@ -1972,6 +1972,62 @@ fn csharp_partial_parts_are_unified_within_a_project_only() {
     );
 }
 
+/// A shared project's files sit beside its `.projitems`, under no project file, and compile
+/// into the project that imports it: the importing project's part takes the accessibility the
+/// shared part declares.
+#[test]
+fn csharp_shared_project_part_joins_the_importing_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "Shared/Ledger.Shared.projitems",
+        "<Project>\n  <ItemGroup>\n    <Compile Include=\"$(MSBuildThisFileDirectory)Entry.cs\" />\n  </ItemGroup>\n</Project>\n",
+    );
+    write(
+        root,
+        "Shared/Entry.cs",
+        "namespace Acme.Ledger\n{\n    public partial class Entry { }\n}\n",
+    );
+    write(
+        root,
+        "App/App.csproj",
+        "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <Import Project=\"..\\Shared\\Ledger.Shared.projitems\" Label=\"Shared\" />\n</Project>\n",
+    );
+    write(
+        root,
+        "App/Entry.Posting.cs",
+        "namespace Acme.Ledger\n{\n    partial class Entry { }\n}\n",
+    );
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let visibility = |path: &str| {
+        let file = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == Path::new(path))
+            .unwrap_or_else(|| panic!("{path} indexed"));
+        snapshot
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.file_id == file.id && symbol.qualified_name == "Acme::Ledger::Entry"
+            })
+            .unwrap()
+            .visibility
+    };
+    assert_eq!(
+        visibility("Shared/Entry.cs"),
+        open_kioku_core::Visibility::Public
+    );
+    assert_eq!(
+        visibility("App/Entry.Posting.cs"),
+        open_kioku_core::Visibility::Public
+    );
+}
+
 fn write(root: &Path, path: &str, content: &str) {
     let path = root.join(path);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

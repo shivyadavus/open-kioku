@@ -770,7 +770,8 @@ impl Indexer {
             analysis_facts.extend(file.analysis_facts);
         }
         // A parser reads one file: a C# `partial` type's part that omits its accessibility takes
-        // the one another part of the same project declares.
+        // the one another part of the same project declares. A file under no project file (a
+        // shared project's) is left out of the map and joins every project with a part of its type.
         let mut msbuild_dirs = HashMap::new();
         let csharp_projects = files
             .iter()
