@@ -776,18 +776,28 @@ impl Indexer {
             tests.extend(file.tests);
             analysis_facts.extend(file.analysis_facts);
         }
+        use crate::project_model::ProjectModelDiscovery;
+        // The manifest walks skip what discovery skips, `[index] keep_dirs` included.
+        let pruner = prune::DiscoveryPruner::new(&root, config)?;
+        let project_model = open_kioku_semantic_model::ProjectModel::discover_in(&pruner);
         // A parser reads one file: a C# `partial` type's part that omits its accessibility takes
-        // the one another part of the same project declares. A file under no project file (a
-        // shared project's) is left out of the map and joins every project with a part of its type.
+        // the one another part of the same project declares. The project is the one the project
+        // model says compiles the file (#681); a file several projects compile (a linked or
+        // shared project's file) is left out of the map and joins every project with a part of
+        // its type. A file no project file the index read compiles is placed by the nearest
+        // directory holding one, as in a repository whose project files cannot be read.
+        let csharp_owners = csharp_imports::csharp_file_projects(&project_model.dotnet, &files);
         let mut msbuild_dirs = HashMap::new();
         let csharp_projects = files
             .iter()
             .filter(|file| file.language == Language::CSharp)
-            .filter_map(|file| {
-                prune::nearest_msbuild_project(&root, &file.path, &mut msbuild_dirs)
-                    .map(|project| (file.id.clone(), project))
+            .filter_map(|file| match csharp_owners.get(&file.id) {
+                Some(project) => project.clone().map(|project| (file.id.clone(), project)),
+                None => prune::nearest_msbuild_project(&root, &file.path, &mut msbuild_dirs)
+                    .map(|project| (file.id.clone(), project)),
             })
             .collect::<HashMap<_, _>>();
+        drop(csharp_owners);
         open_kioku_languages::csharp::unify_partial_type_visibility(&mut symbols, &csharp_projects);
         // Extraction applies the runners' default discovery rules; where a pytest
         // configuration changes them, its Python test files fall back to the test-path rule.
@@ -808,10 +818,6 @@ impl Indexer {
                 .nodes_added(files.len() + symbols.len() + chunks.len() + tests.len()),
         );
 
-        use crate::project_model::ProjectModelDiscovery;
-        // The manifest walks skip what discovery skips, `[index] keep_dirs` included.
-        let pruner = prune::DiscoveryPruner::new(&root, config)?;
-        let project_model = open_kioku_semantic_model::ProjectModel::discover_in(&pruner);
         analysis_facts.extend(cargo_facts::cargo_manifest_facts(&project_model, &files));
         let mut import_registry = imports::ImportRegistry::default();
         let mut file_map: imports::FileMap = HashMap::new();

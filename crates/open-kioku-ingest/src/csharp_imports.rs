@@ -47,7 +47,7 @@ use open_kioku_semantic_model::{
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// Prefix of every fact this resolver writes, shared with the generic import resolver: the
@@ -138,6 +138,60 @@ pub(crate) fn resolve_csharp_imports(
     report.quality_notes.sort();
     report.quality_notes.dedup();
     report
+}
+
+/// The project file each C# file of `files` is compiled into, by the projects' default glob and
+/// `Compile` items (see [`file_owners`]): `Some` for a file one project compiles, `None` for a
+/// file several compile (a linked or shared file). A file no project compiles is left out.
+///
+/// A `partial` type's parts are one type only within one assembly, so this is what groups them
+/// (`open_kioku_languages::csharp::unify_partial_type_visibility`), wherever the files sit.
+pub(crate) fn csharp_file_projects(
+    model: &DotnetModel,
+    files: &[File],
+) -> HashMap<FileId, Option<PathBuf>> {
+    if model.projects.is_empty() {
+        return HashMap::new();
+    }
+    let projects = read_projects(model);
+    files
+        .iter()
+        .filter(|file| file.language == Language::CSharp)
+        .filter_map(|file| {
+            let project = match file_owners(&projects, &slash(&file.path)).as_slice() {
+                [] => return None,
+                [only] => Some(projects[*only].model.project_file.clone()),
+                _ => None,
+            };
+            Some((file.id.clone(), project))
+        })
+        .collect()
+}
+
+/// The model's project files, with their `Compile` patterns read; references, friends and
+/// `global using` directives are filled in by [`Index::build`].
+fn read_projects(model: &DotnetModel) -> Vec<Project<'_>> {
+    model
+        .projects
+        .iter()
+        .map(|project| Project {
+            model: project,
+            dir: slash(project.project_file.parent().unwrap_or(Path::new(""))),
+            include: glob_set(&project.compile_include),
+            remove: glob_set(&project.compile_remove),
+            conditional_compile: glob_set(
+                &[
+                    project.conditional_compile_include.as_slice(),
+                    project.conditional_compile_remove.as_slice(),
+                ]
+                .concat(),
+            ),
+            friends: project.internals_visible_to.iter().cloned().collect(),
+            visible: BTreeSet::new(),
+            conditionally_visible: BTreeSet::new(),
+            globals: project_file_globals(project),
+        })
+        .collect()
 }
 
 /// One project file, with what file ownership and visibility need.
@@ -262,27 +316,7 @@ impl<'a> Index<'a> {
         symbols: &'a [Symbol],
         names: &'a HashMap<FileId, CSharpNameFacts>,
     ) -> Self {
-        let mut projects = model
-            .projects
-            .iter()
-            .map(|project| Project {
-                model: project,
-                dir: slash(project.project_file.parent().unwrap_or(Path::new(""))),
-                include: glob_set(&project.compile_include),
-                remove: glob_set(&project.compile_remove),
-                conditional_compile: glob_set(
-                    &[
-                        project.conditional_compile_include.as_slice(),
-                        project.conditional_compile_remove.as_slice(),
-                    ]
-                    .concat(),
-                ),
-                friends: project.internals_visible_to.iter().cloned().collect(),
-                visible: BTreeSet::new(),
-                conditionally_visible: BTreeSet::new(),
-                globals: project_file_globals(project),
-            })
-            .collect::<Vec<_>>();
+        let mut projects = read_projects(model);
         let by_path = projects
             .iter()
             .enumerate()
@@ -2094,7 +2128,7 @@ fn slash(path: &Path) -> String {
 mod tests {
     use crate::{IndexSnapshot, Indexer};
     use open_kioku_config::OkConfig;
-    use open_kioku_core::{Confidence, GraphEdgeType, GraphNodeType, IndexMode};
+    use open_kioku_core::{Confidence, GraphEdgeType, GraphNodeType, IndexMode, Visibility};
 
     const SDK: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n</Project>\n";
 
@@ -2964,6 +2998,58 @@ mod tests {
                     1,
                     false,
                     "csharp-using-namespace"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_partial_types_parts_are_grouped_by_the_project_compiling_them() {
+        // The ledger project compiles a part that sits in the reports project's directory, which
+        // removes it; the reports project's own `Book` is another type.
+        let snapshot = index(&[
+            (
+                "src/Ledger/Ledger.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <Compile Include=\"../Reports/Shared/Book.Audit.cs\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            (
+                "src/Ledger/Book.cs",
+                "namespace Acme.Ledger;\n\npublic partial class Book { }\n",
+            ),
+            (
+                "src/Reports/Reports.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <Compile Remove=\"Shared/**\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            (
+                "src/Reports/Shared/Book.Audit.cs",
+                "namespace Acme.Ledger;\n\npartial class Book { }\n",
+            ),
+            (
+                "src/Reports/Book.cs",
+                "namespace Acme.Ledger;\n\npartial class Book { }\n",
+            ),
+            (
+                "src/Reports/Book.Totals.cs",
+                "namespace Acme.Ledger;\n\npartial class Book { }\n",
+            ),
+        ]);
+        let mut parts = snapshot
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.qualified_name == "Acme::Ledger::Book")
+            .map(|symbol| (path_of(&snapshot, &symbol.file_id), symbol.visibility))
+            .collect::<Vec<_>>();
+        parts.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            parts,
+            vec![
+                ("src/Ledger/Book.cs".to_string(), Visibility::Public),
+                ("src/Reports/Book.Totals.cs".to_string(), Visibility::Crate),
+                ("src/Reports/Book.cs".to_string(), Visibility::Crate),
+                // Its directory is the reports project's, but the ledger project compiles it.
+                (
+                    "src/Reports/Shared/Book.Audit.cs".to_string(),
+                    Visibility::Public
                 ),
             ]
         );

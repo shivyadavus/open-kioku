@@ -33,7 +33,8 @@ pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v2";
 /// `Directory.Build.props` and `Directory.Packages.props` above them) and solutions
 /// (`.sln`, `.slnx`): which project compiles each C# file, the projects each one
 /// references, its packages and the `global using` directives it declares (#681). v6
-/// read none.
+/// read none, and matched the parts of a C# `partial` type by the nearest directory holding a
+/// project file, not by the project that compiles each.
 pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v7";
 /// v3: a Rust `use` path inside the importing file's own crate resolves through that crate's
 /// declared module tree, so its `IMPORTS` edge names the file declaring the module or the item;
