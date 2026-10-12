@@ -703,6 +703,23 @@ fn is_test_dir_segment(segment: &str) -> bool {
         || lower.ends_with("-spec")
         || lower.ends_with("_spec")
         || has_camel_test_suffix(segment)
+        || is_dotted_test_project(segment)
+}
+
+/// `Acme.Ledger.Tests`, `Acme.Ledger.UnitTests`, `Acme.Specs`: a .NET test project's directory,
+/// named `<Project>.<Suffix>` after the project it tests. Unlike a `-tests` crate or package,
+/// which may be product code, a dotted test suffix names the test project by convention. Only
+/// the last dotted part counts, and only a test word: `Acme.Testing` is a library of test
+/// doubles that ships, and `Acme.Tests.Shared` is judged by its own name.
+fn is_dotted_test_project(segment: &str) -> bool {
+    let Some((project, suffix)) = segment.rsplit_once('.') else {
+        return false;
+    };
+    !project.is_empty()
+        && (matches!(
+            suffix.to_ascii_lowercase().as_str(),
+            "test" | "tests" | "spec" | "specs"
+        ) || has_camel_test_suffix(suffix))
 }
 
 fn is_test_file_name(name: &str) -> bool {
@@ -2623,6 +2640,9 @@ pub enum TestTargetOrigin {
     RegistrationCall,
     /// A registration call the runner will not execute: `test.skip`, `it.todo`, `test.failing`.
     DisabledRegistrationCall,
+    /// A declared test its runner skips: an xUnit `[Fact(Skip = "..")]`, or an NUnit or MSTest
+    /// test marked `[Ignore]`. Test code by provenance, but it validates nothing.
+    DisabledSymbol,
 }
 
 /// Why an indexed [`TestTarget`] cannot stand as validation evidence. Surfaces that withhold
@@ -2633,7 +2653,8 @@ pub enum TestTargetOrigin {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum TestExclusionReason {
-    /// A registration the runner will not execute: `test.skip`, `it.todo`, `test.failing`.
+    /// A test the runner will not execute: a `test.skip`, `it.todo` or `test.failing`
+    /// registration, or a C# `[Fact(Skip = "..")]` or `[Ignore]` test.
     Disabled,
     /// A test-file callable that matches no default runner discovery rule: usually a helper,
     /// fixture or lifecycle hook. Runner configuration is not read, so a test a configured or
@@ -2655,10 +2676,10 @@ impl TestExclusionReason {
     pub fn remedy(self) -> &'static str {
         match self {
             Self::Disabled => {
-                "Enable the skipped tests (`test.skip`, `it.todo`, `test.failing`) before relying on validation recommendations."
+                "Enable the skipped tests (`test.skip`, `it.todo`, `test.failing`, `[Fact(Skip = ..)]`, `[Ignore]`) before relying on validation recommendations."
             }
             Self::Helper => {
-                "If your test runner is configured to collect these callables, run them yourself: runner configuration is not read. Otherwise add tests that match a default discovery rule (`#[test]`, `@Test`, `def test_*`, `func TestX`, `test(..)`/`it(..)`)."
+                "If your test runner is configured to collect these callables, run them yourself: runner configuration is not read. Otherwise add tests that match a default discovery rule (`#[test]`, `@Test`, `def test_*`, `func TestX`, `test(..)`/`it(..)`, `[Fact]`/`[Test]`/`[TestMethod]`)."
             }
         }
     }
@@ -2668,7 +2689,7 @@ impl TestExclusionReason {
     pub fn tier_justification(self) -> &'static str {
         match self {
             Self::Disabled => {
-                "the runner skips this test (`skip`, `todo`, `failing`), so running it validates nothing"
+                "the runner skips this test (`skip`, `todo`, `failing`, `Skip =`, `[Ignore]`), so running it validates nothing"
             }
             Self::Helper => {
                 "this test-file callable matches no default runner discovery rule (runner configuration is not read), so it is not counted as validation"
@@ -2773,7 +2794,9 @@ impl TestTarget {
     /// Why this target cannot stand as validation evidence, or `None` when it can.
     pub fn validation_exclusion(&self) -> Option<TestExclusionReason> {
         match self.origin {
-            TestTargetOrigin::DisabledRegistrationCall => Some(TestExclusionReason::Disabled),
+            TestTargetOrigin::DisabledRegistrationCall | TestTargetOrigin::DisabledSymbol => {
+                Some(TestExclusionReason::Disabled)
+            }
             TestTargetOrigin::TestFileHelper => Some(TestExclusionReason::Helper),
             TestTargetOrigin::Symbol
             | TestTargetOrigin::TestFileSymbol
@@ -2792,6 +2815,7 @@ impl TestTarget {
                 | TestTargetOrigin::TestFileHelper
                 | TestTargetOrigin::RegistrationCall
                 | TestTargetOrigin::DisabledRegistrationCall
+                | TestTargetOrigin::DisabledSymbol
         )
     }
 
@@ -9330,6 +9354,28 @@ mod test_path_tests {
             "spec/models/user_spec.rb",
         ] {
             assert!(is_test_path(path), "{path} should be a test path");
+        }
+    }
+
+    #[test]
+    fn dotnet_test_project_directories_are_tests() {
+        for path in [
+            "src/Acme.Ledger.Tests/Builders/EntryBuilder.cs",
+            "src/Acme.Ledger.UnitTests/Builders.cs",
+            "src/Acme.Ledger.IntegrationTests/Startup.cs",
+            "src/Acme.Ledger.Specs/Posting.cs",
+            "src/acme.ledger.tests/Builders.cs",
+        ] {
+            assert!(is_test_code_path(path), "{path} should be test code");
+        }
+        for path in [
+            "src/Acme.Testing/FakeClock.cs",
+            "src/Acme.Tests.Shared/Clock.cs",
+            "src/Acme.Ledger/Ledger.cs",
+            "src/.Tests/Ledger.cs",
+            "src/Acme.Contest/Score.cs",
+        ] {
+            assert!(!is_test_path(path), "{path} should not be a test path");
         }
     }
 

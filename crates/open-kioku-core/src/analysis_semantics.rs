@@ -286,9 +286,14 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// v23: a C# 14 extension block, which the grammar reads as a constructor named `extension`,
 /// marks its file as parsed with errors and its members are methods of the declaring class; a
 /// local function in a field initializer's lambda is a symbol; a C# type the pattern fallback
-/// names is read from the first `#if` branch only. A v21 index records none of these. v22 is
-/// taken by an open change.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v23";
+/// names is read from the first `#if` branch only. A v21 index records none of these. v22 was
+/// left to an open change, which landed as v24.
+/// v24: a C# method xUnit, NUnit or MSTest runs (`[Fact]`, `[Test]`, `[TestMethod]` in a
+/// `[TestClass]`) is a test whose command filters `dotnet test` to it in its project, and a
+/// `<Project>.Tests` directory is a test path; one its runner skips (`Skip =`, `[Ignore]`) is
+/// `disabled_symbol`, and a C# target's id carries its signature, so overloads are distinct. A
+/// v23 index holds every C# callable of a test file as a helper, and none outside one as a test.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v24";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

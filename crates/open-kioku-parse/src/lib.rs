@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use test_discovery::TestFileDiscovery;
 
 mod csharp_fallback;
+pub mod csharp_tests;
 mod test_discovery;
 
 #[derive(Debug, Clone)]
@@ -1199,15 +1200,23 @@ pub fn extract_tests(
 ) -> Vec<TestTarget> {
     let is_test_file = open_kioku_core::is_test_code_path(&file.path.to_string_lossy());
     let lines = content.lines().collect::<Vec<_>>();
-    let discovery = is_test_file.then(|| TestFileDiscovery::new(file, &lines, symbols));
+    let csharp = (file.language == Language::CSharp)
+        .then(|| csharp_tests::CSharpTests::new(&lines, symbols));
+    let discovery =
+        is_test_file.then(|| TestFileDiscovery::new(file, &lines, symbols, csharp.as_ref()));
     let mut targets = symbols
         .iter()
         .filter(|symbol| {
             // Variables, constants, classes and modules are never targets, in a test file or not.
+            // Outside a test path, a C# test is one by its attribute alone: a test project need
+            // not follow a naming convention, and ingest confirms it from the project file.
             is_test_symbol_kind(&symbol.kind)
                 && (is_test_file
                     || has_test_name_prefix(&symbol.name)
-                    || has_adjacent_test_annotation(&lines, symbol))
+                    || has_adjacent_test_annotation(&lines, symbol)
+                    || csharp.as_ref().is_some_and(|csharp| {
+                        csharp.verdict(symbol) != csharp_tests::Verdict::NotATest
+                    }))
         })
         .map(|symbol| {
             // Every callable of a test file is kept as test code, but only those its runner
@@ -1221,7 +1230,18 @@ pub fn extract_tests(
                 Some(_) => open_kioku_core::TestTargetOrigin::TestFileHelper,
                 None => open_kioku_core::TestTargetOrigin::Symbol,
             };
-            symbol_target(file, symbol, origin, build_hint)
+            match &csharp {
+                Some(csharp) => {
+                    // A test its runner skips is disabled, in a test file or not.
+                    let origin = if csharp.verdict(symbol) == csharp_tests::Verdict::Skipped {
+                        open_kioku_core::TestTargetOrigin::DisabledSymbol
+                    } else {
+                        origin
+                    };
+                    csharp_target(file, csharp, symbol, origin)
+                }
+                None => symbol_target(file, symbol, origin, build_hint),
+            }
         })
         .collect::<Vec<_>>();
     // Most JavaScript and TypeScript tests are calls, not declarations, so they have no symbol.
@@ -1238,6 +1258,7 @@ pub fn extract_tests(
 const SYMBOL_TEST_REASON: &str = "test-like path, annotation, or naming convention";
 const HELPER_REASON: &str =
     "callable in a test-path file matching no default runner discovery rule";
+const DISABLED_SYMBOL_REASON: &str = "test its runner skips (`Skip =`, `[Ignore]`)";
 
 fn symbol_target(
     file: &File,
@@ -1246,10 +1267,65 @@ fn symbol_target(
     build_hint: Option<&str>,
 ) -> TestTarget {
     let id = stable_id(&format!("test:{}:{}", file.path.display(), symbol.name));
+    let command = recommended_command(&file.language, &file.path.to_string_lossy(), build_hint);
+    test_target(file, symbol, origin, id, command)
+}
+
+/// A C# target is identified by its qualified name and signature: one test file often declares a
+/// method of the same name in each of several nested classes (`WhenPosting.Rejects`,
+/// `WhenVoiding.Rejects`), and a test may overload a helper (`Posts()` beside `Posts(int)`). A
+/// test's command filters `dotnet test` to it; a helper's runs the project, since it selects no
+/// test of its own. Ingest scopes both to the test project.
+fn csharp_target(
+    file: &File,
+    csharp: &csharp_tests::CSharpTests<'_>,
+    symbol: &Symbol,
+    origin: open_kioku_core::TestTargetOrigin,
+) -> TestTarget {
+    let id = stable_id(&format!(
+        "test:{}:{}:{}",
+        file.path.display(),
+        symbol.qualified_name,
+        symbol.signature.as_deref().unwrap_or_default()
+    ));
+    let command = if origin == open_kioku_core::TestTargetOrigin::TestFileHelper {
+        csharp_tests::PROJECT_COMMAND.to_string()
+    } else {
+        csharp.command(symbol)
+    };
+    let mut target = test_target(file, symbol, origin, id, Some(command));
+    // A method of a file read through syntax errors is what recovery left whole: still a test
+    // its runner discovers, but no stronger than the medium-confidence symbol it rests on.
+    if target.counts_as_validation_evidence() && symbol.confidence != Confidence::High {
+        target.confidence = Confidence::Medium;
+        target.reason = RECOVERED_CSHARP_TEST_REASON.into();
+        target.score_breakdown = vec![ScoreComponent::single(
+            "indexed_test_confidence",
+            Confidence::Medium.score(),
+            target.evidence_refs.clone(),
+            RECOVERED_CSHARP_TEST_REASON,
+        )];
+    }
+    target
+}
+
+const RECOVERED_CSHARP_TEST_REASON: &str =
+    "test attribute on a method of a C# file read through syntax errors";
+
+fn test_target(
+    file: &File,
+    symbol: &Symbol,
+    origin: open_kioku_core::TestTargetOrigin,
+    id: String,
+    command: Option<String>,
+) -> TestTarget {
     // A helper is test code, not a test, so it is the weakest target there is.
     let (confidence, reason) = match origin {
         open_kioku_core::TestTargetOrigin::TestFileSymbol => (Confidence::High, SYMBOL_TEST_REASON),
         open_kioku_core::TestTargetOrigin::TestFileHelper => (Confidence::Low, HELPER_REASON),
+        open_kioku_core::TestTargetOrigin::DisabledSymbol => {
+            (Confidence::Low, DISABLED_SYMBOL_REASON)
+        }
         _ => (Confidence::Medium, SYMBOL_TEST_REASON),
     };
     TestTarget {
@@ -1259,7 +1335,7 @@ fn symbol_target(
         name: symbol.name.clone(),
         file_id: file.id.clone(),
         range: symbol.range.clone(),
-        command: recommended_command(&file.language, &file.path.to_string_lossy(), build_hint),
+        command,
         confidence,
         reason: reason.into(),
         evidence_refs: vec![id.clone()],
@@ -2032,6 +2108,582 @@ endpoint = "https://orders.example.com/v1/orders"
         // A file read whole keeps tree-sitter's symbols alone.
         let whole = HeuristicParser.parse_with_hint(&file, "namespace Acme;\n", None);
         assert_eq!(whole.syntax.symbols.len(), 1);
+    }
+
+    /// Each C# test target of `src` at `path` as `(name, origin, command)`, in source order.
+    fn csharp_targets(
+        path: &str,
+        src: &str,
+    ) -> Vec<(String, open_kioku_core::TestTargetOrigin, String)> {
+        let file = file_at(path, Language::CSharp);
+        let symbols = extract_symbols(&file, src);
+        let mut tests = extract_tests(&file, src, &symbols, None);
+        tests.sort_by_key(|test| test.range.as_ref().map(|range| range.start));
+        tests
+            .into_iter()
+            .map(|test| (test.name, test.origin, test.command.unwrap_or_default()))
+            .collect()
+    }
+
+    fn csharp_filter(name: &str) -> String {
+        super::csharp_tests::test_command(&format!("FullyQualifiedName~{name}"))
+    }
+
+    /// xUnit runs `[Fact]` and `[Theory]` methods, however the attribute is spelled; the class
+    /// constructor, `IAsyncLifetime` and `IDisposable` methods are its setup and teardown, and a
+    /// test of an abstract class runs under each class deriving from it.
+    #[test]
+    fn xunit_runs_fact_and_theory_methods_not_lifecycle_or_helpers() {
+        use open_kioku_core::TestTargetOrigin::{TestFileHelper, TestFileSymbol};
+        let src = r#"using Check = Xunit.FactAttribute;
+
+namespace Acme.Ledger.Tests;
+
+public class EntryTests : IAsyncLifetime, IDisposable
+{
+    public EntryTests() { }
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    public Task DisposeAsync() => Task.CompletedTask;
+
+    public void Dispose() { }
+
+    [Fact]
+    public void Posts() { }
+
+    [Theory]
+    [InlineData(1)]
+    [MemberData(nameof(Amounts))]
+    public void Rounds(int value) { }
+
+    [FactAttribute] public void Suffixed() { }
+
+    [Xunit.Fact(DisplayName = "posts [twice]")]
+    public void Qualified() { }
+
+    [Check]
+    public void Aliased() { }
+
+    [SkippableFact, Trait("kind", "slow")]
+    public async Task Derived() { }
+
+    private static Entry MakeEntry() => new Entry();
+
+    public class WhenVoided
+    {
+        [Fact]
+        public void Rejects() { }
+    }
+}
+
+public abstract class LedgerContract
+{
+    [Fact]
+    public void Balances() { }
+}
+"#;
+        assert_eq!(
+            csharp_targets("tests/Acme.Ledger.Tests/EntryTests.cs", src),
+            vec![
+                ("EntryTests".into(), TestFileHelper, "dotnet test".into()),
+                (
+                    "InitializeAsync".into(),
+                    TestFileHelper,
+                    "dotnet test".into()
+                ),
+                ("DisposeAsync".into(), TestFileHelper, "dotnet test".into()),
+                ("Dispose".into(), TestFileHelper, "dotnet test".into()),
+                (
+                    "Posts".into(),
+                    TestFileSymbol,
+                    csharp_filter("Acme.Ledger.Tests.EntryTests.Posts")
+                ),
+                (
+                    "Rounds".into(),
+                    TestFileSymbol,
+                    csharp_filter("Acme.Ledger.Tests.EntryTests.Rounds")
+                ),
+                (
+                    "Suffixed".into(),
+                    TestFileSymbol,
+                    csharp_filter("Acme.Ledger.Tests.EntryTests.Suffixed")
+                ),
+                (
+                    "Qualified".into(),
+                    TestFileSymbol,
+                    csharp_filter("Acme.Ledger.Tests.EntryTests.Qualified")
+                ),
+                (
+                    "Aliased".into(),
+                    TestFileSymbol,
+                    csharp_filter("Acme.Ledger.Tests.EntryTests.Aliased")
+                ),
+                (
+                    "Derived".into(),
+                    TestFileSymbol,
+                    csharp_filter("Acme.Ledger.Tests.EntryTests.Derived")
+                ),
+                ("MakeEntry".into(), TestFileHelper, "dotnet test".into()),
+                (
+                    "Rejects".into(),
+                    TestFileSymbol,
+                    csharp_filter("Acme.Ledger.Tests.EntryTests+WhenVoided.Rejects")
+                ),
+                (
+                    "Balances".into(),
+                    TestFileSymbol,
+                    csharp_filter(".Balances")
+                ),
+            ]
+        );
+    }
+
+    /// NUnit runs `[Test]`, `[TestCase]`, `[TestCaseSource]` and `[Theory]` methods; its setup
+    /// and teardown attributes mark lifecycle methods, which are helpers.
+    #[test]
+    fn nunit_runs_test_and_case_methods_not_setup_or_teardown() {
+        use open_kioku_core::TestTargetOrigin::{TestFileHelper, TestFileSymbol};
+        let src = r#"using NUnit.Framework;
+
+namespace Acme.Ledger.Tests
+{
+    [TestFixture]
+    public class StatementTests
+    {
+        [OneTimeSetUp]
+        public void OpenLedger() { }
+
+        [SetUp]
+        public void Reset() { }
+
+        [Test]
+        public void Totals() { }
+
+        [TestCase(1, 2)]
+        [TestCase(3, 4)]
+        public void Sums(int left, int right) { }
+
+        [TestCaseSource(nameof(Cases))]
+        public void Sourced(int amount) { }
+
+        [Theory]
+        public void Holds(int amount) { }
+
+        [NUnit.Framework.TestAttribute]
+        public void Qualified() { }
+
+        [TearDown]
+        public void Clean() { }
+
+        [OneTimeTearDown]
+        public void CloseLedger() { }
+
+        private static int[] Cases() => new[] { 1 };
+    }
+}
+"#;
+        let names = |origin| {
+            csharp_targets("tests/Ledger/StatementTests.cs", src)
+                .into_iter()
+                .filter(|(_, target_origin, _)| *target_origin == origin)
+                .map(|(name, _, _)| name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(TestFileSymbol),
+            vec!["Totals", "Sums", "Sourced", "Holds", "Qualified"]
+        );
+        assert_eq!(
+            names(TestFileHelper),
+            vec!["OpenLedger", "Reset", "Clean", "CloseLedger", "Cases"]
+        );
+        assert!(csharp_targets("tests/Ledger/StatementTests.cs", src)
+            .iter()
+            .any(|(name, _, command)| name == "Sums"
+                && *command == csharp_filter("Acme.Ledger.Tests.StatementTests.Sums")));
+    }
+
+    /// MSTest runs a `[TestMethod]` or `[DataTestMethod]` only in a `[TestClass]` class, or
+    /// through a class deriving from an abstract one.
+    #[test]
+    fn mstest_runs_test_methods_of_test_classes_only() {
+        use open_kioku_core::TestTargetOrigin::{TestFileHelper, TestFileSymbol};
+        let src = r#"namespace Acme.Ledger.Tests;
+
+[TestClass]
+public sealed class JournalTests
+{
+    [ClassInitialize]
+    public static void Open(TestContext context) { }
+
+    [TestInitialize]
+    public void Reset() { }
+
+    [TestMethod]
+    public void Replays() { }
+
+    [DataTestMethod]
+    [DataRow(1)]
+    [DataRow(2)]
+    public void Rounds(int value) { }
+
+    [TestCleanup]
+    public void Clean() { }
+}
+
+public class Unmarked
+{
+    [TestMethod]
+    public void NeverRuns() { }
+}
+
+public abstract class JournalContract
+{
+    [TestMethod]
+    public void Balances() { }
+}
+"#;
+        assert_eq!(
+            csharp_targets("tests/Ledger/JournalTests.cs", src),
+            vec![
+                ("Open".into(), TestFileHelper, "dotnet test".into()),
+                ("Reset".into(), TestFileHelper, "dotnet test".into()),
+                (
+                    "Replays".into(),
+                    TestFileSymbol,
+                    csharp_filter("Acme.Ledger.Tests.JournalTests.Replays")
+                ),
+                (
+                    "Rounds".into(),
+                    TestFileSymbol,
+                    csharp_filter("Acme.Ledger.Tests.JournalTests.Rounds")
+                ),
+                ("Clean".into(), TestFileHelper, "dotnet test".into()),
+                ("NeverRuns".into(), TestFileHelper, "dotnet test".into()),
+                (
+                    "Balances".into(),
+                    TestFileSymbol,
+                    csharp_filter(".Balances")
+                ),
+            ]
+        );
+    }
+
+    /// A `partial` class may carry `[TestClass]` on a part in another file, so its test methods
+    /// run. A test of a file read through syntax errors rests on a medium-confidence symbol, and
+    /// is no stronger than it.
+    #[test]
+    fn csharp_partial_and_recovered_tests_say_what_they_rest_on() {
+        use open_kioku_core::TestTargetOrigin::TestFileSymbol;
+        let partial = "namespace Acme.Tests;\n\npublic partial class GuardTests\n{\n    [TestMethod]\n    public void Rejects() { }\n}\n";
+        assert_eq!(
+            csharp_targets("tests/Acme.Tests/GuardTests.Array.cs", partial),
+            vec![(
+                "Rejects".into(),
+                TestFileSymbol,
+                csharp_filter("Acme.Tests.GuardTests.Rejects")
+            )]
+        );
+
+        // This grammar version cannot read `async` as a name, which C# allows.
+        let recovered = "namespace Acme.Tests;\npublic class BatchTests\n{\n    [Fact]\n    public void Loads()\n    {\n        Assert.True(Load(async: true));\n    }\n    public bool Load(bool async) => async;\n}\n";
+        let file = file_at("tests/Acme.Tests/BatchTests.cs", Language::CSharp);
+        let symbols = extract_symbols(&file, recovered);
+        assert!(symbols
+            .iter()
+            .all(|symbol| symbol.confidence == Confidence::Medium));
+        let tests = extract_tests(&file, recovered, &symbols, None);
+        let loads = tests.iter().find(|test| test.name == "Loads").unwrap();
+        assert_eq!(loads.origin, TestFileSymbol);
+        assert_eq!(loads.confidence, Confidence::Medium);
+        assert_eq!(loads.reason, super::RECOVERED_CSHARP_TEST_REASON);
+    }
+
+    /// A test its runner skips is disabled: an xUnit `Skip` argument, an NUnit or MSTest
+    /// `[Ignore]` on the method or its class. NUnit's `[Explicit]` runs when a filter names it.
+    #[test]
+    fn csharp_tests_the_runner_skips_are_disabled() {
+        use open_kioku_core::TestTargetOrigin::{DisabledSymbol, TestFileSymbol};
+        let src = r#"namespace Acme.Tests;
+
+public class SkippedTests
+{
+    [Fact(Skip = "flaky")]
+    public void Skipped() { }
+
+    [Theory(DisplayName = "x", Skip = "slow")]
+    [InlineData(1)]
+    public void SkippedTheory(int value) { }
+
+    [Fact(DisplayName = "Skip = not an argument")]
+    public void Named() { }
+
+    [Test]
+    [Ignore("broken")]
+    public void Ignored() { }
+
+    [Test, Explicit]
+    public void ExplicitOnly() { }
+}
+
+[Ignore]
+public class IgnoredSuite
+{
+    [Test]
+    public void Whole() { }
+}
+"#;
+        let file = file_at("tests/Acme.Tests/SkippedTests.cs", Language::CSharp);
+        let symbols = extract_symbols(&file, src);
+        let tests = extract_tests(&file, src, &symbols, None);
+        let origin = |name: &str| {
+            let test = tests.iter().find(|test| test.name == name).unwrap();
+            (
+                test.origin,
+                test.confidence,
+                test.counts_as_validation_evidence(),
+            )
+        };
+        for name in ["Skipped", "SkippedTheory", "Ignored", "Whole"] {
+            assert_eq!(
+                origin(name),
+                (DisabledSymbol, Confidence::Low, false),
+                "{name}"
+            );
+        }
+        for name in ["Named", "ExplicitOnly"] {
+            assert_eq!(origin(name).0, TestFileSymbol, "{name}");
+        }
+    }
+
+    /// NUnit names a parameterized fixture's tests with its arguments
+    /// (`Acme.CurrencyTests("usd").Converts`), so they are filtered by type and method apart.
+    /// A verbatim identifier is filtered without its `@`.
+    #[test]
+    fn csharp_filters_follow_the_names_the_runners_report() {
+        use open_kioku_core::TestTargetOrigin::TestFileSymbol;
+        let src = r#"namespace Acme.Checks;
+
+[TestFixture("usd")]
+[TestFixture("eur")]
+public class CurrencyTests
+{
+    public CurrencyTests(string currency) { }
+
+    [Test]
+    public void Converts() { }
+}
+
+[TestFixture]
+public class PlainTests
+{
+    [Test]
+    public void @event() { }
+}
+"#;
+        let targets = csharp_targets("tests/Acme.Checks/CurrencyTests.cs", src);
+        let command = |name: &str| {
+            targets
+                .iter()
+                .find(|(target, origin, _)| target == name && *origin == TestFileSymbol)
+                .map(|(_, _, command)| command.clone())
+                .unwrap_or_else(|| panic!("{name} in {targets:?}"))
+        };
+        assert_eq!(
+            command("Converts"),
+            super::csharp_tests::test_command(
+                "FullyQualifiedName~Acme.Checks.CurrencyTests&FullyQualifiedName~.Converts"
+            )
+        );
+        assert_eq!(
+            command("@event"),
+            csharp_filter("Acme.Checks.PlainTests.event")
+        );
+    }
+
+    /// A test and a helper overloading its name are two targets: one id would keep only one.
+    #[test]
+    fn csharp_overloads_are_distinct_targets() {
+        use open_kioku_core::TestTargetOrigin::{TestFileHelper, TestFileSymbol};
+        let src = "namespace Acme.Tests;\n\npublic class PostingTests\n{\n    [Test]\n    public void Posts() { }\n\n    public void Posts(int amount) { }\n}\n";
+        let file = file_at("tests/Acme.Tests/PostingTests.cs", Language::CSharp);
+        let symbols = extract_symbols(&file, src);
+        let tests = extract_tests(&file, src, &symbols, None);
+        let posts = tests
+            .iter()
+            .filter(|test| test.name == "Posts")
+            .collect::<Vec<_>>();
+        assert_eq!(posts.len(), 2, "{tests:?}");
+        assert_ne!(posts[0].id, posts[1].id);
+        let mut origins = posts.iter().map(|test| test.origin).collect::<Vec<_>>();
+        origins.sort_by_key(|origin| format!("{origin:?}"));
+        assert_eq!(origins, vec![TestFileHelper, TestFileSymbol]);
+    }
+
+    /// NUnit names a case renamed by `TestName =`, or by a `TestCaseData(..).SetName(..)` of
+    /// the file, under its type, so the method's name selects nothing: such a test is selected
+    /// by its type. A combining strategy alone makes a test.
+    #[test]
+    fn csharp_renamed_nunit_cases_are_selected_by_their_type() {
+        use open_kioku_core::TestTargetOrigin::TestFileSymbol;
+        let src = r#"namespace Acme.Ledger.Tests;
+
+public class NamedCases
+{
+    [TestCase(1, TestName = "Totals one")]
+    [TestCase(2)]
+    public void Renamed(int amount) { }
+
+    [TestCase(1, Description = "TestName = not an argument")]
+    public void Described(int amount) { }
+
+    [TestCaseSource(nameof(Amounts))]
+    public void Sourced(int amount) { }
+
+    private static IEnumerable<TestCaseData> Amounts()
+    {
+        yield return new TestCaseData(1).SetName("Sourced one");
+    }
+
+    [Combinatorial]
+    public void Combined([Values(1, 2)] int amount) { }
+
+    [Pairwise]
+    public void Paired([Values(1, 2)] int amount, [Values("a")] string tag) { }
+}
+"#;
+        let targets = csharp_targets("tests/Acme.Ledger.Tests/NamedCases.cs", src);
+        let command = |name: &str| {
+            targets
+                .iter()
+                .find(|(target, origin, _)| target == name && *origin == TestFileSymbol)
+                .map(|(_, _, command)| command.clone())
+                .unwrap_or_else(|| panic!("{name} in {targets:?}"))
+        };
+        assert_eq!(
+            command("Renamed"),
+            csharp_filter("Acme.Ledger.Tests.NamedCases.")
+        );
+        assert_eq!(
+            command("Sourced"),
+            csharp_filter("Acme.Ledger.Tests.NamedCases.")
+        );
+        assert_eq!(
+            command("Described"),
+            csharp_filter("Acme.Ledger.Tests.NamedCases.Described")
+        );
+        assert_eq!(
+            command("Combined"),
+            csharp_filter("Acme.Ledger.Tests.NamedCases.Combined")
+        );
+        assert_eq!(
+            command("Paired"),
+            csharp_filter("Acme.Ledger.Tests.NamedCases.Paired")
+        );
+    }
+
+    /// A class nested in another is a class of its own to every runner: an abstract or ignored
+    /// outer class changes nothing about it, while a generic outer class leaves it open. A
+    /// conditional xUnit v3 skip leaves the test runnable, and a test declared on its class's
+    /// line is read from its own attribute list.
+    #[test]
+    fn csharp_nested_classes_and_conditional_skips_are_judged_on_their_own() {
+        use open_kioku_core::TestTargetOrigin::{DisabledSymbol, TestFileSymbol};
+        let src = r#"namespace Acme.Ledger.Tests;
+
+public class HoldsTests { [Test] public void Holds() { } }
+
+public abstract class BookScenarios
+{
+    public class WhenEmpty
+    {
+        [Test]
+        public void Totals() { }
+    }
+}
+
+public class Outer<T>
+{
+    public class Inner
+    {
+        [Test]
+        public void Opens() { }
+    }
+}
+
+[Ignore("outer")]
+public class IgnoredOuter
+{
+    public class StillRuns
+    {
+        [Test]
+        public void Runs() { }
+    }
+}
+
+public class Conditional
+{
+    [Fact(Skip = "windows only", SkipUnless = nameof(IsWindows))]
+    public void Sometimes() { }
+
+    [Fact(Skip = "always")]
+    public void Never() { }
+}
+"#;
+        let targets = csharp_targets("tests/Acme.Ledger.Tests/BookTests.cs", src);
+        let target = |name: &str| {
+            targets
+                .iter()
+                .find(|(target, _, _)| target == name)
+                .map(|(_, origin, command)| (*origin, command.clone()))
+                .unwrap_or_else(|| panic!("{name} in {targets:?}"))
+        };
+        assert_eq!(
+            target("Holds"),
+            (
+                TestFileSymbol,
+                csharp_filter("Acme.Ledger.Tests.HoldsTests.Holds")
+            )
+        );
+        assert_eq!(
+            target("Totals"),
+            (
+                TestFileSymbol,
+                csharp_filter("Acme.Ledger.Tests.BookScenarios+WhenEmpty.Totals")
+            )
+        );
+        assert_eq!(target("Opens"), (TestFileSymbol, csharp_filter(".Opens")));
+        assert_eq!(
+            target("Runs"),
+            (
+                TestFileSymbol,
+                csharp_filter("Acme.Ledger.Tests.IgnoredOuter+StillRuns.Runs")
+            )
+        );
+        assert_eq!(target("Sometimes").0, TestFileSymbol);
+        assert_eq!(target("Never").0, DisabledSymbol);
+    }
+
+    /// Outside a test path a C# test is one by its attribute alone, and its helpers are no
+    /// targets at all. Same-named tests of sibling nested classes stay distinct targets.
+    #[test]
+    fn csharp_tests_outside_test_paths_are_matched_by_attribute() {
+        let src = "namespace Acme.Checks;\n\npublic class Balances\n{\n    [Fact]\n    public void Holds() { }\n\n    public void Helper() { }\n\n    public class WhenPosted { [Fact] public void Holds() { } }\n}\n";
+        let file = file_at("src/Acme.Checks/Balances.cs", Language::CSharp);
+        let symbols = extract_symbols(&file, src);
+        let tests = extract_tests(&file, src, &symbols, None);
+        assert_eq!(tests.len(), 2, "{tests:?}");
+        assert!(tests.iter().all(
+            |test| test.origin == open_kioku_core::TestTargetOrigin::Symbol && test.name == "Holds"
+        ));
+        assert_ne!(tests[0].id, tests[1].id);
+        let commands = tests
+            .iter()
+            .map(|test| test.command.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert!(commands.contains(&csharp_filter("Acme.Checks.Balances.Holds")));
+        assert!(commands.contains(&csharp_filter("Acme.Checks.Balances+WhenPosted.Holds")));
     }
 
     #[test]

@@ -465,3 +465,283 @@ fn a_pytest_configuration_that_changes_discovery_keeps_its_tests_and_says_why() 
         "{notes}"
     );
 }
+
+/// xUnit, NUnit and MSTest projects beside a library: each runner's attributed methods are tests
+/// and its lifecycle methods, constructors, fixtures and helpers are not. `BalanceChecks.cs` is
+/// on no test path; its `.csproj` references NUnit and the test SDK, which makes it a test.
+#[test]
+fn csharp_tests_plan_runner_attributed_methods_with_project_scoped_commands() {
+    let xunit = "src/Acme.Ledger.Tests/PostingTests.cs";
+    let fixture = "src/Acme.Ledger.Tests/LedgerFixture.cs";
+    let nunit = "tests/Acme.Ledger.NUnit/PostingCases.cs";
+    let mstest = "tests/Acme.Ledger.MSTest/VoidingSuite.cs";
+    let checks = "checks/Acme.Ledger.Checks/BalanceChecks.cs";
+    let target = |path: &str, name: &str| format!("{path}::{name}");
+    let entries = [
+        (target(fixture, "InitializeAsync"), HELPER),
+        (target(fixture, "DisposeAsync"), HELPER),
+        (target(xunit, "PostingTests"), HELPER),
+        (target(xunit, "Dispose"), HELPER),
+        (target(xunit, "PostCreditRaisesTheBalance"), TEST),
+        (target(xunit, "PostDebitLowersTheBalance"), TEST),
+        (target(xunit, "PostKeepsCreditsAndDebitsApart"), TEST),
+        (target(xunit, "PostBoth"), HELPER),
+        (target(xunit, "VoidRestoresTheBalance"), TEST),
+        (target(nunit, "OpenLedger"), HELPER),
+        (target(nunit, "Reset"), HELPER),
+        (target(nunit, "PostCreditAddsEachCase"), TEST),
+        (target(nunit, "PostDebitBelowZeroIsAllowed"), TEST),
+        (target(nunit, "Clean"), HELPER),
+        (target(mstest, "OpenLedger"), HELPER),
+        (target(mstest, "Reset"), HELPER),
+        (target(mstest, "VoidCreditReversesIt"), TEST),
+        (target(mstest, "VoidDebitReversesIt"), TEST),
+        (target(mstest, "Clean"), HELPER),
+        (target(checks, "BalanceStartsAtZero"), TEST),
+    ];
+    let targets = entries
+        .iter()
+        .map(|(target, origin)| (target.as_str(), *origin))
+        .collect::<Vec<_>>();
+    assert_runner_discovery(
+        "csharp-tests-fixture",
+        &targets,
+        "change Post in Posting to reject zero amounts",
+        "PostCreditRaisesTheBalance",
+    );
+
+    let repo = indexed_copy("csharp-tests-fixture");
+    // `ok tests` names the tests linked to the changed file, each filtered to itself in its own
+    // project, the nested class joined with `+` as the runners report it.
+    let selected = ok_json(
+        repo.path(),
+        &["--json", "tests", "--changed", "src/Acme.Ledger/Posting.cs"],
+    );
+    let commands = selected["tests"]
+        .as_array()
+        .unwrap_or_else(|| panic!("ok tests lists tests: {selected}"))
+        .iter()
+        .map(|test| {
+            (
+                test["name"].as_str().unwrap().to_string(),
+                test["command"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (name, command) in [
+        (
+            "VoidRestoresTheBalance",
+            "dotnet test src/Acme.Ledger.Tests/Acme.Ledger.Tests.csproj --filter \"FullyQualifiedName~Acme.Ledger.Tests.PostingTests+WhenVoided.VoidRestoresTheBalance\" -- RunConfiguration.TreatNoTestsAsError=true",
+        ),
+        (
+            "PostCreditAddsEachCase",
+            "dotnet test tests/Acme.Ledger.NUnit/Acme.Ledger.NUnit.csproj --filter \"FullyQualifiedName~Acme.Ledger.NUnit.PostingCases.PostCreditAddsEachCase\" -- RunConfiguration.TreatNoTestsAsError=true",
+        ),
+    ] {
+        assert_eq!(
+            commands.get(name).map(String::as_str),
+            Some(command),
+            "{commands:?}"
+        );
+    }
+    assert!(!commands.contains_key("PostBoth"), "{commands:?}");
+
+    // `ok verify` against the saved plan names the C# tests it still recommends.
+    let plan = ok_json(
+        repo.path(),
+        &[
+            "plan",
+            "change Post in Posting to reject zero amounts",
+            "--format",
+            "json",
+        ],
+    );
+    let plan_path = repo.path().join("plan.json");
+    std::fs::write(&plan_path, plan.to_string()).unwrap();
+    let verified = ok_json(
+        repo.path(),
+        &[
+            "verify",
+            "--plan",
+            plan_path.to_str().unwrap(),
+            "--changed",
+            "src/Acme.Ledger/Posting.cs",
+            "--format",
+            "json",
+        ],
+    );
+    let recommended = verified["recommended_tests"]
+        .as_array()
+        .unwrap_or_else(|| panic!("verify recommends tests: {verified}"))
+        .iter()
+        .map(|test| test["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    for name in ["PostCreditRaisesTheBalance", "PostCreditAddsEachCase"] {
+        assert!(recommended.contains(&name), "{recommended:?}");
+    }
+    assert!(
+        !recommended
+            .iter()
+            .any(|name| ["PostBoth", "Reset"].contains(name)),
+        "{recommended:?}"
+    );
+}
+
+/// Tests whose runner names them differently from their declaration, and tests the runner
+/// skips or never runs. Each recommended command here was run with `dotnet test` and selects
+/// its test; the guard makes one that matches nothing exit 1 instead of 0.
+///
+/// - A shared specification suite: an abstract base in a project declared
+///   `<IsTestProject>false`, inherited by a test project elsewhere. Scoped to its own project,
+///   its command would run nothing, so it has none, at low confidence.
+/// - A partial class made abstract by another part is filtered by method name.
+/// - A parameterized NUnit fixture is filtered by type and method apart.
+/// - An overload of a test is a distinct target; a verbatim `@event` is filtered as `event`.
+/// - `[Fact(Skip = ..)]` and `[Ignore]` are disabled; NUnit's `[Explicit]` still runs.
+/// - An MSTest method of a partial class no part of which is marked `[TestClass]` is a helper.
+#[test]
+fn csharp_commands_select_the_tests_their_runners_name() {
+    let repo = indexed_copy("csharp-inheritance-fixture");
+    let conn = rusqlite::Connection::open(repo.path().join(".ok/index.sqlite")).unwrap();
+    let mut statement = conn
+        .prepare("SELECT f.path, t.json FROM tests t JOIN files f ON f.id = t.file_id")
+        .unwrap();
+    let mut targets = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(|row| {
+            let (path, target) = row.unwrap();
+            let target: serde_json::Value = serde_json::from_str(&target).unwrap();
+            let file = path.rsplit('/').next().unwrap().to_string();
+            (
+                format!("{file}::{}", target["name"].as_str().unwrap()),
+                target["origin"].as_str().unwrap().to_string(),
+                target["confidence"].as_str().unwrap().to_string(),
+                target["command"].as_str().map(str::to_string),
+            )
+        })
+        .collect::<Vec<_>>();
+    targets.sort();
+    let guard = "-- RunConfiguration.TreatNoTestsAsError=true";
+    let mstest = "tests/Acme.MSTest.Tests/Acme.MSTest.Tests.csproj";
+    let nunit = "tests/Acme.NUnit.Tests/Acme.NUnit.Tests.csproj";
+    let xunit = "tests/Acme.Xunit.Tests/Acme.Xunit.Tests.csproj";
+    let run = |project: &str, filter: &str| {
+        Some(format!(
+            "dotnet test {project} --filter \"FullyQualifiedName~{filter}\" {guard}"
+        ))
+    };
+    let helper = |project: &str| Some(format!("dotnet test {project}"));
+    let row = |target: &str, origin: &str, confidence: &str, command: Option<String>| {
+        (
+            target.to_string(),
+            origin.to_string(),
+            confidence.to_string(),
+            command,
+        )
+    };
+    let mut expected = vec![
+        row(
+            "FixtureTests.cs::@event",
+            TEST,
+            "high",
+            run(nunit, "Acme.NUnitChecks.PostingTests.event"),
+        ),
+        row(
+            "FixtureTests.cs::Converts",
+            TEST,
+            "high",
+            run(
+                nunit,
+                "Acme.NUnitChecks.CurrencyTests&FullyQualifiedName~.Converts",
+            ),
+        ),
+        row(
+            "FixtureTests.cs::CurrencyTests",
+            HELPER,
+            "low",
+            helper(nunit),
+        ),
+        row(
+            "FixtureTests.cs::ExplicitOnly",
+            TEST,
+            "high",
+            run(nunit, "Acme.NUnitChecks.IgnoredTests.ExplicitOnly"),
+        ),
+        row("FixtureTests.cs::Holds", TEST, "high", run(nunit, ".Holds")),
+        row(
+            "FixtureTests.cs::Ignored",
+            "disabled_symbol",
+            "low",
+            run(nunit, "Acme.NUnitChecks.IgnoredTests.Ignored"),
+        ),
+        row(
+            "FixtureTests.cs::Posts",
+            TEST,
+            "high",
+            run(nunit, "Acme.NUnitChecks.PostingTests.Posts"),
+        ),
+        row("FixtureTests.cs::Posts", HELPER, "low", helper(nunit)),
+        row(
+            "InheritedTests.cs::Ignored",
+            "disabled_symbol",
+            "low",
+            run(mstest, "Acme.MSTestChecks.IgnoredSuite.Ignored"),
+        ),
+        row(
+            "InheritedTests.cs::Inherits",
+            TEST,
+            "high",
+            run(mstest, "Acme.MSTestChecks.BaseSuite.Inherits"),
+        ),
+        row(
+            "InheritedTests.cs::Nested",
+            TEST,
+            "high",
+            run(mstest, "Acme.MSTestChecks.Outer+Inner.Nested"),
+        ),
+        row(
+            "InheritedTests.cs::NeverRuns",
+            HELPER,
+            "low",
+            helper(mstest),
+        ),
+        row(
+            "InheritedTests.cs::Rejects",
+            TEST,
+            "high",
+            run(mstest, "Acme.MSTestChecks.GuardTests.Rejects"),
+        ),
+        row("LedgerContractBase.cs::Balances", TEST, "low", None),
+        row(
+            "LedgerTests.cs::Replays",
+            TEST,
+            "high",
+            run(xunit, ".Replays"),
+        ),
+        row(
+            "LedgerTests.cs::Skipped",
+            "disabled_symbol",
+            "low",
+            run(xunit, "Acme.Xunit.SkippedTests.Skipped"),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(targets, expected);
+
+    // The test without a command is disclosed, not silently weaker.
+    let status = ok_json(repo.path(), &["--json", "status", "."]);
+    let notes = status["quality"]["quality_notes"].to_string();
+    assert!(
+        notes.contains(
+            "1 C# test(s) of abstract or generic types sit in projects that run none of them"
+        ),
+        "{notes}"
+    );
+    assert_eq!(
+        status["quality"]["excluded_test_targets"]["disabled"], 3,
+        "{status}"
+    );
+}
