@@ -27,14 +27,67 @@ use std::path::PathBuf;
 /// still disagree, the type's accessibility is not known and every part records
 /// [`Visibility::Unknown`].
 pub fn unify_partial_type_visibility(symbols: &mut [Symbol], projects: &HashMap<FileId, PathBuf>) {
-    /// One type's parts: by the project each file is in, and outside any project.
-    #[derive(Default)]
-    struct Parts<'a> {
-        in_project: BTreeMap<&'a PathBuf, Vec<usize>>,
-        outside: Vec<usize>,
+    let types = partial_types(symbols, projects);
+    // Every group is read from the parsed visibilities before any is written, so a part outside
+    // a project that joins several groups cannot carry one group's answer into the next.
+    let mut unified: Vec<(usize, Visibility)> = Vec::new();
+    for parts in &types {
+        let mut outside: Option<Visibility> = None;
+        for group in parts.assemblies().iter().filter(|group| group.len() > 1) {
+            let visibility = group_visibility(symbols, group);
+            for &index in group {
+                if parts.outside.contains(&index) {
+                    outside = Some(match outside {
+                        Some(seen) if seen != visibility => Visibility::Unknown,
+                        _ => visibility,
+                    });
+                } else {
+                    unified.push((index, visibility));
+                }
+            }
+        }
+        if let Some(visibility) = outside {
+            unified.extend(parts.outside.iter().map(|&index| (index, visibility)));
+        }
     }
+    for (index, visibility) in unified {
+        symbols[index].visibility = visibility;
+    }
+}
+
+/// The parts of one C# `partial` type, as indices into the symbols they were read from: by the
+/// project each part's file is in, and outside any project.
+#[derive(Debug, Default)]
+pub struct PartialTypeParts<'a> {
+    in_project: BTreeMap<&'a PathBuf, Vec<usize>>,
+    outside: Vec<usize>,
+}
+
+impl PartialTypeParts<'_> {
+    /// The parts each assembly compiles into one type: a project's own parts with every part
+    /// outside a project, or, when no project has a part, the parts outside a project together.
+    /// A part outside a project is in every group.
+    pub fn assemblies(&self) -> Vec<Vec<usize>> {
+        if self.in_project.is_empty() {
+            return vec![self.outside.clone()];
+        }
+        self.in_project
+            .values()
+            .map(|indices| [indices.as_slice(), self.outside.as_slice()].concat())
+            .collect()
+    }
+}
+
+/// Every C# `partial` class, struct, record or interface among `symbols`, its parts matched as
+/// [`unify_partial_type_visibility`] matches them: by qualified name, kind and type-parameter
+/// count, within the project directory each file is in (`projects`), a file in none joining
+/// every project with a part of the type.
+pub fn partial_types<'a>(
+    symbols: &[Symbol],
+    projects: &'a HashMap<FileId, PathBuf>,
+) -> Vec<PartialTypeParts<'a>> {
     type TypeKey = (String, bool, usize);
-    let mut types: BTreeMap<TypeKey, Parts<'_>> = BTreeMap::new();
+    let mut types: BTreeMap<TypeKey, PartialTypeParts<'a>> = BTreeMap::new();
     for (index, symbol) in symbols.iter().enumerate() {
         if symbol.language != Language::CSharp
             || !matches!(symbol.kind, SymbolKind::Class | SymbolKind::Interface)
@@ -59,40 +112,7 @@ pub fn unify_partial_type_visibility(symbols: &mut [Symbol], projects: &HashMap<
             None => parts.outside.push(index),
         }
     }
-    // Every group is read from the parsed visibilities before any is written, so a part outside
-    // a project that joins several groups cannot carry one group's answer into the next.
-    let mut unified: Vec<(usize, Visibility)> = Vec::new();
-    for parts in types.values() {
-        let groups = if parts.in_project.is_empty() {
-            vec![parts.outside.clone()]
-        } else {
-            parts
-                .in_project
-                .values()
-                .map(|indices| [indices.as_slice(), parts.outside.as_slice()].concat())
-                .collect()
-        };
-        let mut outside: Option<Visibility> = None;
-        for group in groups.iter().filter(|group| group.len() > 1) {
-            let visibility = group_visibility(symbols, group);
-            for &index in group {
-                if parts.outside.contains(&index) {
-                    outside = Some(match outside {
-                        Some(seen) if seen != visibility => Visibility::Unknown,
-                        _ => visibility,
-                    });
-                } else {
-                    unified.push((index, visibility));
-                }
-            }
-        }
-        if let Some(visibility) = outside {
-            unified.extend(parts.outside.iter().map(|&index| (index, visibility)));
-        }
-    }
-    for (index, visibility) in unified {
-        symbols[index].visibility = visibility;
-    }
+    types.into_values().collect()
 }
 
 /// The accessibility one assembly's parts of a partial type give it.

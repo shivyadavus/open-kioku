@@ -5,11 +5,11 @@
     "analysis_semantics_status": {
       "affected_components": [],
       "affected_languages": [],
-      "current_fingerprint": "cc2f13cfe162277273574df251d327700b39a3d1c4f4ba587df106f80e3576b5",
+      "current_fingerprint": "e45c51690131f936fc457882a20717f86051f4074a3c1ec4f0f23d13173b6b78",
       "reasons": [],
       "recommended_action": "none",
       "status": "compatible",
-      "stored_fingerprint": "cc2f13cfe162277273574df251d327700b39a3d1c4f4ba587df106f80e3576b5"
+      "stored_fingerprint": "e45c51690131f936fc457882a20717f86051f4074a3c1ec4f0f23d13173b6b78"
     },
     "caveats": [
       "schema availability reflects the current persisted index manifest"
