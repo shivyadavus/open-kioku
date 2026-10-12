@@ -28,9 +28,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod cargo_facts;
+mod csharp_imports;
 mod cycle_memo;
 mod dependency_trees;
 pub mod derived;
+mod dotnet_project;
 mod git_ignore;
 pub mod path_policy;
 mod prune;
@@ -678,15 +680,20 @@ impl Indexer {
         let mut rust_unit_structs = Vec::new();
         let mut rust_type_aliases = Vec::new();
         let mut rust_impl_blocks = Vec::new();
+        // What each C# file's directives, namespaces and type names say (#681).
+        let mut csharp_names = HashMap::new();
         for (file, outcome) in files.into_iter().zip(outcomes) {
             match outcome {
-                Ok((parsed_file, redacted)) => {
+                Ok((mut parsed_file, redacted)) => {
                     redacted_files += usize::from(redacted);
                     if parsed_file.syntax.syntax_errors {
                         let by_pattern = parsed_file.syntax.symbols.iter().any(|symbol| {
                             symbol.provenance == open_kioku_core::EvidenceSourceType::Heuristic
                         });
                         coverage.record_parsed_with_errors(&file.language, by_pattern);
+                    }
+                    if let Some(names) = parsed_file.syntax.csharp_names.take() {
+                        csharp_names.insert(file.id.clone(), names);
                     }
                     rust_type_only_items
                         .extend(parsed_file.syntax.rust_type_only_items.iter().cloned());
@@ -837,10 +844,17 @@ impl Indexer {
             .filter(|file| file.language == Language::Rust)
             .map(|file| file.id.clone())
             .collect::<HashSet<_>>();
+        // A C# directive names a namespace, never a module file: the C# pass below binds each
+        // name a C# file writes instead.
+        let csharp_file_ids = files
+            .iter()
+            .filter(|file| file.language == Language::CSharp)
+            .map(|file| file.id.clone())
+            .collect::<HashSet<_>>();
         for site in &import_sites {
             if rust_file_ids.contains(&site.file_id) {
                 import_registry.insert_unresolved_site(site);
-            } else {
+            } else if !csharp_file_ids.contains(&site.file_id) {
                 import_registry.resolve_site(site, &file_map);
             }
         }
@@ -944,8 +958,24 @@ impl Indexer {
             &scope_index,
             &rust_modules,
         );
-        let resolver_report =
+        let mut resolver_report =
             resolver::resolve_imports(&pruner, &files, &symbols, &imports, &rust_import_targets)?;
+        let csharp_report = csharp_imports::resolve_csharp_imports(
+            &project_model.dotnet,
+            &files,
+            &symbols,
+            &csharp_names,
+            &imports,
+        );
+        drop(csharp_names);
+        for binding in csharp_report.bindings {
+            import_registry.index.insert(binding);
+        }
+        resolver_report.extend(
+            csharp_report.resolutions,
+            csharp_report.analysis_facts,
+            csharp_report.quality_notes,
+        );
         let binding_index = open_kioku_resolution::BindingIndex::build(bindings.clone());
         let mut inheritance_index =
             open_kioku_resolution::InheritanceIndex::build(inheritance_sites.clone());

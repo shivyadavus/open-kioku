@@ -601,6 +601,84 @@ These tokens still resolve through a direct import or the use site's own file, a
 strategy resolves keeps its caveat, which names the reason. The pass reads at most 80 tokens per
 chunk, keywords excluded, whatever their role.
 
+A C# type name that only a namespace from outside the repository can supply is not matched by
+name alone either: with `using System.IO;` and no repository type `File` in reach, `File` and
+`File.ReadAllText` match neither the repository's own `Acme.Storage.File` nor its members (see
+below).
+
+### C# `using` directives and the .NET project model
+
+A C# `using` names a namespace, never a file: `Acme.Ledger` may be declared by any file of any
+project. So a directive leads to the files that declare the types the file names through it, and
+which those are is decided by C#'s own name lookup over the .NET project model (#681).
+
+The project model is read from each `.csproj`, with the `Directory.Build.props` MSBuild imports
+for it (the nearest one above it, and the one above that when it imports it) and package versions
+from the nearest `Directory.Packages.props`; `.sln` and `.slnx` files list the projects they
+build, and one they list that the repository does not hold is reported. Per project it records
+the assembly name and root namespace, the SDK, whether implicit usings are on, its `Compile`
+items, its `ProjectReference`s to project files of the repository, its `PackageReference`s and
+`packages.config` entries (outside the repository), its `<Using>` items and its
+`InternalsVisibleTo` friends (the project file's items and `[assembly: InternalsVisibleTo]`
+attributes of its files). A C# file belongs to the deepest SDK-style project whose directory holds
+it, outside `bin/`, `obj/` and hidden directories and unless a `Compile Remove` pattern of that
+project takes it out, and to every project whose `Compile Include` names it; a legacy project
+compiles only the files it lists. A project sees its own types and those of the projects it
+references, transitively for an SDK-style project unless `DisableTransitiveProjectReferences` is
+set. A `Condition` is not evaluated: a `ProjectReference`, `<Using>` or `Compile` item it guards
+counts, and an answer that depends on one is not settled (below). Items inside a `<Target>` are
+not read, and a `$(Property)` the files do not set keeps its spelling, so a path spelled with one
+is dropped.
+
+For each type name a file writes, the lookup runs as C# runs it: out from the innermost namespace
+the name is written in, a namespace or a type of each enclosing namespace comes before the
+directives of that namespace's declaration, and the compilation unit's directives come last,
+among them the project's `global using` directives (from any of its files, its `<Using>` items,
+and with `ImplicitUsings` the SDK's defaults: the base list for `Microsoft.NET.Sdk`, plus the web
+and worker namespaces for `Microsoft.NET.Sdk.Web` and `Microsoft.NET.Sdk.Worker`). An alias
+(`using Item = Acme.Ledger.Entry;`) comes before the namespaces directives open, a type parameter,
+a type nested in an enclosing type or in its repository base types takes the name before any of
+that, and for a member-access receiver so does a variable or a member of those types. A type is a
+candidate only when its project is the importing file's or one it references and its
+accessibility lets the importing project name it (`internal` within its project and its friends,
+`file` within its file); `Entry` and `Entry<T>` are different types, and an attribute `[Audited]`
+names `AuditedAttribute` before `Audited`. Not read: nested types a `using static` brings in, and
+anything behind an extern alias, which is taken to be outside the repository.
+
+What the lookup finds becomes:
+
+| Outcome | Fact | Edge |
+| --- | --- | --- |
+| A type a directive imports | `IMPORTS` from the file to each file declaring the type, every part of a partial type, at the directive's line (at the name's line for a `global using` or project item from elsewhere); strategy `csharp-using-namespace`, `csharp-global-using`, `csharp-project-using`, `csharp-implicit-using` or `csharp-using-alias` | authoritative (`import_binding`) only when settled, below; otherwise heuristic with the reason in its message |
+| `using static T` or an alias of a type | `IMPORTS` to each file declaring `T`, whatever the file writes (`csharp-using-static`, `csharp-using-alias`) | as above |
+| A name two imported namespaces declare | an ambiguous `IMPORTS` fact per candidate namespace, naming both candidates (`csharp-ambiguous`) | none |
+| A namespace no project of the repository declares | `DEPENDS_ON` a package: `System` and `System.*` as the standard library (`csharp-standard-library`, authoritative), anything else as a package (`csharp-external-namespace`, heuristic) | none to a file |
+| A namespace only projects the importer does not reference declare | an unresolved `IMPORTS` fact with a caveat (`csharp-namespace-not-referenced`) | none |
+| A namespace of the repository the file names no type of | none; the syntactic `IMPORTS` edge to the namespace stays, since the directive may be there for extension methods | module |
+
+An edge is settled, and so authoritative, only when the name stands where only a type can (a
+declared, parameter, return, base, cast, pattern, `typeof`, `new`, generic-argument or constraint
+type, or an attribute), no nearer directive imports a namespace from outside the repository
+(whose types the index cannot see and which would be searched first), no error node of any file
+spells a declaration of the name in a namespace searched before it (the error's text is read for
+the names after `class`, `struct`, `interface`, `enum`, `record` and `delegate`), the
+target type was read whole by tree-sitter in every part (a part from a file read through syntax
+errors or by the pattern fallback, or declarations of one name not all `partial`, of which a build
+configuration picks one, are not), no syntax error of the importing file stands where a `using`
+directive may (before the first type or namespace declaration of its compilation unit or of a
+namespace body; recovery can misread a directive there into a statement), and it belongs to
+project files the index read, which agree on the answer. Nothing a build configuration decides
+settles an edge either: a name written only under `#if`/`#elif`/`#else`, a directive there, a
+target file that declares its part of the type only there (a polyfill for older frameworks), a
+type whose project is referenced only under an MSBuild `Condition`, or a file a conditional
+`Compile` item includes or removes. A name written only as a member-access
+receiver (`Rules.Apply()`) never settles an edge: an inherited member of the same name would take
+it, and the index cannot read members inherited from a base type outside the repository.
+
+The resolver also binds each name in the import model the symbol registry reads: a name the
+lookup placed in a repository type binds there, and one only a namespace from outside can supply
+is bound outside the repository, so the registry never matches it to a repository symbol by name.
+
 ### Bounded edge windows
 
 Every read that keeps only some of a node's edges keeps them in one order, set by

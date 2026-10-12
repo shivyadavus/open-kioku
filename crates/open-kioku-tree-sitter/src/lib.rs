@@ -117,6 +117,13 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
     walk(file, content, tree.root_node(), &mut ctx, &mut out);
     out.syntax_errors = syntax_errors;
     out.package_declaration = package_declaration(file, content, tree.root_node());
+    if file.language == Language::CSharp {
+        out.csharp_names = Some(csharp::name_facts(
+            tree.root_node(),
+            content.as_bytes(),
+            &out.symbols,
+        ));
+    }
     if file.language == Language::Rust {
         let (opaque, names) = top_level_item_macros(content.as_bytes(), tree.root_node());
         out.invokes_item_macro = opaque;
@@ -2183,6 +2190,7 @@ fn extract_import(
         Language::JavaScript | Language::TypeScript => kind == "import_statement",
         Language::Python => kind == "import_statement" || kind == "import_from_statement",
         Language::Go => kind == "import_spec",
+        Language::CSharp => kind == "using_directive",
         _ => false,
     };
 
@@ -2191,6 +2199,10 @@ fn extract_import(
     }
     if file.language == Language::Rust {
         extract_rust_use(file, source_bytes, node, ctx, out);
+        return;
+    }
+    if file.language == Language::CSharp {
+        extract_csharp_using(file, source_bytes, node, ctx, out);
         return;
     }
 
@@ -2364,6 +2376,44 @@ fn extract_import(
             range,
         });
     }
+}
+
+/// One import site per C# `using` directive, named by the namespace or type it names. A
+/// namespace or `using static` directive opens every name it holds, as a glob does; an alias
+/// directive binds its alias. Which files a directive leads to is the import resolver's to say,
+/// from the names the file writes (see `csharp::name_facts`).
+fn extract_csharp_using(
+    file: &File,
+    source: &[u8],
+    node: Node<'_>,
+    ctx: &ParseContext,
+    out: &mut SyntaxFacts,
+) {
+    let Some(directive) = csharp::using_directive(node, source) else {
+        return;
+    };
+    let target = match &directive.extern_alias {
+        Some(alias) => format!("{alias}::{}", directive.target),
+        None => directive.target.clone(),
+    };
+    let bindings = directive
+        .alias
+        .iter()
+        .map(|alias| ImportedName {
+            imported: target.clone(),
+            local: alias.clone(),
+        })
+        .collect::<Vec<_>>();
+    out.imports.push(ImportSite {
+        file_id: file.id.clone(),
+        scope_id: ctx.current_scope(),
+        source: target,
+        is_glob: bindings.is_empty(),
+        bindings,
+        is_type_only: false,
+        reexported: false,
+        range: node_source_range(node),
+    });
 }
 
 fn extract_rust_module_declaration(

@@ -316,6 +316,67 @@ fn csharp_symbols_are_found_through_search_cli_and_mcp() {
     std::fs::remove_dir_all(&temp).unwrap();
 }
 
+/// A C# `using` leads to the files declaring the types the file names, through the solution's
+/// project references (#681): the web project's global `using Acme.Ledger;` proves an `IMPORTS`
+/// edge to both parts of the partial `Book`, while `using Acme.Reports;` names a project the web
+/// project does not reference and proves nothing. CLI `path` and MCP `dependency_path` agree.
+#[test]
+fn csharp_using_edges_follow_the_solutions_project_references() {
+    let temp = std::env::temp_dir().join(format!(
+        "kioku-test-csharp-solution-{}",
+        uuid::Uuid::new_v4()
+    ));
+    copy_dir_recursive(&fixture_dir("csharp-solution-fixture"), &temp);
+    for args in [["init", "."], ["index", "."]] {
+        Command::cargo_bin("ok")
+            .unwrap()
+            .current_dir(&temp)
+            .args(args)
+            .assert()
+            .success();
+    }
+    let endpoint = "src/Acme.Web/PostingEndpoint.cs";
+    let path = |to: &str| -> serde_json::Value {
+        let output = Command::cargo_bin("ok")
+            .unwrap()
+            .current_dir(&temp)
+            .args(["--json", "path", endpoint, to])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).expect("path is JSON")
+    };
+    for part in [
+        "src/Acme.Ledger/Book.cs",
+        "src/Acme.Ledger/Book.Audit.cs",
+        "src/Acme.Ledger/Entry.cs",
+    ] {
+        let route = path(part);
+        assert_eq!(
+            route["route_authority"], "authoritative",
+            "{part}: {route:#}"
+        );
+        let edges = route["edges"].as_array().expect("a route has edges");
+        assert_eq!(edges.len(), 1, "{part}: {route:#}");
+        assert_eq!(edges[0]["edge_type"], "IMPORTS", "{part}: {route:#}");
+        let mcp = mcp_call(
+            &temp,
+            "dependency_path",
+            serde_json::json!({ "from": endpoint, "to": part }),
+        );
+        assert_eq!(mcp["edges"], route["edges"], "{part}: {mcp:#}");
+    }
+    // The reports project is not referenced: no proven route reaches its `Statement`.
+    let unreferenced = path("src/Acme.Reports/Statement.cs");
+    assert_ne!(
+        unreferenced["route_authority"], "authoritative",
+        "{unreferenced:#}"
+    );
+    std::fs::remove_dir_all(&temp).unwrap();
+}
+
 #[test]
 fn test_mcp_tools_list_snapshot() {
     let temp = std::env::temp_dir().join(format!("kioku-test-mcp-{}", uuid::Uuid::new_v4()));

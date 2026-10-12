@@ -8,7 +8,9 @@ use open_kioku_resolution::{
     context::rust_rules_out_same_file_item, BindingIndex, InheritanceIndex, ResolutionContext,
     ScopeIndex, SymbolIndex,
 };
-use open_kioku_semantic_model::{ImportBinding, SemanticRepository, GLOB_IMPORT_LOCAL_NAME};
+use open_kioku_semantic_model::{
+    ImportBinding, ImportOrigin, SemanticRepository, GLOB_IMPORT_LOCAL_NAME,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cell::{OnceCell, RefCell};
@@ -1090,6 +1092,11 @@ impl SymbolRegistry {
     /// Whether the resolver left `binding` unplaced and its path starts outside the repository:
     /// `use anyhow::Result;`, `import static com.vendor.Keys.ACCESS_KEY;`.
     fn import_leads_outside(&self, binding: &ImportBinding) -> bool {
+        // The resolver placed it outside the repository: a C# type name that only a namespace
+        // from outside can supply (#681).
+        if binding.origin == ImportOrigin::External {
+            return true;
+        }
         // A Java static import keeps its keyword: `static org.x.Constants.NAME`.
         let source = binding.source_module.as_str();
         let source = source
