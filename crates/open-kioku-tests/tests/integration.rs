@@ -377,6 +377,123 @@ fn csharp_using_edges_follow_the_solutions_project_references() {
     std::fs::remove_dir_all(&temp).unwrap();
 }
 
+/// C# calls are proven through the name lookup and the project model (#682): the endpoint's
+/// `book.Add(entry)` picks the one-argument overload, `book.Audit()` reaches the other part of
+/// the partial `Book`, `book.Balance()` the extension method the web project's global `using`
+/// brings into scope, and `new Entry(amount)` the record's primary constructor. MCP callers and
+/// callees and `ok impact` all read them as proven.
+#[test]
+fn csharp_calls_reach_callers_callees_and_impact() {
+    let temp =
+        std::env::temp_dir().join(format!("kioku-test-csharp-calls-{}", uuid::Uuid::new_v4()));
+    copy_dir_recursive(&fixture_dir("csharp-solution-fixture"), &temp);
+    for args in [["init", "."], ["index", "."]] {
+        Command::cargo_bin("ok")
+            .unwrap()
+            .current_dir(&temp)
+            .args(args)
+            .assert()
+            .success();
+    }
+    // `(qualified name, authority)` of each callee or caller MCP returns for `query`.
+    let calls = |query: &str, kind: &str| -> Vec<(String, String)> {
+        let response = mcp_call(
+            &temp,
+            "get_references",
+            serde_json::json!({ "query": query, "kind": kind, "limit": 50 }),
+        );
+        let section = &response[kind];
+        let nodes = section["nodes"].as_array().cloned().unwrap_or_default();
+        let mut found = section["edges"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|edge| {
+                let other = if kind == "callers" {
+                    &edge["from"]
+                } else {
+                    &edge["to"]
+                };
+                let node = nodes
+                    .iter()
+                    .find(|node| node["id"] == *other)
+                    .unwrap_or_else(|| panic!("{other} in {section:#}"));
+                (
+                    node["label"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("a label in {node:#}"))
+                        .to_string(),
+                    section["edge_authority"][edge["id"].as_str().unwrap()]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        found.sort();
+        found
+    };
+    let proven = |entries: Vec<(String, String)>| -> Vec<String> {
+        entries
+            .into_iter()
+            .filter(|(_, authority)| authority == "authoritative")
+            .map(|(name, _)| name)
+            .collect()
+    };
+    assert_eq!(
+        proven(calls("Acme::Web::PostingEndpoint::Post", "callees")),
+        vec![
+            "Acme::Ledger::Book::Add",
+            "Acme::Ledger::Book::Audit",
+            "Acme::Ledger::BookExtensions::Balance",
+            "Acme::Ledger::Entry",
+            "Acme::Web::PostingEndpoint::Post",
+        ]
+    );
+    assert_eq!(
+        proven(calls("Acme::Ledger::Book::Audit", "callers")),
+        vec!["Acme::Web::PostingEndpoint::Post"]
+    );
+
+    // Editing the part of `Book` that declares `Audit` proves the endpoint is impacted.
+    let impact = Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args([
+            "--json",
+            "impact",
+            "--file",
+            "src/Acme.Ledger/Book.Audit.cs",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let impact: serde_json::Value = serde_json::from_slice(&impact).expect("impact is JSON");
+    let proven_callers = impact["proven_impact"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry["edge_type"] == "CALLS")
+        .map(|entry| {
+            format!(
+                "{} {}",
+                entry["path"].as_str().unwrap_or_default(),
+                entry["symbol"].as_str().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        proven_callers
+            .contains(&"src/Acme.Web/PostingEndpoint.cs Acme::Web::PostingEndpoint::Post".into()),
+        "{impact:#}"
+    );
+    std::fs::remove_dir_all(&temp).unwrap();
+}
+
 #[test]
 fn test_mcp_tools_list_snapshot() {
     let temp = std::env::temp_dir().join(format!("kioku-test-mcp-{}", uuid::Uuid::new_v4()));

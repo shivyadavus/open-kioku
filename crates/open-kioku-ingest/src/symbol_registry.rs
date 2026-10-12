@@ -930,9 +930,11 @@ impl SymbolRegistry {
             TokenRole::Member => {
                 // A receiver that names where the candidate is defined is evidence a bare
                 // member lacks: Go's `ledger.NewEntry`, Java's `Constants.ACCESS_KEY`.
-                // A lowercase Java receiver is a variable, whose name may match a package's.
+                // A lowercase Java or C# receiver is a variable, whose name may match a
+                // package's or a namespace's.
                 let receiver = token_use.receiver.as_deref().filter(|receiver| {
-                    chunk.language != Language::Java || receiver.starts_with(char::is_uppercase)
+                    !matches!(chunk.language, Language::Java | Language::CSharp)
+                        || receiver.starts_with(char::is_uppercase)
                 });
                 let Some(receiver) = receiver else {
                     return unresolved(TokenRole::Member.withheld_reason().unwrap_or_default());
@@ -5941,6 +5943,32 @@ mod tests {
                 "src::main::java::org::example::Constants::ACCESS_KEY",
                 1
             )]
+        );
+
+        // So is a lowercase C# one, even where a namespace is spelled like it.
+        let symbols = vec![
+            symbol_in(
+                Language::CSharp,
+                "caller",
+                "Main",
+                "app::Main",
+                SymbolKind::Method,
+            ),
+            symbol_in(
+                Language::CSharp,
+                "post",
+                "Post",
+                "acme::ledger::Book::Post",
+                SymbolKind::Method,
+            ),
+        ];
+        let text = "var a = Book.Post();
+var b = ledger.Post();
+var c = _ledger.Post();";
+        let report = resolve_text(Language::CSharp, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("acme::ledger::Book::Post", 1)]
         );
 
         // A receiver that is itself a member, a call result or `self` says nothing.

@@ -1130,6 +1130,7 @@ async fn dispatch(
                 open_kioku_core::Language::Python,
                 open_kioku_core::Language::Java,
                 open_kioku_core::Language::Go,
+                open_kioku_core::Language::CSharp,
             ]
             .iter()
             .filter_map(open_kioku_resolution::semantic_capabilities_for)
@@ -6334,7 +6335,13 @@ mod tests {
         let semantic_capabilities = result["relationship_semantic_capabilities"]
             .as_array()
             .expect("Tier-1 relationship semantic capabilities");
-        assert_eq!(semantic_capabilities.len(), 6);
+        assert_eq!(semantic_capabilities.len(), 7);
+        assert!(
+            semantic_capabilities
+                .iter()
+                .any(|descriptor| descriptor["language"] == "c_sharp"),
+            "C# declares what its own pass proves"
+        );
         let javascript = semantic_capabilities
             .iter()
             .find(|descriptor| descriptor["language"] == "java_script")

@@ -820,13 +820,31 @@ impl Indexer {
 
         analysis_facts.extend(cargo_facts::cargo_manifest_facts(&project_model, &files));
         // C# `using` directives are placed first, so the name facts the parser read for them are
-        // released before the symbol, scope and binding indexes below are built (#681).
-        let csharp_report = csharp_imports::resolve_csharp_imports(
+        // released before the symbol, scope and binding indexes below are built (#681). C# calls,
+        // base lists and type uses are resolved over the same name lookup (#682), in the modes
+        // that run the proof-gated resolver.
+        let mut quality_report = ResolutionQualityReport::default();
+        let resolves_relationships = matches!(
+            config.index.resolution_mode,
+            open_kioku_config::ResolutionMode::Shadow | open_kioku_config::ResolutionMode::V2
+        );
+        let csharp_call_count = csharp_names
+            .values()
+            .map(|names| names.calls.len())
+            .sum::<usize>();
+        let mut record_csharp_outcome = |edge_type: &GraphEdgeType,
+                                         outcome: &open_kioku_resolution::ResolutionOutcome,
+                                         micros: u64| {
+            quality_report.record_outcome(&Language::CSharp, edge_type, outcome, micros);
+        };
+        let (csharp_report, csharp_relationships) = csharp_imports::resolve_csharp(
             &project_model.dotnet,
             &files,
             &symbols,
             &csharp_names,
             &imports,
+            resolves_relationships
+                .then_some(&mut record_csharp_outcome as &mut csharp_imports::OutcomeRecorder<'_>),
         );
         drop(csharp_names);
         let mut import_registry = imports::ImportRegistry::default();
@@ -1060,15 +1078,14 @@ impl Indexer {
         let registry_fact_count = registry_report.analysis_facts.len();
 
         let mut resolution_diffs = Vec::new();
-        let mut quality_report = ResolutionQualityReport::default();
-        let mut resolved_relationships = Vec::new();
+        let mut resolved_relationships = csharp_relationships;
 
         let file_lookup: HashMap<FileId, &File> = files.iter().map(|f| (f.id.clone(), f)).collect();
 
         if resolution_mode == open_kioku_config::ResolutionMode::Shadow
             || resolution_mode == open_kioku_config::ResolutionMode::V2
         {
-            quality_report.call_sites = call_sites.len();
+            quality_report.call_sites = call_sites.len() + csharp_call_count;
 
             let symbols_by_qualified: HashMap<&str, &Symbol> = symbols
                 .iter()

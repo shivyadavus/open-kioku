@@ -31,6 +31,10 @@
 //! Not read: types a `using static` directive brings in as the static type's nested types, and
 //! namespaces an extern alias names, which are taken to be outside the repository.
 
+mod relationships;
+
+pub(crate) use relationships::OutcomeRecorder;
+
 use crate::resolver::analysis_fact_for_import_resolution;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use open_kioku_core::csharp::{
@@ -42,6 +46,7 @@ use open_kioku_core::{
     GraphNodeType, Import, ImportResolution, Language, LineRange, QualityNote, QualityNoteKind,
     ResolutionStatus, ScopeId, Symbol, SymbolId, SymbolKind, Visibility,
 };
+use open_kioku_resolution::ResolvedRelationship;
 use open_kioku_semantic_model::{
     DotnetModel, DotnetProject, ImportBinding, ImportBindingRule, ImportOrigin,
 };
@@ -103,34 +108,53 @@ pub(crate) struct CSharpImportReport {
 
 /// Places the `using` directives and type names of every C# file of `files`. `names` holds each
 /// C# file's parsed name facts; `imports` the stored import rows, which the resolutions name.
-pub(crate) fn resolve_csharp_imports(
+///
+/// With `relationships`, also resolves the files' calls, base lists and type uses over the same
+/// name lookup (#682, [`relationships`]), passing each occurrence's outcome to it, and returns
+/// the relationships to emit.
+pub(crate) fn resolve_csharp(
     model: &DotnetModel,
     files: &[File],
     symbols: &[Symbol],
     names: &HashMap<FileId, CSharpNameFacts>,
     imports: &[Import],
-) -> CSharpImportReport {
+    relationships: Option<&mut relationships::OutcomeRecorder<'_>>,
+) -> (CSharpImportReport, Vec<ResolvedRelationship>) {
     let csharp_files = files
         .iter()
         .filter(|file| file.language == Language::CSharp && names.contains_key(&file.id))
         .collect::<Vec<_>>();
     if csharp_files.is_empty() {
-        return CSharpImportReport::default();
+        return (CSharpImportReport::default(), Vec::new());
     }
     let index = Index::build(model, &csharp_files, symbols, names);
+    let report = resolve_imports(&index, &csharp_files, names, imports);
+    let resolved = match relationships {
+        Some(record) => relationships::resolve(&index, &csharp_files, record),
+        None => Vec::new(),
+    };
+    (report, resolved)
+}
+
+fn resolve_imports(
+    index: &Index<'_>,
+    csharp_files: &[&File],
+    names: &HashMap<FileId, CSharpNameFacts>,
+    imports: &[Import],
+) -> CSharpImportReport {
     let rows = imports
         .iter()
         .filter_map(|import| Some(((&import.file_id, import.range.as_ref()?.start), import)))
         .collect::<HashMap<_, _>>();
     let mut report = CSharpImportReport::default();
     let mut ambiguous_names = 0usize;
-    for file in &csharp_files {
+    for file in csharp_files {
         let Some(facts) = names.get(&file.id) else {
             continue;
         };
         let resolved = index.resolve_file(file, facts);
         ambiguous_names += resolved.ambiguous_names();
-        resolved.write(file, facts, &index, &rows, &mut report);
+        resolved.write(file, facts, index, &rows, &mut report);
     }
     report.quality_notes.extend(index.notes(ambiguous_names));
     report.analysis_facts.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1078,8 +1102,8 @@ impl Via {
 enum Found {
     /// A type parameter, nested type, variable or member of the same name takes it.
     Shadowed,
-    /// A namespace.
-    Namespace,
+    /// A namespace, named whole.
+    Namespace(String),
     /// A type of an enclosing namespace, which no directive imports.
     Declared(Option<usize>),
     /// A type a directive imports. `doubt` says why something the index cannot see may take
@@ -1319,7 +1343,7 @@ impl<'i, 'a> Lookup<'i, 'a> {
                     .entry(use_.name.clone())
                     .or_insert(NameBinding::Outside { namespace });
             }
-            Found::Shadowed | Found::Namespace | Found::Declared(_) | Found::Nothing => {}
+            Found::Shadowed | Found::Namespace(_) | Found::Declared(_) | Found::Nothing => {}
         }
     }
 
@@ -1403,7 +1427,7 @@ impl<'i, 'a> Lookup<'i, 'a> {
                     .namespace_state(&join_namespace(&level, &use_.name), self.owner)
                     == NamespaceState::Visible
             {
-                return Found::Namespace;
+                return Found::Namespace(join_namespace(&level, &use_.name));
             }
             let declared =
                 self.index
@@ -1563,7 +1587,7 @@ impl<'i, 'a> Lookup<'i, 'a> {
             AliasTarget::Type(groups) => groups,
             AliasTarget::Namespace(namespace) => {
                 let Some(next) = &use_.next else {
-                    return Found::Namespace;
+                    return Found::Namespace(namespace);
                 };
                 let groups = self.index.types_in(
                     &namespace,

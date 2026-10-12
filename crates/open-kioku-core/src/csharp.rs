@@ -55,6 +55,20 @@ pub struct CSharpNameFacts {
     /// the file may be missing, so no lookup in the file proves anything.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden_directives: bool,
+    /// The members the file declares (#682): methods, constructors, a type's primary
+    /// constructor, properties, indexers, events, fields, operators and local functions, with
+    /// what overload resolution and a member access's type need.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<CSharpMember>,
+    /// The calls the file writes outside error nodes: invocations, object creations and
+    /// constructor initializers (#682).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<CSharpCall>,
+    /// Every parameter, local, pattern, `out`, `foreach`, `catch` and `using` variable the file
+    /// declares, with its type when the declaration says it and where its name is in scope
+    /// (#682).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locals: Vec<CSharpLocal>,
 }
 
 /// A type name an error node may declare, and a namespace it may be declared in.
@@ -171,6 +185,316 @@ pub struct CSharpTypeDeclaration {
     /// whether it is compiled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub conditional: bool,
+    /// What the declaration declares: a class, struct, record, interface, enum or delegate.
+    #[serde(default)]
+    pub kind: CSharpTypeKind,
+    /// Declared `static` (a part of a partial type may carry it alone).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_static: bool,
+    /// Every type its base list names, in order and whole (`Acme.Ledger.Base<Entry>`), read in
+    /// the scope the declaration stands in (#682). A C# base list does not say which entry is a
+    /// class and which an interface; the type an entry names does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_types: Vec<CSharpTypeRef>,
+    /// Where the base list is written: in the scope the declaration stands in, outside the
+    /// type itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_place: Option<CSharpPlace>,
+}
+
+/// What a type declaration declares.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CSharpTypeKind {
+    #[default]
+    Class,
+    Struct,
+    /// `record` or `record class`.
+    Record,
+    RecordStruct,
+    Interface,
+    Enum,
+    Delegate,
+}
+
+impl CSharpTypeKind {
+    /// A value type: what it holds is no reference, and `T?` of it is `Nullable<T>`.
+    pub fn is_value_type(self) -> bool {
+        matches!(self, Self::Struct | Self::RecordStruct | Self::Enum)
+    }
+}
+
+/// A type as written: `Acme.Ledger.Entry<Item>`, `Entry[]`, `Entry?`, `(Entry, int)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct CSharpTypeRef {
+    /// The segments of the name as written, outermost first, each with the number of type
+    /// arguments written on it: `Acme`, `Ledger`, `Entry<1>`. Empty for a predefined type
+    /// (`int`, `string`), an array, a tuple or a pointer, whose element types are `arguments`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<CSharpTypeSegment>,
+    /// The name starts at `global::`: no enclosing namespace or `using` takes part.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub global: bool,
+    /// The name starts at an extern alias: a type of an assembly the project references.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub extern_alias: bool,
+    /// The type arguments written on any segment, and the element types of an array, tuple,
+    /// pointer or nullable value: each is a type the declaration uses too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<CSharpTypeRef>,
+    #[serde(default)]
+    pub shape: CSharpTypeShape,
+}
+
+/// One segment of a written type or receiver name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct CSharpTypeSegment {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub arity: u16,
+}
+
+/// How a written type holds the type its path names.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CSharpTypeShape {
+    /// The value is of the type the path names.
+    #[default]
+    Named,
+    /// `T?`: the type the path names, or `Nullable<T>` when that is a value type.
+    Nullable,
+    /// A predefined type (`int`, `string`, `object`), never a type of the repository.
+    Predefined,
+    /// An array, a pointer, a tuple, a function pointer or a type the reader does not take
+    /// apart: no member of a repository type is reached through it.
+    Other,
+}
+
+/// Where a declaration or use is written, for the name lookup of the types it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CSharpPlace {
+    /// The innermost namespace block (see [`CSharpNameFacts::blocks`]).
+    pub block: u32,
+    /// The innermost type declaration, as an index into [`CSharpNameFacts::types`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enclosing: Option<u32>,
+    pub line: u32,
+    /// Inside an `#if`, `#elif` or `#else` region.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conditional: bool,
+}
+
+/// What kind of member a [`CSharpMember`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CSharpMemberKind {
+    Method,
+    Constructor,
+    /// The parameter list written on a record, class or struct declaration; the member's
+    /// symbol is the type's own.
+    PrimaryConstructor,
+    Property,
+    Indexer,
+    Event,
+    Field,
+    Operator,
+    Destructor,
+    LocalFunction,
+}
+
+impl CSharpMemberKind {
+    /// Invoked by a call that names it: a method or a local function.
+    pub fn is_method(self) -> bool {
+        matches!(self, Self::Method | Self::LocalFunction)
+    }
+
+    /// Holds a value of its declared type: a property, field or event.
+    pub fn holds_value(self) -> bool {
+        matches!(self, Self::Property | Self::Field | Self::Event)
+    }
+}
+
+/// One member declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CSharpMember {
+    pub symbol_id: SymbolId,
+    pub kind: CSharpMemberKind,
+    /// The name calls and member accesses write: a method's or property's name, the type's
+    /// name for a constructor.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_static: bool,
+    /// Declared `override` or `new`: it takes the place of, or hides, a base type's member of
+    /// its signature.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_override: bool,
+    /// Written with a body (`{ .. }` or `=> ..`). A `partial` method declared without one is
+    /// implemented by the part that has it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_body: bool,
+    /// The number of type parameters a generic method declares.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub type_parameters: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<CSharpParameter>,
+    /// The return type of a method, local function or operator, the type of a property,
+    /// indexer, field or event; `None` for `void`, a constructor or `var`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<CSharpTypeRef>,
+    /// Where the signature's types are looked up: the declaring type's scope.
+    pub place: CSharpPlace,
+}
+
+/// One parameter of a member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CSharpParameter {
+    pub name: String,
+    /// `None` for a parameter written without a type (`__arglist`) or one the reader cannot
+    /// read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<CSharpTypeRef>,
+    /// The `this` parameter of an extension method.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_this: bool,
+    /// A `params` parameter, which takes any number of arguments.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_params: bool,
+    /// Has a default value, so an argument may be left out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+}
+
+/// What a call does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CSharpCallKind {
+    /// `M(..)`, `x.M(..)`, `x?.M(..)`.
+    Invocation,
+    /// `new T(..)`, or a target-typed `new(..)` whose type the declaration states.
+    Creation,
+    /// `: base(..)` on a constructor.
+    BaseConstructor,
+    /// `: this(..)` on a constructor.
+    ThisConstructor,
+}
+
+/// One call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CSharpCall {
+    /// The member the call is written in, as an index into [`CSharpNameFacts::members`]: the
+    /// innermost method, constructor, accessor's property, operator or local function, or the
+    /// field whose initializer holds it. `None` outside every member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<u32>,
+    pub kind: CSharpCallKind,
+    /// The method's name for an invocation; empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// The number of type arguments written on the method's name (`M<int>(..)`), when any are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_arguments: Option<u16>,
+    pub arguments: u16,
+    /// What an invocation is called on.
+    #[serde(default, skip_serializing_if = "CSharpReceiver::is_none")]
+    pub receiver: CSharpReceiver,
+    /// The type a creation creates: written after `new`, or the declared type of the variable,
+    /// field or property a target-typed `new(..)` initializes. `None` when the reader cannot
+    /// tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<CSharpTypeRef>,
+    pub range: crate::SourceRange,
+    pub place: CSharpPlace,
+}
+
+/// What an invocation is called on: a root, then member accesses written after it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CSharpReceiver {
+    pub root: CSharpReceiverRoot,
+    /// The member names accessed after the root, in order: `store` and `Default` of
+    /// `this.store.Default.Save()`, or `Ledger` and `Rules` of `Acme.Ledger.Rules.Apply()`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<CSharpTypeSegment>,
+}
+
+impl CSharpReceiver {
+    pub fn is_none(&self) -> bool {
+        self.root == CSharpReceiverRoot::None && self.members.is_empty()
+    }
+}
+
+/// Where a receiver starts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CSharpReceiverRoot {
+    /// A bare `M(..)`.
+    #[default]
+    None,
+    This,
+    Base,
+    /// A simple name: a local, a member, a type or a namespace.
+    Name(CSharpTypeSegment),
+    /// A value of a written type: `new T(..)`, `(T)x`, `x as T`.
+    Typed(CSharpTypeRef),
+    /// Anything else: a call's result, an element access, a literal.
+    Unknown,
+}
+
+/// What declares a [`CSharpLocal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CSharpLocalKind {
+    /// A parameter of a member, a local function or a primary constructor.
+    Parameter,
+    /// A parameter of a lambda or anonymous method.
+    LambdaParameter,
+    /// A local, pattern, `out`, `foreach`, `catch`, `using` or query variable.
+    Variable,
+}
+
+/// One variable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CSharpLocal {
+    pub name: String,
+    pub kind: CSharpLocalKind,
+    /// Its type: as declared, or for `var` the type `new T(..)`, `(T)x` or `x as T` gives it.
+    /// `None` when neither says it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<CSharpTypeRef>,
+    /// The type is the declaration's own (`Entry e`), not one an initializer gives `var`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared: bool,
+    /// The member it belongs to, as an index into [`CSharpNameFacts::members`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<u32>,
+    /// Where the name is in scope: the block, statement, lambda or member that declares it.
+    pub scope: crate::SourceRange,
+    pub place: CSharpPlace,
 }
 
 fn is_zero(value: &u16) -> bool {

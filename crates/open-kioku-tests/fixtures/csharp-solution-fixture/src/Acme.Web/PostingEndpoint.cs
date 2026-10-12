@@ -11,6 +11,7 @@ public sealed class PostingEndpoint
     {
         var entry = new Entry(amount);
         book.Add(entry);
-        return entry;
+        book.Audit();
+        return book.Balance() > 0 ? entry : Post(amount, statement);
     }
 }

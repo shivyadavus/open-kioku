@@ -494,9 +494,9 @@ token's place, and where it cannot tell, the token is matched as before:
   one `contains` or `expect` in the repository is not evidence of the call's target. A receiver
   that is a plain name (not itself a member, a call result, `self` or `this`) and names a
   directory, module or type the candidate is defined under is that evidence: Go's
-  `ledger.NewEntry`, Java's `Constants.ACCESS_KEY` (a Java receiver must be capitalized, since
-  a lowercase one is a variable whose name may match a package's), a Python module's
-  `misc.format_size`. On an `import`, `from`, `package` or `use` line the dotted path names
+  `ledger.NewEntry`, Java's `Constants.ACCESS_KEY` (a Java or C# receiver must be capitalized,
+  since a lowercase one is a variable whose name may match a package's or a namespace's), a
+  Python module's `misc.format_size`. On an `import`, `from`, `package` or `use` line the dotted path names
   modules, so no receiver counts there. A receiver the file imports is read by its import, from
   the resolver's import model: one imported from outside the repository (by the same test as a
   plain name, below) matches nothing. A Go receiver is read by its whole import path, which
@@ -683,6 +683,73 @@ it, and the index cannot read members inherited from a base type outside the rep
 The resolver also binds each name in the import model the symbol registry reads: a name the
 lookup placed in a repository type binds there, and one only a namespace from outside can supply
 is bound outside the repository, so the registry never matches it to a repository symbol by name.
+
+### C# calls, inheritance and type uses
+
+C# calls, base lists and declared types are resolved over the same name lookup and project model
+as its `using` directives (#682), by the C# pass in ingest rather than the generic resolvers. A
+type name means what that lookup finds where it is written (a type nested in an enclosing type or
+in its repository base types first, then the enclosing namespaces and the directives); a member
+name means what C#'s member lookup finds in the type, its base classes or its interfaces; and an
+overload is what overload resolution can still choose by counting.
+
+| Relationship | From | Read from |
+| --- | --- | --- |
+| `CALLS` | the calling method, constructor, local function, property or operator, or the field whose initializer calls | a bare `M()`: a local function the member declares, then a method of the enclosing types from the innermost out (their repository base classes included), then a static method of a type a `using static` imports; `this.M()` and `base.M()`; `x.M()` where `x` is a local, parameter, field or property whose declaration writes its type, or a `var` whose initializer is `new T(..)`, a cast `(T)x` or `x as T`; `T.M()` and `Acme.Ledger.T.M()` on a type; chains of fields and properties (`this.store.Current.Save()`); `new T(..)`; a target-typed `new()` that initializes a local, field or property of a written type; `: base(..)`, `: this(..)` and a primary constructor's `: Base(..)`; an extension method (below) |
+| `EXTENDS` | the type declaration | a base list entry naming a class of a class or a record of a record, or an interface of an interface |
+| `IMPLEMENTS` | the type declaration | a base list entry naming an interface of a class, struct or record |
+| `USES_TYPE` | the member, or the member declaring a local | each repository type a parameter, return, property, indexer, field, event or primary-constructor parameter type names, generic arguments and element types included, and the written type of a local, pattern, `out`, `foreach`, `catch` or typed lambda variable |
+
+A C# base list does not say which entry is the base class: the kind of the type an entry names
+decides between `EXTENDS` and `IMPLEMENTS`, and an entry no repository type answers gives no edge.
+An edge to a type goes to every part of a partial type; a call to a member goes to the part that
+declares it, and a call of a partial method to its implementing part.
+
+Overloads are told apart by argument count (a parameter with a default value may be left out and a
+`params` parameter takes any number), by the number of type arguments a call writes, by static or
+instance (a call through a type reaches static methods, through a value instance ones), and by
+reach (a `private` member only from inside its type). Methods of every class from the receiver's
+type up are candidates, less a base method a more derived `override` or `new` method of the same
+parameter count takes the place of. One candidate left is the target; more is ambiguous; none
+means the call reaches no repository method. A constructor follows the same rules, and a type that
+declares no constructor (or a struct, with no arguments) is the target itself.
+
+An extension method is found as C# finds one: only when the receiver's type and its repository
+bases declare no applicable method of the name, from the namespaces enclosing the call outward, at
+each level the static classes of that namespace, of the namespaces its directives import and of
+the types its `using static` directives name. The first level with an applicable method decides,
+and the method's `this` parameter must name the receiver's type, one of its base classes or one of
+the interfaces they implement. A `this` parameter of a type parameter or of a type outside the
+repository may take the receiver too, so beside one the call is ambiguous.
+
+A variable takes a name before a member and a member before a type, as C# reads it: a parameter
+named `Entry` makes `Entry.Create()` a call on the parameter. A variable is in scope in the block,
+lambda, statement or member declaring it, an expression variable of an `if` condition in the block
+around the `if`, and a primary-constructor parameter in the whole type.
+
+| Outcome | Edge |
+| --- | --- |
+| Proven | authoritative: `CALLS` with `exact_call_site` and `receiver_type` plus `containing_type` (a member of a typed receiver, the enclosing or base type, a named type, or a constructor), `same_scope_definition` (a local function) or `import_binding` plus `qualified_name` (an extension method or a `using static` member); `USES_TYPE` with `exact_reference` (and `import_binding` when a directive imports the type); `EXTENDS` with `inheritance_binding` and `qualified_name`; `IMPLEMENTS` with `inheritance_binding` and `trait_or_interface_binding` |
+| Unproven | heuristic, no proof, its message naming the reason after `unproven:` |
+| Ambiguous | heuristic edges to its candidates when there are four or fewer, each message naming them all; none for more (an overload family the argument count cannot split) |
+| Outside the repository, or nothing | none |
+
+Everything that leaves a `using` edge unproven (see above) leaves these unproven too: a file of no
+project, a conditional `Compile` item, an error that may hide a directive, a nearer `using` of a
+namespace from outside the repository, a type an error node may declare, a target read through
+syntax errors, projects compiling the file that disagree, or a project referenced only under a
+`Condition`. So do a call written under `#if`, a target member or part declared only there, a
+member-access receiver that names a type while a base class of the enclosing type is outside the
+repository (a member of that name inherited from it would take the name first), an extension method
+an outside namespace imported nearer could shadow, an extension call on a type whose base class is
+outside the repository (which may declare the method), and a `using static` of a type outside the
+repository beside the one that supplies the method. A member found on the receiver's own type or
+its repository bases is proven even when a base class further up is outside the repository: C#
+takes the most derived applicable method. A bare call, receiver or member access the repository
+types do not answer while such a base class may (`Redirect()` in a class deriving from an outside
+controller), a variable whose declaration writes no type, a call through a call's result, an
+element access or a `dynamic` value, and a call of a delegate a variable, field, property or event
+holds give no edge.
 
 ### Bounded edge windows
 

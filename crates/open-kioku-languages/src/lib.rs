@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn csharp_source_is_detected_and_has_no_relationship_adapter_yet() {
+    fn csharp_source_is_detected_and_resolved_outside_the_generic_adapters() {
         assert_eq!(
             detect_language(Path::new("src/Ledger/Entry.cs")),
             Language::CSharp
@@ -311,8 +311,8 @@ mod tests {
             detect_language(Path::new("tools/build.csx")),
             Language::Unknown
         );
-        // Calls and type relationships are resolved only through a registered adapter; C# has
-        // none, so it records symbols and no relationship.
+        // C# has no adapter for the generic resolvers: its calls and type relationships are
+        // resolved by its own pass in ingest, over the .NET project model's name lookup.
         assert!(semantics_for(&Language::CSharp).is_none());
     }
 

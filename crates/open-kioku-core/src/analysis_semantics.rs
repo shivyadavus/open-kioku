@@ -218,7 +218,13 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v7";
 /// standard-library or package dependency; and a type name only such a namespace can supply
 /// never matches a repository symbol in the symbol registry. v44 indexes resolve every C#
 /// directive as a package and hold no C# `IMPORTS` edge between files.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v45";
+/// v46: C# calls, base lists and declared types resolve over that name lookup (#682): `CALLS`
+/// through typed receivers, `this`, `base`, types, constructors, extension methods in scope and
+/// local functions, an overload chosen by argument count; `EXTENDS` and `IMPLEMENTS` by the kind
+/// of the type a base list entry names; `USES_TYPE` from members and locals to the types they
+/// write. A C# symbol-registry receiver must be capitalized, as a Java one is. v45 indexes hold no
+/// C# relationship but the `using` edges.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v46";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -306,7 +312,10 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// its type declarations' arity and base lists, what `#if` regions and error nodes hold,
 /// and the type parameter and variable names that may shadow a type name (#681); a v23
 /// index records none of these.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v25";
+/// v26: a C# file also records its members with their parameters and types, its calls with
+/// their receivers and argument counts, its variables with their types and scopes, and each type
+/// declaration's kind and whole base list (#682); a v25 index records none of these.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v26";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

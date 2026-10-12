@@ -157,6 +157,21 @@ pub fn semantic_capabilities_for(language: &Language) -> Option<LanguageSemantic
             (InheritanceImplements, Unsupported),
             (SourceRangesCallSite, Authoritative),
         ],
+        // Resolved by the C# pass in ingest over the .NET project model's name lookup (#682),
+        // not by this crate's resolvers; the matrix states what that pass proves.
+        Language::CSharp => &[
+            (CallsLocalFunction, Authoritative),
+            (CallsImportedFunction, Authoritative),
+            (CallsInstanceMember, Authoritative),
+            (CallsStaticMember, Authoritative),
+            (CallsDynamicDispatch, Unsupported),
+            (ReferencesImportBinding, Unsupported),
+            (TypesAnnotation, Authoritative),
+            (TypesConstructor, Authoritative),
+            (InheritanceExtends, Authoritative),
+            (InheritanceImplements, Authoritative),
+            (SourceRangesCallSite, Authoritative),
+        ],
         _ => return None,
     };
 
@@ -211,6 +226,17 @@ mod tests {
         assert_ne!(
             javascript.state(SemanticCapability::TypesAnnotation),
             typescript.state(SemanticCapability::TypesAnnotation)
+        );
+    }
+
+    #[test]
+    fn csharp_declares_what_its_own_pass_proves() {
+        let csharp = semantic_capabilities_for(&Language::CSharp).expect("C# descriptor");
+        assert_eq!(csharp.capabilities.len(), 11);
+        assert!(csharp.has_authoritative_path(SemanticCapability::CallsInstanceMember));
+        assert_eq!(
+            csharp.state(SemanticCapability::CallsDynamicDispatch),
+            CapabilityState::Unsupported
         );
     }
 

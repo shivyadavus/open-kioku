@@ -124,6 +124,11 @@ fn produce_live_relationship_case(
                 require_fixture_source_files_indexed(case, &fixture, &snapshot)?;
             }
         }
+        if case.language == RelationshipBenchLanguage::CSharp {
+            if let Some(fixture) = csharp_relationship_fixture(&case.scenario) {
+                require_fixture_source_files_indexed(case, &fixture, &snapshot)?;
+            }
+        }
         if case.relationship == GraphEdgeType::Imports {
             let fixture = if case.language == RelationshipBenchLanguage::CSharp {
                 csharp_import_edge_fixture(&case.scenario)
@@ -552,6 +557,11 @@ fn live_fixture_files(case: &RelationshipBenchCase) -> anyhow::Result<Vec<(PathB
         || (case.capability_state != RelationshipBenchCapabilityState::Authoritative
             && matches!(case.scenario.as_str(), "metamorphic_a" | "metamorphic_b" | "unsupported_feature"));
     let adversarial = !positive_syntax;
+    if case.language == RelationshipBenchLanguage::CSharp {
+        if let Some(fixture) = csharp_relationship_fixture(&case.scenario) {
+            return Ok(fixture);
+        }
+    }
     let files = match &case.relationship {
         GraphEdgeType::Calls => live_call_fixture(case.language, adversarial, &case.scenario)?,
         GraphEdgeType::References => live_reference_fixture(case.language),
@@ -4187,6 +4197,205 @@ fn csharp_import_edge_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> 
         files
             .into_iter()
             .map(|(path, content)| (PathBuf::from(path), content.to_string()))
+            .collect(),
+    )
+}
+
+/// Multi-project C# fixtures for calls, base lists and type uses (#682): the web project
+/// references the ledger project, whose `Acme.Ledger` namespace declares the types the web
+/// project's `Page` names, unless a scenario says otherwise.
+fn csharp_relationship_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
+    const SDK: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n</Project>\n";
+    const WEB: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <ProjectReference Include=\"..\\Ledger\\Ledger.csproj\" />\n  </ItemGroup>\n</Project>\n";
+    const ENTRY: &str = "namespace Acme.Ledger;\n\npublic class Entry\n{\n    public Entry(int amount) { }\n    public void Save() { }\n    public static Entry Create() => null;\n}\n";
+    const OVERLOADS: &str = "namespace Acme.Ledger;\n\npublic class Entry\n{\n    public void Save(int times) { }\n    public void Save(string note) { }\n}\n";
+    const EXTENSIONS: &str = "namespace Acme.Ledger.Extensions;\n\npublic static class EntryExtensions\n{\n    public static void Archive(this Acme.Ledger.Entry entry) { }\n}\n";
+    const RULES: &str = "namespace Acme.Ledger;\n\npublic static class Rules\n{\n    public static int Apply() => 1;\n}\n";
+    const TYPES: &str = "namespace Acme.Ledger;\n\npublic abstract class Base { }\npublic interface IStore { }\n";
+    // Only the generic `Base<T>`: a selector names a type by its qualified name, which the
+    // non-generic `Base` would share.
+    const GENERIC: &str = "namespace Acme.Ledger;\n\npublic abstract class Base<T> { }\n";
+    let page = |body: &str| format!("using Acme.Ledger;\n\nnamespace Acme.Web;\n\n{body}\n");
+    let mut web = WEB;
+    let mut files: Vec<(&str, String)> = Vec::new();
+    match scenario {
+        // `entry` is a parameter of the type `Entry` the ledger project declares.
+        "csharp_typed_receiver_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) => entry.Save();\n}"),
+            ));
+        }
+        // The one constructor takes one argument.
+        "csharp_constructor_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public object Render() => new Entry(1);\n}"),
+            ));
+        }
+        // A static call through the type a `using` imports.
+        "csharp_static_type_call" => {
+            files.push(("src/Ledger/Rules.cs", RULES.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public int Render() => Rules.Apply();\n}"),
+            ));
+        }
+        // `base.Flush()` reaches the base class's method.
+        "csharp_base_member_call" => {
+            files.push((
+                "src/Web/PageBase.cs",
+                "namespace Acme.Web;\n\npublic class PageBase\n{\n    public virtual void Flush() { }\n}\n"
+                    .into(),
+            ));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page : PageBase\n{\n    public override void Flush() => base.Flush();\n}"),
+            ));
+        }
+        // An extension method of a static class a `using` brings into scope.
+        "csharp_extension_method_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push(("src/Ledger/EntryExtensions.cs", EXTENSIONS.into()));
+            files.push((
+                "src/Web/Page.cs",
+                format!(
+                    "using Acme.Ledger.Extensions;\n{}",
+                    page("public class Page\n{\n    public void Render(Entry entry) => entry.Archive();\n}")
+                ),
+            ));
+        }
+        // A local function takes the bare call.
+        "csharp_local_function_call" => {
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public int Render()\n    {\n        return Total();\n        int Total() => 1;\n    }\n}"),
+            ));
+        }
+        // Two overloads take one argument; the count cannot pick one.
+        "csharp_overload_ambiguity" => {
+            files.push(("src/Ledger/Entry.cs", OVERLOADS.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry, int value) => entry.Save(value);\n}"),
+            ));
+        }
+        // No `using` brings the extension's class into scope.
+        "csharp_extension_out_of_scope" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push(("src/Ledger/EntryExtensions.cs", EXTENSIONS.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) => entry.Archive();\n}"),
+            ));
+        }
+        // The parameter `Entry`, a `Page`, takes the name before the type `Entry`, and C# does
+        // not call the static `Page.Create` through a value.
+        "csharp_shadowed_type_name" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public static Page Create() => null;\n    public object Render(Page Entry) => Entry.Create();\n}"),
+            ));
+        }
+        // The call is compiled only under a build configuration.
+        "csharp_conditional_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry)\n    {\n#if DEBUG\n        entry.Save();\n#endif\n    }\n}"),
+            ));
+        }
+        // The web project does not reference the ledger project.
+        "csharp_unreferenced_project_call" => {
+            web = SDK;
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) => entry.Save();\n}"),
+            ));
+        }
+        // A member `Entry` the base class outside the repository may declare would take the name.
+        "csharp_outside_base_member_name" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page : Vendor.Web.Controller\n{\n    public object Render() => Entry.Create();\n}"),
+            ));
+        }
+        // `Save` is a delegate property; calling it invokes the delegate.
+        "csharp_delegate_member_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public System.Action Save { get; set; }\n    public void Render() => Save();\n}"),
+            ));
+        }
+        "csharp_base_class_extends" | "csharp_class_base_not_implemented" => {
+            files.push(("src/Ledger/Types.cs", TYPES.into()));
+            files.push(("src/Web/Page.cs", page("public class Page : Base\n{\n}")));
+        }
+        "csharp_generic_base_extends" => {
+            files.push(("src/Ledger/Types.cs", GENERIC.into()));
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push(("src/Web/Page.cs", page("public class Page : Base<Entry>\n{\n}")));
+        }
+        "csharp_interface_extends_interface" => {
+            files.push(("src/Ledger/Types.cs", TYPES.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public interface IAuditedStore : IStore\n{\n}"),
+            ));
+        }
+        // `Controller` is imported from outside the repository; the repository's own is in a
+        // namespace the file does not import.
+        "csharp_outside_base_not_extended" => {
+            files.push((
+                "src/Ledger/Controller.cs",
+                "namespace Acme.Ledger.Mvc;\n\npublic class Controller { }\n".into(),
+            ));
+            files.push((
+                "src/Web/Page.cs",
+                "using Vendor.Web;\n\nnamespace Acme.Web;\n\npublic class Page : Controller\n{\n}\n"
+                    .into(),
+            ));
+        }
+        "csharp_interface_implementation" => {
+            files.push(("src/Ledger/Types.cs", TYPES.into()));
+            files.push(("src/Web/Page.cs", page("public class Page : Base, IStore\n{\n}")));
+        }
+        "csharp_parameter_type_use" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) { }\n}"),
+            ));
+        }
+        "csharp_property_type_use" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public Entry Current { get; set; }\n}"),
+            ));
+        }
+        "csharp_unreferenced_type_use" => {
+            web = SDK;
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) { }\n}"),
+            ));
+        }
+        _ => return None,
+    }
+    let projects = [("src/Ledger/Ledger.csproj", SDK.to_string()), ("src/Web/Web.csproj", web.to_string())];
+    Some(
+        projects
+            .into_iter()
+            .chain(files)
+            .map(|(path, content)| (PathBuf::from(path), content))
             .collect(),
     )
 }

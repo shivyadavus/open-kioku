@@ -5,11 +5,11 @@
     "analysis_semantics_status": {
       "affected_components": [],
       "affected_languages": [],
-      "current_fingerprint": "368bb554cfcf426c20b566b743d9f05150be98b7d1ee2aecb119746be0734ba3",
+      "current_fingerprint": "0322386608f160c7edb2ed4c78b51e919bde1e6ae58cd56a537f483045711cda",
       "reasons": [],
       "recommended_action": "none",
       "status": "compatible",
-      "stored_fingerprint": "368bb554cfcf426c20b566b743d9f05150be98b7d1ee2aecb119746be0734ba3"
+      "stored_fingerprint": "0322386608f160c7edb2ed4c78b51e919bde1e6ae58cd56a537f483045711cda"
     },
     "caveats": [
       "schema availability reflects the current persisted index manifest"
@@ -800,6 +800,23 @@
           "types_constructor": "supported_corroborating"
         },
         "language": "go",
+        "version": 1
+      },
+      {
+        "capabilities": {
+          "calls_dynamic_dispatch": "unsupported",
+          "calls_imported_function": "supported_authoritative",
+          "calls_instance_member": "supported_authoritative",
+          "calls_local_function": "supported_authoritative",
+          "calls_static_member": "supported_authoritative",
+          "inheritance_extends": "supported_authoritative",
+          "inheritance_implements": "supported_authoritative",
+          "references_import_binding": "unsupported",
+          "source_ranges_call_site": "supported_authoritative",
+          "types_annotation": "supported_authoritative",
+          "types_constructor": "supported_authoritative"
+        },
+        "language": "c_sharp",
         "version": 1
       }
     ],
