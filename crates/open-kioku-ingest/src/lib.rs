@@ -819,6 +819,16 @@ impl Indexer {
         );
 
         analysis_facts.extend(cargo_facts::cargo_manifest_facts(&project_model, &files));
+        // C# `using` directives are placed first, so the name facts the parser read for them are
+        // released before the symbol, scope and binding indexes below are built (#681).
+        let csharp_report = csharp_imports::resolve_csharp_imports(
+            &project_model.dotnet,
+            &files,
+            &symbols,
+            &csharp_names,
+            &imports,
+        );
+        drop(csharp_names);
         let mut import_registry = imports::ImportRegistry::default();
         let mut file_map: imports::FileMap = HashMap::new();
         fn register_file_key(map: &mut imports::FileMap, key: String, file_id: &FileId) {
@@ -966,16 +976,9 @@ impl Indexer {
         );
         let mut resolver_report =
             resolver::resolve_imports(&pruner, &files, &symbols, &imports, &rust_import_targets)?;
-        let csharp_report = csharp_imports::resolve_csharp_imports(
-            &project_model.dotnet,
-            &files,
-            &symbols,
-            &csharp_names,
-            &imports,
-        );
-        drop(csharp_names);
+        // After the generic passes over the import model, which have no C# bindings to read.
         for binding in csharp_report.bindings {
-            import_registry.index.insert(binding);
+            import_registry.index.insert_file_binding(binding);
         }
         resolver_report.extend(
             csharp_report.resolutions,

@@ -643,7 +643,10 @@ candidate only when its project is the importing file's or one it references and
 accessibility lets the importing project name it (`internal` within its project and its friends,
 `file` within its file); `Entry` and `Entry<T>` are different types, and an attribute `[Audited]`
 names `AuditedAttribute` before `Audited`. Not read: nested types a `using static` brings in, and
-anything behind an extern alias, which is taken to be outside the repository.
+anything behind an extern alias, which is taken to be outside the repository. The index knows
+only the repository's own types, so where a file is declared in a namespace a package also fills (an
+extension class placed in a framework's namespace, say), a type the package declares there would
+take a name before the file's directives, and the lookup does not rule that out.
 
 What the lookup finds becomes:
 

@@ -502,6 +502,18 @@ impl ImportIndex {
             .push(binding);
     }
 
+    /// Records a binding that holds for its whole file, by file alone: a C# `using` directive
+    /// applies to every scope of its file (#681). [`ImportIndex::insert`] also files a binding
+    /// under its scope, which for a binding with no scope of its own is `global`, a key every
+    /// file shares, so the scope map would hold a second copy that [`ImportIndex::lookup`]
+    /// finds by file anyway.
+    pub fn insert_file_binding(&mut self, binding: ImportBinding) {
+        self.by_file_local_name
+            .entry((binding.file_id.clone(), binding.local_name.clone()))
+            .or_default()
+            .push(binding);
+    }
+
     pub fn lookup(
         &self,
         file_id: &FileId,
@@ -576,5 +588,44 @@ pub struct SemanticRepository {
 impl SemanticRepository {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(file: &str, name: &str) -> ImportBinding {
+        ImportBinding {
+            file_id: FileId::new(file),
+            scope_id: ScopeId::new("global"),
+            local_name: name.into(),
+            imported_name: name.into(),
+            source_module: "Acme.Ledger".into(),
+            resolved_module: None,
+            target_file: None,
+            target_symbol: None,
+            origin: ImportOrigin::External,
+            is_type_only: true,
+            is_glob: false,
+            evidence: Vec::new(),
+            rule: ImportBindingRule::ModuleKey,
+            configured_targets: None,
+        }
+    }
+
+    #[test]
+    fn a_file_binding_is_kept_once_and_found_only_for_its_file() {
+        let mut index = ImportIndex::new();
+        index.insert_file_binding(binding("file:a.cs", "Entry"));
+        index.insert_file_binding(binding("file:b.cs", "Entry"));
+        assert!(index.by_scope_local_name.is_empty());
+        let global = ScopeId::new("global");
+        let found = index.lookup(&FileId::new("file:a.cs"), Some(&global), "Entry");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file_id, FileId::new("file:a.cs"));
+        assert!(index
+            .lookup(&FileId::new("file:c.cs"), Some(&global), "Entry")
+            .is_empty());
     }
 }
