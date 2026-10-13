@@ -267,6 +267,15 @@ pub struct DotnetProject {
     pub conditional_compile_include: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditional_compile_remove: Vec<String>,
+    /// The `project_references` whose item sets `PrivateAssets="all"` (or `compile`): they do not
+    /// flow on to the projects that reference this one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_project_references: Vec<PathBuf>,
+    /// `ProjectReference` items to a project file of the repository that bring none of its types
+    /// into the global namespace: `ReferenceOutputAssembly="false"`, or `Aliases` without
+    /// `global`. They are not in `project_references`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unlinked_project_references: Vec<PathBuf>,
     /// `ProjectReference` items naming no project file the repository holds, as written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_project_references: Vec<String>,

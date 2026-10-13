@@ -84,7 +84,15 @@ struct MsBuildFile {
     sdk: Option<String>,
     properties: Vec<(String, String)>,
     items: Vec<MsBuildItem>,
-    imports: Vec<String>,
+    imports: Vec<MsBuildImport>,
+}
+
+/// An `<Import Project="..">` of an MSBuild file.
+#[derive(Debug, Default)]
+struct MsBuildImport {
+    project: String,
+    /// A `Condition` on the import or an element around it.
+    conditional: bool,
 }
 
 #[derive(Debug, Default)]
@@ -141,7 +149,13 @@ fn read_msbuild(content: &str) -> Option<MsBuildFile> {
                     file.sdk.get_or_insert_with(|| sdk.to_string());
                 }
                 if let Some(project) = node.attribute("Project") {
-                    file.imports.push(project.to_string());
+                    file.imports.push(MsBuildImport {
+                        project: project.to_string(),
+                        conditional: node
+                            .ancestors()
+                            .filter(roxmltree::Node::is_element)
+                            .any(|element| element.attribute("Condition").is_some()),
+                    });
                 }
             }
             (Some("PropertyGroup"), property) => {
@@ -215,7 +229,7 @@ impl PropsFiles {
     /// The files MSBuild imports for a project in `dir`: the nearest one at or above it, then,
     /// while one imports the next above it, that one. Outermost first, the order MSBuild
     /// evaluates them in.
-    fn chain(&self, dir: &str) -> Vec<&MsBuildFile> {
+    fn chain(&self, dir: &str) -> Vec<(String, &MsBuildFile)> {
         let mut chain = Vec::new();
         let mut from = Some(dir.to_string());
         while let Some(start) = from.take() {
@@ -226,10 +240,10 @@ impl PropsFiles {
             }) else {
                 break;
             };
-            chain.push(file);
-            if imports_parent_props(file) && !found_dir.is_empty() {
-                from = Some(parent_dir(&found_dir).to_string());
-            }
+            let next = (imports_parent_props(file) && !found_dir.is_empty())
+                .then(|| parent_dir(&found_dir).to_string());
+            chain.push((found_dir, file));
+            from = next;
         }
         chain.reverse();
         chain
@@ -241,7 +255,7 @@ impl PropsFiles {
 /// or `../Directory.Build.props` does.
 fn imports_parent_props(file: &MsBuildFile) -> bool {
     file.imports.iter().any(|import| {
-        let lower = import.to_ascii_lowercase();
+        let lower = import.project.to_ascii_lowercase();
         (lower.contains("getpathoffileabove") || lower.contains(".."))
             && (lower.contains("directory.build.props")
                 || lower.contains("directory.packages.props"))
@@ -291,19 +305,38 @@ fn read_project(
         return unreadable();
     };
     let imported = props.chain(&dir);
-    let mut properties = Properties::new(&stem);
-    for source in imported.iter().copied().chain([&file]) {
+    let mut properties = Properties::new(&stem, &dir);
+    for (source_dir, source) in imported
+        .iter()
+        .map(|(source_dir, source)| (source_dir.as_str(), *source))
+        .chain([(dir.as_str(), &file)])
+    {
         for (name, value) in &source.properties {
-            properties.set(name, value);
+            properties.set_in(name, value, source_dir);
         }
     }
+    // A shared project's `.projitems` the project file imports lists files the project compiles,
+    // usually by `$(MSBuildThisFileDirectory)`, the `.projitems` file's own directory.
+    let shared = file
+        .imports
+        .iter()
+        .filter_map(|import| {
+            let path = join_dir(&dir, &properties.expand_in(&import.project, &dir))?;
+            if !path.to_ascii_lowercase().ends_with(".projitems") {
+                return None;
+            }
+            let content = fs::read_to_string(repo_root.join(&path)).ok()?;
+            let items = read_msbuild(&content)?;
+            Some((parent_dir(&path).to_string(), items, import.conditional))
+        })
+        .collect::<Vec<_>>();
     let sdk = file.sdk.clone();
     let assembly_name = properties
         .get("AssemblyName")
         .filter(|name| !name.is_empty())
         .unwrap_or(&stem)
         .to_string();
-    properties.set("AssemblyName", &assembly_name);
+    properties.set_in("AssemblyName", &assembly_name, &dir);
     let root_namespace = properties
         .get("RootNamespace")
         .filter(|name| !name.is_empty())
@@ -338,29 +371,43 @@ fn read_project(
     let central = package_props
         .chain(&dir)
         .into_iter()
-        .flat_map(|file| file.items.iter())
+        .flat_map(|(_, file)| file.items.iter())
         .filter(|item| item.kind == "PackageVersion")
         .filter_map(|item| Some((item.include.as_deref()?, item.metadata("Version")?)))
         .map(|(id, version)| (id.to_ascii_lowercase(), version.to_string()))
         .collect::<HashMap<_, _>>();
-    for item in imported
-        .iter()
-        .flat_map(|file| file.items.iter())
-        .chain(&file.items)
+    // Item paths are relative to the project's directory wherever the item is written;
+    // `$(MSBuildThisFileDirectory)` names the directory of the file that writes it.
+    let sources =
+        imported
+            .iter()
+            .map(|(source_dir, source)| (source_dir.as_str(), *source, false))
+            .chain([(dir.as_str(), &file, false)])
+            .chain(shared.iter().map(|(source_dir, source, conditional)| {
+                (source_dir.as_str(), source, *conditional)
+            }));
+    for (source_dir, item, import_conditional) in
+        sources.flat_map(|(source_dir, source, conditional)| {
+            source
+                .items
+                .iter()
+                .map(move |item| (source_dir, item, conditional))
+        })
     {
+        let conditional = item.conditional || import_conditional;
         let includes = item
             .include
             .as_deref()
-            .map(|include| split_list(&properties.expand(include)))
+            .map(|include| split_list(&properties.expand_in(include, source_dir)))
             .unwrap_or_default();
         let removes = item
             .remove
             .as_deref()
-            .map(|remove| split_list(&properties.expand(remove)))
+            .map(|remove| split_list(&properties.expand_in(remove, source_dir)))
             .unwrap_or_default();
         match item.kind.as_str() {
             "Compile" => {
-                let (include, remove) = if item.conditional {
+                let (include, remove) = if conditional {
                     (
                         &mut project.conditional_compile_include,
                         &mut project.conditional_compile_remove,
@@ -376,19 +423,44 @@ fn read_project(
                 remove.extend(removes.iter().filter_map(|remove| join_dir(&dir, remove)));
             }
             "ProjectReference" => {
+                // A reference that does not compile against the project's assembly, or does
+                // only under an extern alias, brings no type into the global namespace.
+                let no_assembly = item
+                    .metadata("ReferenceOutputAssembly")
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("false"));
+                let aliased = item.metadata("Aliases").is_some_and(|aliases| {
+                    !aliases.trim().is_empty()
+                        && !aliases.split(',').any(|alias| alias.trim() == "global")
+                });
+                // `PrivateAssets="all"` keeps the reference from flowing to the projects that
+                // reference this one.
+                let private = item.metadata("PrivateAssets").is_some_and(|assets| {
+                    assets.split(';').any(|asset| {
+                        let asset = asset.trim();
+                        asset.eq_ignore_ascii_case("all") || asset.eq_ignore_ascii_case("compile")
+                    })
+                });
                 for include in includes {
                     match join_dir(&dir, &include)
                         .and_then(|joined| projects.get(&joined.to_ascii_lowercase()))
                     {
+                        Some(reference) if no_assembly || aliased => {
+                            if !project.unlinked_project_references.contains(reference) {
+                                project.unlinked_project_references.push(reference.clone());
+                            }
+                        }
                         Some(reference) => {
+                            if private && !project.private_project_references.contains(reference) {
+                                project.private_project_references.push(reference.clone());
+                            }
                             if !project.project_references.contains(reference) {
                                 project.project_references.push(reference.clone());
-                                if item.conditional {
+                                if conditional {
                                     project
                                         .conditional_project_references
                                         .push(reference.clone());
                                 }
-                            } else if !item.conditional {
+                            } else if !conditional {
                                 // Referenced unconditionally too.
                                 project
                                     .conditional_project_references
@@ -420,7 +492,7 @@ fn read_project(
                         is_static: item
                             .metadata("Static")
                             .is_some_and(|value| value.eq_ignore_ascii_case("true")),
-                        conditional: item.conditional,
+                        conditional,
                     });
                 }
                 project.removed_usings.extend(removes);
@@ -466,24 +538,31 @@ fn read_packages_config(content: &str) -> Option<Vec<DotnetPackage>> {
     )
 }
 
+/// What a directory property (`$(MSBuildThisFileDirectory)`, `$(MSBuildProjectDirectory)`)
+/// expands to before the repository-relative directory it names: MSBuild's are absolute, and
+/// [`join_dir`] reads a path starting with this from the repository root.
+const REPOSITORY_ROOT: &str = "\u{1}";
+
 /// MSBuild properties as the project's evaluation sets them, for `$(Name)` expansion.
 struct Properties {
     values: HashMap<String, String>,
 }
 
 impl Properties {
-    fn new(project_name: &str) -> Self {
+    /// The properties of the project `project_name` in the repository-relative `project_dir`.
+    fn new(project_name: &str, project_dir: &str) -> Self {
         let mut values = HashMap::new();
         values.insert("msbuildprojectname".to_string(), project_name.to_string());
-        // Paths are read relative to the file's own directory, which these name.
-        for directory in ["msbuildprojectdirectory", "msbuildthisfiledirectory"] {
-            values.insert(directory.to_string(), String::new());
-        }
+        values.insert(
+            "msbuildprojectdirectory".to_string(),
+            format!("{REPOSITORY_ROOT}{project_dir}"),
+        );
         Self { values }
     }
 
-    fn set(&mut self, name: &str, value: &str) {
-        let value = self.expand(value);
+    /// Sets `name` to `value` as the file in the repository-relative `file_dir` writes it.
+    fn set_in(&mut self, name: &str, value: &str, file_dir: &str) {
+        let value = self.expand_in(value, file_dir);
         self.values.insert(name.to_ascii_lowercase(), value);
     }
 
@@ -493,8 +572,10 @@ impl Properties {
             .map(String::as_str)
     }
 
-    /// `text` with each `$(Name)` the properties set replaced by its value; any other is kept.
-    fn expand(&self, text: &str) -> String {
+    /// `text`, written by the file in the repository-relative `file_dir`, with each `$(Name)`
+    /// the properties set replaced by its value; any other is kept. A directory property
+    /// expands to the directory from the repository root, which [`join_dir`] reads as such.
+    fn expand_in(&self, text: &str, file_dir: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(start) = rest.find("$(") {
@@ -503,9 +584,17 @@ impl Properties {
             match after.find(')') {
                 Some(end) if !after[..end].contains('(') => {
                     let name = &after[..end];
-                    match self.get(name) {
-                        Some(value) => out.push_str(value),
-                        None => out.push_str(&rest[start..start + 2 + end + 1]),
+                    if name.eq_ignore_ascii_case("MSBuildThisFileDirectory") {
+                        out.push_str(REPOSITORY_ROOT);
+                        if !file_dir.is_empty() {
+                            out.push_str(file_dir);
+                            out.push('/');
+                        }
+                    } else {
+                        match self.get(name) {
+                            Some(value) => out.push_str(value),
+                            None => out.push_str(&rest[start..start + 2 + end + 1]),
+                        }
                     }
                     rest = &after[end + 1..];
                 }
@@ -537,10 +626,12 @@ fn join_dir(dir: &str, path: &str) -> Option<String> {
     if path.contains("$(") || path.contains("@(") || path.contains("%(") {
         return None;
     }
-    let joined = if dir.is_empty() {
-        path
-    } else {
-        format!("{dir}/{path}")
+    // A path a directory property starts is from the repository root.
+    let joined = match path.strip_prefix(REPOSITORY_ROOT) {
+        Some(from_root) => from_root.trim_start_matches('/').to_string(),
+        None if path.contains(REPOSITORY_ROOT) => return None,
+        None if dir.is_empty() => path,
+        None => format!("{dir}/{path}"),
     };
     normalize_path(&joined).filter(|normal| !normal.is_empty())
 }
@@ -916,5 +1007,116 @@ mod tests {
         assert!(broken.unreadable);
         assert_eq!(broken.assembly_name, "Broken");
         assert!(!broken.default_compile_items);
+    }
+
+    #[test]
+    fn directory_properties_and_shared_projects_are_read_from_the_file_that_names_them() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        write(
+            root,
+            "Directory.Build.props",
+            "<Project>\n  <PropertyGroup>\n    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>\n    <BuildDir>$(MSBuildThisFileDirectory)..\\build\\</BuildDir>\n  </PropertyGroup>\n</Project>\n",
+        );
+        write(
+            root,
+            "src/App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <Import Project=\"$(RepoRoot)src/Shared/Shared.projitems\" Label=\"Shared\" />\n  <Import Project=\"../Optional/Optional.projitems\" Condition=\"'$(Configuration)' == 'Debug'\" />\n  <ItemGroup>\n    <ProjectReference Include=\"$(RepoRoot)src/Core/Core.csproj\" />\n    <ProjectReference Include=\"$(MSBuildProjectDirectory)/../Data/Data.csproj\" />\n    <ProjectReference Include=\"$(MSBuildThisFileDirectory)..\\Tools\\Tools.csproj\" />\n    <Compile Include=\"$(MSBuildThisFileDirectory)Generated/*.cs\" />\n  </ItemGroup>\n</Project>\n",
+        );
+        write(
+            root,
+            "src/Shared/Shared.projitems",
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\n  <ItemGroup>\n    <Compile Include=\"$(MSBuildThisFileDirectory)Clock.cs\" />\n  </ItemGroup>\n</Project>\n",
+        );
+        write(
+            root,
+            "src/Optional/Optional.projitems",
+            "<Project>\n  <ItemGroup>\n    <Compile Include=\"$(MSBuildThisFileDirectory)Debug.cs\" />\n  </ItemGroup>\n</Project>\n",
+        );
+        for project in ["Core", "Data", "Tools"] {
+            write(
+                root,
+                &format!("src/{project}/{project}.csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n</Project>\n",
+            );
+        }
+        let model = model(
+            root,
+            &[
+                "Directory.Build.props",
+                "src/App/App.csproj",
+                "src/Core/Core.csproj",
+                "src/Data/Data.csproj",
+                "src/Tools/Tools.csproj",
+            ],
+        );
+        let app = project(&model, "src/App/App.csproj");
+        assert_eq!(
+            app.project_references,
+            vec![
+                PathBuf::from("src/Core/Core.csproj"),
+                PathBuf::from("src/Data/Data.csproj"),
+                PathBuf::from("src/Tools/Tools.csproj"),
+            ]
+        );
+        assert!(app.unresolved_project_references.is_empty(), "{app:#?}");
+        assert_eq!(
+            app.compile_include,
+            vec![
+                "src/App/Generated/*.cs".to_string(),
+                "src/Shared/Clock.cs".to_string()
+            ]
+        );
+        assert_eq!(
+            app.conditional_compile_include,
+            vec!["src/Optional/Debug.cs".to_string()]
+        );
+    }
+
+    #[test]
+    fn reference_metadata_says_which_references_bring_types_and_flow_on() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        write(
+            root,
+            "App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <ProjectReference Include=\"../Lib/Lib.csproj\" PrivateAssets=\"all\" />\n    <ProjectReference Include=\"../Gen/Gen.csproj\" ReferenceOutputAssembly=\"false\" OutputItemType=\"Analyzer\" />\n    <ProjectReference Include=\"../Old/Old.csproj\">\n      <Aliases>Legacy</Aliases>\n    </ProjectReference>\n    <ProjectReference Include=\"../Both/Both.csproj\" Aliases=\"global,Both\" />\n  </ItemGroup>\n</Project>\n",
+        );
+        for project in ["Lib", "Gen", "Old", "Both"] {
+            write(
+                root,
+                &format!("{project}/{project}.csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n</Project>\n",
+            );
+        }
+        let model = model(
+            root,
+            &[
+                "App/App.csproj",
+                "Lib/Lib.csproj",
+                "Gen/Gen.csproj",
+                "Old/Old.csproj",
+                "Both/Both.csproj",
+            ],
+        );
+        let app = project(&model, "App/App.csproj");
+        assert_eq!(
+            app.project_references,
+            vec![
+                PathBuf::from("Lib/Lib.csproj"),
+                PathBuf::from("Both/Both.csproj")
+            ]
+        );
+        assert_eq!(
+            app.private_project_references,
+            vec![PathBuf::from("Lib/Lib.csproj")]
+        );
+        assert_eq!(
+            app.unlinked_project_references,
+            vec![
+                PathBuf::from("Gen/Gen.csproj"),
+                PathBuf::from("Old/Old.csproj")
+            ]
+        );
     }
 }

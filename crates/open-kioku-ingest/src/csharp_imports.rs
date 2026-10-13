@@ -189,6 +189,7 @@ fn read_projects(model: &DotnetModel) -> Vec<Project<'_>> {
             friends: project.internals_visible_to.iter().cloned().collect(),
             visible: BTreeSet::new(),
             conditionally_visible: BTreeSet::new(),
+            blind: false,
             globals: project_file_globals(project),
         })
         .collect()
@@ -209,6 +210,9 @@ struct Project<'m> {
     visible: BTreeSet<usize>,
     /// Those of `visible` it reaches only through a `ProjectReference` a `Condition` guards.
     conditionally_visible: BTreeSet<usize>,
+    /// It or a project it sees has a `ProjectReference` the index could not resolve, so it may
+    /// see projects `visible` leaves out.
+    blind: bool,
     /// The project's `global using` directives, from every file, the project file and the SDK.
     globals: Vec<GlobalUsing>,
 }
@@ -255,6 +259,15 @@ struct TypeGroup {
 impl TypeGroup {
     fn files(&self) -> BTreeSet<&FileId> {
         self.parts.iter().map(|(_, file)| file).collect()
+    }
+
+    /// The parts `file` declares.
+    fn parts_in(&self, file: &FileId) -> Vec<SymbolId> {
+        self.parts
+            .iter()
+            .filter(|(_, part)| part == file)
+            .map(|(symbol, _)| symbol.clone())
+            .collect()
     }
 }
 
@@ -307,6 +320,8 @@ struct Index<'a> {
     conditionally_owned: HashSet<FileId>,
     /// Shadowing names by enclosing type group and importing project, computed once.
     shadows: ShadowCache,
+    /// [`Index::shared_with_packages`] by namespace and importing project, computed once.
+    shared: RefCell<HashMap<(String, Option<usize>), bool>>,
 }
 
 impl<'a> Index<'a> {
@@ -333,6 +348,13 @@ impl<'a> Index<'a> {
         for (project, (visible, conditional)) in projects.iter_mut().zip(visible) {
             project.visible = visible;
             project.conditionally_visible = conditional;
+        }
+        let unresolved = projects
+            .iter()
+            .map(|project| !project.model.unresolved_project_references.is_empty())
+            .collect::<Vec<_>>();
+        for project in &mut projects {
+            project.blind = project.visible.iter().any(|&seen| unresolved[seen]);
         }
 
         let mut owners = HashMap::new();
@@ -407,6 +429,7 @@ impl<'a> Index<'a> {
             unowned,
             conditionally_owned,
             shadows: RefCell::new(HashMap::new()),
+            shared: RefCell::new(HashMap::new()),
         };
         index.index_types(symbols);
         index.index_namespaces(files);
@@ -476,6 +499,7 @@ impl<'a> Index<'a> {
                     .and_then(|parent| self.symbols.get(parent))
                     .is_none_or(|parent| parent.kind == SymbolKind::Package)
             });
+            group.visibility = self.declared_visibility(&group, top_level);
             if top_level {
                 let name = group
                     .qualified
@@ -497,6 +521,36 @@ impl<'a> Index<'a> {
                 }
             }
             self.groups.push(group);
+        }
+    }
+
+    /// The accessibility of one project's type: what one of its parts declares, else C#'s
+    /// default for a type in a namespace (`internal`). The parts' symbols may carry another
+    /// project's (a part several projects compile records the accessibility of every project's
+    /// type), so the parts' own modifiers decide. A part whose header the index cannot read
+    /// keeps the symbol's.
+    fn declared_visibility(&self, group: &TypeGroup, top_level: bool) -> Visibility {
+        let mut declared = None::<Visibility>;
+        let mut unread = false;
+        for symbol in group
+            .parts
+            .iter()
+            .filter_map(|(symbol, _)| self.symbols.get(symbol))
+        {
+            match symbol.signature.as_deref().and_then(declared_access) {
+                Some(Some(visibility)) => {
+                    if declared.is_none_or(|known| access_rank(visibility) > access_rank(known)) {
+                        declared = Some(visibility);
+                    }
+                }
+                Some(None) => {}
+                None => unread = true,
+            }
+        }
+        match declared {
+            Some(visibility) => visibility,
+            None if top_level && !unread => Visibility::Crate,
+            None => group.visibility,
         }
     }
 
@@ -598,6 +652,96 @@ impl<'a> Index<'a> {
             || self.projects[owner]
                 .friends
                 .contains(&self.projects[project].model.assembly_name)
+    }
+
+    /// Whether `namespace` declares a top-level type `name` with `arity` that the project model
+    /// cannot rule in or out for code compiled by `importer`: one in a file no project file the
+    /// index read compiles, one a `Compile` item a `Condition` guards includes or removes, or one
+    /// of a project the importer does not see while it has a reference the index could not
+    /// resolve. Such a type is not a candidate, but it may be the one the compiler finds.
+    fn uncertain_types_in(
+        &self,
+        namespace: &str,
+        name: &str,
+        arity: u16,
+        importer: Option<usize>,
+        file: &FileId,
+    ) -> bool {
+        let Some(project) = importer else {
+            // A file of no project already sees every type.
+            return false;
+        };
+        let any_arity = self
+            .unknown_arity
+            .get(&(namespace.to_string(), name.to_string()));
+        self.by_key
+            .get(&(namespace.to_string(), name.to_string(), arity))
+            .into_iter()
+            .chain(any_arity)
+            .flatten()
+            .map(|&group| &self.groups[group])
+            .filter(|group| !self.accessible(group, importer, file))
+            .any(|group| match group.owner {
+                None => true,
+                Some(owner) => {
+                    group
+                        .parts
+                        .iter()
+                        .any(|(_, part)| self.conditionally_owned.contains(part))
+                        || (self.projects[project].blind
+                            && !self.projects[project].visible.contains(&owner))
+                }
+            })
+    }
+
+    /// Whether code compiled by `importer` may see types from outside the repository directly
+    /// in `namespace`: a `System` or `Microsoft` namespace, or one a package the project
+    /// references is named after, unless a project of the repository is named within it.
+    fn shared_with_packages(&self, namespace: &str, importer: Option<usize>) -> bool {
+        if namespace.is_empty() {
+            return false;
+        }
+        let key = (namespace.to_string(), importer);
+        if let Some(&known) = self.shared.borrow().get(&key) {
+            return known;
+        }
+        let shared = self.shares_with_packages(namespace, importer);
+        self.shared.borrow_mut().insert(key, shared);
+        shared
+    }
+
+    fn shares_with_packages(&self, namespace: &str, importer: Option<usize>) -> bool {
+        let within = |outer: &str, inner: &str| {
+            inner == outer
+                || inner
+                    .strip_prefix(outer)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        };
+        let owned = self.projects.iter().any(|project| {
+            [
+                project.model.root_namespace.as_str(),
+                project.model.assembly_name.as_str(),
+            ]
+            .iter()
+            .any(|own| within(namespace, own) || within(own, namespace))
+        });
+        if owned {
+            return false;
+        }
+        if within("System", namespace) || within("Microsoft", namespace) {
+            return true;
+        }
+        let Some(project) = importer else {
+            return false;
+        };
+        self.projects[project].model.packages.iter().any(|package| {
+            let id = package.id.as_str();
+            // `Vendor.Logging.Abstractions` puts its types in `Vendor.Logging`.
+            let prefix = id.rsplit_once('.').map(|(prefix, _)| prefix);
+            within(id, namespace)
+                || (namespace.contains('.') && within(namespace, id))
+                || prefix.is_some_and(|prefix| prefix.contains('.') && within(prefix, namespace))
+        })
     }
 
     /// The accessible top-level types `name` with `arity` in `namespace`.
@@ -893,6 +1037,10 @@ fn visible_projects(
             if !conditional && model.conditional_project_references.contains(reference) {
                 continue;
             }
+            // A reference with `PrivateAssets="all"` serves its own project only.
+            if current != index && model.private_project_references.contains(reference) {
+                continue;
+            }
             let Some(&referenced) = by_path.get(reference.as_path()) else {
                 continue;
             };
@@ -991,6 +1139,37 @@ fn project_file_globals(project: &DotnetProject) -> Vec<GlobalUsing> {
 }
 
 /// Accessibility as a rank: who can name a declaration, widest last.
+/// The accessibility a C# type's header (`public sealed partial class Ledger`) declares:
+/// `Some(None)` when it declares none, `None` when no type keyword is read. The same reading as
+/// the parser's (`protected internal` is `protected`, `private protected` and `internal` are
+/// `crate`, `file` is `private`).
+fn declared_access(signature: &str) -> Option<Option<Visibility>> {
+    let words = signature.split_whitespace().collect::<Vec<_>>();
+    let keyword = words.iter().position(|word| {
+        matches!(
+            *word,
+            "class" | "struct" | "interface" | "record" | "enum" | "delegate"
+        )
+    })?;
+    let modifiers = &words[..keyword];
+    let has = |modifier: &str| modifiers.contains(&modifier);
+    Some(if has("public") {
+        Some(Visibility::Public)
+    } else if has("protected") {
+        Some(if has("private") {
+            Visibility::Crate
+        } else {
+            Visibility::Protected
+        })
+    } else if has("internal") {
+        Some(Visibility::Crate)
+    } else if has("private") || has("file") {
+        Some(Visibility::Private)
+    } else {
+        None
+    })
+}
+
 fn access_rank(visibility: Visibility) -> u8 {
     match visibility {
         Visibility::Unknown => 0,
@@ -1129,6 +1308,8 @@ struct FileRun {
     ambiguous: Vec<AmbiguousUse>,
     /// The names bound in the file, for the registry.
     bindings: BTreeMap<String, NameBinding>,
+    /// Names the file's uses bind two different ways (in different blocks or types).
+    conflicted: BTreeSet<String>,
     /// The file's own directives, placed, by line.
     directives: BTreeMap<u32, DirectivePlace>,
 }
@@ -1145,6 +1326,8 @@ struct Edge {
     doubts: BTreeSet<String>,
     names: BTreeSet<String>,
     via: String,
+    /// The type parts in the target file that a proving use names.
+    symbols: BTreeSet<SymbolId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1233,6 +1416,7 @@ impl<'i, 'a> Lookup<'i, 'a> {
                             doubt,
                             name: &using.target,
                             via: "the directive naming it",
+                            symbols: group.parts_in(target),
                         },
                     );
                 }
@@ -1266,6 +1450,7 @@ impl<'i, 'a> Lookup<'i, 'a> {
                             doubt: doubt.clone().or_else(|| self.target_doubt(group, target)),
                             name: &use_.name,
                             via: &via.describe(),
+                            symbols: group.parts_in(target),
                         },
                     );
                 }
@@ -1278,13 +1463,14 @@ impl<'i, 'a> Lookup<'i, 'a> {
                     [(symbol, _)] => Some(symbol.clone()),
                     _ => None,
                 };
-                run.bindings
-                    .entry(use_.name.clone())
-                    .or_insert_with(|| NameBinding::Internal {
+                run.bind(
+                    &use_.name,
+                    NameBinding::Internal {
                         namespace: group.namespace.clone(),
                         target_file,
                         target_symbol,
-                    });
+                    },
+                );
             }
             Found::Ambiguous { candidates } => {
                 let candidates = candidates
@@ -1315,9 +1501,7 @@ impl<'i, 'a> Lookup<'i, 'a> {
                 // members and their repository base types' were read first. A receiver left
                 // over is a type or an inherited member from outside, either way no repository
                 // symbol.
-                run.bindings
-                    .entry(use_.name.clone())
-                    .or_insert(NameBinding::Outside { namespace });
+                run.bind(&use_.name, NameBinding::Outside { namespace });
             }
             Found::Shadowed | Found::Namespace | Found::Declared(_) | Found::Nothing => {}
         }
@@ -1345,6 +1529,12 @@ impl<'i, 'a> Lookup<'i, 'a> {
         {
             return Some("the file declares the type only under `#if`".to_string());
         }
+        if self.index.conditionally_owned.contains(target) {
+            return Some(
+                "a `Compile` item a `Condition` guards decides whether the type's file is compiled"
+                    .to_string(),
+            );
+        }
         let conditional_reference = match (self.owner, group.owner) {
             (Some(project), Some(owner)) => self.index.projects[project]
                 .conditionally_visible
@@ -1361,15 +1551,35 @@ impl<'i, 'a> Lookup<'i, 'a> {
             return Found::Shadowed;
         }
         if use_.context == CSharpNameContext::Attribute && !use_.name.ends_with("Attribute") {
-            // `[Entry]` names `EntryAttribute` or `Entry`; the suffixed one is tried first.
+            // `[Entry]` names `EntryAttribute` or `Entry`, whichever is an attribute class: C#
+            // looks both up, and both being attributes is an error. A repository
+            // `EntryAttribute` is taken to be the attribute.
             let suffixed = CSharpNameUse {
                 name: format!("{}Attribute", use_.name),
                 ..use_.clone()
             };
             let found = self.find_in_namespaces(&suffixed);
-            if !matches!(found, Found::Nothing | Found::Outside { .. }) {
-                return found;
-            }
+            let outside_attribute = match &found {
+                Found::Nothing => None,
+                Found::Outside { namespace } => (self.index.namespace_state(namespace, self.owner)
+                    == NamespaceState::Outside)
+                    .then(|| namespace.clone()),
+                _ => return found,
+            };
+            let plain = self.find_in_namespaces(use_);
+            return match (plain, outside_attribute) {
+                (Found::Imported { group, via, doubt }, Some(namespace)) => Found::Imported {
+                    group,
+                    via,
+                    doubt: doubt.or_else(|| {
+                        Some(format!(
+                            "`{namespace}`, outside the repository, may declare the attribute `{}`, which C# would take",
+                            suffixed.name
+                        ))
+                    }),
+                },
+                (plain, _) => plain,
+            };
         }
         self.find_in_namespaces(use_)
     }
@@ -1383,7 +1593,32 @@ impl<'i, 'a> Lookup<'i, 'a> {
             .unwrap_or_default();
         let mut outside = None;
         let mut hidden = None;
+        let mut unplaced = None;
+        let mut shared = None;
         for level in namespace_levels(innermost) {
+            // A type the project model cannot place in this namespace may be found here first.
+            if unplaced.is_none()
+                && self.index.uncertain_types_in(
+                    &level,
+                    &use_.name,
+                    use_.arity,
+                    self.owner,
+                    &self.file.id,
+                )
+            {
+                unplaced = Some(format!(
+                    "the project model cannot tell whether code of this file sees the `{}` namespace `{}` declares, which would be found first",
+                    use_.name,
+                    if level.is_empty() { "(global)" } else { level.as_str() }
+                ));
+            }
+            // A package may declare the name in a namespace it shares with the file.
+            if shared.is_none() && self.index.shared_with_packages(&level, self.owner) {
+                shared = Some(format!(
+                    "a package may declare `{}` in namespace `{level}`, which would be found first",
+                    use_.name
+                ));
+            }
             // A type an error node hides in this namespace would be found here first.
             if hidden.is_none()
                 && self
@@ -1433,13 +1668,15 @@ impl<'i, 'a> Lookup<'i, 'a> {
                     return Found::Imported {
                         group,
                         via,
-                        doubt: doubt.or(nearer).or(hidden),
+                        doubt: doubt.or(nearer).or(hidden).or(unplaced).or(shared),
                     };
                 }
                 found => return found,
             }
         }
         match outside {
+            // A type the project model cannot place may be the name's: it is not outside.
+            Some(_) if unplaced.is_some() => Found::Nothing,
             Some(namespace) => Found::Outside { namespace },
             None => Found::Nothing,
         }
@@ -1496,7 +1733,11 @@ impl<'i, 'a> Lookup<'i, 'a> {
         }
         let mut candidates = Vec::<(usize, Via)>::new();
         let mut conditional = BTreeSet::new();
+        // A namespace from outside the repository, else one the repository declares, which may
+        // hold types from outside too.
         let mut outside = None;
+        let mut repository_outside = None;
+        let mut unplaced = None;
         for directive in &directives {
             if directive.kind != CSharpUsingKind::Namespace {
                 continue;
@@ -1506,6 +1747,20 @@ impl<'i, 'a> Lookup<'i, 'a> {
                 continue;
             }
             let namespace = self.directive_namespace(directive.target, block_namespace);
+            if unplaced.is_none()
+                && self.index.uncertain_types_in(
+                    &namespace,
+                    &use_.name,
+                    use_.arity,
+                    self.owner,
+                    &self.file.id,
+                )
+            {
+                unplaced = Some(format!(
+                    "the project model cannot tell whether code of this file sees the `{}` `{namespace}` declares, which the `using` would import too",
+                    use_.name
+                ));
+            }
             match self.index.namespace_state(&namespace, self.owner) {
                 NamespaceState::Visible => {
                     for group in self.index.types_in(
@@ -1523,7 +1778,7 @@ impl<'i, 'a> Lookup<'i, 'a> {
                         }
                     }
                     // A namespace the repository declares may hold types from outside too.
-                    outside.get_or_insert(namespace);
+                    repository_outside.get_or_insert(namespace);
                 }
                 NamespaceState::Outside => {
                     outside.get_or_insert(namespace);
@@ -1532,16 +1787,21 @@ impl<'i, 'a> Lookup<'i, 'a> {
             }
         }
         match candidates.as_slice() {
-            [] => match outside {
+            // A type the project model cannot place may be the name's: it is not outside.
+            [] if unplaced.is_some() => Found::Nothing,
+            [] => match outside.or(repository_outside) {
                 Some(namespace) => Found::Outside { namespace },
                 None => Found::Nothing,
             },
             [(group, via)] => Found::Imported {
                 group: *group,
                 via: via.clone(),
-                doubt: conditional.contains(group).then(|| {
-                    "the `using` that imports it is under `#if` or a `Condition`".to_string()
-                }),
+                doubt: conditional
+                    .contains(group)
+                    .then(|| {
+                        "the `using` that imports it is under `#if` or a `Condition`".to_string()
+                    })
+                    .or(unplaced),
             },
             _ => Found::Ambiguous { candidates },
         }
@@ -1637,7 +1897,64 @@ impl<'i, 'a> Lookup<'i, 'a> {
                 return AliasTarget::Hidden;
             }
         }
+        // `using Kind = Acme.Ledger.Entry.Kind;` names a type nested in a repository type.
+        if let Some(group) = self.nested_type(target, arity, block_namespace) {
+            return AliasTarget::Type(vec![group]);
+        }
         AliasTarget::Outside(target.to_string())
+    }
+
+    /// The type a dotted `target` names through a repository type it nests in: a top-level
+    /// type the file can name, then a nested type of each following name, the last of `arity`.
+    fn nested_type(&self, target: &str, arity: u16, block_namespace: &str) -> Option<usize> {
+        for level in namespace_levels(block_namespace) {
+            let full = join_namespace(&level, target);
+            let segments = full.split('.').collect::<Vec<_>>();
+            for split in 0..segments.len().saturating_sub(1) {
+                let namespace = segments[..split].join(".");
+                let [outer] =
+                    self.index
+                        .types_in(&namespace, segments[split], 0, self.owner, &self.file.id)[..]
+                else {
+                    continue;
+                };
+                let mut current = outer;
+                let rest = &segments[split + 1..];
+                let mut found = true;
+                for (position, name) in rest.iter().enumerate() {
+                    let last = position + 1 == rest.len();
+                    let next = self.index.groups[current]
+                        .parts
+                        .iter()
+                        .flat_map(|(part, _)| self.index.children.get(part).into_iter().flatten())
+                        .filter(|child| {
+                            child.name == *name
+                                && matches!(child.kind, SymbolKind::Class | SymbolKind::Interface)
+                        })
+                        .filter(|child| {
+                            let declared = self
+                                .index
+                                .declarations
+                                .get(&child.id)
+                                .map(|declared| declared.arity);
+                            declared.is_none_or(|declared| declared == if last { arity } else { 0 })
+                        })
+                        .filter_map(|child| self.index.group_of_symbol.get(&child.id).copied())
+                        .collect::<BTreeSet<_>>();
+                    match next.into_iter().collect::<Vec<_>>()[..] {
+                        [group] => current = group,
+                        _ => {
+                            found = false;
+                            break;
+                        }
+                    }
+                }
+                if found {
+                    return Some(current);
+                }
+            }
+        }
+        None
     }
 
     /// Where one of the file's own directives leads, and for a `using static` or an alias of a
@@ -1744,9 +2061,24 @@ struct Reach<'r> {
     doubt: Option<String>,
     name: &'r str,
     via: &'r str,
+    /// The parts of the named type the target file declares.
+    symbols: Vec<SymbolId>,
 }
 
 impl FileRun {
+    /// Binds `name` for the registry, unless another use of the file binds it otherwise.
+    fn bind(&mut self, name: &str, binding: NameBinding) {
+        match self.bindings.get(name) {
+            None => {
+                self.bindings.insert(name.to_string(), binding);
+            }
+            Some(known) if *known != binding => {
+                self.conflicted.insert(name.to_string());
+            }
+            Some(_) => {}
+        }
+    }
+
     fn add_edge(&mut self, target: &FileId, reach: Reach<'_>) {
         let edge = self.edges.entry(target.clone()).or_insert_with(|| Edge {
             line: reach.line,
@@ -1756,6 +2088,7 @@ impl FileRun {
             doubts: BTreeSet::new(),
             names: BTreeSet::new(),
             via: reach.via.to_string(),
+            symbols: BTreeSet::new(),
         });
         // The earliest line is where the edge is recorded; a proving use anywhere proves it.
         if reach.line < edge.line {
@@ -1766,7 +2099,10 @@ impl FileRun {
         edge.receivers_only &= !reach.typed;
         if reach.typed {
             match reach.doubt {
-                None => edge.proven = true,
+                None => {
+                    edge.proven = true;
+                    edge.symbols.extend(reach.symbols);
+                }
                 Some(doubt) => {
                     edge.doubts.insert(doubt);
                 }
@@ -1805,17 +2141,26 @@ impl ResolvedFile {
         };
         let mut reached_by = BTreeMap::<FileId, usize>::new();
         let mut bindings = BTreeMap::<String, Vec<NameBinding>>::new();
+        let mut conflicted = BTreeSet::new();
         for run in runs {
+            conflicted.extend(run.conflicted);
             for (target, edge) in run.edges {
                 *reached_by.entry(target.clone()).or_default() += 1;
                 merged
                     .edges
                     .entry(target)
                     .and_modify(|(known, _)| {
+                        if known.receivers_only != edge.receivers_only {
+                            known.doubts.insert(
+                                "in one of the projects compiling the file only member-access receivers reach it"
+                                    .to_string(),
+                            );
+                        }
                         known.proven &= edge.proven;
                         known.receivers_only &= edge.receivers_only;
                         known.doubts.extend(edge.doubts.iter().cloned());
                         known.names.extend(edge.names.iter().cloned());
+                        known.symbols.extend(edge.symbols.iter().cloned());
                     })
                     .or_insert((edge, true));
             }
@@ -1838,8 +2183,10 @@ impl ResolvedFile {
         // A name the projects compiling the file bind differently binds nowhere.
         merged.bindings = bindings
             .into_iter()
-            .filter(|(_, found)| {
-                found.len() == count && found.windows(2).all(|pair| pair[0] == pair[1])
+            .filter(|(name, found)| {
+                !conflicted.contains(name)
+                    && found.len() == count
+                    && found.windows(2).all(|pair| pair[0] == pair[1])
             })
             .filter_map(|(name, mut found)| Some((name, found.pop()?)))
             .collect();
@@ -1941,20 +2288,31 @@ impl ResolvedFile {
                 source_type: EvidenceSourceType::StaticAnalysis,
                 message: message.into(),
             });
-            let imported = facts
-                .usings
-                .iter()
-                .find(|using| using.line == edge.line)
-                .map_or_else(|| names.clone(), |using| using.target.clone());
-            report.resolutions.push(ImportResolution {
-                import: row(edge.line, &imported),
-                status: ResolutionStatus::Resolved,
-                target_file: Some(target.clone()),
-                target_symbol: None,
-                confidence,
-                strategy: edge.strategy.to_string(),
-                caveats: Vec::new(),
-            });
+            // The symbol registry matches a name the file writes against what an import
+            // resolution names. A `using` makes the types it leads to nameable, not their
+            // members, so each resolution names one type part, and only a proven edge has any.
+            if proven {
+                for symbol in edge
+                    .symbols
+                    .iter()
+                    .filter_map(|symbol| index.symbols.get(symbol))
+                {
+                    report.resolutions.push(ImportResolution {
+                        import: Import {
+                            file_id: file.id.clone(),
+                            imported: symbol.qualified_name.replace("::", "."),
+                            range: Some(LineRange::single(edge.line)),
+                            confidence: Confidence::High,
+                        },
+                        status: ResolutionStatus::Resolved,
+                        target_file: Some(target.clone()),
+                        target_symbol: Some(symbol.id.clone()),
+                        confidence,
+                        strategy: edge.strategy.to_string(),
+                        caveats: Vec::new(),
+                    });
+                }
+            }
         }
         for ambiguous in &self.ambiguous {
             let described = ambiguous
@@ -2126,9 +2484,12 @@ fn slash(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{Edge, FileRun, NameBinding, ResolvedFile};
     use crate::{IndexSnapshot, Indexer};
     use open_kioku_config::OkConfig;
+    use open_kioku_core::FileId;
     use open_kioku_core::{Confidence, GraphEdgeType, GraphNodeType, IndexMode, Visibility};
+    use std::collections::{BTreeMap, BTreeSet};
 
     const SDK: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n</Project>\n";
 
@@ -3052,6 +3413,498 @@ mod tests {
                     Visibility::Public
                 ),
             ]
+        );
+    }
+
+    /// `(source, target)` of every symbol-registry fact from the file at `path` that names
+    /// a symbol of `qualified` (its own or a member's) at high confidence.
+    fn registry_hits(
+        snapshot: &IndexSnapshot,
+        path: &str,
+        qualified: &str,
+    ) -> Vec<(String, String)> {
+        let file = snapshot
+            .files
+            .iter()
+            .find(|file| file.path.to_string_lossy().replace('\\', "/") == path)
+            .expect("file")
+            .id
+            .clone();
+        let targets = snapshot
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.qualified_name == qualified
+                    || symbol.qualified_name.starts_with(&format!("{qualified}::"))
+            })
+            .map(|symbol| symbol.id.clone())
+            .collect::<Vec<_>>();
+        let mut hits = snapshot
+            .analysis_facts
+            .iter()
+            .filter(|fact| {
+                fact.file_id == file
+                    && fact.source.starts_with("open-kioku-symbol-registry/")
+                    && fact.confidence == Confidence::High
+                    && fact
+                        .target_symbol_id
+                        .as_ref()
+                        .is_some_and(|target| targets.contains(target))
+            })
+            .map(|fact| (fact.source.to_string(), fact.target.clone()))
+            .collect::<Vec<_>>();
+        hits.sort();
+        hits
+    }
+
+    /// The message of the C# file `IMPORTS` fact from `from` to `to`.
+    fn edge_message(snapshot: &IndexSnapshot, from: &str, to: &str) -> String {
+        snapshot
+            .analysis_facts
+            .iter()
+            .find(|fact| {
+                fact.edge_type == GraphEdgeType::Imports
+                    && fact.target == to
+                    && path_of(snapshot, &fact.file_id) == from
+                    && fact.source.starts_with("open-kioku-import-resolver/csharp")
+            })
+            .map(|fact| fact.message.to_string())
+            .unwrap_or_default()
+    }
+
+    const RESULT_USER: &str = "using Acme.Data;\n\nnamespace Acme.App\n{\n    public class Handler\n    {\n        public Result Handle() { return new Result(); }\n    }\n}\n";
+    const CORE_RESULT: &str =
+        "namespace Acme\n{\n    public class Result { public int Code; }\n}\n";
+    const DATA_RESULT: &str =
+        "namespace Acme.Data\n{\n    public class Result { public string Message; }\n}\n";
+
+    #[test]
+    fn directory_properties_name_the_directory_of_the_file_that_writes_them() {
+        // `Result` is `Acme.Result` of the core project: the enclosing namespace `Acme` is
+        // searched before the `using`. The core project is referenced through a property a props
+        // file at the root sets from its own directory.
+        let snapshot = index(&[
+            (
+                "Directory.Build.props",
+                "<Project>\n  <PropertyGroup>\n    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>\n  </PropertyGroup>\n</Project>\n",
+            ),
+            (
+                "App/App.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <ProjectReference Include=\"$(RepoRoot)Core/Core.csproj\" />\n    <ProjectReference Include=\"../Data/Data.csproj\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            ("App/Handler.cs", RESULT_USER),
+            ("Core/Core.csproj", SDK),
+            ("Core/Result.cs", CORE_RESULT),
+            ("Data/Data.csproj", SDK),
+            ("Data/Result.cs", DATA_RESULT),
+        ]);
+        assert_eq!(edges(&snapshot), Vec::new());
+        assert_eq!(
+            registry_hits(&snapshot, "App/Handler.cs", "Acme::Data::Result"),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn a_type_the_project_model_cannot_place_leaves_the_lookup_unproven() {
+        // The core project is referenced through a property nothing sets, so the index cannot
+        // tell whether `Acme.Result`, found before the `using`, is visible.
+        let snapshot = index(&[
+            (
+                "App/App.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <ProjectReference Include=\"$(Unset)Core/Core.csproj\" />\n    <ProjectReference Include=\"../Data/Data.csproj\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            ("App/Handler.cs", RESULT_USER),
+            ("Core/Core.csproj", SDK),
+            ("Core/Result.cs", CORE_RESULT),
+            ("Data/Data.csproj", SDK),
+            ("Data/Result.cs", DATA_RESULT),
+            // A file no project the index read compiles: whoever compiles it sees `Acme.Clock`.
+            (
+                "Loose/Clock.cs",
+                "namespace Acme\n{\n    public class Clock { public long Ticks; }\n}\n",
+            ),
+            (
+                "Data/Clock.cs",
+                "namespace Acme.Data\n{\n    public class Clock { public string Zone; }\n}\n",
+            ),
+            (
+                "App/Scheduler.cs",
+                "using Acme.Data;\n\nnamespace Acme.App\n{\n    public class Scheduler { public Clock Now() { return null; } }\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            edges(&snapshot),
+            vec![
+                edge(
+                    "App/Handler.cs",
+                    "Data/Result.cs",
+                    1,
+                    false,
+                    "csharp-using-namespace"
+                ),
+                edge(
+                    "App/Scheduler.cs",
+                    "Data/Clock.cs",
+                    1,
+                    false,
+                    "csharp-using-namespace"
+                ),
+            ]
+        );
+        assert!(
+            edge_message(&snapshot, "App/Handler.cs", "Data/Result.cs")
+                .contains("the project model cannot tell whether code of this file sees the `Result` namespace `Acme` declares"),
+        );
+    }
+
+    #[test]
+    fn a_shared_project_compiles_its_files_into_the_projects_importing_it() {
+        // `Acme.Clock` of the shared project is compiled into the app, so it is found before
+        // the `using`: no edge to the data project's `Acme.Data.Clock`.
+        let snapshot = index(&[
+            (
+                "App/App.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <Import Project=\"../Shared/Shared.projitems\" Label=\"Shared\" />\n  <ItemGroup>\n    <ProjectReference Include=\"../Data/Data.csproj\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            (
+                "App/Scheduler.cs",
+                "using Acme.Data;\n\nnamespace Acme.App\n{\n    public class Scheduler { public Clock Now() { return null; } }\n}\n",
+            ),
+            ("Data/Data.csproj", SDK),
+            (
+                "Data/Clock.cs",
+                "namespace Acme.Data\n{\n    public class Clock { public string Zone; }\n}\n",
+            ),
+            (
+                "Shared/Shared.projitems",
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\n  <ItemGroup>\n    <Compile Include=\"$(MSBuildThisFileDirectory)Clock.cs\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            (
+                "Shared/Clock.cs",
+                "namespace Acme\n{\n    public class Clock { public long Ticks; }\n}\n",
+            ),
+        ]);
+        assert_eq!(edges(&snapshot), Vec::new());
+    }
+
+    #[test]
+    fn an_attribute_an_outside_namespace_may_supply_proves_no_edge() {
+        // `[Check]` is the package's `CheckAttribute` when it declares one; the repository's
+        // `Check` is no attribute.
+        let snapshot = index(&[
+            ("Models/Models.csproj", SDK),
+            (
+                "Models/Check.cs",
+                "namespace Acme.Models\n{\n    public class Check { public string Name; }\n}\n",
+            ),
+            (
+                "Tests/Tests.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <PackageReference Include=\"Vendor.Testing\" Version=\"3.0.0\" />\n    <ProjectReference Include=\"../Models/Models.csproj\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            (
+                "Tests/LedgerTests.cs",
+                "using Vendor.Testing;\nusing Acme.Models;\n\nnamespace Acme.Tests\n{\n    public class LedgerTests\n    {\n        [Check]\n        public void Posts() { }\n    }\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            edges(&snapshot),
+            vec![edge(
+                "Tests/LedgerTests.cs",
+                "Models/Check.cs",
+                2,
+                false,
+                "csharp-using-namespace"
+            )]
+        );
+        assert!(
+            edge_message(&snapshot, "Tests/LedgerTests.cs", "Models/Check.cs")
+                .contains("`Vendor.Testing`, outside the repository, may declare the attribute `CheckAttribute`")
+        );
+    }
+
+    const LEDGER_ENTRY: &str = "namespace Acme.Ledger\n{\n    public class Entry\n    {\n        public enum Kind { Debit, Credit }\n        public static Entry Create() { return new Entry(); }\n        public void Post() { }\n        public void Send(string text) { }\n    }\n}\n";
+
+    #[test]
+    fn the_registry_matches_only_the_types_a_proven_edge_names() {
+        let snapshot = index(&[
+            ("Lib/Lib.csproj", SDK),
+            ("Lib/Entry.cs", LEDGER_ENTRY),
+            ("App/App.csproj", &sdk_project(&["../Lib/Lib.csproj"])),
+            // An unproven edge: the `using` is under `#if`.
+            (
+                "App/Cond.cs",
+                "#if NET8_0\nusing Acme.Ledger;\n#endif\n\nnamespace Acme.App\n{\n    public class Cond\n    {\n        public void Run()\n        {\n            Entry entry = Entry.Create();\n            entry.Post();\n        }\n    }\n}\n",
+            ),
+            // A proven edge to the type, but `Send` is the outside client's.
+            (
+                "App/Mailer.cs",
+                "using Vendor.Mail;\nusing Acme.Ledger;\n\nnamespace Acme.App\n{\n    public class Mailer\n    {\n        public void Notify(MailClient client, Entry entry)\n        {\n            client.Send(null);\n        }\n    }\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            edges(&snapshot),
+            vec![
+                edge(
+                    "App/Cond.cs",
+                    "Lib/Entry.cs",
+                    2,
+                    false,
+                    "csharp-using-namespace"
+                ),
+                edge(
+                    "App/Mailer.cs",
+                    "Lib/Entry.cs",
+                    2,
+                    true,
+                    "csharp-using-namespace"
+                ),
+            ]
+        );
+        assert_eq!(
+            registry_hits(&snapshot, "App/Cond.cs", "Acme::Ledger::Entry"),
+            Vec::new()
+        );
+        let mailer = registry_hits(&snapshot, "App/Mailer.cs", "Acme::Ledger::Entry");
+        assert!(
+            mailer.iter().all(|(_, target)| !target.contains("Send")),
+            "{mailer:?}"
+        );
+        assert!(
+            mailer
+                .iter()
+                .any(|(source, _)| source.ends_with("direct-import")),
+            "{mailer:?}"
+        );
+    }
+
+    #[test]
+    fn a_namespace_a_package_shares_with_the_file_leaves_the_lookup_unproven() {
+        // A package may declare `Descriptor` in `Microsoft.Vendor.Hosting` or `Vendor.Logging`,
+        // where these files are declared; the compiler would take it before the `using`.
+        let snapshot = index(&[
+            ("Lib/Lib.csproj", SDK),
+            (
+                "Lib/Descriptor.cs",
+                "namespace Acme.Services\n{\n    public class Descriptor { public string Key; }\n}\n",
+            ),
+            (
+                "App/App.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <PackageReference Include=\"Vendor.Logging.Abstractions\" Version=\"8.0.0\" />\n    <ProjectReference Include=\"../Lib/Lib.csproj\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            (
+                "App/HostingExtensions.cs",
+                "using Acme.Services;\n\nnamespace Microsoft.Vendor.Hosting\n{\n    public static class HostingExtensions\n    {\n        public static Descriptor Find() { return null; }\n    }\n}\n",
+            ),
+            (
+                "App/LoggingExtensions.cs",
+                "using Acme.Services;\n\nnamespace Vendor.Logging\n{\n    public static class LoggingExtensions\n    {\n        public static Descriptor Find() { return null; }\n    }\n}\n",
+            ),
+            (
+                "App/Registry.cs",
+                "using Acme.Services;\n\nnamespace Acme.App\n{\n    public class Registry { public Descriptor Find() { return null; } }\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            edges(&snapshot),
+            vec![
+                edge(
+                    "App/HostingExtensions.cs",
+                    "Lib/Descriptor.cs",
+                    1,
+                    false,
+                    "csharp-using-namespace"
+                ),
+                edge(
+                    "App/LoggingExtensions.cs",
+                    "Lib/Descriptor.cs",
+                    1,
+                    false,
+                    "csharp-using-namespace"
+                ),
+                edge(
+                    "App/Registry.cs",
+                    "Lib/Descriptor.cs",
+                    1,
+                    true,
+                    "csharp-using-namespace"
+                ),
+            ]
+        );
+        assert!(
+            edge_message(&snapshot, "App/HostingExtensions.cs", "Lib/Descriptor.cs").contains(
+                "a package may declare `Descriptor` in namespace `Microsoft.Vendor.Hosting`"
+            )
+        );
+    }
+
+    #[test]
+    fn an_alias_of_a_nested_type_leads_to_the_file_declaring_it() {
+        let snapshot = index(&[
+            ("Lib/Lib.csproj", SDK),
+            ("Lib/Entry.cs", LEDGER_ENTRY),
+            ("App/App.csproj", &sdk_project(&["../Lib/Lib.csproj"])),
+            (
+                "App/Aliases.cs",
+                "using K = Acme.Ledger.Entry.Kind;\n\nnamespace Acme.App\n{\n    public class Aliases { public K Side; }\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            edges(&snapshot),
+            vec![edge(
+                "App/Aliases.cs",
+                "Lib/Entry.cs",
+                1,
+                true,
+                "csharp-using-alias"
+            )]
+        );
+        assert!(other_facts(&snapshot)
+            .iter()
+            .all(|(_, _, target, _, _)| !target.contains("Entry")));
+    }
+
+    #[test]
+    fn a_linked_part_takes_the_accessibility_of_each_projects_type() {
+        // A declares `Ledger` public in its own part; B compiles only the linked part, which
+        // declares none, so B's `Ledger` is internal and C, which references only B, cannot
+        // name it.
+        let linked = "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <Compile Include=\"..\\Shared\\Ledger.Linked.cs\" Link=\"Ledger.Linked.cs\" />\n  </ItemGroup>\n</Project>\n";
+        let snapshot = index(&[
+            ("A/A.csproj", linked),
+            (
+                "A/Ledger.cs",
+                "namespace Acme.Books\n{\n    public partial class Ledger { public int Count; }\n}\n",
+            ),
+            ("B/B.csproj", linked),
+            ("C/C.csproj", &sdk_project(&["../B/B.csproj"])),
+            (
+                "C/Report.cs",
+                "using Acme.Books;\n\nnamespace Acme.Reports\n{\n    public class Report { public Ledger Source; }\n}\n",
+            ),
+            (
+                "Shared/Ledger.Linked.cs",
+                "namespace Acme.Books\n{\n    partial class Ledger { public int Linked; }\n}\n",
+            ),
+        ]);
+        assert_eq!(edges(&snapshot), Vec::new());
+    }
+
+    #[test]
+    fn a_reference_that_brings_no_types_or_does_not_flow_on_offers_none() {
+        let snapshot = index(&[
+            ("Lib/Lib.csproj", SDK),
+            ("Lib/Entry.cs", ENTRY),
+            (
+                "Mid/Mid.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <ProjectReference Include=\"../Lib/Lib.csproj\" PrivateAssets=\"all\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            (
+                "Mid/Uses.cs",
+                "using Acme.Ledger;\nnamespace Acme.Mid;\npublic class Uses { private Entry entry; }\n",
+            ),
+            ("App/App.csproj", &sdk_project(&["../Mid/Mid.csproj"])),
+            (
+                "App/Page.cs",
+                "using Acme.Ledger;\nnamespace Acme.App;\npublic class Page { private Entry entry; }\n",
+            ),
+            (
+                "Tool/Tool.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <ProjectReference Include=\"../Lib/Lib.csproj\" ReferenceOutputAssembly=\"false\" />\n    <ProjectReference Include=\"../Mid/Mid.csproj\" Aliases=\"Middle\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            (
+                "Tool/Run.cs",
+                "using Acme.Ledger;\nnamespace Acme.Tool;\npublic class Run { private Entry entry; private Uses uses; }\n",
+            ),
+        ]);
+        // Only the project referencing the library itself names its type.
+        assert_eq!(
+            edges(&snapshot),
+            vec![edge(
+                "Mid/Uses.cs",
+                "Lib/Entry.cs",
+                1,
+                true,
+                "csharp-using-namespace"
+            )]
+        );
+    }
+
+    #[test]
+    fn projects_that_disagree_on_how_a_target_is_reached_leave_it_unproven() {
+        let typed = Edge {
+            line: 1,
+            strategy: "csharp-using-namespace",
+            proven: true,
+            receivers_only: false,
+            doubts: BTreeSet::new(),
+            names: BTreeSet::from(["Rules".to_string()]),
+            via: "the `using` on line 1".to_string(),
+            symbols: BTreeSet::new(),
+        };
+        let receiver = Edge {
+            proven: false,
+            receivers_only: true,
+            ..typed.clone()
+        };
+        let target = FileId::new("file:rules");
+        let runs = [typed, receiver]
+            .into_iter()
+            .map(|edge| FileRun {
+                edges: BTreeMap::from([(target.clone(), edge)]),
+                ..FileRun::default()
+            })
+            .collect();
+        let merged = ResolvedFile::merge(runs, &[Some(0), Some(1)], false);
+        let (edge, agreed) = &merged.edges[&target];
+        assert!(*agreed && !edge.proven && !edge.receivers_only);
+        assert!(!edge.doubts.is_empty());
+    }
+
+    #[test]
+    fn a_name_one_file_binds_two_ways_binds_nowhere() {
+        let mut run = FileRun::default();
+        run.bind(
+            "Entry",
+            NameBinding::Outside {
+                namespace: "Vendor.Ledger".into(),
+            },
+        );
+        run.bind(
+            "Entry",
+            NameBinding::Internal {
+                namespace: "Acme.Ledger".into(),
+                target_file: None,
+                target_symbol: None,
+            },
+        );
+        let merged = ResolvedFile::merge(vec![run], &[None], false);
+        assert!(merged.bindings.is_empty());
+    }
+
+    #[test]
+    fn a_target_a_condition_may_leave_out_of_its_project_proves_no_edge() {
+        let snapshot = index(&[
+            (
+                "Lib/Lib.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup Condition=\"'$(Slim)' == 'true'\">\n    <Compile Remove=\"Old/**\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            ("Lib/Old/Entry.cs", ENTRY),
+            ("App/App.csproj", &sdk_project(&["../Lib/Lib.csproj"])),
+            (
+                "App/Page.cs",
+                "using Acme.Ledger;\nnamespace Acme.App;\npublic class Page { private Entry entry; }\n",
+            ),
+        ]);
+        assert_eq!(
+            edges(&snapshot),
+            vec![edge(
+                "App/Page.cs",
+                "Lib/Old/Entry.cs",
+                1,
+                false,
+                "csharp-using-namespace"
+            )]
         );
     }
 
