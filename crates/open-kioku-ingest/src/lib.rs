@@ -28,9 +28,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod cargo_facts;
+mod csharp_imports;
 mod cycle_memo;
 mod dependency_trees;
 pub mod derived;
+mod dotnet_project;
 mod git_ignore;
 pub mod path_policy;
 mod prune;
@@ -678,15 +680,20 @@ impl Indexer {
         let mut rust_unit_structs = Vec::new();
         let mut rust_type_aliases = Vec::new();
         let mut rust_impl_blocks = Vec::new();
+        // What each C# file's directives, namespaces and type names say (#681).
+        let mut csharp_names = HashMap::new();
         for (file, outcome) in files.into_iter().zip(outcomes) {
             match outcome {
-                Ok((parsed_file, redacted)) => {
+                Ok((mut parsed_file, redacted)) => {
                     redacted_files += usize::from(redacted);
                     if parsed_file.syntax.syntax_errors {
                         let by_pattern = parsed_file.syntax.symbols.iter().any(|symbol| {
                             symbol.provenance == open_kioku_core::EvidenceSourceType::Heuristic
                         });
                         coverage.record_parsed_with_errors(&file.language, by_pattern);
+                    }
+                    if let Some(names) = parsed_file.syntax.csharp_names.take() {
+                        csharp_names.insert(file.id.clone(), names);
                     }
                     rust_type_only_items
                         .extend(parsed_file.syntax.rust_type_only_items.iter().cloned());
@@ -769,18 +776,28 @@ impl Indexer {
             tests.extend(file.tests);
             analysis_facts.extend(file.analysis_facts);
         }
+        use crate::project_model::ProjectModelDiscovery;
+        // The manifest walks skip what discovery skips, `[index] keep_dirs` included.
+        let pruner = prune::DiscoveryPruner::new(&root, config)?;
+        let project_model = open_kioku_semantic_model::ProjectModel::discover_in(&pruner);
         // A parser reads one file: a C# `partial` type's part that omits its accessibility takes
-        // the one another part of the same project declares. A file under no project file (a
-        // shared project's) is left out of the map and joins every project with a part of its type.
+        // the one another part of the same project declares. The project is the one the project
+        // model says compiles the file (#681); a file several projects compile (a linked or
+        // shared project's file) is left out of the map and joins every project with a part of
+        // its type. A file no project file the index read compiles is placed by the nearest
+        // directory holding one, as in a repository whose project files cannot be read.
+        let csharp_owners = csharp_imports::csharp_file_projects(&project_model.dotnet, &files);
         let mut msbuild_dirs = HashMap::new();
         let csharp_projects = files
             .iter()
             .filter(|file| file.language == Language::CSharp)
-            .filter_map(|file| {
-                prune::nearest_msbuild_project(&root, &file.path, &mut msbuild_dirs)
-                    .map(|project| (file.id.clone(), project))
+            .filter_map(|file| match csharp_owners.get(&file.id) {
+                Some(project) => project.clone().map(|project| (file.id.clone(), project)),
+                None => prune::nearest_msbuild_project(&root, &file.path, &mut msbuild_dirs)
+                    .map(|project| (file.id.clone(), project)),
             })
             .collect::<HashMap<_, _>>();
+        drop(csharp_owners);
         open_kioku_languages::csharp::unify_partial_type_visibility(&mut symbols, &csharp_projects);
         // Extraction applies the runners' default discovery rules; where a pytest
         // configuration changes them, its Python test files fall back to the test-path rule.
@@ -801,11 +818,35 @@ impl Indexer {
                 .nodes_added(files.len() + symbols.len() + chunks.len() + tests.len()),
         );
 
-        use crate::project_model::ProjectModelDiscovery;
-        // The manifest walks skip what discovery skips, `[index] keep_dirs` included.
-        let pruner = prune::DiscoveryPruner::new(&root, config)?;
-        let project_model = open_kioku_semantic_model::ProjectModel::discover_in(&pruner);
         analysis_facts.extend(cargo_facts::cargo_manifest_facts(&project_model, &files));
+        // C# `using` directives are placed first, so the name facts the parser read for them are
+        // released before the symbol, scope and binding indexes below are built (#681). C# calls,
+        // base lists and type uses are resolved over the same name lookup (#682), in the modes
+        // that run the proof-gated resolver.
+        let mut quality_report = ResolutionQualityReport::default();
+        let resolves_relationships = matches!(
+            config.index.resolution_mode,
+            open_kioku_config::ResolutionMode::Shadow | open_kioku_config::ResolutionMode::V2
+        );
+        let csharp_call_count = csharp_names
+            .values()
+            .map(|names| names.calls.len())
+            .sum::<usize>();
+        let mut record_csharp_outcome = |edge_type: &GraphEdgeType,
+                                         outcome: &open_kioku_resolution::ResolutionOutcome,
+                                         micros: u64| {
+            quality_report.record_outcome(&Language::CSharp, edge_type, outcome, micros);
+        };
+        let (csharp_report, csharp_relationships) = csharp_imports::resolve_csharp(
+            &project_model.dotnet,
+            &files,
+            &symbols,
+            &csharp_names,
+            &imports,
+            resolves_relationships
+                .then_some(&mut record_csharp_outcome as &mut csharp_imports::OutcomeRecorder<'_>),
+        );
+        drop(csharp_names);
         let mut import_registry = imports::ImportRegistry::default();
         let mut file_map: imports::FileMap = HashMap::new();
         fn register_file_key(map: &mut imports::FileMap, key: String, file_id: &FileId) {
@@ -837,10 +878,17 @@ impl Indexer {
             .filter(|file| file.language == Language::Rust)
             .map(|file| file.id.clone())
             .collect::<HashSet<_>>();
+        // A C# directive names a namespace, never a module file: the C# pass below binds each
+        // name a C# file writes instead.
+        let csharp_file_ids = files
+            .iter()
+            .filter(|file| file.language == Language::CSharp)
+            .map(|file| file.id.clone())
+            .collect::<HashSet<_>>();
         for site in &import_sites {
             if rust_file_ids.contains(&site.file_id) {
                 import_registry.insert_unresolved_site(site);
-            } else {
+            } else if !csharp_file_ids.contains(&site.file_id) {
                 import_registry.resolve_site(site, &file_map);
             }
         }
@@ -944,8 +992,17 @@ impl Indexer {
             &scope_index,
             &rust_modules,
         );
-        let resolver_report =
+        let mut resolver_report =
             resolver::resolve_imports(&pruner, &files, &symbols, &imports, &rust_import_targets)?;
+        // After the generic passes over the import model, which have no C# bindings to read.
+        for binding in csharp_report.bindings {
+            import_registry.index.insert_file_binding(binding);
+        }
+        resolver_report.extend(
+            csharp_report.resolutions,
+            csharp_report.analysis_facts,
+            csharp_report.quality_notes,
+        );
         let binding_index = open_kioku_resolution::BindingIndex::build(bindings.clone());
         let mut inheritance_index =
             open_kioku_resolution::InheritanceIndex::build(inheritance_sites.clone());
@@ -1021,15 +1078,14 @@ impl Indexer {
         let registry_fact_count = registry_report.analysis_facts.len();
 
         let mut resolution_diffs = Vec::new();
-        let mut quality_report = ResolutionQualityReport::default();
-        let mut resolved_relationships = Vec::new();
+        let mut resolved_relationships = csharp_relationships;
 
         let file_lookup: HashMap<FileId, &File> = files.iter().map(|f| (f.id.clone(), f)).collect();
 
         if resolution_mode == open_kioku_config::ResolutionMode::Shadow
             || resolution_mode == open_kioku_config::ResolutionMode::V2
         {
-            quality_report.call_sites = call_sites.len();
+            quality_report.call_sites = call_sites.len() + csharp_call_count;
 
             let symbols_by_qualified: HashMap<&str, &Symbol> = symbols
                 .iter()

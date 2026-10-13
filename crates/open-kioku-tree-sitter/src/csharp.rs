@@ -6,13 +6,25 @@
 //! member declared in any of them, shares the type's qualified name while each declaration keeps
 //! its own symbol id and line range.
 //!
-//! Only declarations are read here; nothing in this module emits a relationship. `using`
-//! directives belong in `extract_import`, calls in `extract_call`, base lists in
-//! `extract_inheritance` and locals in `extract_binding`, all of which skip C# today. Resolution
-//! reads those facts only for a language with a `LanguageSemantics` adapter in
-//! `open-kioku-languages`, and C# has none yet.
+//! Nothing in this module emits a relationship. Besides declarations it reads what the import
+//! resolver needs to place a `using` directive (#681): each directive ([`using_directive`]), and
+//! the namespaces, type names and shadowing declarations a C# name lookup reads ([`name_facts`]).
+//! The same walk reads what the C# relationship pass needs (#682): each member with its
+//! parameters and type, each call with its receiver, each variable with its type and scope, and
+//! each type declaration's kind and whole base list ([`code`]). The generic `extract_call`,
+//! `extract_inheritance` and `extract_binding` skip C#: a C# type name is found by the name
+//! lookup over the .NET project model, which the C# pass in ingest runs.
 
-use open_kioku_core::{LineRange, ScopeKind, SymbolKind, Visibility};
+mod code;
+
+use open_kioku_core::csharp::{
+    CSharpCall, CSharpCallKind, CSharpHiddenType, CSharpLocal, CSharpLocalKind, CSharpMember,
+    CSharpMemberKind, CSharpNameContext, CSharpNameFacts, CSharpNameUse, CSharpNamespaceBlock,
+    CSharpPlace, CSharpReceiver, CSharpTypeDeclaration, CSharpTypeKind, CSharpUsing,
+    CSharpUsingKind,
+};
+use open_kioku_core::{LineRange, ScopeKind, Symbol, SymbolId, SymbolKind, Visibility};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use tree_sitter::Node;
 
 pub(crate) const FILE_SCOPED_NAMESPACE: &str = "file_scoped_namespace_declaration";
@@ -27,6 +39,19 @@ fn is_type_declaration(kind: &str) -> bool {
             | "interface_declaration"
             | "enum_declaration"
     )
+}
+
+/// What a type declaration declares; a delegate declaration is a delegate type.
+fn type_kind(node: Node<'_>) -> CSharpTypeKind {
+    match node.kind() {
+        "struct_declaration" => CSharpTypeKind::Struct,
+        "record_declaration" if has_child(node, "struct") => CSharpTypeKind::RecordStruct,
+        "record_declaration" => CSharpTypeKind::Record,
+        "interface_declaration" => CSharpTypeKind::Interface,
+        "enum_declaration" => CSharpTypeKind::Enum,
+        "delegate_declaration" => CSharpTypeKind::Delegate,
+        _ => CSharpTypeKind::Class,
+    }
 }
 
 /// Types that hold members: every type declaration but an enum, whose body holds only values.
@@ -735,6 +760,1147 @@ fn squeeze(text: &str) -> String {
     text.split_whitespace().collect()
 }
 
+/// A `using` directive as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UsingDirective {
+    pub(crate) kind: CSharpUsingKind,
+    /// The dotted name, without `global::`, an extern alias or generic arguments.
+    pub(crate) target: String,
+    pub(crate) arity: u16,
+    pub(crate) alias: Option<String>,
+    pub(crate) global: bool,
+    pub(crate) extern_alias: Option<String>,
+}
+
+/// Reads a `using_directive` node: `[global] using [static] Name;` or `[global] using Alias =
+/// Name;`. The name is the directive's one named child outside its `name` field.
+pub(crate) fn using_directive(node: Node<'_>, source: &[u8]) -> Option<UsingDirective> {
+    if node.kind() != "using_directive" {
+        return None;
+    }
+    let (mut global, mut is_static, mut target) = (false, false, None);
+    let mut cursor = node.walk();
+    for (index, child) in node.children(&mut cursor).enumerate() {
+        let field = u32::try_from(index)
+            .ok()
+            .and_then(|index| node.field_name_for_child(index));
+        match child.kind() {
+            "global" => global = true,
+            "static" => is_static = true,
+            "comment" => {}
+            _ if child.is_named() && field != Some("name") && target.is_none() => {
+                target = Some(child);
+            }
+            _ => {}
+        }
+    }
+    let name = dotted_name(target?, source)?;
+    let alias = node
+        .child_by_field_name("name")
+        .and_then(|alias| alias.utf8_text(source).ok())
+        .map(squeeze)
+        .filter(|alias| !alias.is_empty());
+    let kind = if alias.is_some() {
+        CSharpUsingKind::Alias
+    } else if is_static {
+        CSharpUsingKind::Static
+    } else {
+        CSharpUsingKind::Namespace
+    };
+    let arity = name.segments.last().map_or(0, |(_, arity)| *arity);
+    Some(UsingDirective {
+        kind,
+        target: name.dotted(),
+        arity,
+        alias,
+        global,
+        extern_alias: name.extern_alias,
+    })
+}
+
+/// A namespace or type name as written, one `(identifier, generic arity)` per segment.
+struct DottedName {
+    segments: Vec<(String, u16)>,
+    /// Starts at `global::`: a fully qualified name, which no `using` takes part in.
+    global: bool,
+    /// Starts at an extern alias (`Legacy::`): a name in an assembly the project references
+    /// under that alias.
+    extern_alias: Option<String>,
+}
+
+impl DottedName {
+    fn dotted(&self) -> String {
+        self.segments
+            .iter()
+            .map(|(segment, _)| segment.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+fn dotted_name(node: Node<'_>, source: &[u8]) -> Option<DottedName> {
+    let text = |node: Node<'_>| node.utf8_text(source).ok().map(squeeze);
+    match node.kind() {
+        "identifier" => Some(DottedName {
+            segments: vec![(text(node)?, 0)],
+            global: false,
+            extern_alias: None,
+        }),
+        "generic_name" => {
+            let mut cursor = node.walk();
+            let identifier = node
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "identifier")?;
+            Some(DottedName {
+                segments: vec![(text(identifier)?, type_arity(node))],
+                global: false,
+                extern_alias: None,
+            })
+        }
+        "qualified_name" => {
+            let mut name = dotted_name(node.child_by_field_name("qualifier")?, source)?;
+            let last = dotted_name(node.child_by_field_name("name")?, source)?;
+            name.segments.extend(last.segments);
+            Some(name)
+        }
+        "alias_qualified_name" => {
+            let alias = text(node.child_by_field_name("alias")?)?;
+            let mut name = dotted_name(node.child_by_field_name("name")?, source)?;
+            if alias == "global" {
+                name.global = true;
+            } else {
+                name.extern_alias = Some(alias);
+            }
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// The number of type arguments a `generic_name` writes; `Entry<,>` (unbound) writes two.
+fn type_arity(generic: Node<'_>) -> u16 {
+    let mut cursor = generic.walk();
+    let Some(arguments) = generic
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "type_argument_list")
+    else {
+        return 0;
+    };
+    let named = arguments.named_child_count();
+    let count = if named > 0 {
+        named
+    } else {
+        let mut cursor = arguments.walk();
+        let commas = arguments
+            .children(&mut cursor)
+            .filter(|child| child.kind() == ",")
+            .count();
+        commas + 1
+    };
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
+/// The number of type parameters a declaration's `type_parameter_list` declares.
+fn type_parameter_count(declaration: Node<'_>) -> u16 {
+    let mut cursor = declaration.walk();
+    let count = declaration
+        .children(&mut cursor)
+        .find(|child| child.kind() == "type_parameter_list")
+        .map_or(0, |list| {
+            let mut cursor = list.walk();
+            let count = list
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "type_parameter")
+                .count();
+            count
+        });
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
+/// What a C# name lookup reads in this file: see [`CSharpNameFacts`]. `symbols` are the file's
+/// symbols, which name the type declarations the uses sit in. Nothing inside an error node is
+/// read, as for symbols.
+pub(crate) fn name_facts(unit: Node<'_>, source: &[u8], symbols: &[Symbol]) -> CSharpNameFacts {
+    let type_ids = symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.kind, SymbolKind::Class | SymbolKind::Interface))
+        .filter_map(|symbol| {
+            let start = symbol.range.as_ref()?.start;
+            Some(((start, symbol.qualified_name.clone()), symbol.id.clone()))
+        })
+        .collect();
+    let member_ids = symbols
+        .iter()
+        .filter(|symbol| {
+            !matches!(
+                symbol.kind,
+                SymbolKind::Class | SymbolKind::Interface | SymbolKind::Package
+            )
+        })
+        .filter_map(|symbol| {
+            let start = symbol.range.as_ref()?.start;
+            Some(((start, symbol.qualified_name.clone()), symbol.id.clone()))
+        })
+        .collect();
+    let mut reader = NameReader {
+        source,
+        type_ids,
+        member_ids,
+        type_index: HashMap::new(),
+        callers: Vec::new(),
+        facts: CSharpNameFacts {
+            blocks: vec![CSharpNamespaceBlock {
+                namespace: String::new(),
+                parent: None,
+            }],
+            ..CSharpNameFacts::default()
+        },
+        seen: HashSet::new(),
+        type_parameters: BTreeSet::new(),
+        variables: BTreeSet::new(),
+        regions: 0,
+        recovered: unit.has_error(),
+    };
+    reader.unit(unit);
+    let mut facts = reader.facts;
+    facts.type_parameters = reader.type_parameters.into_iter().collect();
+    facts.variables = reader.variables.into_iter().collect();
+    facts.syntax_errors = unit.has_error();
+    facts.hidden_directives = facts.syntax_errors && directive_zone_has_error(unit);
+    facts
+}
+
+/// The assembly an `[assembly: InternalsVisibleTo("Name, PublicKey=..")]` attribute names.
+fn internals_visible_to(attribute: Node<'_>, source: &[u8]) -> Option<String> {
+    let name = dotted_name(attribute.child_by_field_name("name")?, source)?;
+    let (last, _) = name.segments.last()?;
+    if !matches!(
+        last.as_str(),
+        "InternalsVisibleTo" | "InternalsVisibleToAttribute"
+    ) {
+        return None;
+    }
+    let mut cursor = attribute.walk();
+    let arguments = attribute
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "attribute_argument_list")?;
+    let mut cursor = arguments.walk();
+    let first = arguments.named_children(&mut cursor).next()?;
+    let mut cursor = first.walk();
+    let literal = first
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "string_literal")?;
+    let mut cursor = literal.walk();
+    let content = literal
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "string_literal_content")?
+        .utf8_text(source)
+        .ok()?;
+    let assembly = content.split(',').next()?.trim();
+    (!assembly.is_empty()).then(|| assembly.to_string())
+}
+
+/// The fields of a [`CSharpNameUse`] that tell two uses apart; the first line is kept.
+type UseKey = (
+    u32,
+    Option<SymbolId>,
+    String,
+    u16,
+    Option<String>,
+    u16,
+    CSharpNameContext,
+    bool,
+);
+
+struct NameReader<'s> {
+    source: &'s [u8],
+    /// Type symbols by first line and qualified name, as the main walk recorded them.
+    type_ids: HashMap<(u32, String), SymbolId>,
+    /// Every other symbol (members, local functions) the same way.
+    member_ids: HashMap<(u32, String), SymbolId>,
+    /// The index in `facts.types` of each type declaration read so far.
+    type_index: HashMap<SymbolId, u32>,
+    /// The members around the node being read, innermost last, as indexes into
+    /// `facts.members`: what a call or variable there belongs to.
+    callers: Vec<u32>,
+    facts: CSharpNameFacts,
+    seen: HashSet<UseKey>,
+    type_parameters: BTreeSet<String>,
+    variables: BTreeSet<String>,
+    /// How many `#if`, `#elif` or `#else` regions enclose the node being read.
+    regions: u32,
+    /// The file parsed with syntax errors, as the main walk read its declarations.
+    recovered: bool,
+}
+
+/// Where a parent holds a child: its kind and the field the child is in.
+#[derive(Clone, Copy)]
+struct Place<'p> {
+    parent: &'p str,
+    field: Option<&'p str>,
+}
+
+impl NameReader<'_> {
+    fn unit(&mut self, unit: Node<'_>) {
+        // A file-scoped namespace holds every declaration and directive after it.
+        let mut block = 0;
+        let mut cursor = unit.walk();
+        for child in unit.named_children(&mut cursor) {
+            if child.kind() == FILE_SCOPED_NAMESPACE {
+                if let Some(name) = name_text(child, self.source) {
+                    block = self.open_block(0, &name);
+                }
+                continue;
+            }
+            let place = Place {
+                parent: unit.kind(),
+                field: None,
+            };
+            self.node(child, place, block, None);
+        }
+    }
+
+    fn open_block(&mut self, parent: u32, name: &str) -> u32 {
+        let name = squeeze(name);
+        let outer = &self.facts.blocks[parent as usize].namespace;
+        let namespace = if outer.is_empty() {
+            name
+        } else {
+            format!("{outer}.{name}")
+        };
+        self.facts.blocks.push(CSharpNamespaceBlock {
+            namespace,
+            parent: Some(parent),
+        });
+        u32::try_from(self.facts.blocks.len() - 1).unwrap_or(u32::MAX)
+    }
+
+    fn children(&mut self, node: Node<'_>, block: u32, enclosing: Option<&SymbolId>) {
+        let kind = node.kind();
+        let mut cursor = node.walk();
+        for (index, child) in node.children(&mut cursor).enumerate() {
+            if !child.is_named() {
+                continue;
+            }
+            let field = u32::try_from(index)
+                .ok()
+                .and_then(|index| node.field_name_for_child(index));
+            self.node(
+                child,
+                Place {
+                    parent: kind,
+                    field,
+                },
+                block,
+                enclosing,
+            );
+        }
+    }
+
+    fn node(&mut self, node: Node<'_>, place: Place<'_>, block: u32, enclosing: Option<&SymbolId>) {
+        if node.is_error() {
+            // An error node may hold a type the lookup would find first, or a directive.
+            let outer = self
+                .facts
+                .blocks
+                .get(block as usize)
+                .map(|block| block.namespace.clone())
+                .unwrap_or_default();
+            let text = node.utf8_text(self.source).unwrap_or_default();
+            for hidden in hidden_types_in_error(&outer, text) {
+                if !self.facts.hidden_types.contains(&hidden) {
+                    self.facts.hidden_types.push(hidden);
+                }
+            }
+            return;
+        }
+        match node.kind() {
+            "using_directive" => {
+                self.using(node, block);
+                return;
+            }
+            "extern_alias_directive" => {
+                if let Some(name) = node
+                    .child_by_field_name("name")
+                    .and_then(|name| name.utf8_text(self.source).ok())
+                {
+                    self.facts.extern_aliases.push(squeeze(name));
+                }
+                return;
+            }
+            "namespace_declaration" => {
+                let Some(name) = name_text(node, self.source) else {
+                    return;
+                };
+                let inner = self.open_block(block, &name);
+                if let Some(body) = node.child_by_field_name("body") {
+                    self.children(body, inner, enclosing);
+                }
+                return;
+            }
+            kind if is_type_declaration(kind) || kind == "delegate_declaration" => {
+                self.type_declaration(node, block, enclosing);
+                return;
+            }
+            "type_parameter" => {
+                if let Some(name) = node
+                    .child_by_field_name("name")
+                    .and_then(|name| name.utf8_text(self.source).ok())
+                {
+                    self.type_parameters.insert(name.to_string());
+                }
+            }
+            "implicit_parameter" => {
+                if let Ok(name) = node.utf8_text(self.source) {
+                    self.variables.insert(name.trim().to_string());
+                }
+            }
+            "attribute" if place.parent == "global_attribute" => {
+                if let Some(assembly) = internals_visible_to(node, self.source) {
+                    self.facts.internals_visible_to.push(assembly);
+                }
+            }
+            _ => {}
+        }
+        if node.kind() == "identifier" && declares_variable(place) {
+            if let Ok(name) = node.utf8_text(self.source) {
+                self.variables.insert(name.to_string());
+            }
+        }
+        if let Some(context) = use_context(node.kind(), place) {
+            self.record_use(node, context, block, enclosing);
+        }
+        let member =
+            code::member_kind(node).and_then(|kind| self.member(node, kind, block, enclosing));
+        if let Some(member) = member {
+            self.callers.push(member);
+        }
+        self.code(node, place, block, enclosing);
+        let region = matches!(
+            node.kind(),
+            "preproc_if" | "preproc_elif" | "preproc_else" | "preproc_if_in_attribute_list"
+        );
+        self.regions += u32::from(region);
+        self.children(node, block, enclosing);
+        self.regions -= u32::from(region);
+        if member.is_some() {
+            self.callers.pop();
+        }
+    }
+
+    fn using(&mut self, node: Node<'_>, block: u32) {
+        let Some(directive) = using_directive(node, self.source) else {
+            return;
+        };
+        self.facts.usings.push(CSharpUsing {
+            block,
+            kind: directive.kind,
+            target: directive.target,
+            arity: directive.arity,
+            alias: directive.alias,
+            global: directive.global,
+            extern_alias: directive.extern_alias,
+            line: node.start_position().row as u32 + 1,
+            conditional: self.regions > 0,
+        });
+    }
+
+    fn type_declaration(&mut self, node: Node<'_>, block: u32, outer: Option<&SymbolId>) {
+        let id = symbol(node, self.source, self.recovered).and_then(|(name, _)| {
+            let qualified = qualified_name(node, &name, self.source);
+            let start = line_range(node, self.recovered).start;
+            self.type_ids.get(&(start, qualified)).cloned()
+        });
+        let mut bases = Vec::new();
+        let mut base_types = Vec::new();
+        let mut base_place = None;
+        let mut base_call = None;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() != "base_list" {
+                continue;
+            }
+            base_place = Some(self.place(block, outer, child));
+            let mut list = child.walk();
+            for base in child.named_children(&mut list) {
+                let written = if base.kind() == "primary_constructor_base_type" {
+                    base_call = Some(base);
+                    base.child_by_field_name("type")
+                } else {
+                    Some(base)
+                };
+                if let Some(written) =
+                    written.and_then(|written| code::type_ref(written, self.source))
+                {
+                    base_types.push(written);
+                }
+                if let Some(use_) = written.and_then(|written| {
+                    self.name_use(written, CSharpNameContext::Type, block, outer)
+                }) {
+                    bases.push(use_);
+                }
+            }
+        }
+        let mut primary = None;
+        if let Some(id) = &id {
+            let index = u32::try_from(self.facts.types.len()).unwrap_or(u32::MAX);
+            self.facts.types.push(CSharpTypeDeclaration {
+                symbol_id: id.clone(),
+                arity: type_parameter_count(node),
+                bases,
+                conditional: self.regions > 0,
+                kind: type_kind(node),
+                is_static: has_modifier(node, "static"),
+                base_types,
+                base_place,
+            });
+            self.type_index.insert(id.clone(), index);
+            // The parameter list a record, class or struct declaration writes is its primary
+            // constructor; a `: Base(..)` in its base list calls the base type's constructor.
+            let list = (node.kind() != "delegate_declaration")
+                .then(|| code::parameter_list(node))
+                .flatten();
+            if let Some(list) = list {
+                let place = self.place(block, Some(id), node);
+                primary = Some(
+                    self.push_member(CSharpMember {
+                        symbol_id: id.clone(),
+                        kind: CSharpMemberKind::PrimaryConstructor,
+                        name: node
+                            .child_by_field_name("name")
+                            .and_then(|name| name.utf8_text(self.source).ok())
+                            .map(squeeze)
+                            .unwrap_or_default(),
+                        is_static: false,
+                        is_override: false,
+                        has_body: false,
+                        type_parameters: 0,
+                        parameters: code::parameters(list, self.source),
+                        value_type: None,
+                        place,
+                    }),
+                );
+            }
+            if let Some(base) = base_call {
+                let place = self.place(block, Some(id), base);
+                self.facts.calls.push(CSharpCall {
+                    caller: primary,
+                    kind: CSharpCallKind::BaseConstructor,
+                    name: String::new(),
+                    type_arguments: None,
+                    arguments: code::argument_count(base),
+                    receiver: CSharpReceiver::default(),
+                    created: None,
+                    range: code::source_range(base),
+                    place,
+                });
+            }
+        }
+        // A base list is read where the declaration stands, outside the type; everything else
+        // inside the type. A declaration that is no symbol (misplaced by error recovery) leaves
+        // the enclosing type as it was.
+        let inner = id.as_ref().or(outer);
+        let kind = node.kind();
+        let mut cursor = node.walk();
+        for (index, child) in node.children(&mut cursor).enumerate() {
+            if !child.is_named() {
+                continue;
+            }
+            let field = u32::try_from(index)
+                .ok()
+                .and_then(|index| node.field_name_for_child(index));
+            let enclosing = if child.kind() == "base_list" {
+                outer
+            } else {
+                inner
+            };
+            // The primary constructor's parameters, and the arguments its base call passes,
+            // belong to it.
+            let in_primary = primary.filter(|_| {
+                matches!(
+                    child.kind(),
+                    "parameter_list" | "base_list" | "bracketed_parameter_list"
+                )
+            });
+            if let Some(primary) = in_primary {
+                self.callers.push(primary);
+            }
+            self.node(
+                child,
+                Place {
+                    parent: kind,
+                    field,
+                },
+                block,
+                enclosing,
+            );
+            if in_primary.is_some() {
+                self.callers.pop();
+            }
+        }
+    }
+
+    fn push_member(&mut self, member: CSharpMember) -> u32 {
+        self.facts.members.push(member);
+        u32::try_from(self.facts.members.len() - 1).unwrap_or(u32::MAX)
+    }
+
+    /// Where `node` is written, for the lookup of the types it names.
+    fn place(&self, block: u32, enclosing: Option<&SymbolId>, node: Node<'_>) -> CSharpPlace {
+        CSharpPlace {
+            block,
+            enclosing: enclosing.and_then(|id| self.type_index.get(id).copied()),
+            line: node.start_position().row as u32 + 1,
+            conditional: self.regions > 0,
+        }
+    }
+
+    /// Records the member `node` declares, when it is a symbol of the main walk.
+    fn member(
+        &mut self,
+        node: Node<'_>,
+        kind: CSharpMemberKind,
+        block: u32,
+        enclosing: Option<&SymbolId>,
+    ) -> Option<u32> {
+        let (name, _) = symbol(node, self.source, self.recovered)?;
+        let qualified = qualified_name(node, &name, self.source);
+        let start = line_range(node, self.recovered).start;
+        let symbol_id = self.member_ids.get(&(start, qualified))?.clone();
+        let declaration = declaration_of(node);
+        let parameters = match kind {
+            CSharpMemberKind::Method
+            | CSharpMemberKind::Constructor
+            | CSharpMemberKind::LocalFunction
+            | CSharpMemberKind::Indexer
+            | CSharpMemberKind::Operator => code::parameter_list(declaration)
+                .map(|list| code::parameters(list, self.source))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let type_parameters = match kind {
+            CSharpMemberKind::Method | CSharpMemberKind::LocalFunction => {
+                code::generic_arity(declaration)
+            }
+            _ => 0,
+        };
+        let place = self.place(block, enclosing, declaration);
+        Some(self.push_member(CSharpMember {
+            symbol_id,
+            kind,
+            name,
+            is_static: code::is_static(node),
+            is_override: code::is_override(node),
+            has_body: code::has_body(declaration),
+            type_parameters,
+            parameters,
+            value_type: code::value_type(node, self.source),
+            place,
+        }))
+    }
+
+    /// Records the call or variable `node` writes, if it writes one.
+    fn code(&mut self, node: Node<'_>, place: Place<'_>, block: u32, enclosing: Option<&SymbolId>) {
+        let source = self.source;
+        match node.kind() {
+            "invocation_expression" => {
+                let Some((name, type_arguments, receiver)) = node
+                    .child_by_field_name("function")
+                    .and_then(|function| code::invoked(function, source))
+                else {
+                    return;
+                };
+                // `nameof(x)` names `x` and calls nothing, unless a method `nameof` is in scope,
+                // which no C# code declares.
+                if receiver.is_none() && name == "nameof" {
+                    return;
+                }
+                self.call(
+                    node,
+                    CSharpCallKind::Invocation,
+                    name,
+                    type_arguments,
+                    receiver,
+                    None,
+                    block,
+                    enclosing,
+                );
+            }
+            "object_creation_expression" => {
+                let created = node
+                    .child_by_field_name("type")
+                    .and_then(|written| code::type_ref(written, source));
+                self.call(
+                    node,
+                    CSharpCallKind::Creation,
+                    String::new(),
+                    None,
+                    CSharpReceiver::default(),
+                    created,
+                    block,
+                    enclosing,
+                );
+            }
+            "implicit_object_creation_expression" => {
+                let created = code::target_type(node, source);
+                self.call(
+                    node,
+                    CSharpCallKind::Creation,
+                    String::new(),
+                    None,
+                    CSharpReceiver::default(),
+                    created,
+                    block,
+                    enclosing,
+                );
+            }
+            "constructor_initializer" => {
+                if let Some(kind) = code::initializer_kind(node) {
+                    self.call(
+                        node,
+                        kind,
+                        String::new(),
+                        None,
+                        CSharpReceiver::default(),
+                        None,
+                        block,
+                        enclosing,
+                    );
+                }
+            }
+            "parameter_list" | "bracketed_parameter_list" => {
+                let Some(owner) = node.parent() else {
+                    return;
+                };
+                let kind = match owner.kind() {
+                    "lambda_expression" | "anonymous_method_expression" => {
+                        CSharpLocalKind::LambdaParameter
+                    }
+                    "delegate_declaration" | "function_pointer_type" => return,
+                    _ => CSharpLocalKind::Parameter,
+                };
+                for parameter in code::parameters(node, source) {
+                    if parameter.name.is_empty() {
+                        continue;
+                    }
+                    let declared = parameter.value_type.is_some();
+                    self.local(
+                        parameter.name,
+                        kind,
+                        parameter.value_type,
+                        declared,
+                        owner,
+                        node,
+                        block,
+                        enclosing,
+                    );
+                }
+            }
+            "implicit_parameter" => {
+                let name = node.utf8_text(source).map(squeeze).unwrap_or_default();
+                let scope = node.parent().unwrap_or(node);
+                self.local(
+                    name,
+                    CSharpLocalKind::LambdaParameter,
+                    None,
+                    false,
+                    scope,
+                    node,
+                    block,
+                    enclosing,
+                );
+            }
+            "variable_declarator" => {
+                let Some(declaration) = node
+                    .parent()
+                    .filter(|parent| parent.kind() == "variable_declaration")
+                else {
+                    return;
+                };
+                if declaration.parent().is_some_and(|holder| {
+                    matches!(
+                        holder.kind(),
+                        "field_declaration" | "event_field_declaration"
+                    )
+                }) {
+                    return;
+                }
+                let Some(name) = node
+                    .child_by_field_name("name")
+                    .and_then(|name| name.utf8_text(source).ok())
+                    .map(squeeze)
+                else {
+                    return;
+                };
+                let written = declaration
+                    .child_by_field_name("type")
+                    .and_then(|written| code::type_ref(written, source));
+                let (value_type, declared) = match written {
+                    Some(written) => (Some(written), true),
+                    None => (
+                        code::declarator_value(node)
+                            .and_then(|value| code::initializer_type(value, source)),
+                        false,
+                    ),
+                };
+                let scope = code::scope_of(node);
+                self.local(
+                    name,
+                    CSharpLocalKind::Variable,
+                    value_type,
+                    declared,
+                    scope,
+                    node,
+                    block,
+                    enclosing,
+                );
+            }
+            "declaration_expression" | "declaration_pattern" | "catch_declaration" => {
+                let Some(name) = node
+                    .child_by_field_name("name")
+                    .filter(|name| name.kind() == "identifier")
+                    .and_then(|name| name.utf8_text(source).ok())
+                    .map(squeeze)
+                else {
+                    return;
+                };
+                let value_type = node
+                    .child_by_field_name("type")
+                    .and_then(|written| code::type_ref(written, source));
+                let declared = value_type.is_some();
+                let scope = code::scope_of(node);
+                self.local(
+                    name,
+                    CSharpLocalKind::Variable,
+                    value_type,
+                    declared,
+                    scope,
+                    node,
+                    block,
+                    enclosing,
+                );
+            }
+            "foreach_statement" => {
+                let Some(name) = node
+                    .child_by_field_name("left")
+                    .filter(|left| left.kind() == "identifier")
+                    .and_then(|left| left.utf8_text(source).ok())
+                    .map(squeeze)
+                else {
+                    return;
+                };
+                let value_type = node
+                    .child_by_field_name("type")
+                    .and_then(|written| code::type_ref(written, source));
+                let declared = value_type.is_some();
+                self.local(
+                    name,
+                    CSharpLocalKind::Variable,
+                    value_type,
+                    declared,
+                    node,
+                    node,
+                    block,
+                    enclosing,
+                );
+            }
+            // Every other variable a declaration spells (a deconstruction, a query variable, a
+            // pattern's designation) has no type the reader takes from it, but its name still
+            // takes a receiver from a member or type of that name.
+            "identifier"
+                if declares_variable(place)
+                    && !matches!(
+                        place.parent,
+                        "variable_declarator"
+                            | "parameter"
+                            | "parameter_list"
+                            | "bracketed_parameter_list"
+                            | "catch_declaration"
+                            | "declaration_expression"
+                            | "declaration_pattern"
+                            | "foreach_statement"
+                            | "tuple_element"
+                    ) =>
+            {
+                let name = node.utf8_text(source).map(squeeze).unwrap_or_default();
+                let scope = code::scope_of(node);
+                self.local(
+                    name,
+                    CSharpLocalKind::Variable,
+                    None,
+                    false,
+                    scope,
+                    node,
+                    block,
+                    enclosing,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call(
+        &mut self,
+        node: Node<'_>,
+        kind: CSharpCallKind,
+        name: String,
+        type_arguments: Option<u16>,
+        receiver: CSharpReceiver,
+        created: Option<open_kioku_core::csharp::CSharpTypeRef>,
+        block: u32,
+        enclosing: Option<&SymbolId>,
+    ) {
+        let place = self.place(block, enclosing, node);
+        self.facts.calls.push(CSharpCall {
+            caller: self.callers.last().copied(),
+            kind,
+            name,
+            type_arguments,
+            arguments: code::argument_count(node),
+            receiver,
+            created,
+            range: code::source_range(node),
+            place,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn local(
+        &mut self,
+        name: String,
+        kind: CSharpLocalKind,
+        value_type: Option<open_kioku_core::csharp::CSharpTypeRef>,
+        declared: bool,
+        scope: Node<'_>,
+        node: Node<'_>,
+        block: u32,
+        enclosing: Option<&SymbolId>,
+    ) {
+        if name.is_empty() {
+            return;
+        }
+        let place = self.place(block, enclosing, node);
+        self.facts.locals.push(CSharpLocal {
+            name,
+            kind,
+            value_type,
+            declared,
+            owner: self.callers.last().copied(),
+            scope: code::source_range(scope),
+            place,
+        });
+    }
+
+    fn record_use(
+        &mut self,
+        node: Node<'_>,
+        context: CSharpNameContext,
+        block: u32,
+        enclosing: Option<&SymbolId>,
+    ) {
+        let Some(use_) = self.name_use(node, context, block, enclosing) else {
+            return;
+        };
+        let key = (
+            use_.block,
+            use_.enclosing_type.clone(),
+            use_.name.clone(),
+            use_.arity,
+            use_.next.clone(),
+            use_.next_arity,
+            use_.context,
+            use_.conditional,
+        );
+        if self.seen.insert(key) {
+            self.facts.uses.push(use_);
+        }
+    }
+
+    /// The use a name node writes, unless it is fully qualified (`global::`) or starts at an
+    /// extern alias, which no `using` of the file takes part in.
+    fn name_use(
+        &self,
+        node: Node<'_>,
+        context: CSharpNameContext,
+        block: u32,
+        enclosing: Option<&SymbolId>,
+    ) -> Option<CSharpNameUse> {
+        let name = dotted_name(node, self.source)?;
+        if name.global || name.extern_alias.is_some() {
+            return None;
+        }
+        let mut segments = name.segments.into_iter();
+        let (first, arity) = segments.next()?;
+        let (next, next_arity) = segments
+            .next()
+            .map_or((None, 0), |(next, arity)| (Some(next), arity));
+        Some(CSharpNameUse {
+            block,
+            enclosing_type: enclosing.cloned(),
+            name: first,
+            arity,
+            next,
+            next_arity,
+            context,
+            line: node.start_position().row as u32 + 1,
+            conditional: self.regions > 0,
+        })
+    }
+}
+
+/// What an error node's text may hide.
+/// The types the error node `text`, standing in a block of `outer`, may hide: every name it
+/// spells after a type keyword, in `outer` and in each namespace it spells (see
+/// [`CSharpNameFacts::hidden_types`]).
+fn hidden_types_in_error(outer: &str, text: &str) -> Vec<CSharpHiddenType> {
+    let words = text
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '.' || ch == '@'))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let mut namespaces = error_namespaces(outer, &words);
+    if !namespaces.iter().any(|namespace| namespace == outer) {
+        namespaces.push(outer.to_string());
+    }
+    let mut types = Vec::new();
+    for pair in words.windows(2) {
+        if !matches!(
+            pair[0],
+            "class" | "struct" | "interface" | "enum" | "record" | "delegate"
+        ) {
+            continue;
+        }
+        let name = pair[1].trim_start_matches('@');
+        if name.is_empty() || name.contains('.') {
+            continue;
+        }
+        for namespace in &namespaces {
+            let hidden = CSharpHiddenType {
+                namespace: namespace.clone(),
+                name: name.to_string(),
+            };
+            if !types.contains(&hidden) {
+                types.push(hidden);
+            }
+        }
+    }
+    types
+}
+
+/// Whether a syntax error stands where a `using` directive may: in the compilation unit or a
+/// namespace body, before its first type or namespace declaration. C# allows a directive only
+/// there, and recovery can misread one there into something else (a `using` swallowed into a
+/// top-level statement spells no `using` in any error node), so an error anywhere in that zone
+/// may hide one; an error after it, inside a declaration, cannot.
+fn directive_zone_has_error(list: Node<'_>) -> bool {
+    let mut in_zone = true;
+    let mut cursor = list.walk();
+    for child in list.named_children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "namespace_declaration" {
+            // Each namespace body has a zone of its own.
+            in_zone = false;
+            if child
+                .child_by_field_name("body")
+                .is_some_and(directive_zone_has_error)
+            {
+                return true;
+            }
+        } else if is_type_declaration(kind) || kind == "delegate_declaration" {
+            in_zone = false;
+        } else if in_zone && child.has_error() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Each `namespace Name` the words of an error node spell, joined to `outer` and to the ones
+/// spelled before it: an error node does not say where a block closes, so a later one may be
+/// nested in an earlier one.
+fn error_namespaces(outer: &str, words: &[&str]) -> Vec<String> {
+    let join = |left: &str, right: &str| {
+        if left.is_empty() {
+            right.to_string()
+        } else {
+            format!("{left}.{right}")
+        }
+    };
+    let mut namespaces = Vec::new();
+    let mut nested = outer.to_string();
+    for pair in words.windows(2) {
+        if pair[0] != "namespace" {
+            continue;
+        }
+        let name = pair[1].trim_matches('.');
+        if name.is_empty() {
+            continue;
+        }
+        nested = join(&nested, name);
+        for namespace in [join(outer, name), nested.clone()] {
+            if !namespaces.contains(&namespace) {
+                namespaces.push(namespace);
+            }
+        }
+    }
+    namespaces
+}
+
+/// The context a name node of `kind` is written in at `place`, when it is a type name the lookup
+/// reads: see [`CSharpNameContext`]. A name inside a qualified name, a generic name or a
+/// directive is read with the name holding it.
+fn use_context(kind: &str, place: Place<'_>) -> Option<CSharpNameContext> {
+    if !matches!(
+        kind,
+        "identifier" | "generic_name" | "qualified_name" | "alias_qualified_name"
+    ) {
+        return None;
+    }
+    match (place.parent, place.field) {
+        ("using_directive" | "qualified_name" | "generic_name" | "alias_qualified_name", _) => None,
+        (_, Some("type" | "returns")) => Some(CSharpNameContext::Type),
+        ("as_expression" | "is_expression", Some("right")) => Some(CSharpNameContext::Type),
+        ("base_list" | "type_argument_list" | "explicit_interface_specifier", None) => {
+            Some(CSharpNameContext::Type)
+        }
+        ("attribute", Some("name")) => Some(CSharpNameContext::Attribute),
+        ("member_access_expression", Some("expression"))
+            if matches!(kind, "identifier" | "generic_name") =>
+        {
+            Some(CSharpNameContext::Receiver)
+        }
+        _ => None,
+    }
+}
+
+/// Whether an identifier at `place` declares a local, parameter, pattern, range or loop
+/// variable (or a field, which shadows a receiver the same way). Query clauses spell their
+/// variable without a field, so every identifier directly in one counts: a name read as a
+/// variable that is not one only keeps a receiver out of the lookup.
+fn declares_variable(place: Place<'_>) -> bool {
+    matches!(
+        (place.parent, place.field),
+        (
+            "variable_declarator"
+                | "parameter"
+                | "catch_declaration"
+                | "declaration_expression"
+                | "declaration_pattern"
+                | "from_clause"
+                | "tuple_element"
+                | "var_pattern"
+                | "recursive_pattern"
+                | "list_pattern"
+                | "tuple_pattern"
+                | "parenthesized_variable_designation"
+                | "bracketed_parameter_list"
+                | "parameter_list",
+            Some("name"),
+        ) | ("foreach_statement", Some("left"))
+            | ("join_clause" | "let_clause" | "query_continuation", None)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::parse_file;
@@ -902,9 +2068,15 @@ namespace Acme.Ledger
             .symbols
             .iter()
             .all(|symbol| symbol.confidence == Confidence::High));
-        // Nothing here is a relationship: calls, base lists and `using` belong to resolution.
+        // Calls and base lists are not read as relationships; `using System;` is an import site
+        // the import resolver places.
         assert!(facts.calls.is_empty());
-        assert!(facts.imports.is_empty());
+        let imports = facts
+            .imports
+            .iter()
+            .map(|site| site.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(imports, vec!["System"]);
         assert!(facts.inheritance.is_empty());
         assert!(facts.bindings.is_empty());
     }
@@ -1583,5 +2755,756 @@ public class Platform
             find(&facts, "Acme::Locals::Holder::Twice").kind,
             SymbolKind::Function
         );
+    }
+
+    mod names {
+        use super::parse;
+        use open_kioku_core::csharp::{
+            CSharpNameContext, CSharpNameFacts, CSharpNameUse, CSharpUsing, CSharpUsingKind,
+        };
+        use open_kioku_core::SyntaxFacts;
+
+        fn names(facts: &SyntaxFacts) -> &CSharpNameFacts {
+            facts
+                .csharp_names
+                .as_ref()
+                .expect("a C# file has name facts")
+        }
+
+        /// `(name, arity, next, context, line)` of every use, in order.
+        fn uses(facts: &SyntaxFacts) -> Vec<(String, u16, Option<String>, CSharpNameContext, u32)> {
+            names(facts)
+                .uses
+                .iter()
+                .map(|use_| {
+                    (
+                        use_.name.clone(),
+                        use_.arity,
+                        use_.next.clone(),
+                        use_.context,
+                        use_.line,
+                    )
+                })
+                .collect()
+        }
+
+        fn use_(
+            name: &str,
+            context: CSharpNameContext,
+            line: u32,
+        ) -> (String, u16, Option<String>, CSharpNameContext, u32) {
+            (name.into(), 0, None, context, line)
+        }
+
+        fn directive(
+            block: u32,
+            kind: CSharpUsingKind,
+            target: &str,
+            alias: Option<&str>,
+            global: bool,
+            line: u32,
+        ) -> CSharpUsing {
+            CSharpUsing {
+                block,
+                kind,
+                target: target.into(),
+                arity: 0,
+                alias: alias.map(str::to_string),
+                global,
+                extern_alias: None,
+                line,
+                conditional: false,
+            }
+        }
+
+        #[test]
+        fn using_directives_are_read_with_their_kind_block_and_spelling() {
+            let facts = parse(
+                "Page.cs",
+                "extern alias Legacy;\n\
+                 global using System;\n\
+                 global using static System.Math;\n\
+                 global using Json = Vendor.Serialization;\n\
+                 using global::Acme.Ledger;\n\
+                 using Legacy::Acme.Old;\n\
+                 using Numbers = System.Collections.Generic.List<int>;\n\
+                 namespace Acme.Web;\n\
+                 using Acme.Billing;\n\
+                 class Page { }\n",
+            );
+            let names = names(&facts);
+            use CSharpUsingKind::*;
+            let mut numbers = directive(
+                0,
+                Alias,
+                "System.Collections.Generic.List",
+                Some("Numbers"),
+                false,
+                7,
+            );
+            numbers.arity = 1;
+            let mut legacy = directive(0, Namespace, "Acme.Old", None, false, 6);
+            legacy.extern_alias = Some("Legacy".into());
+            assert_eq!(
+                names.usings,
+                vec![
+                    directive(0, Namespace, "System", None, true, 2),
+                    directive(0, Static, "System.Math", None, true, 3),
+                    directive(0, Alias, "Vendor.Serialization", Some("Json"), true, 4),
+                    directive(0, Namespace, "Acme.Ledger", None, false, 5),
+                    legacy,
+                    numbers,
+                    // After a file-scoped namespace a directive is that namespace's.
+                    directive(1, Namespace, "Acme.Billing", None, false, 9),
+                ]
+            );
+            assert_eq!(names.extern_aliases, vec!["Legacy".to_string()]);
+            assert_eq!(names.blocks.len(), 2);
+            assert_eq!(names.blocks[1].namespace, "Acme.Web");
+            assert_eq!(names.blocks[1].parent, Some(0));
+
+            // One import site per directive, named by what it names; an alias binds its name.
+            let sites = facts
+                .imports
+                .iter()
+                .map(|site| {
+                    (
+                        site.source.as_str(),
+                        site.is_glob,
+                        site.bindings
+                            .iter()
+                            .map(|binding| binding.local.as_str())
+                            .collect::<Vec<_>>(),
+                        site.range.start_line,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                sites,
+                vec![
+                    ("System", true, vec![], 2),
+                    ("System.Math", true, vec![], 3),
+                    ("Vendor.Serialization", false, vec!["Json"], 4),
+                    ("Acme.Ledger", true, vec![], 5),
+                    ("Legacy::Acme.Old", true, vec![], 6),
+                    ("System.Collections.Generic.List", false, vec!["Numbers"], 7),
+                    ("Acme.Billing", true, vec![], 9),
+                ]
+            );
+        }
+
+        #[test]
+        fn namespace_blocks_nest_and_hold_their_own_directives() {
+            let facts = parse(
+                "Core.cs",
+                "using Acme.Shared;\nnamespace Acme\n{\n    using Acme.Util;\n    namespace Ledger.Core\n    {\n        using Rules = Acme.Rules;\n        class A { Entry e; }\n    }\n}\n",
+            );
+            let names = names(&facts);
+            let blocks = names
+                .blocks
+                .iter()
+                .map(|block| (block.namespace.as_str(), block.parent))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                blocks,
+                vec![("", None), ("Acme", Some(0)), ("Acme.Ledger.Core", Some(1))]
+            );
+            let directives = names
+                .usings
+                .iter()
+                .map(|using| (using.block, using.target.as_str()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                directives,
+                vec![(0, "Acme.Shared"), (1, "Acme.Util"), (2, "Acme.Rules")]
+            );
+            assert_eq!(names.uses.len(), 1);
+            assert_eq!(names.uses[0].block, 2);
+            assert_eq!(names.uses[0].name, "Entry");
+        }
+
+        #[test]
+        fn type_names_are_read_where_only_a_type_can_stand() {
+            use CSharpNameContext::{Attribute, Receiver, Type};
+            let facts = parse(
+                "Page.cs",
+                r#"namespace Acme.Web;
+[Serializable, Acme.Marker]
+public class Page<TModel> : Base<TModel>, IPage where TModel : Model
+{
+    private Entry? entry = new Entry();
+    public Outer.Inner Nested { get; }
+    public IList<Statement> Items(Line[] lines, out Ledger ledger) => Rules.Run<Rule>(Status.Active);
+    void M(object o)
+    {
+        var x = (Cast)o;
+        if (o is Pattern p) { }
+        var t = typeof(Generic<,>);
+        foreach (Item item in items) { }
+        var y = o as AsType;
+        var z = default(DefaultType);
+        try { } catch (LedgerException ex) { }
+        global::Acme.Full.Thing.Create();
+        Legacy::Acme.Old.Thing.Create();
+        nameof(NotAUse);
+        Run(Plain);
+    }
+}
+"#,
+            );
+            let mut generic = use_("Generic", Type, 12);
+            generic.1 = 2;
+            let mut base = use_("Base", Type, 3);
+            base.1 = 1;
+            let mut list = use_("IList", Type, 7);
+            list.1 = 1;
+            let mut marker = use_("Acme", Attribute, 2);
+            marker.2 = Some("Marker".into());
+            let mut nested = use_("Outer", Type, 6);
+            nested.2 = Some("Inner".into());
+            assert_eq!(
+                uses(&facts),
+                vec![
+                    use_("Serializable", Attribute, 2),
+                    marker,
+                    base,
+                    use_("TModel", Type, 3),
+                    use_("IPage", Type, 3),
+                    use_("Model", Type, 3),
+                    use_("Entry", Type, 5),
+                    nested,
+                    list,
+                    use_("Statement", Type, 7),
+                    use_("Line", Type, 7),
+                    use_("Ledger", Type, 7),
+                    use_("Rules", Receiver, 7),
+                    use_("Rule", Type, 7),
+                    use_("Status", Receiver, 7),
+                    use_("Cast", Type, 10),
+                    use_("Pattern", Type, 11),
+                    generic,
+                    use_("Item", Type, 13),
+                    use_("AsType", Type, 14),
+                    use_("DefaultType", Type, 15),
+                    use_("LedgerException", Type, 16),
+                ]
+            );
+            let names = names(&facts);
+            assert_eq!(names.type_parameters, vec!["TModel".to_string()]);
+            for variable in [
+                "entry", "lines", "ledger", "o", "x", "p", "t", "item", "y", "z", "ex",
+            ] {
+                assert!(
+                    names.variables.contains(&variable.to_string()),
+                    "{variable} in {:?}",
+                    names.variables
+                );
+            }
+        }
+
+        #[test]
+        fn a_type_records_its_arity_and_base_list_read_outside_it() {
+            let facts = parse(
+                "Entry.cs",
+                "namespace Acme;\npublic class Entry<TKey, TValue> : Base, IEntry\n{\n    class Nested : Entry<int, int> { Inner i; }\n}\npublic record Line(int N) : Row(N);\n",
+            );
+            let names = names(&facts);
+            let id_of = |qualified: &str| {
+                facts
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.qualified_name == qualified)
+                    .map(|symbol| symbol.id.clone())
+                    .expect("type symbol")
+            };
+            let entry = id_of("Acme::Entry");
+            let nested = id_of("Acme::Entry::Nested");
+            let declared = names
+                .types
+                .iter()
+                .map(|declared| {
+                    (
+                        declared.symbol_id.clone(),
+                        declared.arity,
+                        declared
+                            .bases
+                            .iter()
+                            .map(|base| (base.name.clone(), base.enclosing_type.clone()))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                declared,
+                vec![
+                    (
+                        entry.clone(),
+                        2,
+                        vec![("Base".to_string(), None), ("IEntry".to_string(), None)]
+                    ),
+                    // A nested type's base list is read in the type around it.
+                    (
+                        nested.clone(),
+                        0,
+                        vec![("Entry".to_string(), Some(entry.clone()))]
+                    ),
+                    (id_of("Acme::Line"), 0, vec![("Row".to_string(), None)]),
+                ]
+            );
+            // A name inside a type is written in that type.
+            let inner = names
+                .uses
+                .iter()
+                .find(|use_| use_.name == "Inner")
+                .expect("Inner is a use");
+            assert_eq!(inner.enclosing_type, Some(nested));
+        }
+
+        #[test]
+        fn a_constraint_names_its_parameter_but_uses_only_its_types() {
+            let facts = parse("Box.cs", "class Box<T> where T : Item, new() { }\n");
+            let written = names(&facts)
+                .uses
+                .iter()
+                .map(|use_| use_.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(written, vec!["Item"]);
+        }
+
+        #[test]
+        fn a_use_is_kept_once_per_place_at_its_first_line() {
+            let facts = parse(
+                "Twice.cs",
+                "class Twice\n{\n    Entry a;\n    Entry b;\n    void M() { Entry.Make(); Entry.Make(); }\n}\n",
+            );
+            let written = names(&facts)
+                .uses
+                .iter()
+                .map(|use_: &CSharpNameUse| (use_.name.as_str(), use_.context, use_.line))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                written,
+                vec![
+                    ("Entry", CSharpNameContext::Type, 3),
+                    ("Entry", CSharpNameContext::Receiver, 5),
+                ]
+            );
+        }
+
+        #[test]
+        fn nothing_inside_an_error_node_is_read_for_names() {
+            let facts = parse(
+                "Broken.cs",
+                "using Acme.Ledger;\nnamespace Acme;\npublic class Broken\n{\n    public void Lost() { if (x { Entry e; }\n",
+            );
+            let names = names(&facts);
+            assert_eq!(names.usings.len(), 1);
+            assert!(
+                names.uses.iter().all(|use_| use_.name != "Entry"),
+                "{:?}",
+                names.uses
+            );
+        }
+
+        #[test]
+        fn friend_assemblies_and_syntax_errors_are_recorded() {
+            let facts = parse(
+                "AssemblyInfo.cs",
+                "using System.Runtime.CompilerServices;\n[assembly: InternalsVisibleTo(\"Acme.Tests\")]\n[assembly: System.Runtime.CompilerServices.InternalsVisibleToAttribute(\"Acme.Bench, PublicKey=0024\")]\n[assembly: Other(\"Acme.Nope\")]\n",
+            );
+            assert_eq!(
+                names(&facts).internals_visible_to,
+                vec!["Acme.Tests".to_string(), "Acme.Bench".to_string()]
+            );
+            assert!(!names(&facts).syntax_errors);
+            let broken = parse("Broken.cs", "class Broken { void M() { if (x { } }\n");
+            assert!(names(&broken).syntax_errors);
+        }
+
+        #[test]
+        fn an_error_records_the_types_it_may_hide_and_whether_a_directive_may_be_missing() {
+            use open_kioku_core::csharp::CSharpHiddenType;
+            let hidden = |namespace: &str, name: &str| CSharpHiddenType {
+                namespace: namespace.into(),
+                name: name.into(),
+            };
+            // An error in a method body spells no type keyword and stands after the directives.
+            let body = parse(
+                "Body.cs",
+                "using Acme.Ledger;\nnamespace Acme.Web;\npublic class Page\n{\n    void M() { var x = 1 +; }\n}\n",
+            );
+            assert!(names(&body).syntax_errors);
+            assert!(names(&body).hidden_types.is_empty());
+            assert!(!names(&body).hidden_directives);
+            // Recovery swallowed the namespace declarations themselves: `Page` may be declared in
+            // any namespace the error spells, and in the one it stands in.
+            let declarations = parse(
+                "Broken.cs",
+                "namespace Acme\n{\n    namespace Web\n    {\n        public class Page { public void Lost() { if (x { }\n    }\n}\n",
+            );
+            let read = names(&declarations);
+            assert_eq!(
+                read.hidden_types,
+                vec![
+                    hidden("Acme", "Page"),
+                    hidden("Web", "Page"),
+                    hidden("Acme.Web", "Page"),
+                    hidden("", "Page"),
+                ],
+                "{read:?}"
+            );
+            // A `using` recovery misreads into a top-level statement spells no `using` in any
+            // error node, but the error stands where directives do.
+            let directive = parse(
+                "Directive.cs",
+                "using Acme.Ledger;\nusing using Acme.Billing;\nnamespace Acme.Web;\npublic class Page { }\n",
+            );
+            assert!(names(&directive).hidden_directives);
+            assert_eq!(names(&directive).usings.len(), 1);
+            // So does one in a namespace body, before its first type.
+            let nested = parse(
+                "Nested.cs",
+                "namespace Acme\n{\n    using using Acme.Billing;\n    class Page { }\n}\n",
+            );
+            assert!(names(&nested).hidden_directives);
+        }
+
+        #[test]
+        fn what_an_if_region_holds_is_conditional() {
+            let facts = parse(
+                "Page.cs",
+                "using System;\n#if NET6\nusing Acme.Modern;\n#else\nusing Acme.Legacy;\n#endif\nnamespace Acme.Web\n{\n#if !NET7\n    internal sealed class Polyfill { }\n#endif\n    public class Page\n    {\n#if DEBUG\n        private Entry entry;\n#elif TRACE\n        private Line line;\n#endif\n        private Kept kept;\n    }\n}\n",
+            );
+            let read = names(&facts);
+            let usings = read
+                .usings
+                .iter()
+                .map(|using| (using.target.as_str(), using.conditional))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                usings,
+                vec![
+                    ("System", false),
+                    ("Acme.Modern", true),
+                    ("Acme.Legacy", true)
+                ]
+            );
+            let uses = read
+                .uses
+                .iter()
+                .map(|use_| (use_.name.as_str(), use_.conditional))
+                .collect::<Vec<_>>();
+            assert_eq!(uses, vec![("Entry", true), ("Line", true), ("Kept", false)]);
+            let types = read
+                .types
+                .iter()
+                .map(|declared| declared.conditional)
+                .collect::<Vec<_>>();
+            assert_eq!(types, vec![true, false]);
+        }
+
+        #[test]
+        fn other_languages_record_no_csharp_names() {
+            let java = open_kioku_core::File {
+                language: open_kioku_core::Language::Java,
+                ..super::file("Entry.java")
+            };
+            let facts = crate::parse_file(&java, "class Entry {}\n").expect("parses");
+            assert!(facts.csharp_names.is_none());
+        }
+    }
+
+    mod code {
+        use super::parse;
+        use open_kioku_core::csharp::{
+            CSharpCallKind, CSharpNameFacts, CSharpReceiver, CSharpReceiverRoot, CSharpTypeKind,
+            CSharpTypeRef, CSharpTypeShape,
+        };
+
+        fn facts(source: &str) -> CSharpNameFacts {
+            parse("src/Store.cs", source)
+                .csharp_names
+                .expect("a C# file has name facts")
+        }
+
+        fn written(type_: &CSharpTypeRef) -> String {
+            let path = type_
+                .path
+                .iter()
+                .map(|segment| {
+                    if segment.arity > 0 {
+                        format!("{}`{}", segment.name, segment.arity)
+                    } else {
+                        segment.name.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(".");
+            let arguments = type_
+                .arguments
+                .iter()
+                .map(written)
+                .collect::<Vec<_>>()
+                .join(",");
+            let shape = match type_.shape {
+                CSharpTypeShape::Named => "",
+                CSharpTypeShape::Nullable => "?",
+                CSharpTypeShape::Predefined => "predefined",
+                CSharpTypeShape::Other => "other",
+            };
+            let global = if type_.global { "global::" } else { "" };
+            if arguments.is_empty() {
+                format!("{global}{path}{shape}")
+            } else {
+                format!("{global}{path}{shape}[{arguments}]")
+            }
+        }
+
+        fn receiver(receiver: &CSharpReceiver) -> String {
+            let root = match &receiver.root {
+                CSharpReceiverRoot::None => String::new(),
+                CSharpReceiverRoot::This => "this".into(),
+                CSharpReceiverRoot::Base => "base".into(),
+                CSharpReceiverRoot::Name(segment) => segment.name.clone(),
+                CSharpReceiverRoot::Typed(type_) => format!("({})", written(type_)),
+                CSharpReceiverRoot::Unknown => "?".into(),
+            };
+            std::iter::once(root)
+                .chain(receiver.members.iter().map(|member| member.name.clone()))
+                .collect::<Vec<_>>()
+                .join(".")
+        }
+
+        /// `caller: kind receiver.name<type arguments>/arguments` for each call.
+        fn calls(read: &CSharpNameFacts) -> Vec<String> {
+            read.calls
+                .iter()
+                .map(|call| {
+                    let caller = call
+                        .caller
+                        .map(|index| read.members[index as usize].name.clone())
+                        .unwrap_or_else(|| "-".into());
+                    let target = match call.kind {
+                        CSharpCallKind::Invocation => {
+                            let receiver = receiver(&call.receiver);
+                            let dot = if receiver.is_empty() { "" } else { "." };
+                            let arguments = call
+                                .type_arguments
+                                .map(|count| format!("<{count}>"))
+                                .unwrap_or_default();
+                            format!("{receiver}{dot}{}{arguments}", call.name)
+                        }
+                        CSharpCallKind::Creation => {
+                            format!("new {}", call.created.as_ref().map_or("?".into(), written))
+                        }
+                        CSharpCallKind::BaseConstructor => "base()".into(),
+                        CSharpCallKind::ThisConstructor => "this()".into(),
+                    };
+                    format!("{caller}: {target}/{}", call.arguments)
+                })
+                .collect()
+        }
+
+        #[test]
+        fn calls_record_their_receiver_member_and_argument_count() {
+            let read = facts(
+                "namespace Acme.Ledger;\n\
+                 public class Store : Base<int>, IStore\n\
+                 {\n\
+                 \x20   private readonly Entry _entry = new();\n\
+                 \x20   public static Store Default => new Store(1);\n\
+                 \x20   public Store(int x) : base(x) {}\n\
+                 \x20   public Store() : this(1) {}\n\
+                 \x20   public void Run(Entry a)\n\
+                 \x20   {\n\
+                 \x20       var s = new Store(2);\n\
+                 \x20       s.Get(1);\n\
+                 \x20       this.Get(1, \"x\");\n\
+                 \x20       base.Save();\n\
+                 \x20       Get(2);\n\
+                 \x20       _entry?.Post();\n\
+                 \x20       Store.Default.Run(a);\n\
+                 \x20       Acme.Ledger.Rules.Apply<int>(1);\n\
+                 \x20       nameof(Get);\n\
+                 \x20       ((Entry)a).Save();\n\
+                 \x20       GetStore().Get(1);\n\
+                 \x20       int.Parse(\"1\");\n\
+                 \x20       Helper();\n\
+                 \x20       void Helper() => a.Items.First();\n\
+                 \x20   }\n\
+                 }\n",
+            );
+            assert_eq!(
+                calls(&read),
+                vec![
+                    "_entry: new Entry/0",
+                    "Default: new Store/1",
+                    "Store: base()/1",
+                    "Store: this()/1",
+                    "Run: new Store/1",
+                    "Run: s.Get/1",
+                    "Run: this.Get/2",
+                    "Run: base.Save/0",
+                    "Run: Get/1",
+                    "Run: _entry.Post/0",
+                    "Run: Store.Default.Run/1",
+                    "Run: Acme.Ledger.Rules.Apply<1>/1",
+                    "Run: (Entry).Save/0",
+                    "Run: ?.Get/1",
+                    "Run: GetStore/0",
+                    "Run: ?.Parse/1",
+                    "Run: Helper/0",
+                    "Helper: a.Items.First/0",
+                ]
+            );
+        }
+
+        #[test]
+        fn members_record_their_parameters_and_types() {
+            let read = facts(
+                "namespace Acme.Ledger;\n\
+                 public static class Ext\n\
+                 {\n\
+                 \x20   public static int Post(this Entry e, int x = 1) => 0;\n\
+                 \x20   public static void All<T>(this T e, params Entry[] xs) {}\n\
+                 }\n\
+                 public record Money(decimal Amount, Entry Source) : Base(Amount), IThing;\n\
+                 public class Book\n\
+                 {\n\
+                 \x20   private Entry? _maybe, _other;\n\
+                 \x20   public List<Entry> Items { get; }\n\
+                 \x20   public override string ToString() => \"\";\n\
+                 \x20   public void Clear() {}\n\
+                 }\n",
+            );
+            let members = read
+                .members
+                .iter()
+                .map(|member| {
+                    let parameters = member
+                        .parameters
+                        .iter()
+                        .map(|parameter| {
+                            format!(
+                                "{}{}{}:{}{}",
+                                if parameter.is_this { "this " } else { "" },
+                                if parameter.is_params { "params " } else { "" },
+                                parameter.name,
+                                parameter.value_type.as_ref().map_or("-".into(), written),
+                                if parameter.optional { "=" } else { "" }
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "{:?} {}{}{}({parameters}) -> {}",
+                        member.kind,
+                        if member.is_static { "static " } else { "" },
+                        if member.is_override { "override " } else { "" },
+                        member.name,
+                        member.value_type.as_ref().map_or("-".into(), written)
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                members,
+                vec![
+                    "Method static Post(this e:Entry, x:predefined=) -> predefined",
+                    "Method static All(this e:T, params xs:other[Entry]) -> -",
+                    "PrimaryConstructor Money(Amount:predefined, Source:Entry) -> -",
+                    "Property Amount() -> predefined",
+                    "Property Source() -> Entry",
+                    "Field _maybe() -> Entry?",
+                    "Field _other() -> Entry?",
+                    "Property Items() -> List`1[Entry]",
+                    "Method override ToString() -> predefined",
+                    "Method Clear() -> -",
+                ]
+            );
+            assert_eq!(read.members[1].type_parameters, 1);
+            assert_eq!(calls(&read), vec!["Money: base()/1"]);
+            let kinds = read
+                .types
+                .iter()
+                .map(|declared| (declared.kind, declared.is_static, declared.base_types.len()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                kinds,
+                vec![
+                    (CSharpTypeKind::Class, true, 0),
+                    (CSharpTypeKind::Record, false, 2),
+                    (CSharpTypeKind::Class, false, 0),
+                ]
+            );
+        }
+
+        #[test]
+        fn variables_record_their_type_and_scope() {
+            let read = facts(
+                "namespace Acme;\n\
+                 class C(Store store)\n\
+                 {\n\
+                 \x20   void Run(Entry a, out Entry b)\n\
+                 \x20   {\n\
+                 \x20       var s = new Store();\n\
+                 \x20       Store t = new(), u = null;\n\
+                 \x20       var c = (Entry)a;\n\
+                 \x20       var d = a as Entry;\n\
+                 \x20       var e = Make();\n\
+                 \x20       foreach (Entry f in list) { }\n\
+                 \x20       if (a is Entry g) { }\n\
+                 \x20       Get(out var h);\n\
+                 \x20       try { } catch (LedgerException ex) { }\n\
+                 \x20       Func<Entry, int> k = x => 1;\n\
+                 \x20       Action<Entry> m = (Entry y) => y.Save();\n\
+                 \x20       var (p, q) = pair;\n\
+                 \x20   }\n\
+                 }\n",
+            );
+            let locals = read
+                .locals
+                .iter()
+                .map(|local| {
+                    format!(
+                        "{} {:?} {}{} lines {}-{}",
+                        local.name,
+                        local.kind,
+                        local.value_type.as_ref().map_or("-".into(), written),
+                        if local.declared { "" } else { " (inferred)" },
+                        local.scope.start_line,
+                        local.scope.end_line,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                locals,
+                vec![
+                    "store Parameter Store lines 2-19",
+                    "a Parameter Entry lines 4-18",
+                    "b Parameter Entry lines 4-18",
+                    "s Variable Store (inferred) lines 5-18",
+                    "t Variable Store lines 5-18",
+                    "u Variable Store lines 5-18",
+                    "c Variable Entry (inferred) lines 5-18",
+                    "d Variable Entry (inferred) lines 5-18",
+                    "e Variable - (inferred) lines 5-18",
+                    "f Variable Entry lines 11-11",
+                    "g Variable Entry lines 5-18",
+                    "h Variable - (inferred) lines 5-18",
+                    "ex Variable LedgerException lines 14-14",
+                    "k Variable Func`2[Entry,predefined] lines 5-18",
+                    "x LambdaParameter - (inferred) lines 15-15",
+                    "m Variable Action`1[Entry] lines 5-18",
+                    "y LambdaParameter Entry lines 16-16",
+                    "p Variable - (inferred) lines 5-18",
+                    "q Variable - (inferred) lines 5-18",
+                ]
+            );
+            let creations = calls(&read)
+                .into_iter()
+                .filter(|call| call.contains("new"))
+                .collect::<Vec<_>>();
+            assert_eq!(creations, vec!["Run: new Store/0", "Run: new Store/0"]);
+        }
     }
 }

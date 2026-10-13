@@ -18,6 +18,7 @@ enum RelationshipBenchLanguage {
     Python,
     Java,
     Go,
+    CSharp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1525,6 +1526,7 @@ fn language_name(language: RelationshipBenchLanguage) -> &'static str {
         RelationshipBenchLanguage::Python => "python",
         RelationshipBenchLanguage::Java => "java",
         RelationshipBenchLanguage::Go => "go",
+        RelationshipBenchLanguage::CSharp => "csharp",
     }
 }
 

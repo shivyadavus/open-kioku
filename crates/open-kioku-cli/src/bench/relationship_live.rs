@@ -74,7 +74,7 @@ fn live_relationship_run_metadata(
         .filter(|value| !value.is_empty())
         .or_else(|| std::env::var("GITHUB_SHA").ok());
     let semantics_fingerprint = open_kioku_core::AnalysisSemanticsState::current().fingerprint;
-    let adapter_versions = ["rust", "typescript", "javascript", "python", "java", "go"]
+    let adapter_versions = ["rust", "typescript", "javascript", "python", "java", "go", "csharp"]
         .into_iter()
         .map(|language| {
             (
@@ -124,8 +124,18 @@ fn produce_live_relationship_case(
                 require_fixture_source_files_indexed(case, &fixture, &snapshot)?;
             }
         }
+        if case.language == RelationshipBenchLanguage::CSharp {
+            if let Some(fixture) = csharp_relationship_fixture(&case.scenario) {
+                require_fixture_source_files_indexed(case, &fixture, &snapshot)?;
+            }
+        }
         if case.relationship == GraphEdgeType::Imports {
-            if let Some(fixture) = rust_import_edge_fixture(&case.scenario) {
+            let fixture = if case.language == RelationshipBenchLanguage::CSharp {
+                csharp_import_edge_fixture(&case.scenario)
+            } else {
+                rust_import_edge_fixture(&case.scenario)
+            };
+            if let Some(fixture) = fixture {
                 require_fixture_source_files_indexed(case, &fixture, &snapshot)?;
             }
         }
@@ -538,6 +548,7 @@ fn malformed_live_fixture_file(language: RelationshipBenchLanguage) -> (PathBuf,
         RelationshipBenchLanguage::Python => (PathBuf::from("src/broken.py"), "def broken(:\n    pass\n"),
         RelationshipBenchLanguage::Java => (PathBuf::from("src/Broken.java"), "class Broken { void broken( { }"),
         RelationshipBenchLanguage::Go => (PathBuf::from("broken.go"), "package bench\nfunc Broken( {\n"),
+        RelationshipBenchLanguage::CSharp => (PathBuf::from("src/Broken.cs"), "class Broken { void Broken( { }"),
     }
 }
 
@@ -546,6 +557,11 @@ fn live_fixture_files(case: &RelationshipBenchCase) -> anyhow::Result<Vec<(PathB
         || (case.capability_state != RelationshipBenchCapabilityState::Authoritative
             && matches!(case.scenario.as_str(), "metamorphic_a" | "metamorphic_b" | "unsupported_feature"));
     let adversarial = !positive_syntax;
+    if case.language == RelationshipBenchLanguage::CSharp {
+        if let Some(fixture) = csharp_relationship_fixture(&case.scenario) {
+            return Ok(fixture);
+        }
+    }
     let files = match &case.relationship {
         GraphEdgeType::Calls => live_call_fixture(case.language, adversarial, &case.scenario)?,
         GraphEdgeType::References => live_reference_fixture(case.language),
@@ -564,6 +580,11 @@ fn live_fixture_files(case: &RelationshipBenchCase) -> anyhow::Result<Vec<(PathB
         GraphEdgeType::UsesType => live_type_fixture(case.language, positive_syntax),
         GraphEdgeType::Implements => live_implements_fixture(case.language, positive_syntax),
         GraphEdgeType::Extends => live_extends_fixture(case.language, positive_syntax),
+        GraphEdgeType::Imports if case.language == RelationshipBenchLanguage::CSharp => {
+            csharp_import_edge_fixture(&case.scenario).ok_or_else(|| {
+                anyhow::anyhow!("no C# IMPORTS fixture for scenario {}", case.scenario)
+            })?
+        }
         GraphEdgeType::Imports => match rust_import_edge_fixture(&case.scenario) {
             Some(fixture) => {
                 if case.language != RelationshipBenchLanguage::Rust {
@@ -591,6 +612,7 @@ fn main_path(language: RelationshipBenchLanguage) -> &'static str {
         RelationshipBenchLanguage::Python => "src/main.py",
         RelationshipBenchLanguage::Java => "src/Bench.java",
         RelationshipBenchLanguage::Go => "main.go",
+        RelationshipBenchLanguage::CSharp => "src/Bench.cs",
     }
 }
 
@@ -3606,7 +3628,7 @@ fn require_fixture_source_files_indexed(
     for (path, _) in fixture {
         if !path
             .extension()
-            .is_some_and(|extension| extension == "rs" || extension == "py")
+            .is_some_and(|extension| extension == "rs" || extension == "py" || extension == "cs")
         {
             continue;
         }
@@ -3647,6 +3669,9 @@ fn positive_call_source(language: RelationshipBenchLanguage) -> String {
         RelationshipBenchLanguage::Go => {
             "package bench\nfunc TargetFn() {}\nfunc CallerFn() { TargetFn() }\n".into()
         }
+        RelationshipBenchLanguage::CSharp => {
+            "class Bench {\n  static void TargetFn() {}\n  static void CallerFn() { TargetFn(); }\n}\n".into()
+        }
     }
 }
 
@@ -3679,6 +3704,7 @@ fn missing_call_source(language: RelationshipBenchLanguage) -> String {
         RelationshipBenchLanguage::Python => "def caller_fn():\n    missing_target()\n".into(),
         RelationshipBenchLanguage::Java => "class Bench { void callerFn() {} }\n".into(),
         RelationshipBenchLanguage::Go => "package bench\nfunc CallerFn() {}\n".into(),
+        RelationshipBenchLanguage::CSharp => "class Bench { void CallerFn() {} }\n".into(),
     }
 }
 
@@ -3694,6 +3720,7 @@ fn reference_source(language: RelationshipBenchLanguage) -> String {
         RelationshipBenchLanguage::Python => "def target_fn(): pass\ndef caller_fn(): pass\n".into(),
         RelationshipBenchLanguage::Java => "class Bench { static void targetFn() {} static void callerFn() {} }\n".into(),
         RelationshipBenchLanguage::Go => "package bench\nfunc TargetFn() {}\nfunc CallerFn() {}\n".into(),
+        RelationshipBenchLanguage::CSharp => "class Bench { static void TargetFn() {} static void CallerFn() {} }\n".into(),
     }
 }
 
@@ -3709,6 +3736,7 @@ fn live_type_fixture(
             RelationshipBenchLanguage::Python => "class TargetType: pass\ndef caller_fn(value: TargetType): pass\n".into(),
             RelationshipBenchLanguage::Java => "class TargetType {}\nclass Bench { void callerFn(TargetType value) {} }\n".into(),
             RelationshipBenchLanguage::Go => "package bench\ntype TargetType struct{}\nfunc CallerFn(value TargetType) {}\n".into(),
+            RelationshipBenchLanguage::CSharp => "class TargetType {}\nclass Bench { void CallerFn(TargetType value) {} }\n".into(),
         }
     } else {
         match language {
@@ -3718,6 +3746,7 @@ fn live_type_fixture(
             RelationshipBenchLanguage::Python => "def caller_fn(value): pass\n".into(),
             RelationshipBenchLanguage::Java => "class Bench { void callerFn(Object value) {} }\n".into(),
             RelationshipBenchLanguage::Go => "package bench\nfunc CallerFn(value interface{}) {}\n".into(),
+            RelationshipBenchLanguage::CSharp => "class Bench { void CallerFn(object value) {} }\n".into(),
         }
     };
     vec![(PathBuf::from(main_path(language)), content)]
@@ -3735,6 +3764,7 @@ fn live_implements_fixture(
             RelationshipBenchLanguage::Python => "class SourceType: pass\n".into(),
             RelationshipBenchLanguage::Java => "interface TargetType {}\nclass SourceType implements TargetType {}\n".into(),
             RelationshipBenchLanguage::Go => "package bench\ntype TargetType interface{ Target() }\ntype SourceType struct{}\nfunc (SourceType) Target() {}\n".into(),
+            RelationshipBenchLanguage::CSharp => "interface ITargetType {}\nclass SourceType : ITargetType {}\n".into(),
         }
     } else {
         source_type_only(language)
@@ -3754,6 +3784,7 @@ fn live_extends_fixture(
             RelationshipBenchLanguage::Python => "class TargetType: pass\nclass SourceType(TargetType): pass\n".into(),
             RelationshipBenchLanguage::Java => "class TargetType {}\nclass SourceType extends TargetType {}\n".into(),
             RelationshipBenchLanguage::Go => "package bench\ntype TargetType struct{}\ntype SourceType struct{}\n".into(),
+            RelationshipBenchLanguage::CSharp => "class TargetType {}\nclass SourceType : TargetType {}\n".into(),
         }
     } else {
         source_type_only(language)
@@ -3769,6 +3800,7 @@ fn source_type_only(language: RelationshipBenchLanguage) -> String {
         RelationshipBenchLanguage::Python => "class SourceType: pass\n".into(),
         RelationshipBenchLanguage::Java => "class SourceType {}\n".into(),
         RelationshipBenchLanguage::Go => "package bench\ntype SourceType struct{}\n".into(),
+        RelationshipBenchLanguage::CSharp => "class SourceType {}\n".into(),
     }
 }
 
@@ -4048,6 +4080,326 @@ fn rust_import_edge_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
     )
 }
 
+/// Multi-project C# fixtures for the file-level `IMPORTS` edge of a `using` directive (#681). A
+/// namespace import leads to the files declaring the types the importing file names through it,
+/// in the projects its project file references.
+fn csharp_import_edge_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
+    const SDK: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n</Project>\n";
+    const WEB: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <ProjectReference Include=\"..\\Ledger\\Ledger.csproj\" />\n  </ItemGroup>\n</Project>\n";
+    const ENTRY: &str = "namespace Acme.Ledger;\n\npublic class Entry { }\n";
+    const RULES: &str = "namespace Acme.Ledger;\n\npublic static class Rules\n{\n    public static int Apply() => 1;\n}\n";
+    const USES_ENTRY: &str = "using Acme.Ledger;\n\nnamespace Acme.Web;\n\npublic class Page\n{\n    private Entry entry;\n}\n";
+    let files: Vec<(&str, &str)> = match scenario {
+        // `Entry` is declared in a project the importing project references.
+        "csharp_namespace_import" => vec![
+            ("src/Ledger/Ledger.csproj", SDK),
+            ("src/Ledger/Entry.cs", ENTRY),
+            ("src/Web/Web.csproj", WEB),
+            ("src/Web/Page.cs", USES_ENTRY),
+        ],
+        // A `global using` in another file of the project imports the namespace.
+        "csharp_global_using_import" => vec![
+            ("src/Ledger/Ledger.csproj", SDK),
+            ("src/Ledger/Entry.cs", ENTRY),
+            ("src/Web/Web.csproj", WEB),
+            ("src/Web/GlobalUsings.cs", "global using Acme.Ledger;\n"),
+            (
+                "src/Web/Page.cs",
+                "namespace Acme.Web;\n\npublic class Page\n{\n    private Entry entry;\n}\n",
+            ),
+        ],
+        // An alias names the type itself.
+        "csharp_alias_type_import" => vec![
+            ("src/Ledger/Ledger.csproj", SDK),
+            ("src/Ledger/Entry.cs", ENTRY),
+            ("src/Web/Web.csproj", WEB),
+            (
+                "src/Web/Page.cs",
+                "using Item = Acme.Ledger.Entry;\n\nnamespace Acme.Web;\n\npublic class Page\n{\n    private Item item;\n}\n",
+            ),
+        ],
+        // `using static` names the type whose static members it imports.
+        "csharp_static_type_import" => vec![
+            ("src/Ledger/Ledger.csproj", SDK),
+            ("src/Ledger/Rules.cs", RULES),
+            ("src/Web/Web.csproj", WEB),
+            (
+                "src/Web/Page.cs",
+                "using static Acme.Ledger.Rules;\n\nnamespace Acme.Web;\n\npublic class Page\n{\n    private int value = Apply();\n}\n",
+            ),
+        ],
+        // A standard-library namespace is a module edge; the repository's own `File`, in a
+        // namespace the file does not import, is not the `File` it names.
+        "csharp_external_namespace_import" => vec![
+            ("App.csproj", SDK),
+            (
+                "src/Storage/File.cs",
+                "namespace Acme.Storage;\n\npublic static class File\n{\n    public static string ReadAllText(string path) => path;\n}\n",
+            ),
+            (
+                "src/Web/Page.cs",
+                "using System.IO;\n\nnamespace Acme.Web;\n\npublic class Page\n{\n    private FileInfo info;\n    public string Read() => File.ReadAllText(\"a\");\n}\n",
+            ),
+        ],
+        // The declaring project is not referenced, so its types are not visible.
+        "csharp_namespace_not_referenced" => vec![
+            ("src/Ledger/Ledger.csproj", SDK),
+            ("src/Ledger/Entry.cs", ENTRY),
+            ("src/Web/Web.csproj", SDK),
+            ("src/Web/Page.cs", USES_ENTRY),
+        ],
+        // Two imported namespaces declare `Entry`; C# picks neither.
+        "csharp_ambiguous_namespace_import" => vec![
+            ("App.csproj", SDK),
+            ("src/Ledger/Entry.cs", ENTRY),
+            (
+                "src/Billing/Entry.cs",
+                "namespace Acme.Billing;\n\npublic class Entry { }\n",
+            ),
+            (
+                "src/Web/Page.cs",
+                "using Acme.Billing;\nusing Acme.Ledger;\n\nnamespace Acme.Web;\n\npublic class Page\n{\n    private Entry entry;\n}\n",
+            ),
+        ],
+        // The file's own namespace declares `Entry`, which C# finds before any directive.
+        "csharp_enclosing_namespace_takes_name" => vec![
+            ("App.csproj", SDK),
+            ("src/Ledger/Entry.cs", ENTRY),
+            (
+                "src/Web/Entry.cs",
+                "namespace Acme.Web;\n\npublic class Entry { }\n",
+            ),
+            ("src/Web/Page.cs", USES_ENTRY),
+        ],
+        // An `internal` type of a referenced project is not visible to the importer.
+        "csharp_internal_type_not_visible" => vec![
+            ("src/Ledger/Ledger.csproj", SDK),
+            (
+                "src/Ledger/Entry.cs",
+                "namespace Acme.Ledger;\n\ninternal class Entry { }\n",
+            ),
+            ("src/Web/Web.csproj", WEB),
+            ("src/Web/Page.cs", USES_ENTRY),
+        ],
+        // A member-access receiver may be an inherited member; it proves no edge.
+        "csharp_receiver_only_import" => vec![
+            ("src/Ledger/Ledger.csproj", SDK),
+            ("src/Ledger/Rules.cs", RULES),
+            ("src/Web/Web.csproj", WEB),
+            (
+                "src/Web/Page.cs",
+                "using Acme.Ledger;\n\nnamespace Acme.Web;\n\npublic class Page\n{\n    public int Value() => Rules.Apply();\n}\n",
+            ),
+        ],
+        _ => return None,
+    };
+    Some(
+        files
+            .into_iter()
+            .map(|(path, content)| (PathBuf::from(path), content.to_string()))
+            .collect(),
+    )
+}
+
+/// Multi-project C# fixtures for calls, base lists and type uses (#682): the web project
+/// references the ledger project, whose `Acme.Ledger` namespace declares the types the web
+/// project's `Page` names, unless a scenario says otherwise.
+fn csharp_relationship_fixture(scenario: &str) -> Option<Vec<(PathBuf, String)>> {
+    const SDK: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n</Project>\n";
+    const WEB: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <ProjectReference Include=\"..\\Ledger\\Ledger.csproj\" />\n  </ItemGroup>\n</Project>\n";
+    const ENTRY: &str = "namespace Acme.Ledger;\n\npublic class Entry\n{\n    public Entry(int amount) { }\n    public void Save() { }\n    public static Entry Create() => null;\n}\n";
+    const OVERLOADS: &str = "namespace Acme.Ledger;\n\npublic class Entry\n{\n    public void Save(int times) { }\n    public void Save(string note) { }\n}\n";
+    const EXTENSIONS: &str = "namespace Acme.Ledger.Extensions;\n\npublic static class EntryExtensions\n{\n    public static void Archive(this Acme.Ledger.Entry entry) { }\n}\n";
+    const RULES: &str = "namespace Acme.Ledger;\n\npublic static class Rules\n{\n    public static int Apply() => 1;\n}\n";
+    const TYPES: &str = "namespace Acme.Ledger;\n\npublic abstract class Base { }\npublic interface IStore { }\n";
+    // Only the generic `Base<T>`: a selector names a type by its qualified name, which the
+    // non-generic `Base` would share.
+    const GENERIC: &str = "namespace Acme.Ledger;\n\npublic abstract class Base<T> { }\n";
+    let page = |body: &str| format!("using Acme.Ledger;\n\nnamespace Acme.Web;\n\n{body}\n");
+    let mut web = WEB;
+    let mut files: Vec<(&str, String)> = Vec::new();
+    match scenario {
+        // `entry` is a parameter of the type `Entry` the ledger project declares.
+        "csharp_typed_receiver_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) => entry.Save();\n}"),
+            ));
+        }
+        // The one constructor takes one argument.
+        "csharp_constructor_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public object Render() => new Entry(1);\n}"),
+            ));
+        }
+        // A static call through the type a `using` imports.
+        "csharp_static_type_call" => {
+            files.push(("src/Ledger/Rules.cs", RULES.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public int Render() => Rules.Apply();\n}"),
+            ));
+        }
+        // `base.Flush()` reaches the base class's method.
+        "csharp_base_member_call" => {
+            files.push((
+                "src/Web/PageBase.cs",
+                "namespace Acme.Web;\n\npublic class PageBase\n{\n    public virtual void Flush() { }\n}\n"
+                    .into(),
+            ));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page : PageBase\n{\n    public override void Flush() => base.Flush();\n}"),
+            ));
+        }
+        // An extension method of a static class a `using` brings into scope.
+        "csharp_extension_method_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push(("src/Ledger/EntryExtensions.cs", EXTENSIONS.into()));
+            files.push((
+                "src/Web/Page.cs",
+                format!(
+                    "using Acme.Ledger.Extensions;\n{}",
+                    page("public class Page\n{\n    public void Render(Entry entry) => entry.Archive();\n}")
+                ),
+            ));
+        }
+        // A local function takes the bare call.
+        "csharp_local_function_call" => {
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public int Render()\n    {\n        return Total();\n        int Total() => 1;\n    }\n}"),
+            ));
+        }
+        // Two overloads take one argument; the count cannot pick one.
+        "csharp_overload_ambiguity" => {
+            files.push(("src/Ledger/Entry.cs", OVERLOADS.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry, int value) => entry.Save(value);\n}"),
+            ));
+        }
+        // No `using` brings the extension's class into scope.
+        "csharp_extension_out_of_scope" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push(("src/Ledger/EntryExtensions.cs", EXTENSIONS.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) => entry.Archive();\n}"),
+            ));
+        }
+        // The parameter `Entry`, a `Page`, takes the name before the type `Entry`, and C# does
+        // not call the static `Page.Create` through a value.
+        "csharp_shadowed_type_name" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public static Page Create() => null;\n    public object Render(Page Entry) => Entry.Create();\n}"),
+            ));
+        }
+        // The call is compiled only under a build configuration.
+        "csharp_conditional_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry)\n    {\n#if DEBUG\n        entry.Save();\n#endif\n    }\n}"),
+            ));
+        }
+        // The web project does not reference the ledger project.
+        "csharp_unreferenced_project_call" => {
+            web = SDK;
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) => entry.Save();\n}"),
+            ));
+        }
+        // A member `Entry` the base class outside the repository may declare would take the name.
+        "csharp_outside_base_member_name" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page : Vendor.Web.Controller\n{\n    public object Render() => Entry.Create();\n}"),
+            ));
+        }
+        // `Save` is a delegate property; calling it invokes the delegate.
+        "csharp_delegate_member_call" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public System.Action Save { get; set; }\n    public void Render() => Save();\n}"),
+            ));
+        }
+        "csharp_base_class_extends" | "csharp_class_base_not_implemented" => {
+            files.push(("src/Ledger/Types.cs", TYPES.into()));
+            files.push(("src/Web/Page.cs", page("public class Page : Base\n{\n}")));
+        }
+        "csharp_generic_base_extends" => {
+            files.push(("src/Ledger/Types.cs", GENERIC.into()));
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push(("src/Web/Page.cs", page("public class Page : Base<Entry>\n{\n}")));
+        }
+        "csharp_interface_extends_interface" => {
+            files.push(("src/Ledger/Types.cs", TYPES.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public interface IAuditedStore : IStore\n{\n}"),
+            ));
+        }
+        // `Controller` is imported from outside the repository; the repository's own is in a
+        // namespace the file does not import.
+        "csharp_outside_base_not_extended" => {
+            files.push((
+                "src/Ledger/Controller.cs",
+                "namespace Acme.Ledger.Mvc;\n\npublic class Controller { }\n".into(),
+            ));
+            files.push((
+                "src/Web/Page.cs",
+                "using Vendor.Web;\n\nnamespace Acme.Web;\n\npublic class Page : Controller\n{\n}\n"
+                    .into(),
+            ));
+        }
+        "csharp_interface_implementation" => {
+            files.push(("src/Ledger/Types.cs", TYPES.into()));
+            files.push(("src/Web/Page.cs", page("public class Page : Base, IStore\n{\n}")));
+        }
+        "csharp_parameter_type_use" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) { }\n}"),
+            ));
+        }
+        "csharp_property_type_use" => {
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public Entry Current { get; set; }\n}"),
+            ));
+        }
+        "csharp_unreferenced_type_use" => {
+            web = SDK;
+            files.push(("src/Ledger/Entry.cs", ENTRY.into()));
+            files.push((
+                "src/Web/Page.cs",
+                page("public class Page\n{\n    public void Render(Entry entry) { }\n}"),
+            ));
+        }
+        _ => return None,
+    }
+    let projects = [("src/Ledger/Ledger.csproj", SDK.to_string()), ("src/Web/Web.csproj", web.to_string())];
+    Some(
+        projects
+            .into_iter()
+            .chain(files)
+            .map(|(path, content)| (PathBuf::from(path), content))
+            .collect(),
+    )
+}
+
 fn import_source(language: RelationshipBenchLanguage, _dependency: bool) -> String {
     match language {
         RelationshipBenchLanguage::Rust => "use std::fmt;\npub fn caller_fn() { let _ = fmt::Error; }\n".into(),
@@ -4056,6 +4408,7 @@ fn import_source(language: RelationshipBenchLanguage, _dependency: bool) -> Stri
         RelationshipBenchLanguage::Python => "import os\ndef caller_fn():\n    return os.name\n".into(),
         RelationshipBenchLanguage::Java => "import java.util.List;\nclass Bench { List<String> value; }\n".into(),
         RelationshipBenchLanguage::Go => "package bench\nimport \"fmt\"\nfunc CallerFn() { fmt.Println(\"ok\") }\n".into(),
+        RelationshipBenchLanguage::CSharp => "using System.IO;\nclass Bench { string CallerFn() => Path.GetTempPath(); }\n".into(),
     }
 }
 
@@ -4067,6 +4420,7 @@ fn no_import_source(language: RelationshipBenchLanguage) -> String {
         RelationshipBenchLanguage::Python => "def caller_fn(): pass\n".into(),
         RelationshipBenchLanguage::Java => "class Bench {}\n".into(),
         RelationshipBenchLanguage::Go => "package bench\nfunc CallerFn() {}\n".into(),
+        RelationshipBenchLanguage::CSharp => "class Bench { void CallerFn() {} }\n".into(),
     }
 }
 
@@ -4078,6 +4432,7 @@ fn unrelated_live_fixture_file(language: RelationshipBenchLanguage) -> (PathBuf,
         RelationshipBenchLanguage::Python => "src/unrelated.py",
         RelationshipBenchLanguage::Java => "src/Unrelated.java",
         RelationshipBenchLanguage::Go => "unrelated.go",
+        RelationshipBenchLanguage::CSharp => "src/Unrelated.cs",
     };
     let content = match language {
         RelationshipBenchLanguage::Rust => "pub fn unrelated_noise() {}\n",
@@ -4086,6 +4441,7 @@ fn unrelated_live_fixture_file(language: RelationshipBenchLanguage) -> (PathBuf,
         RelationshipBenchLanguage::Python => "def unrelated_noise(): pass\n",
         RelationshipBenchLanguage::Java => "class Unrelated {}\n",
         RelationshipBenchLanguage::Go => "package bench\nfunc UnrelatedNoise() {}\n",
+        RelationshipBenchLanguage::CSharp => "class Unrelated {}\n",
     };
     (PathBuf::from(path), content.into())
 }

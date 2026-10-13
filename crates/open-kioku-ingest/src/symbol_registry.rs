@@ -8,7 +8,9 @@ use open_kioku_resolution::{
     context::rust_rules_out_same_file_item, BindingIndex, InheritanceIndex, ResolutionContext,
     ScopeIndex, SymbolIndex,
 };
-use open_kioku_semantic_model::{ImportBinding, SemanticRepository, GLOB_IMPORT_LOCAL_NAME};
+use open_kioku_semantic_model::{
+    ImportBinding, ImportOrigin, SemanticRepository, GLOB_IMPORT_LOCAL_NAME,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cell::{OnceCell, RefCell};
@@ -928,9 +930,11 @@ impl SymbolRegistry {
             TokenRole::Member => {
                 // A receiver that names where the candidate is defined is evidence a bare
                 // member lacks: Go's `ledger.NewEntry`, Java's `Constants.ACCESS_KEY`.
-                // A lowercase Java receiver is a variable, whose name may match a package's.
+                // A lowercase Java or C# receiver is a variable, whose name may match a
+                // package's or a namespace's.
                 let receiver = token_use.receiver.as_deref().filter(|receiver| {
-                    chunk.language != Language::Java || receiver.starts_with(char::is_uppercase)
+                    !matches!(chunk.language, Language::Java | Language::CSharp)
+                        || receiver.starts_with(char::is_uppercase)
                 });
                 let Some(receiver) = receiver else {
                     return unresolved(TokenRole::Member.withheld_reason().unwrap_or_default());
@@ -1090,6 +1094,11 @@ impl SymbolRegistry {
     /// Whether the resolver left `binding` unplaced and its path starts outside the repository:
     /// `use anyhow::Result;`, `import static com.vendor.Keys.ACCESS_KEY;`.
     fn import_leads_outside(&self, binding: &ImportBinding) -> bool {
+        // The resolver placed it outside the repository: a C# type name that only a namespace
+        // from outside can supply (#681).
+        if binding.origin == ImportOrigin::External {
+            return true;
+        }
         // A Java static import keeps its keyword: `static org.x.Constants.NAME`.
         let source = binding.source_module.as_str();
         let source = source
@@ -5934,6 +5943,32 @@ mod tests {
                 "src::main::java::org::example::Constants::ACCESS_KEY",
                 1
             )]
+        );
+
+        // So is a lowercase C# one, even where a namespace is spelled like it.
+        let symbols = vec![
+            symbol_in(
+                Language::CSharp,
+                "caller",
+                "Main",
+                "app::Main",
+                SymbolKind::Method,
+            ),
+            symbol_in(
+                Language::CSharp,
+                "post",
+                "Post",
+                "acme::ledger::Book::Post",
+                SymbolKind::Method,
+            ),
+        ];
+        let text = "var a = Book.Post();
+var b = ledger.Post();
+var c = _ledger.Post();";
+        let report = resolve_text(Language::CSharp, text, &symbols);
+        assert_eq!(
+            line_targets(&report),
+            vec![call("acme::ledger::Book::Post", 1)]
         );
 
         // A receiver that is itself a member, a call result or `self` says nothing.

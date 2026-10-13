@@ -5216,6 +5216,685 @@
         "module_or_package_binding"
       ],
       "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+    },
+    {
+      "id": "ci-csharp-imports-01-csharp_namespace_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_namespace_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_namespace_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_namespace_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/Ledger/Entry.cs",
+        "identity": "file:csharp:imports:csharp_namespace_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#681): `using Acme.Ledger;` leads to the file declaring the `Entry` the file names, in the project its project file references."
+    },
+    {
+      "id": "ci-csharp-imports-02-csharp_global_using_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_global_using_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_global_using_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_global_using_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/Ledger/Entry.cs",
+        "identity": "file:csharp:imports:csharp_global_using_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#681): a `global using Acme.Ledger;` in another file of the project imports `Entry` into every file of it; the edge is recorded where the file names it."
+    },
+    {
+      "id": "ci-csharp-imports-03-csharp_alias_type_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_alias_type_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_alias_type_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_alias_type_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/Ledger/Entry.cs",
+        "identity": "file:csharp:imports:csharp_alias_type_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#681): `using Item = Acme.Ledger.Entry;` names the type itself."
+    },
+    {
+      "id": "ci-csharp-imports-04-csharp_static_type_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_static_type_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_static_type_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_static_type_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/Ledger/Rules.cs",
+        "identity": "file:csharp:imports:csharp_static_type_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#681): `using static Acme.Ledger.Rules;` names the type whose static members it imports."
+    },
+    {
+      "id": "ci-csharp-imports-05-csharp_external_namespace_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_external_namespace_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_external_namespace_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_external_namespace_import",
+      "expected_target": {
+        "kind": "module",
+        "selector": "System.IO",
+        "identity": "module:csharp:imports:csharp_external_namespace_import:target"
+      },
+      "expected_proof_kinds": [
+        "module_or_package_binding"
+      ],
+      "notes": "Regression case (#681): `using System.IO;` is a namespace no project of the repository declares, so its only edge is the module edge; the repository's own `Acme.Storage.File`, which the file does not import, is never the `File` it names."
+    },
+    {
+      "id": "ci-csharp-imports-06-csharp_namespace_not_referenced",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_namespace_not_referenced",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_namespace_not_referenced:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_namespace_not_referenced",
+      "notes": "Regression case (#681): only a project the importing project does not reference declares `Acme.Ledger`, so its types are not visible and the directive proves no edge."
+    },
+    {
+      "id": "ci-csharp-imports-07-csharp_ambiguous_namespace_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_ambiguous_namespace_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_ambiguous_namespace_import:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "csharp_ambiguous_namespace_import",
+      "notes": "Regression case (#681): `Acme.Billing` and `Acme.Ledger` both declare `Entry`; C# picks neither, so neither directive proves an edge."
+    },
+    {
+      "id": "ci-csharp-imports-08-csharp_enclosing_namespace_takes_name",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_enclosing_namespace_takes_name",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_enclosing_namespace_takes_name:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_enclosing_namespace_takes_name",
+      "expected_target": {
+        "kind": "module",
+        "selector": "Acme.Ledger",
+        "identity": "module:csharp:imports:csharp_enclosing_namespace_takes_name:target"
+      },
+      "expected_proof_kinds": [
+        "module_or_package_binding"
+      ],
+      "notes": "Regression case (#681): the file's own namespace `Acme.Web` declares `Entry`, which C# finds before any directive, so the directive's only edge is the namespace and never `Acme.Ledger`'s `Entry`."
+    },
+    {
+      "id": "ci-csharp-imports-09-csharp_internal_type_not_visible",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_internal_type_not_visible",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_internal_type_not_visible:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_internal_type_not_visible",
+      "expected_target": {
+        "kind": "module",
+        "selector": "Acme.Ledger",
+        "identity": "module:csharp:imports:csharp_internal_type_not_visible:target"
+      },
+      "expected_proof_kinds": [
+        "module_or_package_binding"
+      ],
+      "notes": "Regression case (#681): an `internal` type of a referenced project is not visible to the importing project, so the directive's only edge is the namespace."
+    },
+    {
+      "id": "ci-csharp-imports-10-csharp_receiver_only_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_receiver_only_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_receiver_only_import:source"
+      },
+      "expected_outcome": "may_emit_heuristic_only",
+      "scenario": "csharp_receiver_only_import",
+      "notes": "Regression case (#681): `Rules.Apply()` names `Rules` only as a member-access receiver, which a member inherited from a base type outside the repository would take, so the edge stays unproven."
+    },
+    {
+      "id": "ci-csharp-calls-01-csharp_typed_receiver_call",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_typed_receiver_call",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_typed_receiver_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_typed_receiver_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::Entry::Save",
+        "identity": "symbol:csharp:calls:csharp_typed_receiver_call:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#682): `entry.Save()` on a parameter of the type `Entry` reaches `Entry.Save` in the referenced project."
+    },
+    {
+      "id": "ci-csharp-calls-02-csharp_constructor_call",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_constructor_call",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_constructor_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_constructor_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::Entry::Entry",
+        "identity": "symbol:csharp:calls:csharp_constructor_call:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#682): `new Entry(1)` reaches the one constructor that takes one argument."
+    },
+    {
+      "id": "ci-csharp-calls-03-csharp_static_type_call",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_static_type_call",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_static_type_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_static_type_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::Rules::Apply",
+        "identity": "symbol:csharp:calls:csharp_static_type_call:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#682): `Rules.Apply()` reaches the static method of the type `using Acme.Ledger;` imports."
+    },
+    {
+      "id": "ci-csharp-calls-04-csharp_base_member_call",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_base_member_call",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Flush",
+        "identity": "symbol:csharp:calls:csharp_base_member_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_base_member_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Web::PageBase::Flush",
+        "identity": "symbol:csharp:calls:csharp_base_member_call:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "receiver_type",
+        "containing_type"
+      ],
+      "notes": "Regression case (#682): `base.Flush()` in an override reaches the base class's method, not the override."
+    },
+    {
+      "id": "ci-csharp-calls-05-csharp_extension_method_call",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_extension_method_call",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_extension_method_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_extension_method_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::Extensions::EntryExtensions::Archive",
+        "identity": "symbol:csharp:calls:csharp_extension_method_call:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#682): `entry.Archive()` reaches the extension method of a static class a `using` brings into scope, whose `this` parameter takes an `Entry`."
+    },
+    {
+      "id": "ci-csharp-calls-06-csharp_local_function_call",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_local_function_call",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_local_function_call:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_local_function_call",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render::Total",
+        "identity": "symbol:csharp:calls:csharp_local_function_call:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "same_scope_definition"
+      ],
+      "notes": "Regression case (#682): a bare `Total()` reaches the local function the calling method declares."
+    },
+    {
+      "id": "ci-csharp-calls-07-csharp_overload_ambiguity",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_overload_ambiguity",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_overload_ambiguity:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "csharp_overload_ambiguity",
+      "notes": "Regression case (#682): two overloads of `Save` take one argument; the argument count cannot pick one, so no edge is proven."
+    },
+    {
+      "id": "ci-csharp-calls-08-csharp_extension_out_of_scope",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_extension_out_of_scope",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_extension_out_of_scope:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_extension_out_of_scope",
+      "notes": "Regression case (#682): the extension method's class is in a namespace the file does not import, so `entry.Archive()` reaches nothing."
+    },
+    {
+      "id": "ci-csharp-calls-09-csharp_shadowed_type_name",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_shadowed_type_name",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_shadowed_type_name:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_shadowed_type_name",
+      "notes": "Regression case (#682): the parameter `Entry` takes the name before the type `Entry`, so `Entry.Create()` is no call of `Entry.Create`."
+    },
+    {
+      "id": "ci-csharp-calls-10-csharp_conditional_call",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_conditional_call",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_conditional_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_conditional_call",
+      "notes": "Regression case (#682): a call written under `#if` is compiled only by some build configurations, so it proves no edge."
+    },
+    {
+      "id": "ci-csharp-calls-11-csharp_unreferenced_project_call",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_unreferenced_project_call",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_unreferenced_project_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_unreferenced_project_call",
+      "notes": "Regression case (#682): the web project does not reference the ledger project, so its `Entry` is not the parameter's type."
+    },
+    {
+      "id": "ci-csharp-calls-12-csharp_outside_base_member_name",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_outside_base_member_name",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_outside_base_member_name:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_outside_base_member_name",
+      "notes": "Regression case (#682): a member `Entry` the base class from outside the repository may declare would take the name before the type, so `Entry.Create()` stays unproven."
+    },
+    {
+      "id": "ci-csharp-calls-13-csharp_delegate_member_call",
+      "fixture_id": "ci/ri3/csharp/calls/csharp_delegate_member_call",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:calls:csharp_delegate_member_call:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_delegate_member_call",
+      "notes": "Regression case (#682): `Save()` invokes the delegate a property holds, not a method."
+    },
+    {
+      "id": "ci-csharp-extends-01-csharp_base_class_extends",
+      "fixture_id": "ci/ri3/csharp/extends/csharp_base_class_extends",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "EXTENDS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page",
+        "identity": "symbol:csharp:extends:csharp_base_class_extends:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_base_class_extends",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::Base",
+        "identity": "symbol:csharp:extends:csharp_base_class_extends:target"
+      },
+      "expected_proof_kinds": [
+        "inheritance_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#682): the base list's `Base` is a class of the referenced project."
+    },
+    {
+      "id": "ci-csharp-extends-02-csharp_generic_base_extends",
+      "fixture_id": "ci/ri3/csharp/extends/csharp_generic_base_extends",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "EXTENDS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page",
+        "identity": "symbol:csharp:extends:csharp_generic_base_extends:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_generic_base_extends",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::Base",
+        "identity": "symbol:csharp:extends:csharp_generic_base_extends:target"
+      },
+      "expected_proof_kinds": [
+        "inheritance_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#682): `Base<Entry>` names the generic `Base<T>` of the referenced project by its arity."
+    },
+    {
+      "id": "ci-csharp-extends-03-csharp_interface_extends_interface",
+      "fixture_id": "ci/ri3/csharp/extends/csharp_interface_extends_interface",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "EXTENDS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::IAuditedStore",
+        "identity": "symbol:csharp:extends:csharp_interface_extends_interface:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_interface_extends_interface",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::IStore",
+        "identity": "symbol:csharp:extends:csharp_interface_extends_interface:target"
+      },
+      "expected_proof_kinds": [
+        "inheritance_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case (#682): an interface's base list extends the interfaces it names."
+    },
+    {
+      "id": "ci-csharp-extends-04-csharp_outside_base_not_extended",
+      "fixture_id": "ci/ri3/csharp/extends/csharp_outside_base_not_extended",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "EXTENDS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page",
+        "identity": "symbol:csharp:extends:csharp_outside_base_not_extended:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_outside_base_not_extended",
+      "notes": "Regression case (#682): `Controller` comes from a namespace outside the repository; the repository's own `Controller` is in a namespace the file does not import."
+    },
+    {
+      "id": "ci-csharp-implements-01-csharp_interface_implementation",
+      "fixture_id": "ci/ri3/csharp/implements/csharp_interface_implementation",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPLEMENTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page",
+        "identity": "symbol:csharp:implements:csharp_interface_implementation:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_interface_implementation",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::IStore",
+        "identity": "symbol:csharp:implements:csharp_interface_implementation:target"
+      },
+      "expected_proof_kinds": [
+        "inheritance_binding",
+        "trait_or_interface_binding"
+      ],
+      "notes": "Regression case (#682): a class's base list entry naming an interface is an implemented interface."
+    },
+    {
+      "id": "ci-csharp-implements-02-csharp_class_base_not_implemented",
+      "fixture_id": "ci/ri3/csharp/implements/csharp_class_base_not_implemented",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPLEMENTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page",
+        "identity": "symbol:csharp:implements:csharp_class_base_not_implemented:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_class_base_not_implemented",
+      "notes": "Regression case (#682): a base list entry naming a class is the base class, never an implemented interface."
+    },
+    {
+      "id": "ci-csharp-uses_type-01-csharp_parameter_type_use",
+      "fixture_id": "ci/ri3/csharp/uses_type/csharp_parameter_type_use",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:uses_type:csharp_parameter_type_use:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_parameter_type_use",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::Entry",
+        "identity": "symbol:csharp:uses_type:csharp_parameter_type_use:target"
+      },
+      "expected_proof_kinds": [
+        "exact_reference"
+      ],
+      "notes": "Regression case (#682): a parameter's declared type is used by the method."
+    },
+    {
+      "id": "ci-csharp-uses_type-02-csharp_property_type_use",
+      "fixture_id": "ci/ri3/csharp/uses_type/csharp_property_type_use",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Current",
+        "identity": "symbol:csharp:uses_type:csharp_property_type_use:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_property_type_use",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "Acme::Ledger::Entry",
+        "identity": "symbol:csharp:uses_type:csharp_property_type_use:target"
+      },
+      "expected_proof_kinds": [
+        "exact_reference"
+      ],
+      "notes": "Regression case (#682): a property's declared type is used by the property."
+    },
+    {
+      "id": "ci-csharp-uses_type-03-csharp_unreferenced_type_use",
+      "fixture_id": "ci/ri3/csharp/uses_type/csharp_unreferenced_type_use",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "USES_TYPE",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "Acme::Web::Page::Render",
+        "identity": "symbol:csharp:uses_type:csharp_unreferenced_type_use:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_unreferenced_type_use",
+      "notes": "Regression case (#682): only an unreferenced project declares `Entry`, so the parameter's type is no repository type."
     }
   ]
 }

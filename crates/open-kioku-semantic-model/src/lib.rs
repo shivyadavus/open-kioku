@@ -193,6 +193,133 @@ pub struct ProjectModel {
     pub modules: HashMap<ModuleId, ModuleInfo>,
     pub aliases: Vec<PathAlias>,
     pub dependencies: HashSet<String>,
+    /// The .NET projects and solutions of the repository (#681).
+    #[serde(default)]
+    pub dotnet: DotnetModel,
+}
+
+/// The .NET project files (`.csproj`) and solutions (`.sln`, `.slnx`) of a repository, as the
+/// import resolver reads them: which project compiles each C# file, which projects each one
+/// references, and the `using` directives a project applies to all of its files.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DotnetModel {
+    /// Every project file the manifest walk found, by repository-relative path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<DotnetProject>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub solutions: Vec<DotnetSolution>,
+}
+
+/// One `.csproj`, with what `Directory.Build.props` and `Directory.Packages.props` above it add.
+///
+/// MSBuild evaluates properties and conditions this model does not: a `Condition` is not
+/// evaluated (every conditional item counts, the ones the resolver reads are marked
+/// conditional, and the last conditional property wins), and a property or path spelled with an
+/// unknown `$(Property)` keeps its spelling. The resolver treats what this
+/// leaves unknown as unknown, never as absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DotnetProject {
+    /// Repository-relative path of the project file.
+    pub project_file: PathBuf,
+    /// The SDK an SDK-style project names (`Microsoft.NET.Sdk`, `Microsoft.NET.Sdk.Web`);
+    /// `None` for a legacy project, which lists every file it compiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk: Option<String>,
+    /// `AssemblyName`, else the project file's name without its extension.
+    pub assembly_name: String,
+    /// `RootNamespace`, else the assembly name. MSBuild uses it for new files and resources; no
+    /// name lookup reads it.
+    pub root_namespace: String,
+    /// `ImplicitUsings` is `enable` or `true`: the SDK's default namespaces are `global using`
+    /// directives of every file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub implicit_usings: bool,
+    /// The SDK's default `Compile` items apply: every `.cs` file below the project's directory,
+    /// outside `bin/`, `obj/` and hidden directories. Off for a legacy project and where
+    /// `EnableDefaultCompileItems` or `EnableDefaultItems` is `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default_compile_items: bool,
+    /// `Compile Include` patterns, repository-relative with `/` separators. One leaving the
+    /// repository is dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compile_include: Vec<String>,
+    /// `Compile Remove` patterns, repository-relative with `/` separators.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compile_remove: Vec<String>,
+    /// `<Using>` items: `global using` directives the project file declares.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usings: Vec<DotnetUsing>,
+    /// Namespaces a `<Using Remove>` item takes out of the implicit or declared ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_usings: Vec<String>,
+    /// `ProjectReference` items naming a project file of the repository, by repository-relative
+    /// path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_references: Vec<PathBuf>,
+    /// The `project_references` every `ProjectReference` to which a `Condition` guards (on the
+    /// item, its `ItemGroup` or a `When`): a build configuration decides whether they are
+    /// referenced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_project_references: Vec<PathBuf>,
+    /// `Compile Include` and `Compile Remove` patterns a `Condition` guards, repository-relative:
+    /// a build configuration decides whether they apply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_compile_include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_compile_remove: Vec<String>,
+    /// `ProjectReference` items naming no project file the repository holds, as written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_project_references: Vec<String>,
+    /// Referenced projects' own references are visible too: SDK-style projects reference
+    /// transitively unless `DisableTransitiveProjectReferences` is `true`; legacy ones never do.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transitive_project_references: bool,
+    /// `PackageReference` items and `packages.config` entries: packages outside the repository.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<DotnetPackage>,
+    /// `InternalsVisibleTo` items: assemblies that may name the project's `internal` types.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub internals_visible_to: Vec<String>,
+    /// The project file is not XML the index can read; nothing above was read from it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unreadable: bool,
+}
+
+/// A `<Using Include="..">` item of a project file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DotnetUsing {
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_static: bool,
+    /// A `Condition` guards the item: a build configuration decides whether it applies.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conditional: bool,
+}
+
+/// A package a project depends on from outside the repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DotnetPackage {
+    pub id: String,
+    /// The version the project, its `packages.config` or a central `Directory.Packages.props`
+    /// sets, when one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// One `.sln` or `.slnx` file.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DotnetSolution {
+    /// Repository-relative path of the solution file.
+    pub path: PathBuf,
+    /// The C# project files it lists that the manifest walk found, repository-relative.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<PathBuf>,
+    /// The C# project files it lists that the repository does not hold (or the walk skips), as
+    /// written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_projects: Vec<String>,
 }
 
 impl ProjectModel {
@@ -375,6 +502,18 @@ impl ImportIndex {
             .push(binding);
     }
 
+    /// Records a binding that holds for its whole file, by file alone: a C# `using` directive
+    /// applies to every scope of its file (#681). [`ImportIndex::insert`] also files a binding
+    /// under its scope, which for a binding with no scope of its own is `global`, a key every
+    /// file shares, so the scope map would hold a second copy that [`ImportIndex::lookup`]
+    /// finds by file anyway.
+    pub fn insert_file_binding(&mut self, binding: ImportBinding) {
+        self.by_file_local_name
+            .entry((binding.file_id.clone(), binding.local_name.clone()))
+            .or_default()
+            .push(binding);
+    }
+
     pub fn lookup(
         &self,
         file_id: &FileId,
@@ -449,5 +588,44 @@ pub struct SemanticRepository {
 impl SemanticRepository {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(file: &str, name: &str) -> ImportBinding {
+        ImportBinding {
+            file_id: FileId::new(file),
+            scope_id: ScopeId::new("global"),
+            local_name: name.into(),
+            imported_name: name.into(),
+            source_module: "Acme.Ledger".into(),
+            resolved_module: None,
+            target_file: None,
+            target_symbol: None,
+            origin: ImportOrigin::External,
+            is_type_only: true,
+            is_glob: false,
+            evidence: Vec::new(),
+            rule: ImportBindingRule::ModuleKey,
+            configured_targets: None,
+        }
+    }
+
+    #[test]
+    fn a_file_binding_is_kept_once_and_found_only_for_its_file() {
+        let mut index = ImportIndex::new();
+        index.insert_file_binding(binding("file:a.cs", "Entry"));
+        index.insert_file_binding(binding("file:b.cs", "Entry"));
+        assert!(index.by_scope_local_name.is_empty());
+        let global = ScopeId::new("global");
+        let found = index.lookup(&FileId::new("file:a.cs"), Some(&global), "Entry");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file_id, FileId::new("file:a.cs"));
+        assert!(index
+            .lookup(&FileId::new("file:c.cs"), Some(&global), "Entry")
+            .is_empty());
     }
 }

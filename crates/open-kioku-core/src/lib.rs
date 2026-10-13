@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub mod abstention;
 pub mod analysis_semantics;
 pub mod cargo_manifest;
+pub mod csharp;
 pub mod identity;
 pub mod process;
 pub mod relationship;
@@ -2350,6 +2351,9 @@ pub struct SyntaxFacts {
     /// The Rust `impl` blocks the file writes (#639).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rust_impl_blocks: Vec<RustImplBlock>,
+    /// What a C# file's `using` directives, namespaces and type names say (#681).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csharp_names: Option<csharp::CSharpNameFacts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
