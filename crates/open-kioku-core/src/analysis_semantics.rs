@@ -29,7 +29,14 @@ pub const STABLE_IDENTITY_SEMANTICS_VERSION: &str = "stable-identity-v2";
 /// secret-like and hold no edge into it, and no history row for it. A private-key PEM body in
 /// programming-language source is replaced before it is indexed; earlier versions stored it as
 /// written.
-pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v6";
+/// v7: the manifest walk reads .NET project files (`.csproj` with the
+/// `Directory.Build.props` and `Directory.Packages.props` above them) and solutions
+/// (`.sln`, `.slnx`): which project compiles each C# file, the projects each one
+/// references (by `$(MSBuildThisFileDirectory)`-relative paths, `.projitems` shared projects and
+/// `ProjectReference` metadata included), its packages and the `global using` directives it
+/// declares (#681). v6 read none, and matched the parts of a C# `partial` type by the nearest
+/// directory holding a project file, not by the project that compiles each.
+pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v7";
 /// v3: a Rust `use` path inside the importing file's own crate resolves through that crate's
 /// declared module tree, so its `IMPORTS` edge names the file declaring the module or the item;
 /// v2 resolved such a path against the repository-root `src/` and fell back to the crate root,
@@ -205,7 +212,16 @@ pub const PROJECT_RESOLVER_SEMANTICS_VERSION: &str = "project-resolver-v6";
 /// v44: a symbol-registry fact made by a name-only strategy (unique project name, suffix import
 /// reachability, fuzzy) records why it may name the wrong target in `AnalysisFact::ambiguity`;
 /// v43 facts recorded it only in their message, so their edges did not read as ambiguous.
-pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v44";
+/// v45: a C# `using` directive is placed by C#'s name lookup over the .NET project model (#681):
+/// a namespace import leads to the files declaring the types the file names through it, in the
+/// projects its project references, every part of a partial type included; a name two imported
+/// namespaces declare is ambiguous; a namespace no project of the repository declares is a
+/// standard-library or package dependency; and a type name only such a namespace can supply
+/// never matches a repository symbol in the symbol registry, which matches only the type a
+/// proven edge names; a type the project model cannot place, or a package's type in a namespace
+/// it may share with the file, leaves the lookup unproven. v44 indexes resolve every C#
+/// directive as a package and hold no C# `IMPORTS` edge between files.
+pub const RELATIONSHIP_RESOLVER_SEMANTICS_VERSION: &str = "ri3-relationship-resolver-v45";
 pub const PROOF_POLICY_SEMANTICS_VERSION: &str = "ri3-proof-policy-v1";
 /// v2: the static `use`-syntax `IMPORTS` edge asserts a module binding only where the syntax
 /// proves one; a Rust in-crate item path carries none, and a glob names the module it opens.
@@ -288,12 +304,18 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// local function in a field initializer's lambda is a symbol; a C# type the pattern fallback
 /// names is read from the first `#if` branch only. A v21 index records none of these. v22 is
 /// taken by an open change.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v23";
+/// v25 (v24 is taken by an open change): a C# `using` directive is an import site, and a
+/// C# file records its namespace blocks, directives, the type names it writes and where,
+/// its type declarations' arity and base lists, what `#if` regions and error nodes hold,
+/// and the type parameter and variable names that may shadow a type name (#681); a v23
+/// index records none of these.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v25";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 
 /// Languages parsed into symbols that have no relationship adapter yet: they carry parser
-/// semantics but no language adapter version, since no relationship is resolved for them.
+/// semantics but no language adapter version, since no call or type relationship is resolved for
+/// them. C#'s `using` directives are placed by the import resolver, whose version covers them.
 const PARSED_ONLY_LANGUAGES: [&str; 1] = ["csharp"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

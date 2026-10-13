@@ -22,6 +22,25 @@ pub struct ResolverReport {
     pub quality_notes: Vec<QualityNote>,
 }
 
+impl ResolverReport {
+    /// Adds another pass's resolutions, facts and notes, keeping the report's order and
+    /// deduplication.
+    pub(crate) fn extend(
+        &mut self,
+        resolutions: Vec<ImportResolution>,
+        analysis_facts: Vec<AnalysisFact>,
+        quality_notes: Vec<QualityNote>,
+    ) {
+        self.resolutions.extend(resolutions);
+        self.analysis_facts.extend(analysis_facts);
+        self.analysis_facts.sort_by(|a, b| a.id.cmp(&b.id));
+        self.analysis_facts.dedup_by(|a, b| a.id == b.id);
+        self.quality_notes.extend(quality_notes);
+        self.quality_notes.sort();
+        self.quality_notes.dedup();
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FileIndex {
     by_path: HashMap<String, File>,
@@ -80,6 +99,11 @@ pub fn resolve_imports(
         let Some(source_file) = files_by_id.get(&import.file_id) else {
             continue;
         };
+        // A C# directive names a namespace, which leads to the files declaring the types the file
+        // writes: the C# pass places it from the project model and the file's names.
+        if source_file.language == Language::CSharp {
+            continue;
+        }
         let resolution = resolve_one(source_file, import, &file_index, &manifests, rust_targets);
         if !resolution.caveats.is_empty() {
             report.quality_notes.push(QualityNote::new(
@@ -92,7 +116,9 @@ pub fn resolve_imports(
                 ),
             ));
         }
-        if let Some(fact) = analysis_fact_for_resolution(source_file, &resolution, &file_index) {
+        if let Some(fact) =
+            analysis_fact_for_resolution(source_file, &resolution, |id| file_index.by_id(id))
+        {
             report.analysis_facts.push(fact);
         }
         report.resolutions.push(resolution);
@@ -256,14 +282,23 @@ fn resolution(
     }
 }
 
-fn analysis_fact_for_resolution(
+/// The fact a resolution of an import other than a resolved one states: a builtin or package
+/// dependency, an ambiguous or an unresolved import.
+pub(crate) fn analysis_fact_for_import_resolution(
     source_file: &File,
     resolution: &ImportResolution,
-    files: &FileIndex,
+) -> Option<AnalysisFact> {
+    analysis_fact_for_resolution(source_file, resolution, |_| None)
+}
+
+fn analysis_fact_for_resolution<'f>(
+    source_file: &File,
+    resolution: &ImportResolution,
+    file_by_id: impl Fn(&FileId) -> Option<&'f File>,
 ) -> Option<AnalysisFact> {
     let (edge_type, target_kind, target, message) = match &resolution.status {
         ResolutionStatus::Resolved => {
-            let target_file = files.by_id(resolution.target_file.as_ref()?)?;
+            let target_file = file_by_id(resolution.target_file.as_ref()?)?;
             // A file importing itself is no dependency: `mod tests { use super::*; }` names the
             // module the file already is. The path is resolved, so it is not an unresolved import
             // either, and there is nothing to record.

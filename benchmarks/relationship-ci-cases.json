@@ -5216,6 +5216,222 @@
         "module_or_package_binding"
       ],
       "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+    },
+    {
+      "id": "ci-csharp-imports-01-csharp_namespace_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_namespace_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_namespace_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_namespace_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/Ledger/Entry.cs",
+        "identity": "file:csharp:imports:csharp_namespace_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#681): `using Acme.Ledger;` leads to the file declaring the `Entry` the file names, in the project its project file references."
+    },
+    {
+      "id": "ci-csharp-imports-02-csharp_global_using_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_global_using_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_global_using_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_global_using_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/Ledger/Entry.cs",
+        "identity": "file:csharp:imports:csharp_global_using_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#681): a `global using Acme.Ledger;` in another file of the project imports `Entry` into every file of it; the edge is recorded where the file names it."
+    },
+    {
+      "id": "ci-csharp-imports-03-csharp_alias_type_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_alias_type_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_alias_type_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_alias_type_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/Ledger/Entry.cs",
+        "identity": "file:csharp:imports:csharp_alias_type_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#681): `using Item = Acme.Ledger.Entry;` names the type itself."
+    },
+    {
+      "id": "ci-csharp-imports-04-csharp_static_type_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_static_type_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_static_type_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_static_type_import",
+      "expected_target": {
+        "kind": "file",
+        "selector": "src/Ledger/Rules.cs",
+        "identity": "file:csharp:imports:csharp_static_type_import:target"
+      },
+      "expected_proof_kinds": [
+        "import_binding"
+      ],
+      "notes": "Regression case (#681): `using static Acme.Ledger.Rules;` names the type whose static members it imports."
+    },
+    {
+      "id": "ci-csharp-imports-05-csharp_external_namespace_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_external_namespace_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_external_namespace_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_external_namespace_import",
+      "expected_target": {
+        "kind": "module",
+        "selector": "System.IO",
+        "identity": "module:csharp:imports:csharp_external_namespace_import:target"
+      },
+      "expected_proof_kinds": [
+        "module_or_package_binding"
+      ],
+      "notes": "Regression case (#681): `using System.IO;` is a namespace no project of the repository declares, so its only edge is the module edge; the repository's own `Acme.Storage.File`, which the file does not import, is never the `File` it names."
+    },
+    {
+      "id": "ci-csharp-imports-06-csharp_namespace_not_referenced",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_namespace_not_referenced",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_namespace_not_referenced:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "csharp_namespace_not_referenced",
+      "notes": "Regression case (#681): only a project the importing project does not reference declares `Acme.Ledger`, so its types are not visible and the directive proves no edge."
+    },
+    {
+      "id": "ci-csharp-imports-07-csharp_ambiguous_namespace_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_ambiguous_namespace_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_ambiguous_namespace_import:source"
+      },
+      "expected_outcome": "ambiguous_no_authoritative_edge",
+      "scenario": "csharp_ambiguous_namespace_import",
+      "notes": "Regression case (#681): `Acme.Billing` and `Acme.Ledger` both declare `Entry`; C# picks neither, so neither directive proves an edge."
+    },
+    {
+      "id": "ci-csharp-imports-08-csharp_enclosing_namespace_takes_name",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_enclosing_namespace_takes_name",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_enclosing_namespace_takes_name:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_enclosing_namespace_takes_name",
+      "expected_target": {
+        "kind": "module",
+        "selector": "Acme.Ledger",
+        "identity": "module:csharp:imports:csharp_enclosing_namespace_takes_name:target"
+      },
+      "expected_proof_kinds": [
+        "module_or_package_binding"
+      ],
+      "notes": "Regression case (#681): the file's own namespace `Acme.Web` declares `Entry`, which C# finds before any directive, so the directive's only edge is the namespace and never `Acme.Ledger`'s `Entry`."
+    },
+    {
+      "id": "ci-csharp-imports-09-csharp_internal_type_not_visible",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_internal_type_not_visible",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_internal_type_not_visible:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "csharp_internal_type_not_visible",
+      "expected_target": {
+        "kind": "module",
+        "selector": "Acme.Ledger",
+        "identity": "module:csharp:imports:csharp_internal_type_not_visible:target"
+      },
+      "expected_proof_kinds": [
+        "module_or_package_binding"
+      ],
+      "notes": "Regression case (#681): an `internal` type of a referenced project is not visible to the importing project, so the directive's only edge is the namespace."
+    },
+    {
+      "id": "ci-csharp-imports-10-csharp_receiver_only_import",
+      "fixture_id": "ci/ri3/csharp/imports/csharp_receiver_only_import",
+      "split": "development",
+      "language": "c_sharp",
+      "relationship": "IMPORTS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "file",
+        "selector": "src/Web/Page.cs",
+        "identity": "file:csharp:imports:csharp_receiver_only_import:source"
+      },
+      "expected_outcome": "may_emit_heuristic_only",
+      "scenario": "csharp_receiver_only_import",
+      "notes": "Regression case (#681): `Rules.Apply()` names `Rules` only as a member-access receiver, which a member inherited from a base type outside the repository would take, so the edge stays unproven."
     }
   ]
 }

@@ -1,3 +1,4 @@
+use crate::dotnet_project::{read_dotnet_model, DotnetFiles};
 use crate::prune::{DirVerdict, DiscoveryPruner};
 use crate::rust_use_path::normalize_path;
 use open_kioku_core::{File, FileId, Language};
@@ -33,8 +34,10 @@ impl ProjectModelDiscovery for ProjectModel {
         }
 
         let mut manifests = HashMap::new();
-        walk_discover(repo_root, pruner, &mut model, &mut manifests);
+        let mut dotnet = DotnetFiles::default();
+        walk_discover(repo_root, pruner, &mut model, &mut manifests, &mut dotnet);
         read_cargo_manifests(&mut model, &manifests);
+        model.dotnet = read_dotnet_model(repo_root, &dotnet);
         model
     }
 
@@ -864,6 +867,7 @@ fn walk_discover(
     pruner: &DiscoveryPruner,
     model: &mut ProjectModel,
     manifests: &mut CargoTables,
+    dotnet: &mut DotnetFiles,
 ) {
     let repo_root = pruner.root();
     let entries = match fs::read_dir(current) {
@@ -881,7 +885,7 @@ fn walk_discover(
             {
                 continue;
             }
-            walk_discover(&path, pruner, model, manifests);
+            walk_discover(&path, pruner, model, manifests, dotnet);
         } else if path.is_file() {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 match file_name {
@@ -980,7 +984,7 @@ fn walk_discover(
                             None,
                         );
                     }
-                    _ => {}
+                    _ => dotnet.record(repo_relative_path(&path, repo_root)),
                 }
             }
         }

@@ -10,18 +10,18 @@ use std::path::PathBuf;
 /// Ledger` in one file and `partial class Ledger` in another declare one public type. A parser
 /// reads one file, so it records the part with no modifier at the default (`internal` at the top
 /// level). Parts are matched by qualified name, kind and type-parameter count, which C# requires
-/// every part to share, and by `projects`: the directory of the MSBuild project each file is
-/// in. Parts of one partial type are compiled into one assembly, so parts in two projects are
-/// two types even under one name.
+/// every part to share, and by `projects`: the project each file is compiled into, which the
+/// caller reads from the project files where it can (the ingest pipeline keys a file by the
+/// project file that compiles it, and by the nearest directory holding a project file when no
+/// project file it read does). Parts of one partial type are compiled into one assembly, so
+/// parts in two projects are two types even under one name.
 ///
-/// A file in no project's directory is read as one a project compiles from outside it, such as
-/// a shared project's (`.shproj`/`.projitems`) file, which every importing project compiles. Such
-/// a part joins the parts of each project that has a part of the type, and, with no project
+/// A file `projects` leaves out is read as one several projects compile, such as a linked file
+/// or a shared project's (`.shproj`/`.projitems`) file, which every importing project compiles.
+/// Such a part joins the parts of each project that has a part of the type, and, with no project
 /// part of the type at all, the other parts outside a project, which is the whole repository's
 /// type when it holds no project file. A part outside a project that joins several projects
-/// takes their common accessibility, or [`Visibility::Unknown`] when they differ. Project files
-/// are not read, so a file a project compiles from inside another project's directory is
-/// matched with that other project.
+/// takes their common accessibility, or [`Visibility::Unknown`] when they differ.
 ///
 /// When the parts declare different accessibilities, which C# rejects, or declare none and
 /// still disagree, the type's accessibility is not known and every part records
