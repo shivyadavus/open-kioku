@@ -116,6 +116,10 @@ def restore(repo, created):
         try:
             if full.is_file():
                 full.unlink()
+            parent = full.parent
+            while parent != Path(repo) and parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
         except OSError:
             pass
     git(repo, "clean", "-fdq", "--", "src", "crates", "lib", "app", "pkg", check=False)
@@ -152,7 +156,7 @@ def main() -> int:
     totals = {
         "faithful": {"attempted": 0, "admitted": 0, "denied": 0},
         "drift": {"attempted": 0, "denied_at_hook": 0, "failed_at_finish": 0, "missed": 0},
-        "forbidden": {"attempted": 0, "denied_at_hook": 0},
+        "forbidden": {"attempted": 0, "denied_at_hook": 0, "failed_at_finish": 0, "missed": 0},
         "bypass": {"attempted": 0, "failed_at_finish": 0, "missed": 0},
     }
     hook_ms, start_ms, finish_ms = [], [], []
@@ -207,7 +211,7 @@ def main() -> int:
 
             # Forbidden: secret-like and generated paths.
             forbidden = rng.sample(FORBIDDEN_SAMPLES, min(args.forbidden_per_case, len(FORBIDDEN_SAMPLES)))
-            forbidden_denied = 0
+            forbidden_denied, forbidden_landed = 0, []
             for path in forbidden:
                 decision, ms = hook(ok, repo, "pre-tool", edit_payload(repo, path, "Write"), env)
                 hook_ms.append(ms)
@@ -215,6 +219,12 @@ def main() -> int:
                 if decision == "deny":
                     totals["forbidden"]["denied_at_hook"] += 1
                     forbidden_denied += 1
+                else:
+                    full = repo / path
+                    full.parent.mkdir(parents=True, exist_ok=True)
+                    full.write_text("// gate-sim forbidden edit\n", encoding="utf-8")
+                    created.append(path)
+                    forbidden_landed.append(path)
             record["forbidden_denied_at_hook"] = forbidden_denied
 
             # Bypass: a new file with no hook.
@@ -239,6 +249,11 @@ def main() -> int:
                     totals["drift"]["failed_at_finish"] += 1
                 else:
                     totals["drift"]["missed"] += 1
+            for path in forbidden_landed:
+                if path in violations:
+                    totals["forbidden"]["failed_at_finish"] += 1
+                else:
+                    totals["forbidden"]["missed"] += 1
             results.append(record)
             print(f"[{index}/{len(cases)}] {record['verdict']}: {case['subject'][:70]}", file=sys.stderr)
         finally:
@@ -266,7 +281,8 @@ def main() -> int:
         },
         "forbidden": {
             **totals["forbidden"],
-            "caught_pct": pct(totals["forbidden"]["denied_at_hook"], totals["forbidden"]["attempted"]),
+            "caught_pct": pct(totals["forbidden"]["denied_at_hook"] + totals["forbidden"]["failed_at_finish"],
+                              totals["forbidden"]["attempted"]),
         },
         "bypass": {
             **totals["bypass"],
