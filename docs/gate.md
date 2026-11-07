@@ -110,9 +110,11 @@ edit was denied or warned during the session, and `PASS` otherwise.
 [`scripts/gate-sim.py`](../scripts/gate-sim.py) drives synthetic agent sessions against an
 indexed repository: tasks are the subjects of real commits, legitimate edits are the files those
 commits changed, and drifting edits are files outside the boundary, forbidden paths, and files
-created without any hook. It reports the catch rate for each kind of drift, the share of
-legitimate edits the boundary admitted without widening (the friction a faithful agent feels),
-and hook latency. Results are under [`benchmarks/gate/`](../benchmarks/gate/).
+created without any hook. On this repository, 38 commit-derived sessions in `enforce` mode
+(release build): 114 of 114 drift edits and 76 of 76 forbidden edits denied at the hook, 38 of
+38 hook-less bypasses failed at `finish`, 81% of a faithful agent's edits admitted without
+widening (18 of 38 sessions needed none), hook median 5.3 ms and p95 8.0 ms per edit. Method,
+caveats and the raw report: [`benchmarks/gate/`](../benchmarks/gate/README.md).
 
 ## What it is not
 
