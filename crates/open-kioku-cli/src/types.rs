@@ -289,6 +289,17 @@ enum Command {
         #[arg(long = "write-attestation", default_value_t = false)]
         write_attestation: bool,
     },
+    /// Hold a coding agent's edits to a declared boundary, and write the verified Change
+    /// Dossier when it stops.
+    #[command(after_help = "Examples:
+  ok gate install claude --apply
+  ok gate start \"add retry handling to token refresh\"
+  ok gate expand src/http/retry.rs --reason \"the retry helper lives here\"
+  ok gate finish")]
+    Gate {
+        #[command(subcommand)]
+        command: GateCommand,
+    },
     /// Create, verify, explain, show, or export a versioned change contract.
     Contract {
         #[command(subcommand)]

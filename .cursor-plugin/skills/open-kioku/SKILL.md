@@ -72,6 +72,21 @@ at a small fraction of the cost of the JSON rendering.
   control cost. It changes how many context items are gathered, not how they are
   rendered.
 
+## The gate
+
+When this repository has the gate hooks installed (`ok gate install claude --apply`,
+or the plugin), hold your edits to a declared boundary:
+
+1. Before editing for a task, run `ok gate start "<task>"`. The plan's boundary
+   becomes the session's; the hooks then classify every `Edit`/`Write`.
+2. A denied edit names the one command that widens the boundary:
+   `ok gate expand <path> --reason "<why this file must change>"`. Give a real
+   reason; it is recorded in the dossier. A forbidden path (secrets, generated
+   code, the index) cannot be widened to; change the approach instead.
+3. When the change is done, run `ok gate finish`. It verifies the real diff
+   against the boundary and writes `.ok/gate/dossiers/<session>.md`, the record
+   to hand to review. A `FAIL` lists the paths to revert or widen.
+
 ## Rules
 
 1. Call `search_code` or `get_definition` before editing a file you have not read

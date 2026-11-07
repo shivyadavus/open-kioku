@@ -38,6 +38,7 @@ members = [
   "crates/open-kioku-actions",
   "crates/open-kioku-patch",
   "crates/open-kioku-plan",
+  "crates/open-kioku-gate",
   "crates/open-kioku-tests",
   "crates/open-kioku-sandbox",
   "crates/open-kioku-mcp",

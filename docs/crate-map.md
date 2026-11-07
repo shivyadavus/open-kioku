@@ -25,6 +25,7 @@ graph TD
         Tests["open-kioku-tests"]
         Patch["open-kioku-patch"]
         Plan["open-kioku-plan"]
+        Gate["open-kioku-gate"]
         Actions["open-kioku-actions"]
         Format["open-kioku-format"]
         Evidence["open-kioku-evidence"]
@@ -145,6 +146,7 @@ graph TD
 | `open-kioku-tests` | Identifies tests affected by a change using graph reachability. |
 | `open-kioku-patch` | Generates and validates code patches. |
 | `open-kioku-plan` | Multi-step change planning with evidence gathering. |
+| `open-kioku-gate` | Gate sessions, per-edit boundary decisions, the hook wire format, and the Change Dossier. |
 | `open-kioku-actions` | Orchestrates compound agent actions (search → analyze → plan). |
 | `open-kioku-format` | Output formatting for terminal, JSON, and markdown. |
 | `open-kioku-evidence` | Collects and scores evidence supporting a planned change. |

@@ -1263,6 +1263,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
         Command::Contract { command } => {
             handle_contract_command(cli.json, &repo, command)?;
         }
+        Command::Gate { command } => {
+            handle_gate_command(cli.json, &repo, command)?;
+        }
         Command::Bench(mut args) => match args.command.take() {
             Some(BenchCommand::SelfHistory(self_args)) => {
                 let self_repo = resolve_repo(&repo, self_args.path.clone());

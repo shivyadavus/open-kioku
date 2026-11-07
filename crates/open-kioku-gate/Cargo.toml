@@ -1,0 +1,23 @@
+[package]
+name = "open-kioku-gate"
+version.workspace = true
+edition.workspace = true
+description = "The gate between a coding agent and the merge button: a declared boundary enforced on every edit, and a Change Dossier verified against it."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+chrono.workspace = true
+open-kioku-core = { version = "4.0.0", path = "../open-kioku-core" }
+open-kioku-errors = { version = "4.0.0", path = "../open-kioku-errors" }
+open-kioku-patch = { version = "4.0.0", path = "../open-kioku-patch" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

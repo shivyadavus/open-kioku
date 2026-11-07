@@ -86,6 +86,7 @@ include!("bench/relationship.rs");
 include!("bench/self_history.rs");
 include!("commands/verification.rs");
 include!("commands/contract.rs");
+include!("commands/gate.rs");
 include!("reports/ranking.rs");
 include!("reports/proof.rs");
 include!("commands/context.rs");

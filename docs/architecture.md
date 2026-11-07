@@ -3,7 +3,7 @@
 Open Kioku is organized as a Rust workspace with strict dependency direction:
 
 1. Interface layer: `open-kioku-cli`, `open-kioku-mcp`, `open-kioku-daemon`.
-2. Agent intelligence layer: `open-kioku-context`, `open-kioku-ranking`, `open-kioku-impact`, `open-kioku-tests`, `open-kioku-patch`, `open-kioku-actions`.
+2. Agent intelligence layer: `open-kioku-context`, `open-kioku-ranking`, `open-kioku-impact`, `open-kioku-tests`, `open-kioku-patch`, `open-kioku-gate`, `open-kioku-actions`.
 3. Code intelligence kernel: `open-kioku-ingest`, `open-kioku-parse`, `open-kioku-languages`, `open-kioku-symbols`, `open-kioku-graph`, `open-kioku-architecture`.
 4. Storage layer: `open-kioku-storage`, `open-kioku-storage-sqlite`, `open-kioku-storage-kv`, `open-kioku-search-regex`, `open-kioku-search-tantivy`.
 5. Optional integrations: `open-kioku-scip`, `open-kioku-lsp`, `open-kioku-semantic`, `open-kioku-vector`, `open-kioku-qdrant`, `open-kioku-sentry`.
