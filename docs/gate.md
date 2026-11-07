@@ -113,8 +113,12 @@ commits changed, and drifting edits are files outside the boundary, forbidden pa
 created without any hook. On this repository, 38 commit-derived sessions in `enforce` mode
 (release build): 114 of 114 drift edits and 76 of 76 forbidden edits denied at the hook, 38 of
 38 hook-less bypasses failed at `finish`, 81% of a faithful agent's edits admitted without
-widening (18 of 38 sessions needed none), hook median 5.3 ms and p95 8.0 ms per edit. Method,
-caveats and the raw report: [`benchmarks/gate/`](../benchmarks/gate/README.md).
+widening (18 of 38 sessions needed none), hook median 5.3 ms and p95 8.0 ms per edit. In `warn`
+mode (20 sessions), where the hook denies only forbidden paths, the verifier at `finish` failed
+60 of 60 drift edits and 20 of 20 bypasses; 38 of 40 forbidden edits were denied at the hook, and
+the two that were not were writes under a git-ignored build directory the index never saw, which
+are warned, recorded, and cannot reach a commit. Method, caveats and the raw reports:
+[`benchmarks/gate/`](../benchmarks/gate/README.md).
 
 ## What it is not
 

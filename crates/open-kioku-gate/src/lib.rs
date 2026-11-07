@@ -859,6 +859,25 @@ pub fn build_dossier(
     if session.mode == GateMode::Observe {
         caveats.push("observe mode: nothing was denied during the session".into());
     }
+    let changed = change
+        .changed_files
+        .iter()
+        .map(|path| normalize_str(path))
+        .collect::<BTreeSet<_>>();
+    let warned_absent = trail
+        .warned_paths
+        .iter()
+        .filter(|path| !changed.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !warned_absent.is_empty() {
+        caveats.push(format!(
+            "{} edit(s) the hook allowed outside the boundary are not in the change (reverted, \
+             or under a path git ignores, which cannot reach a commit): {}",
+            warned_absent.len(),
+            warned_absent.join(", ")
+        ));
+    }
 
     let verification_summary = verification.map(|report| DossierVerification {
         verdict: report.verdict,
@@ -1468,5 +1487,18 @@ mod tests {
             .caveats
             .iter()
             .any(|c| c.contains("no change to verify")));
+        // A warned edit that never reached the tree (reverted, or git-ignored) is named.
+        let warn = session(GateMode::Warn);
+        let events = vec![GateEvent::for_decision(
+            &warn.id,
+            &warn.decide("target/x.rs"),
+            "Write",
+        )];
+        let dossier = build_dossier("demo", &warn, &p, &events, 0, &ChangeInput::default(), None);
+        assert_eq!(dossier.verdict, DossierVerdict::Warn);
+        assert!(dossier
+            .caveats
+            .iter()
+            .any(|c| c.contains("not in the change") && c.contains("target/x.rs")));
     }
 }
