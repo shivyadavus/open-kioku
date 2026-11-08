@@ -17,7 +17,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           { "type": "command", "command": "ok gate hook pre-tool", "timeout": 30 }
         ]
@@ -25,7 +25,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           { "type": "command", "command": "ok gate hook post-tool", "timeout": 30 }
         ]

@@ -23,8 +23,9 @@ activates a session whose boundary is the plan's `allowed_files`, `caution_files
 `forbidden_files` and `forbidden_rules`. It records `git rev-parse HEAD` and every path that is
 already modified or untracked, so a dirty working tree is not mistaken for the session's change.
 
-`ok gate finish` verifies the change (`git diff HEAD` plus untracked files, less what was dirty
-before the session and not edited during it) with the same `ChangeVerifier` behind `ok verify`,
+`ok gate finish` verifies the change — every tracked change since the session's recorded base
+revision, committed during the session or not, plus untracked files, less what was dirty before
+the session and not edited during it — with the same `ChangeVerifier` behind `ok verify`,
 writes `.ok/gate/dossiers/<session>.json` and `.md`, ends the session, and exits non-zero on a
 `FAIL`. Pass `--run-commands` to execute the plan's validation commands and record their exit
 codes; `--keep` writes the dossier and leaves the session active.
@@ -40,6 +41,7 @@ is `ok gate hook <event>`: it reads the harness's JSON on stdin and answers on s
 |---|---|---|
 | `pre-tool` | `PreToolUse` on `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | Classifies each path against the boundary. Denies a forbidden path in every mode but `observe`; denies an outside path in `enforce`; records every decision to `.ok/gate/events.jsonl`. Never opens the index: one small JSON read per edit. |
 | `post-tool` | `PostToolUse`, same tools | After an allowed edit outside or on a caution path, tells the agent so, with the command that widens the boundary. |
+| `pre-tool`, `post-tool` | `PreToolUse` / `PostToolUse` on `Bash` | A shell command can write files the edit tools never see. Before it runs, the paths it names as write targets (`>`/`>>` redirections, `tee`, `sed -i`, `cp`/`mv` destinations, `touch`, `rm`, `git mv`/`git rm`) are judged like edits, and a dirty-tree snapshot is taken; a target outside the repository (`/tmp`, `/dev/null`) is not the gate's concern. After it runs, every path that became dirty and was not named is recorded in the trail and, when outside the boundary, reported to the agent. A write that already landed is recorded as warned, never denied. |
 | `stop` | `Stop` | Verifies the change and writes the dossier. On `FAIL` it holds the agent with the violations and the remedies; when `stop_hook_active` is set (the agent is already continuing because of a stop hook) it reports and never blocks again, so a condition the agent cannot resolve cannot loop. |
 | `prompt`, `session-start` | `UserPromptSubmit`, `SessionStart` | One factual line: whether a session is active, its task and boundary size, and how to start, widen, or finish one. |
 
@@ -95,7 +97,10 @@ request comment takes. It carries no source text: paths, counts, verdicts, reaso
   and the denied and warned paths. This is what the hooks saw, not what happened: an edit made
   outside the harness is caught by the next section, and the dossier says when the two disagree.
 - **The actual change** — changed files, new untracked files, files left out because they were
-  dirty before the session, the diff's SHA-256, and where the change was read from.
+  dirty before the session, the diff's SHA-256, and where the change was read from: the diff is
+  taken against the session's base revision, so a commit made during the session is still part
+  of the change, and renames keep both paths. If the base revision no longer exists (a rebase or
+  amend rewrote it), the dossier says so and falls back to `HEAD`.
 - **Verification** — the `ok verify` verdict, boundary violations, impacted dependents not
   updated, recommended tests the plan did not list, validation targets, commands run with exit
   codes, and warnings.
@@ -127,4 +132,8 @@ are warned, recorded, and cannot reach a commit. Method, caveats and the raw rep
 - It is not proof that the change is correct. A `PASS` says the change stayed where it was
   declared and the verifier found no missing dependents; tests and review still decide the rest.
 - It is not available to an agent that bypasses its harness. The hooks see what the harness
-  reports; the verifier at `finish` sees the working tree, and the dossier says when they differ.
+  reports, including the files a shell command names or leaves changed; a write the shell hook
+  could not attribute, or one made from outside the harness, is seen by the verifier at
+  `finish`, and the dossier says when the trail and the tree differ.
+- A widened boundary is only as honest as its reason. `ok gate expand` records the reason; it
+  does not judge it. The reviewer reads the dossier's *Widened during the session* list.

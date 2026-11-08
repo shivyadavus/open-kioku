@@ -32,6 +32,7 @@ const SESSION_FILE: &str = "session.json";
 const PLAN_FILE: &str = "plan.json";
 const EVENTS_FILE: &str = "events.jsonl";
 const DOSSIER_DIR: &str = "dossiers";
+const SNAPSHOT_DIR: &str = "snapshots";
 
 /// How strictly a session holds edits to its boundary.
 ///
@@ -182,6 +183,9 @@ pub struct GateSession {
     pub risk_level: String,
     pub risk_score: f32,
     pub confidence_summary: String,
+    /// The name the dossier gives the repository; set by the CLI from ok.toml or the directory.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo_name: String,
     pub boundary: GateBoundary,
     /// Paths already modified or untracked when the session started. A path here that no
     /// hook reported editing during the session is not the session's change and is left out
@@ -204,6 +208,7 @@ impl GateSession {
             risk_level: plan.risk.level.clone(),
             risk_score: plan.risk.score,
             confidence_summary: plan.confidence_summary.clone(),
+            repo_name: String::new(),
             boundary: GateBoundary::from_plan(plan),
             preexisting_changes: Vec::new(),
         }
@@ -402,11 +407,40 @@ impl GateStore {
         self.append_event(&GateEvent::new(&session.id, EventKind::SessionStarted))
     }
 
+    /// Write the session atomically: a hook reading it while `expand` rewrites it sees the
+    /// old session or the new one, never a torn file.
     pub fn write_session(&self, session: &GateSession) -> Result<()> {
         fs::create_dir_all(&self.root)?;
         let text = serde_json::to_string_pretty(session)?;
-        fs::write(self.session_path(), text)?;
+        let tmp = self
+            .root
+            .join(format!("{SESSION_FILE}.tmp-{}", std::process::id()));
+        fs::write(&tmp, text)?;
+        fs::rename(&tmp, self.session_path())?;
         Ok(())
+    }
+
+    /// Remember the dirty paths before a shell command, keyed by the tool call, so the
+    /// post-tool hook can tell what the command changed.
+    pub fn write_snapshot(&self, id: &str, dirty: &[String]) -> Result<()> {
+        let dir = self.root.join(SNAPSHOT_DIR);
+        fs::create_dir_all(&dir)?;
+        fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::to_string(dirty)?,
+        )?;
+        Ok(())
+    }
+
+    /// The snapshot `write_snapshot` stored under `id`, removed as it is read.
+    pub fn take_snapshot(&self, id: &str) -> Result<Option<Vec<String>>> {
+        let path = self.root.join(SNAPSHOT_DIR).join(format!("{id}.json"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)?;
+        let _ = fs::remove_file(&path);
+        Ok(serde_json::from_slice(&bytes).ok())
     }
 
     pub fn saved_plan(&self) -> Result<PlanReport> {
@@ -544,6 +578,8 @@ pub struct HookInput {
     #[serde(default)]
     pub tool_input: serde_json::Value,
     #[serde(default)]
+    pub tool_use_id: Option<String>,
+    #[serde(default)]
     pub stop_hook_active: bool,
 }
 
@@ -560,6 +596,16 @@ impl HookInput {
             self.tool_name.as_str(),
             "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
         )
+    }
+
+    /// Whether this tool runs a shell command, which may write files the edit hooks never see.
+    pub fn is_shell_tool(&self) -> bool {
+        self.tool_name == "Bash"
+    }
+
+    /// The shell command a shell tool runs.
+    pub fn shell_command(&self) -> Option<&str> {
+        self.tool_input.get("command").and_then(|v| v.as_str())
     }
 
     /// The absolute paths this tool call writes.
@@ -643,6 +689,261 @@ fn lexical_normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// The files a shell command names as something it writes: redirection targets (`>`, `>>`),
+/// `tee` files, `sed -i` files, `cp`/`mv`/`install` destinations, `touch`, `rm`, `truncate`,
+/// `git mv` and `git rm` paths. Heuristic and conservative: it reads the command text, not
+/// the shell, so a target built from a variable or produced by a program is not named. What
+/// it misses, the post-tool hook finds in the tree.
+pub fn shell_write_targets(command: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    for segment in split_shell_segments(command) {
+        let words = shell_words(&segment);
+        if words.is_empty() {
+            continue;
+        }
+        // Redirections anywhere in the segment.
+        let mut i = 0;
+        while i < words.len() {
+            let word = words[i].as_str();
+            let stripped = word.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+            if stripped == ">" || stripped == ">>" || stripped == ">|" {
+                if let Some(next) = words.get(i + 1) {
+                    push_target(&mut targets, next);
+                }
+                i += 2;
+                continue;
+            }
+            if let Some(rest) = stripped
+                .strip_prefix(">>")
+                .or_else(|| stripped.strip_prefix(">|"))
+                .or_else(|| stripped.strip_prefix('>'))
+            {
+                if !rest.is_empty() && !rest.starts_with('&') {
+                    push_target(&mut targets, rest);
+                }
+            }
+            i += 1;
+        }
+        // The command word, skipping `sudo`, `env VAR=x`, `command`, `builtin`, `nohup`, `time`.
+        let mut start = 0;
+        while start < words.len()
+            && (matches!(
+                words[start].as_str(),
+                "sudo" | "env" | "command" | "builtin" | "nohup" | "time" | "exec"
+            ) || words[start].contains('=') && !words[start].starts_with('-'))
+        {
+            start += 1;
+        }
+        let Some(name) = words.get(start) else {
+            continue;
+        };
+        let name = name.rsplit('/').next().unwrap_or(name).to_string();
+        let args: Vec<&str> = words[start + 1..]
+            .iter()
+            .map(String::as_str)
+            .take_while(|w| {
+                !w.starts_with('>')
+                    && !w
+                        .trim_start_matches(|c: char| c.is_ascii_digit())
+                        .starts_with('>')
+            })
+            .collect();
+        let operands: Vec<&str> = args
+            .iter()
+            .copied()
+            .filter(|a| !a.starts_with('-') || *a == "-")
+            .collect();
+        match name.as_str() {
+            "tee" => operands.iter().for_each(|o| push_target(&mut targets, o)),
+            "touch" | "rm" | "truncate" | "unlink" | "mkfifo" => {
+                operands.iter().for_each(|o| push_target(&mut targets, o))
+            }
+            "sed"
+                if args
+                    .iter()
+                    .any(|a| a.starts_with("-i") || *a == "--in-place") =>
+            {
+                // Every operand after the script is a file. The script is the first operand,
+                // unless `-e`/`-f` (or their long forms) supplied it, in which case the word
+                // after each such flag is the script and every remaining operand is a file.
+                let script_flags = ["-e", "-f", "--expression", "--file"];
+                let scripted = args.iter().any(|a| {
+                    script_flags.contains(a)
+                        || a.starts_with("--expression=")
+                        || a.starts_with("--file=")
+                });
+                let mut skip_next = false;
+                let mut first_operand_seen = false;
+                for arg in &args {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if script_flags.contains(arg) {
+                        skip_next = true;
+                        continue;
+                    }
+                    if arg.starts_with('-') && *arg != "-" {
+                        continue;
+                    }
+                    if !scripted && !first_operand_seen {
+                        first_operand_seen = true;
+                        continue;
+                    }
+                    push_target(&mut targets, arg);
+                }
+            }
+            "cp" | "mv" | "install" | "ln" => {
+                if let Some(dest) = operands.last() {
+                    push_target(&mut targets, dest);
+                }
+            }
+            "git" => match operands.first().copied() {
+                Some("mv") => operands[1..]
+                    .iter()
+                    .for_each(|o| push_target(&mut targets, o)),
+                Some("rm") => operands[1..]
+                    .iter()
+                    .for_each(|o| push_target(&mut targets, o)),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn push_target(targets: &mut Vec<String>, raw: &str) {
+    let value = raw.trim_matches(|c| c == '"' || c == '\'');
+    if value.is_empty() || value == "-" || value.starts_with("/dev/") || value.starts_with('$') {
+        return;
+    }
+    targets.push(value.to_string());
+}
+
+/// Split on `;`, `&&`, `||`, `|` and newlines outside quotes. A heredoc body is dropped: its
+/// lines are data, not commands.
+fn split_shell_segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    let mut heredoc: Option<String> = None;
+    let mut line = String::new();
+    while let Some(c) = chars.next() {
+        if let Some(terminator) = &heredoc {
+            if c == '\n' {
+                if line.trim() == terminator {
+                    heredoc = None;
+                }
+                line.clear();
+            } else {
+                line.push(c);
+            }
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                current.push(c);
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    current.push(c);
+                }
+                '<' if chars.peek() == Some(&'<') => {
+                    chars.next();
+                    if chars.peek() == Some(&'<') {
+                        chars.next();
+                        current.push_str("<<<");
+                        continue;
+                    }
+                    // `<<EOF`, `<<-EOF`, `<<'EOF'`, `<< "EOF"`: the terminator word.
+                    let mut word = String::new();
+                    while let Some(&n) = chars.peek() {
+                        if n == ' ' || n == '-' {
+                            chars.next();
+                            if word.is_empty() {
+                                continue;
+                            }
+                            break;
+                        }
+                        if n.is_whitespace() || n == ';' || n == '|' || n == '&' || n == '>' {
+                            break;
+                        }
+                        word.push(n);
+                        chars.next();
+                    }
+                    let word = word.trim_matches(|c| c == '\'' || c == '"').to_string();
+                    // The rest of this line is still the command; the body starts next line.
+                    while let Some(&n) = chars.peek() {
+                        if n == '\n' {
+                            chars.next();
+                            break;
+                        }
+                        current.push(n);
+                        chars.next();
+                    }
+                    heredoc = Some(word);
+                    line.clear();
+                }
+                ';' | '\n' => {
+                    segments.push(std::mem::take(&mut current));
+                }
+                '|' | '&' => {
+                    if chars.peek() == Some(&c) {
+                        chars.next();
+                    }
+                    segments.push(std::mem::take(&mut current));
+                }
+                _ => current.push(c),
+            },
+        }
+    }
+    segments.push(current);
+    segments
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect()
+}
+
+/// Whitespace-split with quotes honoured; quotes are kept on the word so `push_target` can
+/// strip them.
+fn shell_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for c in segment.chars() {
+        match quote {
+            Some(q) => {
+                current.push(c);
+                if c == q {
+                    quote = None;
+                }
+            }
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                current.push(c);
+            }
+            None if c.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1415,6 +1716,58 @@ mod tests {
                 .unwrap();
         assert!(!bash.is_edit_tool());
         assert!(bash.edited_paths().is_empty());
+    }
+
+    #[test]
+    fn shell_write_targets_name_redirections_and_file_commands() {
+        let t = |c: &str| shell_write_targets(c);
+        assert_eq!(t("echo x > src/a.rs"), vec!["src/a.rs"]);
+        assert_eq!(t("cargo test 2>&1 >> out.log"), vec!["out.log"]);
+        assert_eq!(t("echo x >'with space.txt'"), vec!["with space.txt"]);
+        assert_eq!(t("printf y | tee -a notes.md"), vec!["notes.md"]);
+        assert_eq!(
+            t("sed -i 's/a/b/' src/x.rs src/y.rs"),
+            vec!["src/x.rs", "src/y.rs"]
+        );
+        assert_eq!(t("sed -i.bak -e 's/a/b/' src/x.rs"), vec!["src/x.rs"]);
+        assert_eq!(t("cp a.txt b/c.txt && mv d e"), vec!["b/c.txt", "e"]);
+        assert_eq!(
+            t("git mv old.rs new.rs; git rm gone.rs"),
+            vec!["gone.rs", "new.rs", "old.rs"]
+        );
+        assert_eq!(t("touch x.rs; rm -f y.rs"), vec!["x.rs", "y.rs"]);
+        assert_eq!(t("sudo env FOO=1 tee out.txt"), vec!["out.txt"]);
+        // Not targets: reads, /dev/null, variables, the heredoc body, quoted operators.
+        assert!(t("cat src/a.rs | grep x").is_empty());
+        assert!(t("cargo build > /dev/null").is_empty());
+        assert!(t("echo x > $OUT").is_empty());
+        assert!(t("echo 'a > b'").is_empty());
+        assert_eq!(
+            t("python3 - <<'EOF'\nopen('src/x.rs','w').write('> y')\nEOF\necho done > z.txt"),
+            vec!["z.txt"],
+            "the heredoc body is data; the command after it still counts"
+        );
+        assert_eq!(t("cat <<EOF > gen.rs\nfn x() {}\nEOF"), vec!["gen.rs"]);
+    }
+
+    #[test]
+    fn snapshots_are_taken_once_and_session_writes_leave_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GateStore::for_repo(dir.path());
+        let s = session(GateMode::Enforce);
+        store.start(&s, b"{}").unwrap();
+        store.write_snapshot("toolu_1", &["a.rs".into()]).unwrap();
+        assert_eq!(
+            store.take_snapshot("toolu_1").unwrap(),
+            Some(vec!["a.rs".to_string()])
+        );
+        assert_eq!(store.take_snapshot("toolu_1").unwrap(), None);
+        let leftovers = fs::read_dir(store.root())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 
     #[test]

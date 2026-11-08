@@ -68,6 +68,12 @@ below are about what was caught, where, and what a faithful agent paid.
 - Latency: hook median 5.2 ms, p95 6.5 ms; `start` 4.4 s; `finish` 13.5 s (more changed files to
   verify per case than in enforce mode, since drift lands).
 
+## Live sessions
+
+[`live-runs.md`](live-runs.md) records three real Claude Code sessions driven under the gate in
+`enforce` mode on this repository: what the boundary declared, what the agent edited, where it
+widened the boundary and why, and what it did unprompted with `ok gate check` and `ok gate finish`.
+
 ## Reading it
 
 - A denial at the hook is deterministic: the path's relation to the boundary, read from one JSON

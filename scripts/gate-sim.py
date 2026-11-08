@@ -219,12 +219,17 @@ def main() -> int:
                 if decision == "deny":
                     totals["forbidden"]["denied_at_hook"] += 1
                     forbidden_denied += 1
-                else:
+                elif path.startswith(("target/", "node_modules/")):
+                    # Only a build-output or dependency path is written when the hook allows
+                    # it (observe mode, or a directory the index never saw); a secret-like
+                    # path or the index itself is never created in the repository.
                     full = repo / path
                     full.parent.mkdir(parents=True, exist_ok=True)
                     full.write_text("// gate-sim forbidden edit\n", encoding="utf-8")
                     created.append(path)
                     forbidden_landed.append(path)
+                else:
+                    totals["forbidden"]["not_written"] = totals["forbidden"].get("not_written", 0) + 1
             record["forbidden_denied_at_hook"] = forbidden_denied
 
             # Bypass: a new file with no hook.

@@ -1,7 +1,7 @@
 use open_kioku_gate::{
-    build_dossier, plan_with_expansions, render_markdown, ChangeDossier, ChangeInput,
-    DossierVerdict, EventKind, GateEvent, GateMode, GateSession, GateStore, HookAction,
-    HookInput, HookResponse, PathDecision,
+    build_dossier, plan_with_expansions, render_markdown, shell_write_targets, ChangeDossier,
+    ChangeInput, DossierVerdict, EventKind, GateEvent, GateMode, GateSession, GateStore,
+    HookAction, HookInput, HookResponse, PathDecision,
 };
 
 #[derive(Subcommand)]
@@ -22,7 +22,8 @@ enum GateCommand {
         /// Maximum context results the plan is built from.
         #[arg(long, default_value_t = 12)]
         limit: usize,
-        /// Replace an active session instead of refusing to start over it.
+        /// Replace an active session instead of refusing to start over it. The new plan is
+        /// built first; the old session ends only once the new one can start.
         #[arg(long, default_value_t = false)]
         force: bool,
     },
@@ -89,9 +90,10 @@ enum GateFormat {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum GateHookEvent {
-    /// Before an edit tool runs: allow, warn, or deny by the boundary.
+    /// Before an edit tool or a shell command runs: allow, warn, or deny by the boundary.
     PreTool,
-    /// After an edit tool ran: tell the agent when the edit was outside the boundary.
+    /// After it ran: tell the agent when the edit was outside the boundary, and record
+    /// files a shell command changed.
     PostTool,
     /// When the agent wants to stop: verify, write the dossier, and hold it on a failure.
     Stop,
@@ -140,6 +142,14 @@ struct GateFinishOutput {
 }
 
 fn handle_gate_command(json: bool, repo: &Path, command: GateCommand) -> anyhow::Result<()> {
+    // Hooks resolve their repository from the harness's input; every other subcommand works
+    // on an absolute root, so an absolute path given to `check` or `expand` is compared
+    // against an absolute repository and not against `.`.
+    if let GateCommand::Hook { event } = command {
+        return gate_hook(repo, event);
+    }
+    let repo = std::path::absolute(repo)?;
+    let repo = repo.as_path();
     match command {
         GateCommand::Start {
             task,
@@ -156,9 +166,21 @@ fn handle_gate_command(json: bool, repo: &Path, command: GateCommand) -> anyhow:
             keep,
         } => gate_finish(json, repo, run_commands, format, keep),
         GateCommand::Abandon => gate_abandon(json, repo),
-        GateCommand::Hook { event } => gate_hook(repo, event),
+        GateCommand::Hook { .. } => unreachable!("handled above"),
         GateCommand::Install { client, apply } => gate_install(json, repo, client, apply),
     }
+}
+
+/// The name the dossier gives the repository: `[repo] name` from ok.toml unless it is the
+/// default, else the directory name.
+fn gate_repo_name(repo: &Path, config: &OkConfig) -> String {
+    Some(config.repo.name.clone())
+        .filter(|name| !name.is_empty() && name != "open-kioku-repo")
+        .or_else(|| {
+            repo.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "repository".into())
 }
 
 fn gate_start(
@@ -170,7 +192,8 @@ fn gate_start(
     force: bool,
 ) -> anyhow::Result<()> {
     let gate_store = GateStore::for_repo(repo);
-    if let Some(active) = gate_store.active_session()? {
+    let active = gate_store.active_session()?;
+    if let Some(active) = &active {
         if !force {
             anyhow::bail!(
                 "a gate session is already active for task \"{}\" (started {}); finish it with \
@@ -179,7 +202,6 @@ fn gate_start(
                 active.started_at.format("%Y-%m-%d %H:%M UTC")
             );
         }
-        gate_store.finish(&active)?;
     }
     let config = OkConfig::load_from_repo(repo)?;
     let mode = match mode {
@@ -192,7 +214,7 @@ fn gate_start(
     };
     let store = open_store(repo)?;
     require_authoritative_relationships(&store)?;
-    let context = build_context_pack(repo, &store, task, limit)?;
+    let context = build_context_pack_with_config(repo, &store, task, limit, &config)?;
     let index_dir = default_index_dir(repo);
     let search_index = if TantivySearchIndex::exists(&index_dir) {
         Some(TantivySearchIndex::open_or_create(&index_dir)?)
@@ -207,12 +229,14 @@ fn gate_start(
         .plan_from_context(task, limit, context)?;
     let plan_json = serde_json::to_vec_pretty(&report)?;
     let mut session = GateSession::new(task, mode, &report, &plan_json);
+    session.repo_name = gate_repo_name(repo, &config);
     session.base_rev = open_kioku_git::commit(repo);
-    if session.base_rev.is_some() {
-        let (modified, untracked) = gate_dirty_paths(repo)?;
-        session.preexisting_changes = modified.into_iter().chain(untracked).collect();
-        session.preexisting_changes.sort();
-        session.preexisting_changes.dedup();
+    if let Some(base) = session.base_rev.as_deref() {
+        session.preexisting_changes = gate_changed_since(repo, base)?;
+    }
+    // The plan is built, so the new session can start: only now does a replaced session end.
+    if let Some(active) = &active {
+        gate_store.finish(active)?;
     }
     gate_store.start(&session, &plan_json)?;
     let output = GateStartOutput {
@@ -233,12 +257,13 @@ fn gate_start(
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
-    println!("Gate session {} started ({} mode)", output.session_id, mode.as_str());
-    println!("Task: {}", output.task);
     println!(
-        "Risk {} · {}",
-        output.risk_level, output.confidence_summary
+        "Gate session {} started ({} mode)",
+        output.session_id,
+        mode.as_str()
     );
+    println!("Task: {}", output.task);
+    println!("Risk {} · {}", output.risk_level, output.confidence_summary);
     println!("Allowed ({}):", output.allowed.len());
     for path in &output.allowed {
         println!("  {path}");
@@ -327,8 +352,42 @@ fn require_active_session(gate_store: &GateStore) -> anyhow::Result<GateSession>
     })
 }
 
+/// `path` as the deepest existing ancestor's canonical form plus the rest, so a path under a
+/// symlinked directory (`/tmp` on macOS, a linked home) compares equal to the canonical
+/// repository root even when the file does not exist yet.
+fn gate_canonical_lossy(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            let mut out = canonical;
+            for component in rest.iter().rev() {
+                out.push(component);
+            }
+            return out;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// `path` relative to `repo`: lexically first, then with both sides canonicalized, so a
+/// symlink on either side does not read as "outside the repository".
+fn gate_relative(repo: &Path, path: &Path) -> Option<String> {
+    open_kioku_gate::repo_relative(repo, path).or_else(|| {
+        let repo = gate_canonical_lossy(repo);
+        let path = gate_canonical_lossy(path);
+        open_kioku_gate::repo_relative(&repo, &path)
+    })
+}
+
 fn gate_relative_path(repo: &Path, path: &Path) -> anyhow::Result<String> {
-    open_kioku_gate::repo_relative(repo, path).ok_or_else(|| {
+    gate_relative(repo, path).ok_or_else(|| {
         caller_input_error(format!(
             "{} is not inside the repository {}",
             path.display(),
@@ -378,77 +437,95 @@ fn gate_expand(json: bool, repo: &Path, path: &Path, reason: &str) -> anyhow::Re
     Ok(())
 }
 
-/// The working tree's tracked modifications (against HEAD, renames followed) and untracked
-/// files, repository-relative. Paths under `.ok/` are the gate's own and never counted.
-fn gate_dirty_paths(repo: &Path) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let list = |args: &[&str]| -> anyhow::Result<Vec<String>> {
-        let output = ProcessCommand::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Ok(output
-            .stdout
-            .split(|b| *b == 0)
-            .filter(|entry| !entry.is_empty())
-            .map(|entry| open_kioku_gate::normalize_str(&String::from_utf8_lossy(entry)))
-            .filter(|path| !path.starts_with(".ok/"))
-            .collect())
-    };
-    let modified = list(&[
-        "diff",
-        "--name-only",
-        "--find-renames",
-        "--relative",
-        "-z",
-        "HEAD",
-    ])?;
-    let untracked = list(&["ls-files", "--others", "--exclude-standard", "-z"])?;
-    Ok((modified, untracked))
+/// Every path whose working-tree content differs from `base`: tracked files changed since it,
+/// committed or not, and untracked files git does not ignore. The gate's own `.ok/` is
+/// never counted.
+fn gate_changed_since(repo: &Path, base: &str) -> anyhow::Result<Vec<String>> {
+    let mut paths = open_kioku_git::changed_paths_since_commit(repo, base)?
+        .iter()
+        .map(open_kioku_gate::normalize)
+        .filter(|path| !path.starts_with(".ok/"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
-/// The unified diff of `paths` against HEAD, with the same flags `ok verify --git` uses.
-fn gate_git_diff(repo: &Path, paths: &[String]) -> anyhow::Result<String> {
-    if paths.is_empty() {
-        return Ok(String::new());
-    }
+/// Untracked files git does not ignore, repository-relative, without the gate's own `.ok/`.
+fn gate_untracked(repo: &Path) -> anyhow::Result<Vec<String>> {
     let output = ProcessCommand::new("git")
         .arg("-C")
         .arg(repo)
+        .args(["-c", "core.quotePath=false"])
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git ls-files --others failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| open_kioku_gate::normalize_str(&String::from_utf8_lossy(entry)))
+        .filter(|path| !path.starts_with(".ok/"))
+        .collect())
+}
+
+/// The unified diff of every tracked change since `base`, committed or not, with the flags
+/// `ok verify --git` uses. Renames are paired, so a file moved out of a forbidden directory
+/// is judged with both of its paths.
+fn gate_git_diff(repo: &Path, base: &str) -> anyhow::Result<String> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["-c", "core.quotePath=false"])
         .args([
             "diff",
             "--unified=0",
             "--no-ext-diff",
+            "--no-textconv",
             "--no-color",
             "--find-renames",
             "--submodule=short",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             "--relative",
-            "HEAD",
+            "--end-of-options",
+            base,
             "--",
         ])
-        .args(paths)
         .output()?;
     if !output.status.success() {
         anyhow::bail!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "git diff {base} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(String::from_utf8(output.stdout)?)
 }
 
-/// What the gate knows about the session's change: in a git repository, the tracked
-/// modifications and untracked files now, less any that were already dirty when the session
-/// started and that no hook reported editing since; elsewhere, the paths the hooks reported.
+/// Split a unified diff into its `diff --git` entries.
+fn gate_diff_entries(diff: &str) -> Vec<String> {
+    let mut entries: Vec<String> = Vec::new();
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with("diff --git ") || entries.is_empty() {
+            entries.push(String::new());
+        }
+        entries
+            .last_mut()
+            .expect("an entry was just pushed")
+            .push_str(line);
+    }
+    entries.into_iter().filter(|e| !e.trim().is_empty()).collect()
+}
+
+/// What the gate knows about the session's change: in a git repository, every tracked change
+/// since the session's base revision (committed during the session or not) and every
+/// untracked file, less any path that was already dirty when the session started and that
+/// no hook reported editing since; elsewhere, the paths the hooks reported.
 fn gate_change_input(
     repo: &Path,
     session: &GateSession,
@@ -465,7 +542,7 @@ fn gate_change_input(
         })
         .filter_map(|event| event.path.clone())
         .collect::<BTreeSet<_>>();
-    if head_rev.is_none() {
+    let Some(head) = head_rev.as_deref() else {
         let changed = reported
             .into_iter()
             .filter(|path| repo.join(path).exists())
@@ -478,32 +555,87 @@ fn gate_change_input(
             head_rev,
             source: "edits reported by the hooks (not a git repository)".to_string(),
         });
-    }
-    let (modified, untracked) = gate_dirty_paths(repo)?;
+    };
+    let mut source = String::from("git diff against the session's base revision plus untracked files, \
+                                   less changes that predate the session");
+    let base = match session.base_rev.as_deref() {
+        Some(base) if base != head => {
+            source.push_str(&format!(
+                "; {} commit(s) made during the session are included",
+                gate_commit_count(repo, base, head)
+            ));
+            base.to_string()
+        }
+        Some(base) => base.to_string(),
+        None => head.to_string(),
+    };
+    let diff = match gate_git_diff(repo, &base) {
+        Ok(diff) => diff,
+        Err(err) if base != head => {
+            // The base is gone (a rebase or an amend rewrote it): the current HEAD is the only
+            // comparison left, and the dossier says so.
+            source = format!(
+                "git diff against HEAD plus untracked files; the session's base revision \
+                 {} is no longer in the repository ({err}), so commits made during the session \
+                 are not included",
+                &base[..base.len().min(10)]
+            );
+            gate_git_diff(repo, head)?
+        }
+        Err(err) => return Err(err),
+    };
     let preexisting = session
         .preexisting_changes
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
     let excluded = |path: &String| preexisting.contains(path) && !reported.contains(path);
-    let (excluded_modified, modified): (Vec<_>, Vec<_>) = modified.into_iter().partition(excluded);
+
+    let mut kept_diff = String::new();
+    let mut preexisting_excluded = Vec::new();
+    for entry in gate_diff_entries(&diff) {
+        let paths = open_kioku_patch::changed_files_from_unified_diff(&entry)
+            .iter()
+            .map(open_kioku_gate::normalize)
+            .collect::<Vec<_>>();
+        if !paths.is_empty() && paths.iter().all(excluded) {
+            preexisting_excluded.extend(paths);
+        } else {
+            kept_diff.push_str(&entry);
+        }
+    }
     let (excluded_untracked, untracked): (Vec<_>, Vec<_>) =
-        untracked.into_iter().partition(excluded);
-    let mut preexisting_excluded = excluded_modified;
+        gate_untracked(repo)?.into_iter().partition(excluded);
     preexisting_excluded.extend(excluded_untracked);
     preexisting_excluded.sort();
-    let diff = gate_git_diff(repo, &modified)?;
-    let mut changed = modified.iter().cloned().collect::<BTreeSet<_>>();
+    preexisting_excluded.dedup();
+
+    let mut changed = open_kioku_patch::changed_files_from_unified_diff(&kept_diff)
+        .iter()
+        .map(open_kioku_gate::normalize)
+        .filter(|path| !path.starts_with(".ok/"))
+        .collect::<BTreeSet<_>>();
     changed.extend(untracked.iter().cloned());
     Ok(ChangeInput {
         changed_files: changed.into_iter().collect(),
         untracked_files: untracked,
         preexisting_excluded,
-        unified_diff: (!diff.trim().is_empty()).then_some(diff),
+        unified_diff: (!kept_diff.trim().is_empty()).then_some(kept_diff),
         head_rev,
-        source: "git diff HEAD plus untracked files, less changes that predate the session"
-            .to_string(),
+        source,
     })
+}
+
+fn gate_commit_count(repo: &Path, base: &str, head: &str) -> usize {
+    ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-list", "--count", &format!("{base}..{head}")])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8_lossy(&output.stdout).trim().parse().ok())
+        .unwrap_or(0)
 }
 
 struct GateRun {
@@ -564,16 +696,11 @@ fn gate_run_verification(
                 )?,
         )
     };
-    let repo_name = OkConfig::load_from_repo(repo)
-        .map(|config| config.repo.name)
-        .ok()
-        .filter(|name| name != "open-kioku-repo")
-        .or_else(|| {
-            repo.canonicalize()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        })
-        .unwrap_or_else(|| "repository".into());
+    let repo_name = if session.repo_name.is_empty() {
+        gate_repo_name(repo, &OkConfig::default())
+    } else {
+        session.repo_name.clone()
+    };
     let dossier = build_dossier(
         &repo_name,
         session,
@@ -664,22 +791,26 @@ fn gate_summary_line(dossier: &ChangeDossier) -> String {
     )
 }
 
-/// The repository a hook serves: the harness's project directory when it says, else the
-/// `--repo` the command was given.
-fn gate_hook_repo(repo: &Path, input: &HookInput) -> PathBuf {
+/// The repository a hook serves. An explicit `--repo` wins; with the default `.`, the
+/// harness's project directory (`CLAUDE_PROJECT_DIR`), then the git root of the `cwd` it
+/// reports, then `.` itself. Always absolute.
+fn gate_hook_repo(repo: &Path, input: &HookInput) -> anyhow::Result<PathBuf> {
+    if repo != Path::new(".") {
+        return Ok(std::path::absolute(repo)?);
+    }
     if let Ok(dir) = std::env::var("CLAUDE_PROJECT_DIR") {
         if !dir.is_empty() {
-            return PathBuf::from(dir);
+            return Ok(PathBuf::from(dir));
         }
     }
-    if repo == Path::new(".") && !input.cwd.is_empty() {
+    if !input.cwd.is_empty() {
         let cwd = PathBuf::from(&input.cwd);
         if let Ok(root) = open_kioku_git::discover_root(&cwd) {
-            return root;
+            return Ok(root);
         }
-        return cwd;
+        return Ok(cwd);
     }
-    repo.to_path_buf()
+    Ok(std::path::absolute(repo)?)
 }
 
 fn gate_emit(response: HookResponse) -> anyhow::Result<()> {
@@ -691,12 +822,12 @@ fn gate_emit(response: HookResponse) -> anyhow::Result<()> {
 
 fn gate_hook(repo: &Path, event: GateHookEvent) -> anyhow::Result<()> {
     let input = HookInput::parse(std::io::stdin().lock()).unwrap_or_default();
-    let repo = gate_hook_repo(repo, &input);
+    let repo = gate_hook_repo(repo, &input)?;
     let gate_store = GateStore::for_repo(&repo);
     let session = gate_store.active_session()?;
     match event {
         GateHookEvent::PreTool => gate_hook_pre_tool(&repo, &gate_store, session, &input),
-        GateHookEvent::PostTool => gate_hook_post_tool(&repo, session, &input),
+        GateHookEvent::PostTool => gate_hook_post_tool(&repo, &gate_store, session, &input),
         GateHookEvent::Stop => gate_hook_stop(&repo, &gate_store, session, &input),
         GateHookEvent::Prompt | GateHookEvent::SessionStart => {
             let event_name = if event == GateHookEvent::Prompt {
@@ -739,6 +870,8 @@ fn gate_hook(repo: &Path, event: GateHookEvent) -> anyhow::Result<()> {
     }
 }
 
+/// Decide the paths an edit tool writes. A path outside the repository is judged by mode: a
+/// session cannot be widened to it.
 fn gate_hook_decisions(
     repo: &Path,
     session: &GateSession,
@@ -747,7 +880,7 @@ fn gate_hook_decisions(
     input
         .edited_paths()
         .iter()
-        .map(|path| match open_kioku_gate::repo_relative(repo, path) {
+        .map(|path| match gate_relative(repo, path) {
             Some(relative) => session.decide(&relative),
             None => {
                 let display = open_kioku_gate::normalize(path);
@@ -776,18 +909,63 @@ fn gate_hook_decisions(
         .collect()
 }
 
+/// Decide the repository files a shell command names as write targets (redirections, `tee`,
+/// `sed -i`, `cp`/`mv` destinations, `touch`, `rm`, `git mv`/`git rm`). A target outside the
+/// repository (`/tmp`, `/dev/null`) is not the gate's concern and is skipped; what the
+/// command writes that this cannot see, the post-tool hook reads from the tree.
+fn gate_shell_decisions(repo: &Path, session: &GateSession, command: &str) -> Vec<PathDecision> {
+    shell_write_targets(command)
+        .iter()
+        .filter_map(|target| {
+            let path = Path::new(target);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                repo.join(path)
+            };
+            gate_relative(repo, &path)
+        })
+        .map(|relative| {
+            let mut decision = session.decide(&relative);
+            if decision.action == HookAction::Deny {
+                decision.reason.push_str(
+                    " Use the Edit or Write tool for repository files so each path is judged \
+                     before it changes, or write scratch output outside the repository.",
+                );
+            }
+            decision
+        })
+        .collect()
+}
+
+/// A snapshot id for one shell tool call, so the post-tool hook can pair with the pre-tool one.
+fn gate_snapshot_id(input: &HookInput) -> String {
+    input
+        .tool_use_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .map(|id| {
+            id.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            open_kioku_gate::sha256_hex(input.tool_input.to_string().as_bytes())[..16].to_string()
+        })
+}
+
 fn gate_hook_pre_tool(
     repo: &Path,
     gate_store: &GateStore,
     session: Option<GateSession>,
     input: &HookInput,
 ) -> anyhow::Result<()> {
-    if !input.is_edit_tool() {
+    if !input.is_edit_tool() && !input.is_shell_tool() {
         return Ok(());
     }
     let Some(session) = session else {
         let config = OkConfig::load_from_repo(repo).unwrap_or_default();
-        if config.gate.require_plan {
+        if config.gate.require_plan && input.is_edit_tool() {
             return gate_emit(HookResponse::Deny {
                 event: "PreToolUse".into(),
                 reason: "This repository requires a gate session before source edits \
@@ -798,7 +976,18 @@ fn gate_hook_pre_tool(
         }
         return Ok(());
     };
-    let decisions = gate_hook_decisions(repo, &session, input);
+    let decisions = if input.is_edit_tool() {
+        gate_hook_decisions(repo, &session, input)
+    } else {
+        // Remember what was dirty before the command, so the post-tool hook can tell what
+        // it changed, however it changed it.
+        if let Some(base) = session.base_rev.as_deref() {
+            if let Ok(dirty) = gate_changed_since(repo, base) {
+                gate_store.write_snapshot(&gate_snapshot_id(input), &dirty)?;
+            }
+        }
+        gate_shell_decisions(repo, &session, input.shell_command().unwrap_or_default())
+    };
     for decision in &decisions {
         gate_store.append_event(&GateEvent::for_decision(
             &session.id,
@@ -816,32 +1005,93 @@ fn gate_hook_pre_tool(
     }
     gate_emit(HookResponse::Deny {
         event: "PreToolUse".into(),
-        reason: format!("Open Kioku gate denied this edit. {}", denied.join(" ")),
+        reason: format!(
+            "Open Kioku gate denied this {}. {}",
+            if input.is_shell_tool() {
+                "command"
+            } else {
+                "edit"
+            },
+            denied.join(" ")
+        ),
     })
 }
 
 fn gate_hook_post_tool(
     repo: &Path,
+    gate_store: &GateStore,
     session: Option<GateSession>,
     input: &HookInput,
 ) -> anyhow::Result<()> {
     let Some(session) = session else {
         return Ok(());
     };
-    if !input.is_edit_tool() {
+    if input.is_edit_tool() {
+        let warned = gate_hook_decisions(repo, &session, input)
+            .into_iter()
+            .filter(|d| d.action == HookAction::Warn)
+            .map(|d| d.reason)
+            .collect::<Vec<_>>();
+        if warned.is_empty() {
+            return Ok(());
+        }
+        return gate_emit(HookResponse::Context {
+            event: "PostToolUse".into(),
+            text: format!("Open Kioku gate: {}", warned.join(" ")),
+        });
+    }
+    if !input.is_shell_tool() {
         return Ok(());
     }
-    let warned = gate_hook_decisions(repo, &session, input)
-        .into_iter()
-        .filter(|d| d.action == HookAction::Warn)
-        .map(|d| d.reason)
-        .collect::<Vec<_>>();
-    if warned.is_empty() {
+    // Files the command changed that the pre-tool hook could not name: new dirty paths
+    // against the snapshot it took. Recorded like any edit; the agent hears about those
+    // outside the boundary.
+    let Some(base) = session.base_rev.as_deref() else {
+        return Ok(());
+    };
+    let before = gate_store.take_snapshot(&gate_snapshot_id(input))?;
+    let Some(before) = before else {
+        return Ok(());
+    };
+    let before = before.into_iter().collect::<BTreeSet<_>>();
+    let named = shell_write_targets(input.shell_command().unwrap_or_default())
+        .iter()
+        .filter_map(|t| gate_relative(repo, &repo.join(t)))
+        .collect::<BTreeSet<_>>();
+    let mut notices = Vec::new();
+    for path in gate_changed_since(repo, base)? {
+        if before.contains(&path) || named.contains(&path) {
+            continue;
+        }
+        // The write already happened, so nothing is denied here: what enforce mode would have
+        // refused is recorded as warned, and the agent is told.
+        let mut decision = session.decide(&path);
+        if decision.action == HookAction::Deny {
+            decision.action = HookAction::Warn;
+        }
+        gate_store.append_event(&GateEvent::for_decision(
+            &session.id,
+            &decision,
+            &input.tool_name,
+        ))?;
+        if decision.action != HookAction::Allow {
+            notices.push(format!(
+                "the command changed `{}` ({}): {}",
+                decision.path,
+                decision.class.as_str(),
+                decision.reason
+            ));
+        }
+    }
+    if notices.is_empty() {
         return Ok(());
     }
     gate_emit(HookResponse::Context {
         event: "PostToolUse".into(),
-        text: format!("Open Kioku gate: {}", warned.join(" ")),
+        text: format!(
+            "Open Kioku gate: {} Verification at finish will hold the change to the boundary.",
+            notices.join(" ")
+        ),
     })
 }
 
@@ -900,11 +1150,11 @@ fn gate_claude_hooks() -> serde_json::Value {
     };
     serde_json::json!({
         "PreToolUse": [{
-            "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+            "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
             "hooks": [command("pre-tool", 30)]
         }],
         "PostToolUse": [{
-            "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+            "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
             "hooks": [command("post-tool", 30)]
         }],
         "Stop": [{
@@ -999,7 +1249,10 @@ fn gate_install(json: bool, repo: &Path, client: GateClient, apply: bool) -> any
                     path.display()
                 )
             } else {
-                format!("{} already carries the gate hooks; nothing changed.", path.display())
+                format!(
+                    "{} already carries the gate hooks; nothing changed.",
+                    path.display()
+                )
             },
             &serde_json::json!({"path": path, "added": added, "applied": true}),
         )
@@ -1043,5 +1296,24 @@ mod gate_tests {
         let mut settings = serde_json::json!("junk");
         assert_eq!(merge_gate_hooks(&mut settings), 5);
         assert!(settings["hooks"]["UserPromptSubmit"].is_array());
+    }
+
+    #[test]
+    fn gate_diff_entries_split_on_each_git_header() {
+        let diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+y\n";
+        let entries = gate_diff_entries(diff);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].starts_with("diff --git a/x"));
+        assert!(entries[1].starts_with("diff --git a/y"));
+        assert_eq!(entries.concat(), diff);
+        assert!(gate_diff_entries("").is_empty());
+    }
+
+    #[test]
+    fn gate_canonical_lossy_keeps_a_missing_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let missing = dir.path().join("not").join("yet.rs");
+        assert_eq!(gate_canonical_lossy(&missing), real.join("not").join("yet.rs"));
     }
 }

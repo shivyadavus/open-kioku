@@ -142,7 +142,7 @@ fn gate_install_is_idempotent_and_keeps_other_settings() {
     assert_eq!(written["permissions"]["allow"][0], "Bash(cargo test)");
     assert_eq!(
         written["hooks"]["PreToolUse"][0]["matcher"],
-        "Edit|Write|MultiEdit|NotebookEdit"
+        "Edit|Write|MultiEdit|NotebookEdit|Bash"
     );
     assert_eq!(
         written["hooks"]["Stop"][0]["hooks"][0]["command"],
@@ -454,4 +454,245 @@ fn gate_require_plan_denies_edits_before_a_session_exists() {
     );
     let allowed = hook(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
     assert!(allowed.trim().is_empty(), "{allowed}");
+}
+
+#[test]
+fn gate_judges_commits_made_during_the_session_and_paired_renames() {
+    let (_temp, repo) = demo_repo();
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "warn",
+        ]);
+        c
+    });
+    // An out-of-boundary file written with no hook, then committed before stopping: the
+    // session's base revision, not HEAD, is what the change is read against.
+    std::fs::write(repo.join("BYPASS.md"), "x\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "mid-session commit"]);
+    let stop: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "stop",
+        &serde_json::json!({"cwd": repo, "hook_event_name": "Stop", "stop_hook_active": false})
+            .to_string(),
+    ))
+    .unwrap();
+    assert_eq!(stop["decision"], "block", "{stop}");
+    assert!(
+        stop["reason"].as_str().unwrap().contains("BYPASS.md"),
+        "{stop}"
+    );
+
+    // A rename keeps both paths in the judged change.
+    git(&repo, &["mv", "src/auth.rs", "src/authn.rs"]);
+    let finished: serde_json::Value = serde_json::from_str(&{
+        let output = ok()
+            .arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "finish"])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    })
+    .unwrap();
+    let changed = finished["dossier"]["change"]["changed_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(changed.contains(&"src/auth.rs".to_string()), "{changed:?}");
+    assert!(changed.contains(&"src/authn.rs".to_string()), "{changed:?}");
+    assert!(changed.contains(&"BYPASS.md".to_string()), "{changed:?}");
+    let source = finished["dossier"]["change"]["source"].as_str().unwrap();
+    assert!(
+        source.contains("1 commit(s) made during the session"),
+        "{source}"
+    );
+}
+
+#[test]
+fn gate_check_and_expand_accept_absolute_paths_from_the_repository_root() {
+    let (_temp, repo) = demo_repo();
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "enforce",
+        ]);
+        c
+    });
+    // No --repo: the default `.` is the current directory, and the path is absolute.
+    let check: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.current_dir(&repo)
+            .arg("--json")
+            .args(["gate", "check"])
+            .arg(repo.join("src/auth.rs"));
+        c
+    }))
+    .unwrap();
+    assert_eq!(check["path"], "src/auth.rs");
+    assert_eq!(check["action"], "allow");
+    run({
+        let mut c = ok();
+        c.current_dir(&repo)
+            .args(["gate", "expand"])
+            .arg(repo.join("src/retry.rs"))
+            .args(["--reason", "new module"]);
+        c
+    });
+    let status: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.current_dir(&repo).arg("--json").args(["gate", "status"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(
+        status["session"]["boundary"]["expansions"][0]["path"],
+        "src/retry.rs"
+    );
+}
+
+#[test]
+fn gate_force_start_keeps_the_old_session_when_planning_fails() {
+    let (_temp, repo) = demo_repo();
+    run({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "start", "add retry handling to token refresh"]);
+        c
+    });
+    // Break planning: the index directory is gone.
+    let ok_dir = repo.join(".ok");
+    let saved = _temp.path().join("ok-saved");
+    std::fs::rename(&ok_dir, &saved).unwrap();
+    std::fs::create_dir_all(&ok_dir).unwrap();
+    std::fs::rename(saved.join("gate"), ok_dir.join("gate")).unwrap();
+    let (_, err) = run_failure({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "start", "another task", "--force"]);
+        c
+    });
+    assert!(!err.contains("already active"), "{err}");
+    let status: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "status"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(
+        status["active"], true,
+        "the old session survives a failed replacement"
+    );
+    assert_eq!(
+        status["session"]["task"],
+        "add retry handling to token refresh"
+    );
+}
+
+#[test]
+fn gate_shell_commands_are_judged_by_named_targets_and_by_what_they_changed() {
+    let (_temp, repo) = demo_repo();
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "enforce",
+        ]);
+        c
+    });
+    let bash = |command: &str, id: &str| {
+        serde_json::json!({
+            "session_id": "test", "cwd": repo, "tool_name": "Bash", "tool_use_id": id,
+            "tool_input": {"command": command}
+        })
+        .to_string()
+    };
+    // A redirection into an outside file is denied before it runs; one into /tmp is not the
+    // gate's concern; one into an allowed file passes.
+    let denied: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "pre-tool",
+        &bash("echo x > src/retry.rs", "t1"),
+    ))
+    .unwrap();
+    assert_eq!(
+        denied["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{denied}"
+    );
+    assert!(denied["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .contains("Edit or Write tool"));
+    let scratch = hook(
+        &repo,
+        "pre-tool",
+        &bash("cargo test > /tmp/gate-test.log", "t2"),
+    );
+    assert!(scratch.trim().is_empty(), "{scratch}");
+    let inside = hook(&repo, "pre-tool", &bash("echo '// x' >> src/auth.rs", "t3"));
+    assert!(inside.trim().is_empty(), "{inside}");
+
+    // A command the hook cannot read (a heredoc) writes an outside file: the pre-tool hook
+    // snapshots, the post-tool hook sees the new file and tells the agent.
+    let pre = hook(
+        &repo,
+        "pre-tool",
+        &bash(
+            "python3 - <<'EOF'\nopen('src/retry.rs','w').write('x')\nEOF",
+            "t4",
+        ),
+    );
+    assert!(pre.trim().is_empty(), "{pre}");
+    std::fs::write(repo.join("src/retry.rs"), "pub fn retry() {}\n").unwrap();
+    let post: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "post-tool",
+        &bash(
+            "python3 - <<'EOF'\nopen('src/retry.rs','w').write('x')\nEOF",
+            "t4",
+        ),
+    ))
+    .unwrap();
+    let text = post["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        text.contains("src/retry.rs") && text.contains("outside"),
+        "{text}"
+    );
+    // The trail recorded the shell write like any edit.
+    let status: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "status"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(status["edits_denied"], 1, "{status}");
+    assert_eq!(
+        status["edits_warned"], 1,
+        "a shell write that already landed is recorded as warned, not denied: {status}"
+    );
 }
