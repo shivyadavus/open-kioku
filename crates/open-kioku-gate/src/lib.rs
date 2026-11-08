@@ -937,7 +937,7 @@ fn redirect_operator(word: &str) -> Option<&str> {
 
 /// Subshell and group punctuation glued to a word: `(echo`, `auth.rs)`, `{`, `}`.
 fn trim_group(word: &str) -> String {
-    if word.starts_with("$(") {
+    if word.starts_with("$(") || word.starts_with(">(") || word.starts_with("<(") {
         return word.to_string();
     }
     word.trim_start_matches(['(', '{'])
@@ -952,6 +952,9 @@ fn resolve_target(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
         || value.starts_with("/dev/")
         || value.starts_with('$')
         || value.starts_with('~')
+        || value.starts_with('(')
+        || value.starts_with(">(")
+        || value.starts_with("<(")
         || value.contains("$(")
         || value.contains('`')
         || value.contains(['*', '?', '['])
@@ -973,6 +976,7 @@ fn split_shell_segments(command: &str) -> Vec<String> {
     let mut quote: Option<char> = None;
     let mut chars = command.chars().peekable();
     let mut heredoc: Option<String> = None;
+    let mut pending_heredoc: Option<String> = None;
     let mut line = String::new();
     while let Some(c) = chars.next() {
         if let Some(terminator) = &heredoc {
@@ -1024,19 +1028,18 @@ fn split_shell_segments(command: &str) -> Vec<String> {
                         chars.next();
                     }
                     let word = word.trim_matches(|c| c == '\'' || c == '"').to_string();
-                    // The rest of this line is still the command; the body starts next line.
-                    while let Some(&n) = chars.peek() {
-                        if n == '\n' {
-                            chars.next();
-                            break;
-                        }
-                        current.push(n);
-                        chars.next();
-                    }
-                    heredoc = Some(word);
-                    line.clear();
+                    // The rest of this line is still command text (`cat <<EOF | tee f`), split
+                    // like any other; the body starts after the newline.
+                    pending_heredoc = Some(word);
                 }
-                ';' | '\n' => {
+                '\n' => {
+                    segments.push(std::mem::take(&mut current));
+                    if let Some(word) = pending_heredoc.take() {
+                        heredoc = Some(word);
+                        line.clear();
+                    }
+                }
+                ';' => {
                     segments.push(std::mem::take(&mut current));
                 }
                 '|' | '&' => {
@@ -1089,6 +1092,18 @@ fn shell_words(segment: &str) -> Vec<String> {
             current.push_str("$(");
             substitution_depth = 1;
             i += 1;
+        } else if (c == '>' || c == '<') && chars.get(i + 1) == Some(&'(') {
+            // Process substitution: `>(tee log)` is one word, never a path.
+            current.push(c);
+            current.push('(');
+            substitution_depth = 1;
+            i += 1;
+        } else if c == '\\' {
+            // An escaped character is part of the word: `with\ space.rs`.
+            if let Some(&next) = chars.get(i + 1) {
+                current.push(next);
+                i += 1;
+            }
         } else if c == '`' {
             in_backtick = true;
             current.push(c);
@@ -1950,6 +1965,19 @@ mod tests {
         );
         assert_eq!(t("mv -t dest src1 src2"), vec!["/r/dest"]);
         assert_eq!(t("cp --target-directory=out a b"), vec!["/r/out"]);
+        assert_eq!(
+            t("cat <<EOF | tee src/gen.rs\nfn x() {}\nEOF"),
+            vec!["/r/src/gen.rs"],
+            "a command fed by a heredoc is a command"
+        );
+        assert!(
+            t("cargo test 2> >(tee err.log)").is_empty(),
+            "process substitution is not a path"
+        );
+        assert_eq!(
+            t("echo x > src/with\\ space.rs"),
+            vec!["/r/src/with space.rs"]
+        );
     }
 
     #[test]

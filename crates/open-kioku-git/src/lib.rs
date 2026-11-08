@@ -289,7 +289,20 @@ pub fn compare_with_head(
 /// an index built here now would read differently from one built at `commit`, ignored files
 /// aside, which indexing skips anyway.
 pub fn changed_paths_since_commit(root: impl AsRef<Path>, commit: &str) -> Result<Vec<PathBuf>> {
-    let root = root.as_ref();
+    changed_paths_since(root.as_ref(), commit, false)
+}
+
+/// [`changed_paths_since_commit`] with every path relative to `root` rather than to the
+/// repository's top level, the form `unified_diff_since` and `untracked_paths` use, so the
+/// three agree when `root` is a subdirectory of the git working tree.
+pub fn changed_paths_since_commit_relative(
+    root: impl AsRef<Path>,
+    commit: &str,
+) -> Result<Vec<PathBuf>> {
+    changed_paths_since(root.as_ref(), commit, true)
+}
+
+fn changed_paths_since(root: &Path, commit: &str, relative: bool) -> Result<Vec<PathBuf>> {
     let run = |args: &[&str], what: &str| -> Result<Vec<PathBuf>> {
         let output = Command::new("git")
             .arg("-C")
@@ -311,20 +324,19 @@ pub fn changed_paths_since_commit(root: impl AsRef<Path>, commit: &str) -> Resul
             .map(|raw| PathBuf::from(String::from_utf8_lossy(raw).into_owned()))
             .collect())
     };
-    let mut paths = run(
-        &[
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--end-of-options",
-            commit,
-            "--",
-        ],
-        "diff --name-only",
-    )?;
+    let mut args = vec![
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+    ];
+    if relative {
+        args.push("--relative");
+    }
+    args.extend(["--end-of-options", commit, "--"]);
+    let mut paths = run(&args, "diff --name-only")?;
     paths.extend(untracked_paths(root)?);
     paths.sort();
     paths.dedup();

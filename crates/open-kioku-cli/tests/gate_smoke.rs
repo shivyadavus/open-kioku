@@ -210,6 +210,13 @@ fn gate_enforces_the_boundary_through_the_hooks_and_writes_a_dossier() {
     assert!(bash.trim().is_empty(), "{bash}");
     let inside = hook(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
     assert!(inside.trim().is_empty(), "{inside}");
+    // The edit is recorded once it has happened, by the post-tool hook.
+    let after = hook(
+        &repo,
+        "post-tool",
+        &edit_input(&repo, "Edit", "src/auth.rs"),
+    );
+    assert!(after.trim().is_empty(), "{after}");
     let outside: serde_json::Value = serde_json::from_str(&hook(
         &repo,
         "pre-tool",
@@ -997,6 +1004,11 @@ fn gate_force_start_keeps_the_replaced_sessions_edits_as_the_change() {
         &edit_input(&repo, "Write", "src/retry.rs"),
     );
     std::fs::write(repo.join("src/retry.rs"), "pub fn retry() {}\n").unwrap();
+    hook(
+        &repo,
+        "post-tool",
+        &edit_input(&repo, "Write", "src/retry.rs"),
+    );
     run({
         let mut c = ok();
         c.arg("--repo").arg(&repo).args([
@@ -1031,4 +1043,140 @@ fn gate_force_start_keeps_the_replaced_sessions_edits_as_the_change() {
         .collect::<Vec<_>>();
     assert_eq!(changed, vec!["src/retry.rs".to_string()], "{finished}");
     assert_eq!(finished["dossier"]["verdict"], "fail");
+}
+
+#[test]
+fn gate_runs_outside_git_from_the_hooks_trail_and_finds_the_session_from_a_subdirectory() {
+    // Not a git repository: the change is what the hooks reported.
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("demo");
+    run({
+        let mut c = ok();
+        c.arg("demo").arg("--path").arg(&repo);
+        c
+    });
+    let started: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json").arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "warn",
+        ]);
+        c
+    }))
+    .unwrap();
+    assert!(started["base_rev"].is_null(), "{started}");
+    hook(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
+    let mut auth = std::fs::read_to_string(repo.join("src/auth.rs")).unwrap();
+    auth.push_str("// x\n");
+    std::fs::write(repo.join("src/auth.rs"), auth).unwrap();
+    hook(
+        &repo,
+        "post-tool",
+        &edit_input(&repo, "Edit", "src/auth.rs"),
+    );
+    // An edit the hook allowed but that never happened is not in the trail.
+    hook(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/lib.rs"));
+    let finished: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "finish"]);
+        c
+    }))
+    .unwrap();
+    let dossier = &finished["dossier"];
+    assert_eq!(
+        dossier["change"]["changed_files"],
+        serde_json::json!(["src/auth.rs"])
+    );
+    assert_eq!(dossier["trail"]["edits_allowed"], 1, "{dossier}");
+    assert!(dossier["caveats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c.as_str().unwrap().contains("not a git repository")));
+
+    // In a git repository, `ok gate expand` from a subdirectory finds the session and resolves
+    // the path against the caller's directory, as the hook's denial message assumes.
+    let (_temp, repo) = demo_repo();
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "enforce",
+        ]);
+        c
+    });
+    run({
+        let mut c = ok();
+        c.current_dir(repo.join("src")).args([
+            "gate",
+            "expand",
+            "src/retry.rs",
+            "--reason",
+            "new module",
+        ]);
+        c
+    });
+    let status: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.current_dir(repo.join("src"))
+            .arg("--json")
+            .args(["gate", "status"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(status["active"], true);
+    assert_eq!(
+        status["session"]["boundary"]["expansions"][0]["path"],
+        "src/retry.rs"
+    );
+}
+
+#[test]
+fn gate_reads_a_relative_path_from_the_current_directory_only_when_it_exists_there() {
+    let (_temp, repo) = demo_repo();
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "enforce",
+        ]);
+        c
+    });
+    std::fs::write(repo.join("src/local.rs"), "").unwrap();
+    run({
+        let mut c = ok();
+        c.current_dir(repo.join("src")).args([
+            "gate",
+            "expand",
+            "local.rs",
+            "--reason",
+            "sibling module",
+        ]);
+        c
+    });
+    let status: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "status"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(
+        status["session"]["boundary"]["expansions"][0]["path"],
+        "src/local.rs"
+    );
 }

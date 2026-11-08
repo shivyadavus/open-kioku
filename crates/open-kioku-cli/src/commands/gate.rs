@@ -32,12 +32,14 @@ enum GateCommand {
     Status,
     /// Decide one path against the active boundary, the way the edit hook would.
     Check {
-        /// Repository-relative or absolute path.
+        /// Repository-relative or absolute path. A relative path that exists only from the
+        /// current directory is read from there.
         path: PathBuf,
     },
     /// Widen the active boundary by one path, recording the reason in the dossier.
     Expand {
-        /// Repository-relative or absolute path to admit.
+        /// Repository-relative or absolute path to admit. A relative path that exists only
+        /// from the current directory is read from there.
         path: PathBuf,
         /// Why this file must change for the declared task.
         #[arg(long, value_name = "TEXT")]
@@ -149,7 +151,7 @@ fn handle_gate_command(json: bool, repo: &Path, command: GateCommand) -> anyhow:
     if let GateCommand::Hook { event } = command {
         return gate_hook(repo, event);
     }
-    let repo = std::path::absolute(repo)?;
+    let repo = gate_command_repo(repo)?;
     let repo = repo.as_path();
     match command {
         GateCommand::Start {
@@ -172,6 +174,38 @@ fn handle_gate_command(json: bool, repo: &Path, command: GateCommand) -> anyhow:
     }
 }
 
+/// The repository a non-hook subcommand works on: an explicit `--repo` as given, else the git
+/// top level above the current directory (so `ok gate expand` works from the subdirectory a
+/// shell left the agent in), else the current directory. Always absolute.
+fn gate_command_repo(repo: &Path) -> anyhow::Result<PathBuf> {
+    if repo != Path::new(".") {
+        return Ok(std::path::absolute(repo)?);
+    }
+    let cwd = std::env::current_dir()?;
+    Ok(gate_git_toplevel(&cwd).unwrap_or(cwd))
+}
+
+/// The git working tree's top level above `dir`, when `dir` is inside one.
+fn gate_git_toplevel(dir: &Path) -> Option<PathBuf> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then(|| PathBuf::from(text))
+}
+
+/// Whether `repo` is inside a git working tree. `discover_root` falls back to the directory
+/// itself, so it cannot answer this.
+fn gate_in_git(repo: &Path) -> bool {
+    gate_git_toplevel(repo).is_some()
+}
+
 /// The name the dossier gives the repository: `[repo] name` from ok.toml unless it is the
 /// default, else the directory name.
 fn gate_repo_name(repo: &Path, config: &OkConfig) -> String {
@@ -187,11 +221,8 @@ fn gate_repo_name(repo: &Path, config: &OkConfig) -> String {
 /// The revision a session's change is read against: `HEAD`, or the empty tree in a git
 /// repository with no commits yet. `None` outside a git repository.
 fn gate_base_rev(repo: &Path) -> Option<String> {
-    open_kioku_git::commit(repo).or_else(|| {
-        open_kioku_git::discover_root(repo)
-            .ok()
-            .map(|_| EMPTY_TREE_REV.to_string())
-    })
+    open_kioku_git::commit(repo)
+        .or_else(|| gate_in_git(repo).then(|| EMPTY_TREE_REV.to_string()))
 }
 
 fn gate_start(
@@ -413,10 +444,28 @@ fn gate_relative_path(repo: &Path, path: &Path) -> anyhow::Result<String> {
     })
 }
 
+/// A path given to `check` or `expand`. An absolute path is itself. A relative path is read
+/// against the repository root, which is how the hooks' messages spell paths, unless it names
+/// an existing file only when read against the caller's directory (the agent's shell may have
+/// `cd`ed into a subdirectory).
+fn gate_argument_path(repo: &Path, path: &Path) -> anyhow::Result<String> {
+    if path.is_absolute() {
+        return gate_relative_path(repo, path);
+    }
+    let from_repo = repo.join(path);
+    let from_cwd = std::path::absolute(path)?;
+    if !from_repo.exists() && from_cwd.exists() {
+        if let Some(relative) = gate_relative(repo, &from_cwd) {
+            return Ok(relative);
+        }
+    }
+    gate_relative_path(repo, &from_repo)
+}
+
 fn gate_check(json: bool, repo: &Path, path: &Path) -> anyhow::Result<()> {
     let gate_store = GateStore::for_repo(repo);
     let session = require_active_session(&gate_store)?;
-    let relative = gate_relative_path(repo, path)?;
+    let relative = gate_argument_path(repo, path)?;
     let decision = session.decide(&relative);
     if json {
         println!("{}", serde_json::to_string_pretty(&decision)?);
@@ -438,7 +487,7 @@ fn gate_check(json: bool, repo: &Path, path: &Path) -> anyhow::Result<()> {
 fn gate_expand(json: bool, repo: &Path, path: &Path, reason: &str) -> anyhow::Result<()> {
     let gate_store = GateStore::for_repo(repo);
     let mut session = require_active_session(&gate_store)?;
-    let relative = gate_relative_path(repo, path)?;
+    let relative = gate_argument_path(repo, path)?;
     gate_store.expand(&mut session, &relative, reason)?;
     if json {
         println!(
@@ -458,7 +507,18 @@ fn gate_expand(json: bool, repo: &Path, path: &Path, reason: &str) -> anyhow::Re
 /// committed or not, and untracked files git does not ignore. The gate's own `.ok/` is
 /// never counted.
 fn gate_changed_since(repo: &Path, base: &str) -> anyhow::Result<Vec<String>> {
-    let mut paths = open_kioku_git::changed_paths_since_commit(repo, base)?
+    let listed = match open_kioku_git::changed_paths_since_commit_relative(repo, base) {
+        Ok(listed) => listed,
+        // The base is gone (a rebase or an amend rewrote it): HEAD is the comparison left,
+        // as `gate_change_input` reads it.
+        Err(err) => match open_kioku_git::commit(repo) {
+            Some(head) if head != base => {
+                open_kioku_git::changed_paths_since_commit_relative(repo, &head)?
+            }
+            _ => return Err(err.into()),
+        },
+    };
+    let mut paths = listed
         .iter()
         .map(open_kioku_gate::normalize)
         .filter(|path| !path.starts_with(".ok/"))
@@ -1018,7 +1078,10 @@ fn gate_hook_pre_tool(
         if !config.gate.require_plan {
             return Ok(());
         }
-        let writes_repo_files = input.is_edit_tool()
+        let writes_repo_files = input
+            .edited_paths()
+            .iter()
+            .any(|path| gate_relative(repo, path).is_some())
             || !gate_shell_targets(
                 repo,
                 &gate_shell_cwd(repo, input),
@@ -1046,12 +1109,17 @@ fn gate_hook_pre_tool(
             input.shell_command().unwrap_or_default(),
         )
     };
+    // A denial is recorded now, because the tool will not run. An edit that is allowed is
+    // recorded by the post-tool hook once it has happened: a tool call the user refuses or
+    // that fails must not read as an edit.
     for decision in &decisions {
-        gate_store.append_event(&GateEvent::for_decision(
-            &session.id,
-            decision,
-            &input.tool_name,
-        ))?;
+        if decision.action == HookAction::Deny || input.is_shell_tool() {
+            gate_store.append_event(&GateEvent::for_decision(
+                &session.id,
+                decision,
+                &input.tool_name,
+            ))?;
+        }
     }
     let denied = decisions
         .iter()
@@ -1076,9 +1144,8 @@ fn gate_hook_pre_tool(
         // The command will run: remember what was dirty before it, so the post-tool hook can
         // tell what it changed, however it changed it.
         if let Some(base) = session.base_rev.as_deref() {
-            if let Ok(dirty) = gate_dirty_stamps(repo, base) {
-                gate_store.write_snapshot(&gate_snapshot_id(input), &dirty)?;
-            }
+            let dirty = gate_dirty_stamps(repo, base)?;
+            gate_store.write_snapshot(&gate_snapshot_id(input), &dirty)?;
         }
     }
     Ok(())
@@ -1094,7 +1161,15 @@ fn gate_hook_post_tool(
         return Ok(());
     };
     if input.is_edit_tool() {
-        let warned = gate_hook_decisions(repo, &session, input)
+        let decisions = gate_hook_decisions(repo, &session, input);
+        for decision in &decisions {
+            gate_store.append_event(&GateEvent::for_decision(
+                &session.id,
+                decision,
+                &input.tool_name,
+            ))?;
+        }
+        let warned = decisions
             .into_iter()
             .filter(|d| d.action == HookAction::Warn)
             .map(|d| d.reason)

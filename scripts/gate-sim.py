@@ -189,6 +189,8 @@ def main() -> int:
                     faithful_admitted += 1
                 with open(repo / path, "a", encoding="utf-8") as handle:
                     handle.write("\n// gate-sim faithful edit\n")
+                # The harness reports a completed edit through the post-tool hook.
+                hook(ok, repo, "post-tool", edit_payload(repo, path), env)
             record["faithful_admitted"] = faithful_admitted
             record["faithful_in_boundary"] = sum(1 for f in case["files"] if f in admitted)
 
@@ -206,6 +208,7 @@ def main() -> int:
                 else:
                     with open(repo / path, "a", encoding="utf-8") as handle:
                         handle.write("\n// gate-sim drift edit\n")
+                    hook(ok, repo, "post-tool", edit_payload(repo, path, "Write"), env)
                     drift_landed.append(path)
             record["drift_denied_at_hook"] = drift_denied
 
