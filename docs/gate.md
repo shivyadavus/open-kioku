@@ -20,8 +20,11 @@ ok gate finish                        # verify, write the dossier, end the sessi
 
 `ok gate start` builds the same plan `ok plan` builds, saves it under `.ok/gate/plan.json`, and
 activates a session whose boundary is the plan's `allowed_files`, `caution_files`,
-`forbidden_files` and `forbidden_rules`. It records `git rev-parse HEAD` and every path that is
-already modified or untracked, so a dirty working tree is not mistaken for the session's change.
+`forbidden_files` and `forbidden_rules`. It records the base revision (`HEAD`, or git's empty
+tree in a repository with no commits yet) and every path that is already modified or
+untracked, so a dirty working tree is not mistaken for the session's change. `--force`
+replaces an active session only once the new plan is built, and keeps the replaced session's
+trail as `.ok/gate/events-<session>.jsonl`.
 
 `ok gate finish` verifies the change — every tracked change since the session's recorded base
 revision, committed during the session or not, plus untracked files, less what was dirty before
@@ -42,8 +45,13 @@ is `ok gate hook <event>`: it reads the harness's JSON on stdin and answers on s
 | `pre-tool` | `PreToolUse` on `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | Classifies each path against the boundary. Denies a forbidden path in every mode but `observe`; denies an outside path in `enforce`; records every decision to `.ok/gate/events.jsonl`. Never opens the index: one small JSON read per edit. |
 | `post-tool` | `PostToolUse`, same tools | After an allowed edit outside or on a caution path, tells the agent so, with the command that widens the boundary. |
 | `pre-tool`, `post-tool` | `PreToolUse` / `PostToolUse` on `Bash` | A shell command can write files the edit tools never see. Before it runs, the paths it names as write targets (`>`/`>>` redirections, `tee`, `sed -i`, `cp`/`mv` destinations, `touch`, `rm`, `git mv`/`git rm`) are judged like edits, and a dirty-tree snapshot is taken; a target outside the repository (`/tmp`, `/dev/null`) is not the gate's concern. After it runs, every path that became dirty and was not named is recorded in the trail and, when outside the boundary, reported to the agent. A write that already landed is recorded as warned, never denied. |
-| `stop` | `Stop` | Verifies the change and writes the dossier. On `FAIL` it holds the agent with the violations and the remedies; when `stop_hook_active` is set (the agent is already continuing because of a stop hook) it reports and never blocks again, so a condition the agent cannot resolve cannot loop. |
+| `stop` | `Stop` | Verifies the change and writes the dossier. On `FAIL` it holds the agent with the violations and the remedies; when `stop_hook_active` is set (the agent is already continuing because of a stop hook) it reports and never blocks again, so a condition the agent cannot resolve cannot loop. A stop with nothing changed since the last verification (same trail, same dirty tree) answers from that verification instead of opening the index again. |
 | `prompt`, `session-start` | `UserPromptSubmit`, `SessionStart` | One factual line: whether a session is active, its task and boundary size, and how to start, widen, or finish one. |
+
+The edit hook fails closed: malformed input, an unreadable `ok.toml` or a torn session file
+refuse the tool call (exit 2, with the way out on stderr) rather than let an edit through
+unjudged. The informing hooks (`prompt`, `session-start`, `post-tool`, `stop`) never block on
+their own errors.
 
 A denial reads, for example:
 

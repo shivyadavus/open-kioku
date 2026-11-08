@@ -1,7 +1,7 @@
 use open_kioku_gate::{
     build_dossier, plan_with_expansions, render_markdown, shell_write_targets, ChangeDossier,
     ChangeInput, DossierVerdict, EventKind, GateEvent, GateMode, GateSession, GateStore,
-    HookAction, HookInput, HookResponse, PathDecision,
+    HookAction, HookInput, HookResponse, LastVerify, PathDecision, EMPTY_TREE_REV,
 };
 
 #[derive(Subcommand)]
@@ -23,7 +23,8 @@ enum GateCommand {
         #[arg(long, default_value_t = 12)]
         limit: usize,
         /// Replace an active session instead of refusing to start over it. The new plan is
-        /// built first; the old session ends only once the new one can start.
+        /// built first; the old session ends only once the new one can start, and its event
+        /// trail is kept as `.ok/gate/events-<session>.jsonl`.
         #[arg(long, default_value_t = false)]
         force: bool,
     },
@@ -183,6 +184,16 @@ fn gate_repo_name(repo: &Path, config: &OkConfig) -> String {
         .unwrap_or_else(|| "repository".into())
 }
 
+/// The revision a session's change is read against: `HEAD`, or the empty tree in a git
+/// repository with no commits yet. `None` outside a git repository.
+fn gate_base_rev(repo: &Path) -> Option<String> {
+    open_kioku_git::commit(repo).or_else(|| {
+        open_kioku_git::discover_root(repo)
+            .ok()
+            .map(|_| EMPTY_TREE_REV.to_string())
+    })
+}
+
 fn gate_start(
     json: bool,
     repo: &Path,
@@ -230,7 +241,7 @@ fn gate_start(
     let plan_json = serde_json::to_vec_pretty(&report)?;
     let mut session = GateSession::new(task, mode, &report, &plan_json);
     session.repo_name = gate_repo_name(repo, &config);
-    session.base_rev = open_kioku_git::commit(repo);
+    session.base_rev = gate_base_rev(repo);
     if let Some(base) = session.base_rev.as_deref() {
         session.preexisting_changes = gate_changed_since(repo, base)?;
     }
@@ -453,58 +464,11 @@ fn gate_changed_since(repo: &Path, base: &str) -> anyhow::Result<Vec<String>> {
 
 /// Untracked files git does not ignore, repository-relative, without the gate's own `.ok/`.
 fn gate_untracked(repo: &Path) -> anyhow::Result<Vec<String>> {
-    let output = ProcessCommand::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["-c", "core.quotePath=false"])
-        .args(["ls-files", "--others", "--exclude-standard", "-z"])
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git ls-files --others failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(output
-        .stdout
-        .split(|b| *b == 0)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| open_kioku_gate::normalize_str(&String::from_utf8_lossy(entry)))
+    Ok(open_kioku_git::untracked_paths(repo)?
+        .iter()
+        .map(open_kioku_gate::normalize)
         .filter(|path| !path.starts_with(".ok/"))
         .collect())
-}
-
-/// The unified diff of every tracked change since `base`, committed or not, with the flags
-/// `ok verify --git` uses. Renames are paired, so a file moved out of a forbidden directory
-/// is judged with both of its paths.
-fn gate_git_diff(repo: &Path, base: &str) -> anyhow::Result<String> {
-    let output = ProcessCommand::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["-c", "core.quotePath=false"])
-        .args([
-            "diff",
-            "--unified=0",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--find-renames",
-            "--submodule=short",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            "--relative",
-            "--end-of-options",
-            base,
-            "--",
-        ])
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git diff {base} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8(output.stdout)?)
 }
 
 /// Split a unified diff into its `diff --git` entries.
@@ -531,7 +495,6 @@ fn gate_change_input(
     session: &GateSession,
     events: &[GateEvent],
 ) -> anyhow::Result<ChangeInput> {
-    let head_rev = open_kioku_git::commit(repo);
     let reported = events
         .iter()
         .filter(|event| {
@@ -542,7 +505,7 @@ fn gate_change_input(
         })
         .filter_map(|event| event.path.clone())
         .collect::<BTreeSet<_>>();
-    let Some(head) = head_rev.as_deref() else {
+    let Some(head) = gate_base_rev(repo) else {
         let changed = reported
             .into_iter()
             .filter(|path| repo.join(path).exists())
@@ -552,24 +515,27 @@ fn gate_change_input(
             untracked_files: Vec::new(),
             preexisting_excluded: Vec::new(),
             unified_diff: None,
-            head_rev,
+            head_rev: None,
             source: "edits reported by the hooks (not a git repository)".to_string(),
         });
     };
-    let mut source = String::from("git diff against the session's base revision plus untracked files, \
-                                   less changes that predate the session");
+    let head_rev = open_kioku_git::commit(repo);
+    let mut source = String::from(
+        "git diff against the session's base revision plus untracked files, less changes \
+         that predate the session",
+    );
     let base = match session.base_rev.as_deref() {
         Some(base) if base != head => {
             source.push_str(&format!(
                 "; {} commit(s) made during the session are included",
-                gate_commit_count(repo, base, head)
+                gate_commit_count(repo, base, &head)
             ));
             base.to_string()
         }
         Some(base) => base.to_string(),
-        None => head.to_string(),
+        None => head.clone(),
     };
-    let diff = match gate_git_diff(repo, &base) {
+    let diff = match open_kioku_git::unified_diff_since(repo, &base) {
         Ok(diff) => diff,
         Err(err) if base != head => {
             // The base is gone (a rebase or an amend rewrote it): the current HEAD is the only
@@ -580,9 +546,9 @@ fn gate_change_input(
                  are not included",
                 &base[..base.len().min(10)]
             );
-            gate_git_diff(repo, head)?
+            open_kioku_git::unified_diff_since(repo, &head)?
         }
-        Err(err) => return Err(err),
+        Err(err) => return Err(err.into()),
     };
     let preexisting = session
         .preexisting_changes
@@ -598,7 +564,15 @@ fn gate_change_input(
             .iter()
             .map(open_kioku_gate::normalize)
             .collect::<Vec<_>>();
-        if !paths.is_empty() && paths.iter().all(excluded) {
+        if paths.is_empty() {
+            continue;
+        }
+        // The gate's own files are never the agent's change, even in a repository that
+        // tracks part of `.ok/`.
+        if paths.iter().all(|path| path.starts_with(".ok/")) {
+            continue;
+        }
+        if paths.iter().all(excluded) {
             preexisting_excluded.extend(paths);
         } else {
             kept_diff.push_str(&entry);
@@ -813,6 +787,15 @@ fn gate_hook_repo(repo: &Path, input: &HookInput) -> anyhow::Result<PathBuf> {
     Ok(std::path::absolute(repo)?)
 }
 
+/// The directory a shell command starts in: the one the harness reports, else the repository.
+fn gate_shell_cwd(repo: &Path, input: &HookInput) -> PathBuf {
+    if input.cwd.is_empty() {
+        repo.to_path_buf()
+    } else {
+        PathBuf::from(&input.cwd)
+    }
+}
+
 fn gate_emit(response: HookResponse) -> anyhow::Result<()> {
     if let Some(value) = response.to_json() {
         println!("{}", serde_json::to_string(&value)?);
@@ -821,12 +804,32 @@ fn gate_emit(response: HookResponse) -> anyhow::Result<()> {
 }
 
 fn gate_hook(repo: &Path, event: GateHookEvent) -> anyhow::Result<()> {
-    let input = HookInput::parse(std::io::stdin().lock()).unwrap_or_default();
+    let parsed = HookInput::parse(std::io::stdin().lock());
+    if event == GateHookEvent::PreTool {
+        // The edit hook fails closed: malformed input, an unreadable configuration or a torn
+        // session must refuse the tool call (exit 2, which the harness treats as blocking)
+        // rather than let an edit through unjudged. The other hooks only inform.
+        return match parsed
+            .map_err(anyhow::Error::from)
+            .and_then(|input| gate_hook_pre_tool_entry(repo, &input))
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                eprintln!(
+                    "Open Kioku gate: the edit hook could not judge this tool call ({err:#}), so \
+                     it is refused. Run `ok gate status` in the repository to see the session; \
+                     `ok gate abandon` ends a broken one."
+                );
+                std::process::exit(2);
+            }
+        };
+    }
+    let input = parsed.unwrap_or_default();
     let repo = gate_hook_repo(repo, &input)?;
     let gate_store = GateStore::for_repo(&repo);
     let session = gate_store.active_session()?;
     match event {
-        GateHookEvent::PreTool => gate_hook_pre_tool(&repo, &gate_store, session, &input),
+        GateHookEvent::PreTool => unreachable!("handled above"),
         GateHookEvent::PostTool => gate_hook_post_tool(&repo, &gate_store, session, &input),
         GateHookEvent::Stop => gate_hook_stop(&repo, &gate_store, session, &input),
         GateHookEvent::Prompt | GateHookEvent::SessionStart => {
@@ -870,6 +873,16 @@ fn gate_hook(repo: &Path, event: GateHookEvent) -> anyhow::Result<()> {
     }
 }
 
+fn gate_hook_pre_tool_entry(repo: &Path, input: &HookInput) -> anyhow::Result<()> {
+    if !input.is_edit_tool() && !input.is_shell_tool() {
+        return Ok(());
+    }
+    let repo = gate_hook_repo(repo, input)?;
+    let gate_store = GateStore::for_repo(&repo);
+    let session = gate_store.active_session()?;
+    gate_hook_pre_tool(&repo, &gate_store, session, input)
+}
+
 /// Decide the paths an edit tool writes. A path outside the repository is judged by mode: a
 /// session cannot be widened to it.
 fn gate_hook_decisions(
@@ -909,24 +922,27 @@ fn gate_hook_decisions(
         .collect()
 }
 
-/// Decide the repository files a shell command names as write targets (redirections, `tee`,
-/// `sed -i`, `cp`/`mv` destinations, `touch`, `rm`, `git mv`/`git rm`). A target outside the
-/// repository (`/tmp`, `/dev/null`) is not the gate's concern and is skipped; what the
-/// command writes that this cannot see, the post-tool hook reads from the tree.
-fn gate_shell_decisions(repo: &Path, session: &GateSession, command: &str) -> Vec<PathDecision> {
-    shell_write_targets(command)
+/// The repository files a shell command names as write targets, repository-relative. A
+/// target outside the repository (`/tmp`, `/dev/null`) is not the gate's concern.
+fn gate_shell_targets(repo: &Path, cwd: &Path, command: &str) -> Vec<String> {
+    shell_write_targets(command, cwd)
         .iter()
-        .filter_map(|target| {
-            let path = Path::new(target);
-            let path = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                repo.join(path)
-            };
-            gate_relative(repo, &path)
-        })
+        .filter_map(|path| gate_relative(repo, path))
+        .collect()
+}
+
+/// Decide the repository files a shell command names as write targets. What the command
+/// writes that this cannot see, the post-tool hook reads from the tree.
+fn gate_shell_decisions(
+    repo: &Path,
+    session: &GateSession,
+    cwd: &Path,
+    command: &str,
+) -> Vec<PathDecision> {
+    gate_shell_targets(repo, cwd, command)
+        .iter()
         .map(|relative| {
-            let mut decision = session.decide(&relative);
+            let mut decision = session.decide(relative);
             if decision.action == HookAction::Deny {
                 decision.reason.push_str(
                     " Use the Edit or Write tool for repository files so each path is judged \
@@ -960,33 +976,40 @@ fn gate_hook_pre_tool(
     session: Option<GateSession>,
     input: &HookInput,
 ) -> anyhow::Result<()> {
-    if !input.is_edit_tool() && !input.is_shell_tool() {
-        return Ok(());
-    }
     let Some(session) = session else {
-        let config = OkConfig::load_from_repo(repo).unwrap_or_default();
-        if config.gate.require_plan && input.is_edit_tool() {
-            return gate_emit(HookResponse::Deny {
-                event: "PreToolUse".into(),
-                reason: "This repository requires a gate session before source edits \
-                         (`[gate] require_plan = true`). Run `ok gate start \"<task>\"` to \
-                         declare the plan and boundary, then retry the edit."
-                    .into(),
-            });
+        // No session: nothing to hold edits to, unless the repository requires one. A
+        // configuration that cannot be read is an error, which the caller fails closed on.
+        let config = OkConfig::load_from_repo(repo)?;
+        if !config.gate.require_plan {
+            return Ok(());
         }
-        return Ok(());
+        let writes_repo_files = input.is_edit_tool()
+            || !gate_shell_targets(
+                repo,
+                &gate_shell_cwd(repo, input),
+                input.shell_command().unwrap_or_default(),
+            )
+            .is_empty();
+        if !writes_repo_files {
+            return Ok(());
+        }
+        return gate_emit(HookResponse::Deny {
+            event: "PreToolUse".into(),
+            reason: "This repository requires a gate session before source edits \
+                     (`[gate] require_plan = true`). Run `ok gate start \"<task>\"` to \
+                     declare the plan and boundary, then retry."
+                .into(),
+        });
     };
     let decisions = if input.is_edit_tool() {
         gate_hook_decisions(repo, &session, input)
     } else {
-        // Remember what was dirty before the command, so the post-tool hook can tell what
-        // it changed, however it changed it.
-        if let Some(base) = session.base_rev.as_deref() {
-            if let Ok(dirty) = gate_changed_since(repo, base) {
-                gate_store.write_snapshot(&gate_snapshot_id(input), &dirty)?;
-            }
-        }
-        gate_shell_decisions(repo, &session, input.shell_command().unwrap_or_default())
+        gate_shell_decisions(
+            repo,
+            &session,
+            &gate_shell_cwd(repo, input),
+            input.shell_command().unwrap_or_default(),
+        )
     };
     for decision in &decisions {
         gate_store.append_event(&GateEvent::for_decision(
@@ -1000,21 +1023,30 @@ fn gate_hook_pre_tool(
         .filter(|d| d.action == HookAction::Deny)
         .map(|d| d.reason.clone())
         .collect::<Vec<_>>();
-    if denied.is_empty() {
-        return Ok(());
+    if !denied.is_empty() {
+        return gate_emit(HookResponse::Deny {
+            event: "PreToolUse".into(),
+            reason: format!(
+                "Open Kioku gate denied this {}. {}",
+                if input.is_shell_tool() {
+                    "command"
+                } else {
+                    "edit"
+                },
+                denied.join(" ")
+            ),
+        });
     }
-    gate_emit(HookResponse::Deny {
-        event: "PreToolUse".into(),
-        reason: format!(
-            "Open Kioku gate denied this {}. {}",
-            if input.is_shell_tool() {
-                "command"
-            } else {
-                "edit"
-            },
-            denied.join(" ")
-        ),
-    })
+    if input.is_shell_tool() {
+        // The command will run: remember what was dirty before it, so the post-tool hook can
+        // tell what it changed, however it changed it.
+        if let Some(base) = session.base_rev.as_deref() {
+            if let Ok(dirty) = gate_changed_since(repo, base) {
+                gate_store.write_snapshot(&gate_snapshot_id(input), &dirty)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn gate_hook_post_tool(
@@ -1049,15 +1081,17 @@ fn gate_hook_post_tool(
     let Some(base) = session.base_rev.as_deref() else {
         return Ok(());
     };
-    let before = gate_store.take_snapshot(&gate_snapshot_id(input))?;
-    let Some(before) = before else {
+    let Some(before) = gate_store.take_snapshot(&gate_snapshot_id(input))? else {
         return Ok(());
     };
     let before = before.into_iter().collect::<BTreeSet<_>>();
-    let named = shell_write_targets(input.shell_command().unwrap_or_default())
-        .iter()
-        .filter_map(|t| gate_relative(repo, &repo.join(t)))
-        .collect::<BTreeSet<_>>();
+    let named = gate_shell_targets(
+        repo,
+        &gate_shell_cwd(repo, input),
+        input.shell_command().unwrap_or_default(),
+    )
+    .into_iter()
+    .collect::<BTreeSet<_>>();
     let mut notices = Vec::new();
     for path in gate_changed_since(repo, base)? {
         if before.contains(&path) || named.contains(&path) {
@@ -1095,6 +1129,37 @@ fn gate_hook_post_tool(
     })
 }
 
+/// A fingerprint of everything a verification reads: the trail (less verification records)
+/// and the dirty tree. Equal fingerprints mean the last dossier still stands.
+fn gate_verify_fingerprint(
+    repo: &Path,
+    gate_store: &GateStore,
+    session: &GateSession,
+) -> anyhow::Result<String> {
+    let (events, malformed) = gate_store.events()?;
+    let trail = events
+        .iter()
+        .filter(|e| e.kind != EventKind::VerifyRun)
+        .count();
+    let dirty = match session.base_rev.as_deref() {
+        Some(base) => gate_changed_since(repo, base)?,
+        None => Vec::new(),
+    };
+    let mut text = format!("{trail}\n{malformed}\n");
+    for path in &dirty {
+        text.push_str(path);
+        text.push('\n');
+        if let Ok(metadata) = fs::metadata(repo.join(path)) {
+            text.push_str(&format!(
+                "{}:{:?}\n",
+                metadata.len(),
+                metadata.modified().ok()
+            ));
+        }
+    }
+    Ok(open_kioku_gate::sha256_hex(text.as_bytes()))
+}
+
 fn gate_hook_stop(
     repo: &Path,
     gate_store: &GateStore,
@@ -1104,28 +1169,48 @@ fn gate_hook_stop(
     let Some(session) = session else {
         return Ok(());
     };
-    let run = gate_run_verification(repo, gate_store, &session, false)?;
-    let dossier = &run.dossier;
-    let summary = gate_summary_line(dossier);
-    if dossier.verdict == DossierVerdict::Fail && !input.stop_hook_active {
+    // A stop with nothing changed since the last verification answers from that verification
+    // instead of opening the index again.
+    let fingerprint = gate_verify_fingerprint(repo, gate_store, &session)?;
+    let (verdict, summary, dossier_markdown, violations) = match gate_store.read_last_verify() {
+        Some(last) if last.fingerprint == fingerprint => {
+            (last.verdict, last.summary, last.dossier_markdown, Vec::new())
+        }
+        _ => {
+            let run = gate_run_verification(repo, gate_store, &session, false)?;
+            let summary = gate_summary_line(&run.dossier);
+            gate_store.write_last_verify(&LastVerify {
+                fingerprint: gate_verify_fingerprint(repo, gate_store, &session)?,
+                verdict: run.dossier.verdict,
+                summary: summary.clone(),
+                dossier_markdown: run.dossier_markdown.clone(),
+            })?;
+            let violations = run
+                .dossier
+                .verification
+                .as_ref()
+                .map(|v| v.boundary_violations.clone())
+                .unwrap_or_default();
+            (run.dossier.verdict, summary, run.dossier_markdown, violations)
+        }
+    };
+    if verdict == DossierVerdict::Fail && !input.stop_hook_active {
         let mut reason = format!(
             "Open Kioku gate: the change does not verify against the declared boundary. {summary}."
         );
-        if let Some(verification) = &dossier.verification {
-            for finding in verification.boundary_violations.iter().take(8) {
-                reason.push_str(&format!(
-                    "\n- {} [{}]: {}",
-                    finding.path.as_deref().unwrap_or("-"),
-                    finding.kind,
-                    finding.reason
-                ));
-            }
+        for finding in violations.iter().take(8) {
+            reason.push_str(&format!(
+                "\n- {} [{}]: {}",
+                finding.path.as_deref().unwrap_or("-"),
+                finding.kind,
+                finding.reason
+            ));
         }
         reason.push_str(
             "\nEither revert the edits outside the boundary, or widen it with a reason for each \
              path (`ok gate expand <path> --reason \"<why>\"`), then stop again. The dossier is at ",
         );
-        reason.push_str(&run.dossier_markdown.display().to_string());
+        reason.push_str(&dossier_markdown.display().to_string());
         reason.push('.');
         return gate_emit(HookResponse::Block { reason });
     }
@@ -1133,13 +1218,14 @@ fn gate_hook_stop(
         event: "Stop".into(),
         text: format!(
             "Open Kioku gate: {summary}. Dossier: {}",
-            run.dossier_markdown.display()
+            dossier_markdown.display()
         ),
     })
 }
 
 /// The hook entries `ok gate install claude` writes. Each command is the `ok` binary on PATH,
-/// the same assumption the plugin's MCP server entry makes.
+/// the same assumption the plugin's MCP server entry makes. `hooks/hooks.json`, which the
+/// Claude Code plugin ships, carries the same entries; a test holds them equal.
 fn gate_claude_hooks() -> serde_json::Value {
     let command = |event: &str, timeout: u64| {
         serde_json::json!({
@@ -1149,6 +1235,12 @@ fn gate_claude_hooks() -> serde_json::Value {
         })
     };
     serde_json::json!({
+        "SessionStart": [{
+            "hooks": [command("session-start", 10)]
+        }],
+        "UserPromptSubmit": [{
+            "hooks": [command("prompt", 10)]
+        }],
         "PreToolUse": [{
             "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
             "hooks": [command("pre-tool", 30)]
@@ -1159,12 +1251,6 @@ fn gate_claude_hooks() -> serde_json::Value {
         }],
         "Stop": [{
             "hooks": [command("stop", 600)]
-        }],
-        "UserPromptSubmit": [{
-            "hooks": [command("prompt", 10)]
-        }],
-        "SessionStart": [{
-            "hooks": [command("session-start", 10)]
         }]
     })
 }
@@ -1299,6 +1385,18 @@ mod gate_tests {
     }
 
     #[test]
+    fn the_plugins_hooks_file_carries_exactly_the_installers_entries() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/hooks.json");
+        let shipped: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            shipped["hooks"],
+            gate_claude_hooks(),
+            "hooks/hooks.json and `ok gate install claude` must agree"
+        );
+    }
+
+    #[test]
     fn gate_diff_entries_split_on_each_git_header() {
         let diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+y\n";
         let entries = gate_diff_entries(diff);
@@ -1314,6 +1412,9 @@ mod gate_tests {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().canonicalize().unwrap();
         let missing = dir.path().join("not").join("yet.rs");
-        assert_eq!(gate_canonical_lossy(&missing), real.join("not").join("yet.rs"));
+        assert_eq!(
+            gate_canonical_lossy(&missing),
+            real.join("not").join("yet.rs")
+        );
     }
 }

@@ -696,3 +696,190 @@ fn gate_shell_commands_are_judged_by_named_targets_and_by_what_they_changed() {
         "a shell write that already landed is recorded as warned, not denied: {status}"
     );
 }
+
+fn hook_status(repo: &Path, event: &str, stdin: &str) -> (Option<i32>, String, String) {
+    let mut child = ok()
+        .arg("--repo")
+        .arg(repo)
+        .args(["gate", "hook", event])
+        .env_remove("CLAUDE_PROJECT_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("hook should spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin should be piped")
+        .write_all(stdin.as_bytes())
+        .expect("stdin should accept input");
+    let output = child.wait_with_output().expect("hook should finish");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn gate_edit_hook_fails_closed_and_require_plan_covers_shell_writes() {
+    let (_temp, repo) = demo_repo();
+    // Malformed input: the edit hook refuses (exit 2) rather than letting the edit through;
+    // an informing hook stays quiet.
+    let (code, _, err) = hook_status(&repo, "pre-tool", "{not json");
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("refused"), "{err}");
+    let (code, out, _) = hook_status(&repo, "prompt", "{not json");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("additionalContext"));
+
+    // A torn session file: refused, with the way out named.
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "enforce",
+        ]);
+        c
+    });
+    std::fs::write(
+        repo.join(".ok/gate/session.json"),
+        "{\"schema_version\": 1, \"id\": ",
+    )
+    .unwrap();
+    let (code, _, err) = hook_status(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("ok gate abandon"), "{err}");
+    std::fs::remove_file(repo.join(".ok/gate/session.json")).unwrap();
+
+    // require_plan with no session: an Edit and a shell write into the repository are both
+    // denied; a shell write to /tmp is not.
+    let config = repo.join("ok.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let (head, gate) = text.split_once("[gate]\n").expect("a [gate] section");
+    let gate = gate.replacen("require_plan = false", "require_plan = true", 1);
+    std::fs::write(&config, format!("{head}[gate]\n{gate}")).unwrap();
+    let bash = |command: &str| {
+        serde_json::json!({"cwd": repo, "tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": command}})
+            .to_string()
+    };
+    let denied: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "pre-tool", &bash("echo x > src/auth.rs"))).unwrap();
+    assert_eq!(
+        denied["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{denied}"
+    );
+    let scratch = hook(&repo, "pre-tool", &bash("echo x > /tmp/gate-scratch.log"));
+    assert!(scratch.trim().is_empty(), "{scratch}");
+    let listing = hook(&repo, "pre-tool", &bash("ls -la"));
+    assert!(listing.trim().is_empty(), "{listing}");
+}
+
+#[test]
+fn gate_stop_hook_reuses_the_last_verification_until_something_changes() {
+    let (_temp, repo) = demo_repo();
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "warn",
+        ]);
+        c
+    });
+    std::fs::write(repo.join("BYPASS.md"), "x\n").unwrap();
+    let stop = |active: bool| {
+        serde_json::json!({"cwd": repo, "hook_event_name": "Stop", "stop_hook_active": active})
+            .to_string()
+    };
+    let first: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "stop", &stop(false))).unwrap();
+    assert_eq!(first["decision"], "block");
+    let events_after_first = std::fs::read_to_string(repo.join(".ok/gate/events.jsonl")).unwrap();
+    assert_eq!(events_after_first.matches("verify_run").count(), 1);
+    // Nothing changed: the second stop answers from the first verification, no new VerifyRun.
+    let second: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "stop", &stop(false))).unwrap();
+    assert_eq!(second["decision"], "block");
+    let events_after_second = std::fs::read_to_string(repo.join(".ok/gate/events.jsonl")).unwrap();
+    assert_eq!(
+        events_after_second.matches("verify_run").count(),
+        1,
+        "{events_after_second}"
+    );
+    // The bypass is removed: the tree changed, so verification runs again and passes.
+    std::fs::remove_file(repo.join("BYPASS.md")).unwrap();
+    let third: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "stop", &stop(false))).unwrap();
+    assert!(third.get("decision").is_none(), "{third}");
+    let events_after_third = std::fs::read_to_string(repo.join(".ok/gate/events.jsonl")).unwrap();
+    assert_eq!(events_after_third.matches("verify_run").count(), 2);
+}
+
+#[test]
+fn gate_works_in_a_repository_with_no_commits_yet() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("demo");
+    run({
+        let mut c = ok();
+        c.arg("demo").arg("--path").arg(&repo);
+        c
+    });
+    git(&repo, &["init", "-q"]);
+    let started: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json").arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "warn",
+        ]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(
+        started["base_rev"], "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "the empty tree is the base when there is no HEAD"
+    );
+    // Every file is untracked and pre-existing; a commit made during the session and a new
+    // file are the change.
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "first"]);
+    std::fs::write(repo.join("BYPASS.md"), "x\n").unwrap();
+    let output = ok()
+        .arg("--json")
+        .arg("--repo")
+        .arg(&repo)
+        .args(["gate", "finish"])
+        .output()
+        .unwrap();
+    let finished: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    let dossier = &finished["dossier"];
+    assert_eq!(
+        dossier["repo"]["base_rev"],
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    );
+    let changed = dossier["change"]["changed_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(changed.contains(&"BYPASS.md".to_string()), "{changed:?}");
+    assert!(
+        !dossier["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c.as_str().unwrap().contains("not a git repository")),
+        "{dossier}"
+    );
+}
