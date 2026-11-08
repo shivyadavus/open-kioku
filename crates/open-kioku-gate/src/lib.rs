@@ -19,9 +19,9 @@ use open_kioku_errors::{OkError, Result};
 use open_kioku_patch::{forbidden_rule_matches, ChangeVerificationReport, VerificationVerdict};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 /// Schema version carried by every session, event, and dossier this crate writes.
@@ -47,6 +47,8 @@ pub struct LastVerify {
     pub verdict: DossierVerdict,
     pub summary: String,
     pub dossier_markdown: PathBuf,
+    #[serde(default)]
+    pub violations: Vec<DossierFinding>,
 }
 
 /// How strictly a session holds edits to its boundary.
@@ -482,7 +484,7 @@ impl GateStore {
 
     /// Remember the dirty paths before a shell command, keyed by the tool call, so the
     /// post-tool hook can tell what the command changed.
-    pub fn write_snapshot(&self, id: &str, dirty: &[String]) -> Result<()> {
+    pub fn write_snapshot(&self, id: &str, dirty: &BTreeMap<String, String>) -> Result<()> {
         let dir = self.root.join(SNAPSHOT_DIR);
         fs::create_dir_all(&dir)?;
         fs::write(
@@ -493,7 +495,7 @@ impl GateStore {
     }
 
     /// The snapshot `write_snapshot` stored under `id`, removed as it is read.
-    pub fn take_snapshot(&self, id: &str) -> Result<Option<Vec<String>>> {
+    pub fn take_snapshot(&self, id: &str) -> Result<Option<BTreeMap<String, String>>> {
         let path = self.root.join(SNAPSHOT_DIR).join(format!("{id}.json"));
         if !path.exists() {
             return Ok(None);
@@ -535,20 +537,35 @@ impl GateStore {
         if !path.exists() {
             return Ok((Vec::new(), 0));
         }
-        let file = fs::File::open(&path)?;
+        let bytes = fs::read(&path)?;
         let mut events = Vec::new();
         let mut malformed = 0usize;
-        for line in std::io::BufReader::new(file).lines() {
-            let line = line?;
-            if line.trim().is_empty() {
+        for line in bytes.split(|b| *b == b'\n') {
+            if line.iter().all(|b| b.is_ascii_whitespace()) {
                 continue;
             }
-            match serde_json::from_str::<GateEvent>(&line) {
-                Ok(event) => events.push(event),
-                Err(_) => malformed += 1,
+            match std::str::from_utf8(line)
+                .ok()
+                .and_then(|text| serde_json::from_str::<GateEvent>(text).ok())
+            {
+                Some(event) => events.push(event),
+                None => malformed += 1,
             }
         }
         Ok((events, malformed))
+    }
+
+    /// End whatever session file is there, parsable or not: the recovery for a session the
+    /// hooks refuse to read. Returns whether a file was removed.
+    pub fn abandon_any(&self) -> Result<bool> {
+        let path = self.session_path();
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(path)?;
+        let _ = fs::remove_dir_all(self.root.join(SNAPSHOT_DIR));
+        let _ = fs::remove_file(self.root.join(LAST_VERIFY_FILE));
+        Ok(true)
     }
 
     /// Widen the active session's boundary by one path, recording why.
@@ -694,6 +711,8 @@ pub enum HookResponse {
     Context { event: String, text: String },
     /// Keep the agent working (Stop hooks): it may not finish until `reason` is addressed.
     Block { reason: String },
+    /// Tell the user something without changing what the harness does (a Stop that passed).
+    SystemMessage { text: String },
 }
 
 impl HookResponse {
@@ -716,6 +735,9 @@ impl HookResponse {
             Self::Block { reason } => Some(serde_json::json!({
                 "decision": "block",
                 "reason": reason,
+            })),
+            Self::SystemMessage { text } => Some(serde_json::json!({
+                "systemMessage": text,
             })),
         }
     }
@@ -871,7 +893,20 @@ pub fn shell_write_targets(command: &str, cwd: &Path) -> Vec<PathBuf> {
                 }
             }
             "cp" | "mv" | "install" | "ln" => {
-                if let Some(dest) = operands.last() {
+                // `-t DIR` names the destination; otherwise the last operand is.
+                let target_dir = args
+                    .iter()
+                    .position(|a| *a == "-t" || *a == "--target-directory");
+                if let Some(i) = target_dir {
+                    if let Some(dir) = args.get(i + 1) {
+                        raw.push(dir.to_string());
+                    }
+                } else if let Some(dir) = args
+                    .iter()
+                    .find_map(|a| a.strip_prefix("--target-directory="))
+                {
+                    raw.push(dir.to_string());
+                } else if let Some(dest) = operands.last() {
                     raw.push(dest.to_string());
                 }
             }
@@ -944,6 +979,8 @@ fn split_shell_segments(command: &str) -> Vec<String> {
             if c == '\n' {
                 if line.trim() == terminator {
                     heredoc = None;
+                    // The command that fed the heredoc is complete; what follows is new.
+                    segments.push(std::mem::take(&mut current));
                 }
                 line.clear();
             } else {
@@ -1906,6 +1943,35 @@ mod tests {
             "the heredoc body is data; the command after it still counts"
         );
         assert_eq!(t("cat <<EOF > gen.rs\nfn x() {}\nEOF"), vec!["/r/gen.rs"]);
+        assert_eq!(
+            t("cat <<EOF > gen.rs\nfn x() {}\nEOF\nsed -i 's/x/y/' src/b.rs"),
+            vec!["/r/gen.rs", "/r/src/b.rs"],
+            "the command after a heredoc is its own segment"
+        );
+        assert_eq!(t("mv -t dest src1 src2"), vec!["/r/dest"]);
+        assert_eq!(t("cp --target-directory=out a b"), vec!["/r/out"]);
+    }
+
+    #[test]
+    fn events_skip_undecodable_lines_and_abandon_any_clears_a_torn_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GateStore::for_repo(dir.path());
+        let s = session(GateMode::Warn);
+        store.start(&s, b"{}").unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(store.events_path())
+            .unwrap()
+            .write_all(b"\xff\xfe not utf-8\n")
+            .unwrap();
+        let (events, malformed) = store.events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(malformed, 1);
+        fs::write(store.session_path(), b"{\"schema_version\": 1, \"id\": ").unwrap();
+        assert!(store.active_session().is_err());
+        assert!(store.abandon_any().unwrap());
+        assert!(store.active_session().unwrap().is_none());
+        assert!(!store.abandon_any().unwrap());
     }
 
     #[test]
@@ -1917,13 +1983,14 @@ mod tests {
         store
             .append_event(&GateEvent::new(&first.id, EventKind::EditDenied).with_path("x.rs"))
             .unwrap();
-        store.write_snapshot("t", &[]).unwrap();
+        store.write_snapshot("t", &BTreeMap::new()).unwrap();
         store
             .write_last_verify(&LastVerify {
                 fingerprint: "f".into(),
                 verdict: DossierVerdict::Pass,
                 summary: "s".into(),
                 dossier_markdown: PathBuf::from("d.md"),
+                violations: Vec::new(),
             })
             .unwrap();
         let second = session(GateMode::Warn);
@@ -1946,11 +2013,9 @@ mod tests {
         let store = GateStore::for_repo(dir.path());
         let s = session(GateMode::Enforce);
         store.start(&s, b"{}").unwrap();
-        store.write_snapshot("toolu_1", &["a.rs".into()]).unwrap();
-        assert_eq!(
-            store.take_snapshot("toolu_1").unwrap(),
-            Some(vec!["a.rs".to_string()])
-        );
+        let snapshot = BTreeMap::from([("a.rs".to_string(), "1:2".to_string())]);
+        store.write_snapshot("toolu_1", &snapshot).unwrap();
+        assert_eq!(store.take_snapshot("toolu_1").unwrap(), Some(snapshot));
         assert_eq!(store.take_snapshot("toolu_1").unwrap(), None);
         let leftovers = fs::read_dir(store.root())
             .unwrap()

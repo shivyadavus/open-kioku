@@ -242,9 +242,15 @@ fn gate_start(
     let mut session = GateSession::new(task, mode, &report, &plan_json);
     session.repo_name = gate_repo_name(repo, &config);
     session.base_rev = gate_base_rev(repo);
-    if let Some(base) = session.base_rev.as_deref() {
-        session.preexisting_changes = gate_changed_since(repo, base)?;
-    }
+    session.preexisting_changes = match &active {
+        // Replacing a session: what was dirty before the first session started is still
+        // what predates the work; the replaced session's edits are this session's change.
+        Some(active) if active.base_rev == session.base_rev => active.preexisting_changes.clone(),
+        _ => match session.base_rev.as_deref() {
+            Some(base) => gate_changed_since(repo, base)?,
+            None => Vec::new(),
+        },
+    };
     // The plan is built, so the new session can start: only now does a replaced session end.
     if let Some(active) = &active {
         gate_store.finish(active)?;
@@ -740,13 +746,28 @@ fn gate_finish(
 
 fn gate_abandon(json: bool, repo: &Path) -> anyhow::Result<()> {
     let gate_store = GateStore::for_repo(repo);
-    let session = require_active_session(&gate_store)?;
-    gate_store.finish(&session)?;
-    print_text_or_json(
-        json,
-        &format!("Gate session {} abandoned; nothing was verified.", session.id),
-        &serde_json::json!({"abandoned": session.id}),
-    )
+    match gate_store.active_session() {
+        Ok(Some(session)) => {
+            gate_store.finish(&session)?;
+            print_text_or_json(
+                json,
+                &format!("Gate session {} abandoned; nothing was verified.", session.id),
+                &serde_json::json!({"abandoned": session.id}),
+            )
+        }
+        Ok(None) => Err(caller_input_error(
+            "no active gate session; start one with `ok gate start \"<task>\"`",
+        )),
+        // A session the hooks refuse to read is exactly what abandon must be able to clear.
+        Err(err) => {
+            gate_store.abandon_any()?;
+            print_text_or_json(
+                json,
+                &format!("Gate session file could not be read ({err}); it was removed."),
+                &serde_json::json!({"abandoned": "unreadable", "error": err.to_string()}),
+            )
+        }
+    }
 }
 
 fn gate_summary_line(dossier: &ChangeDossier) -> String {
@@ -954,6 +975,20 @@ fn gate_shell_decisions(
         .collect()
 }
 
+/// The dirty paths since `base`, each with a stamp of its size and modification time, so a
+/// file that was already dirty and is written again still reads as changed.
+fn gate_dirty_stamps(repo: &Path, base: &str) -> anyhow::Result<BTreeMap<String, String>> {
+    Ok(gate_changed_since(repo, base)?
+        .into_iter()
+        .map(|path| {
+            let stamp = fs::metadata(repo.join(&path))
+                .map(|m| format!("{}:{:?}", m.len(), m.modified().ok()))
+                .unwrap_or_else(|_| "absent".into());
+            (path, stamp)
+        })
+        .collect())
+}
+
 /// A snapshot id for one shell tool call, so the post-tool hook can pair with the pre-tool one.
 fn gate_snapshot_id(input: &HookInput) -> String {
     input
@@ -1041,7 +1076,7 @@ fn gate_hook_pre_tool(
         // The command will run: remember what was dirty before it, so the post-tool hook can
         // tell what it changed, however it changed it.
         if let Some(base) = session.base_rev.as_deref() {
-            if let Ok(dirty) = gate_changed_since(repo, base) {
+            if let Ok(dirty) = gate_dirty_stamps(repo, base) {
                 gate_store.write_snapshot(&gate_snapshot_id(input), &dirty)?;
             }
         }
@@ -1084,17 +1119,21 @@ fn gate_hook_post_tool(
     let Some(before) = gate_store.take_snapshot(&gate_snapshot_id(input))? else {
         return Ok(());
     };
-    let before = before.into_iter().collect::<BTreeSet<_>>();
-    let named = gate_shell_targets(
-        repo,
-        &gate_shell_cwd(repo, input),
-        input.shell_command().unwrap_or_default(),
-    )
-    .into_iter()
-    .collect::<BTreeSet<_>>();
+    let cwd = gate_shell_cwd(repo, input);
+    let command = input.shell_command().unwrap_or_default();
+    let named = gate_shell_targets(repo, &cwd, command)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let mut notices = Vec::new();
-    for path in gate_changed_since(repo, base)? {
-        if before.contains(&path) || named.contains(&path) {
+    // Named targets the pre-tool hook allowed with a warning: the agent is told now, the way
+    // an Edit outside the boundary is told, with the remedy.
+    for decision in gate_shell_decisions(repo, &session, &cwd, command) {
+        if decision.action == HookAction::Warn {
+            notices.push(decision.reason);
+        }
+    }
+    for (path, stamp) in gate_dirty_stamps(repo, base)? {
+        if named.contains(&path) || before.get(&path) == Some(&stamp) {
             continue;
         }
         // The write already happened, so nothing is denied here: what enforce mode would have
@@ -1172,33 +1211,32 @@ fn gate_hook_stop(
     // A stop with nothing changed since the last verification answers from that verification
     // instead of opening the index again.
     let fingerprint = gate_verify_fingerprint(repo, gate_store, &session)?;
-    let (verdict, summary, dossier_markdown, violations) = match gate_store.read_last_verify() {
-        Some(last) if last.fingerprint == fingerprint => {
-            (last.verdict, last.summary, last.dossier_markdown, Vec::new())
-        }
+    let last = match gate_store.read_last_verify() {
+        Some(last) if last.fingerprint == fingerprint => last,
         _ => {
             let run = gate_run_verification(repo, gate_store, &session, false)?;
-            let summary = gate_summary_line(&run.dossier);
-            gate_store.write_last_verify(&LastVerify {
-                fingerprint: gate_verify_fingerprint(repo, gate_store, &session)?,
+            let last = LastVerify {
+                fingerprint,
                 verdict: run.dossier.verdict,
-                summary: summary.clone(),
+                summary: gate_summary_line(&run.dossier),
                 dossier_markdown: run.dossier_markdown.clone(),
-            })?;
-            let violations = run
-                .dossier
-                .verification
-                .as_ref()
-                .map(|v| v.boundary_violations.clone())
-                .unwrap_or_default();
-            (run.dossier.verdict, summary, run.dossier_markdown, violations)
+                violations: run
+                    .dossier
+                    .verification
+                    .as_ref()
+                    .map(|v| v.boundary_violations.clone())
+                    .unwrap_or_default(),
+            };
+            gate_store.write_last_verify(&last)?;
+            last
         }
     };
-    if verdict == DossierVerdict::Fail && !input.stop_hook_active {
+    if last.verdict == DossierVerdict::Fail && !input.stop_hook_active {
         let mut reason = format!(
-            "Open Kioku gate: the change does not verify against the declared boundary. {summary}."
+            "Open Kioku gate: the change does not verify against the declared boundary. {}.",
+            last.summary
         );
-        for finding in violations.iter().take(8) {
+        for finding in last.violations.iter().take(8) {
             reason.push_str(&format!(
                 "\n- {} [{}]: {}",
                 finding.path.as_deref().unwrap_or("-"),
@@ -1210,15 +1248,16 @@ fn gate_hook_stop(
             "\nEither revert the edits outside the boundary, or widen it with a reason for each \
              path (`ok gate expand <path> --reason \"<why>\"`), then stop again. The dossier is at ",
         );
-        reason.push_str(&dossier_markdown.display().to_string());
+        reason.push_str(&last.dossier_markdown.display().to_string());
         reason.push('.');
         return gate_emit(HookResponse::Block { reason });
     }
-    gate_emit(HookResponse::Context {
-        event: "Stop".into(),
+    // Informational only: a message the user sees, which neither blocks nor continues the turn.
+    gate_emit(HookResponse::SystemMessage {
         text: format!(
-            "Open Kioku gate: {summary}. Dossier: {}",
-            dossier_markdown.display()
+            "Open Kioku gate: {}. Dossier: {}",
+            last.summary,
+            last.dossier_markdown.display()
         ),
     })
 }

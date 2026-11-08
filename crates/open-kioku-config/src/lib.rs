@@ -583,7 +583,10 @@ impl OkConfig {
                     .into(),
             ));
         }
-        if !matches!(self.gate.mode.as_str(), "enforce" | "warn" | "observe") {
+        if !matches!(
+            self.gate.mode.trim().to_ascii_lowercase().as_str(),
+            "enforce" | "warn" | "observe"
+        ) {
             return Err(OkError::Config(format!(
                 "gate.mode must be enforce, warn, or observe, not `{}`",
                 self.gate.mode

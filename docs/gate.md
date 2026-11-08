@@ -50,8 +50,10 @@ is `ok gate hook <event>`: it reads the harness's JSON on stdin and answers on s
 
 The edit hook fails closed: malformed input, an unreadable `ok.toml` or a torn session file
 refuse the tool call (exit 2, with the way out on stderr) rather than let an edit through
-unjudged. The informing hooks (`prompt`, `session-start`, `post-tool`, `stop`) never block on
-their own errors.
+unjudged. `ok gate abandon` removes a session file the hooks cannot read, so that way out
+always works. The informing hooks (`prompt`, `session-start`, `post-tool`, `stop`) never block
+on their own errors; a stop that passes reports with `systemMessage`, which the user sees and
+which neither blocks nor continues the agent's turn.
 
 A denial reads, for example:
 

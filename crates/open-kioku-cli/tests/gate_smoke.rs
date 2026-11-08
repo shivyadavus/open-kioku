@@ -298,10 +298,10 @@ fn gate_enforces_the_boundary_through_the_hooks_and_writes_a_dossier() {
     ))
     .unwrap();
     assert!(again.get("decision").is_none(), "{again}");
-    assert!(again["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap()
-        .contains("FAIL"));
+    assert!(
+        again["systemMessage"].as_str().unwrap().contains("FAIL"),
+        "a stop that does not block informs the user, never the model's turn: {again}"
+    );
 
     // Remove the bypass; finish passes (with warnings) and ends the session.
     std::fs::remove_file(repo.join("BYPASS.md")).unwrap();
@@ -423,7 +423,7 @@ fn gate_require_plan_denies_edits_before_a_session_exists() {
     let text = std::fs::read_to_string(&config).unwrap();
     let (head, gate) = text.split_once("[gate]\n").expect("a [gate] section");
     let gate = gate
-        .replacen("mode = \"warn\"", "mode = \"enforce\"", 1)
+        .replacen("mode = \"warn\"", "mode = \"Enforce\"", 1)
         .replacen("require_plan = false", "require_plan = true", 1);
     assert!(gate.contains("require_plan = true"), "{gate}");
     std::fs::write(&config, format!("{head}[gate]\n{gate}")).unwrap();
@@ -754,7 +754,17 @@ fn gate_edit_hook_fails_closed_and_require_plan_covers_shell_writes() {
     let (code, _, err) = hook_status(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
     assert_eq!(code, Some(2), "{err}");
     assert!(err.contains("ok gate abandon"), "{err}");
-    std::fs::remove_file(repo.join(".ok/gate/session.json")).unwrap();
+    let cleared = run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args(["gate", "abandon"]);
+        c
+    });
+    assert!(cleared.contains("removed"), "{cleared}");
+    let quiet = hook(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
+    assert!(
+        quiet.trim().is_empty(),
+        "after abandon the hook is quiet again: {quiet}"
+    );
 
     // require_plan with no session: an Edit and a shell write into the repository are both
     // denied; a shell write to /tmp is not.
@@ -807,6 +817,10 @@ fn gate_stop_hook_reuses_the_last_verification_until_something_changes() {
     let second: serde_json::Value =
         serde_json::from_str(&hook(&repo, "stop", &stop(false))).unwrap();
     assert_eq!(second["decision"], "block");
+    assert!(
+        second["reason"].as_str().unwrap().contains("BYPASS.md"),
+        "the cached verdict keeps its violations: {second}"
+    );
     let events_after_second = std::fs::read_to_string(repo.join(".ok/gate/events.jsonl")).unwrap();
     assert_eq!(
         events_after_second.matches("verify_run").count(),
@@ -818,6 +832,13 @@ fn gate_stop_hook_reuses_the_last_verification_until_something_changes() {
     let third: serde_json::Value =
         serde_json::from_str(&hook(&repo, "stop", &stop(false))).unwrap();
     assert!(third.get("decision").is_none(), "{third}");
+    assert!(
+        third["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("Dossier:"),
+        "{third}"
+    );
     let events_after_third = std::fs::read_to_string(repo.join(".ok/gate/events.jsonl")).unwrap();
     assert_eq!(events_after_third.matches("verify_run").count(), 2);
 }
@@ -882,4 +903,132 @@ fn gate_works_in_a_repository_with_no_commits_yet() {
             .any(|c| c.as_str().unwrap().contains("not a git repository")),
         "{dossier}"
     );
+}
+
+#[test]
+fn gate_shell_writes_to_already_dirty_files_are_seen_and_warn_mode_names_outside_targets() {
+    let (_temp, repo) = demo_repo();
+    // Dirty before the session and outside the boundary: a shell write to it during the
+    // session must still count as the session's change.
+    std::fs::write(repo.join("src/other.rs"), "pub fn other() {}\n").unwrap();
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "warn",
+        ]);
+        c
+    });
+    let bash = |command: &str, id: &str| {
+        serde_json::json!({"cwd": repo, "tool_name": "Bash", "tool_use_id": id, "tool_input": {"command": command}})
+            .to_string()
+    };
+    // A named outside target in warn mode is allowed, and the agent is told after the fact.
+    let pre = hook(&repo, "pre-tool", &bash("echo x > src/retry.rs", "n1"));
+    assert!(pre.trim().is_empty(), "{pre}");
+    std::fs::write(repo.join("src/retry.rs"), "x\n").unwrap();
+    let post: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "post-tool",
+        &bash("echo x > src/retry.rs", "n1"),
+    ))
+    .unwrap();
+    let text = post["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        text.contains("src/retry.rs") && text.contains("ok gate expand"),
+        "{text}"
+    );
+    // An unnamed write to the already-dirty file: its stamp changed, so it is recorded.
+    let heredoc = "python3 - <<'EOF'\nopen('src/other.rs','a').write('x')\nEOF";
+    let pre = hook(&repo, "pre-tool", &bash(heredoc, "n2"));
+    assert!(pre.trim().is_empty(), "{pre}");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(repo.join("src/other.rs"), "pub fn other() {}\n// touched\n").unwrap();
+    let post: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "post-tool", &bash(heredoc, "n2"))).unwrap();
+    assert!(post["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("src/other.rs"));
+    let output = ok()
+        .arg("--json")
+        .arg("--repo")
+        .arg(&repo)
+        .args(["gate", "finish"])
+        .output()
+        .unwrap();
+    let finished: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    let changed = finished["dossier"]["change"]["changed_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(changed.contains(&"src/other.rs".to_string()), "{changed:?}");
+    // The field is omitted from JSON when empty.
+    assert!(finished["dossier"]["change"]["preexisting_excluded"]
+        .as_array()
+        .is_none_or(|a| a.is_empty()));
+}
+
+#[test]
+fn gate_force_start_keeps_the_replaced_sessions_edits_as_the_change() {
+    let (_temp, repo) = demo_repo();
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "warn",
+        ]);
+        c
+    });
+    hook(
+        &repo,
+        "pre-tool",
+        &edit_input(&repo, "Write", "src/retry.rs"),
+    );
+    std::fs::write(repo.join("src/retry.rs"), "pub fn retry() {}\n").unwrap();
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "refined task",
+            "--mode",
+            "warn",
+            "--force",
+        ]);
+        c
+    });
+    assert!(repo.join(".ok/gate").read_dir().unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with("events-")));
+    let (stdout, _) = run_failure({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "finish"]);
+        c
+    });
+    let finished: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let changed = finished["dossier"]["change"]["changed_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(changed, vec!["src/retry.rs".to_string()], "{finished}");
+    assert_eq!(finished["dossier"]["verdict"], "fail");
 }
