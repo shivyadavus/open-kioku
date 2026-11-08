@@ -1,0 +1,42 @@
+{
+  "description": "Open Kioku gate: hold the agent's edits to the boundary it declared with `ok gate start`, and verify the change into a Change Dossier when it stops. Every command is `ok` on PATH, the same assumption the plugin's MCP server makes. With no active gate session the hooks are silent except for a one-line reminder on each prompt.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "ok gate hook session-start", "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "ok gate hook prompt", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          { "type": "command", "command": "ok gate hook pre-tool", "timeout": 30 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          { "type": "command", "command": "ok gate hook post-tool", "timeout": 30 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "ok gate hook stop", "timeout": 600 }
+        ]
+      }
+    ]
+  }
+}

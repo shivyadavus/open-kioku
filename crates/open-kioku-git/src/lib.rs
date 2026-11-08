@@ -289,7 +289,20 @@ pub fn compare_with_head(
 /// an index built here now would read differently from one built at `commit`, ignored files
 /// aside, which indexing skips anyway.
 pub fn changed_paths_since_commit(root: impl AsRef<Path>, commit: &str) -> Result<Vec<PathBuf>> {
-    let root = root.as_ref();
+    changed_paths_since(root.as_ref(), commit, false)
+}
+
+/// [`changed_paths_since_commit`] with every path relative to `root` rather than to the
+/// repository's top level, the form `unified_diff_since` and `untracked_paths` use, so the
+/// three agree when `root` is a subdirectory of the git working tree.
+pub fn changed_paths_since_commit_relative(
+    root: impl AsRef<Path>,
+    commit: &str,
+) -> Result<Vec<PathBuf>> {
+    changed_paths_since(root.as_ref(), commit, true)
+}
+
+fn changed_paths_since(root: &Path, commit: &str, relative: bool) -> Result<Vec<PathBuf>> {
     let run = |args: &[&str], what: &str| -> Result<Vec<PathBuf>> {
         let output = Command::new("git")
             .arg("-C")
@@ -311,27 +324,81 @@ pub fn changed_paths_since_commit(root: impl AsRef<Path>, commit: &str) -> Resul
             .map(|raw| PathBuf::from(String::from_utf8_lossy(raw).into_owned()))
             .collect())
     };
-    let mut paths = run(
-        &[
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--end-of-options",
-            commit,
-            "--",
-        ],
-        "diff --name-only",
-    )?;
-    paths.extend(run(
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-        "ls-files --others",
-    )?);
+    let mut args = vec![
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+    ];
+    if relative {
+        args.push("--relative");
+    }
+    args.extend(["--end-of-options", commit, "--"]);
+    let mut paths = run(&args, "diff --name-only")?;
+    paths.extend(untracked_paths(root)?);
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+/// Untracked files Git does not ignore, repository-relative.
+pub fn untracked_paths(root: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root.as_ref())
+        .args(["-c", "core.quotePath=false"])
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()
+        .map_err(|err| OkError::Repository(format!("git ls-files --others failed: {err}")))?;
+    if !output.status.success() {
+        return Err(OkError::Repository(format!(
+            "git ls-files --others failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| PathBuf::from(String::from_utf8_lossy(raw).into_owned()))
+        .collect())
+}
+
+/// The unified diff of every tracked change since `base`, committed or not: zero context,
+/// renames paired, fixed `a/` and `b/` prefixes, no external diff or textconv, uncoloured.
+/// `base` may be any revision, the empty tree included.
+pub fn unified_diff_since(root: impl AsRef<Path>, base: &str) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root.as_ref())
+        .args(["-c", "core.quotePath=false"])
+        .args([
+            "diff",
+            "--unified=0",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--find-renames",
+            "--submodule=short",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--relative",
+            "--end-of-options",
+            base,
+            "--",
+        ])
+        .output()
+        .map_err(|err| OkError::Repository(format!("git diff failed: {err}")))?;
+    if !output.status.success() {
+        return Err(OkError::Repository(format!(
+            "git diff {base} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|err| OkError::Repository(format!("git diff output is not UTF-8: {err}")))
 }
 
 pub fn require_repo(root: impl AsRef<Path>) -> Result<PathBuf> {

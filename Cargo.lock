@@ -2564,6 +2564,7 @@ dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-format",
+ "open-kioku-gate",
  "open-kioku-git",
  "open-kioku-graph",
  "open-kioku-impact",
@@ -2717,6 +2718,20 @@ dependencies = [
  "chrono",
  "open-kioku-core",
  "serde_json",
+]
+
+[[package]]
+name = "open-kioku-gate"
+version = "4.0.0"
+dependencies = [
+ "chrono",
+ "open-kioku-core",
+ "open-kioku-errors",
+ "open-kioku-patch",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

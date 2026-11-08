@@ -88,6 +88,19 @@ ok verify --plan plan.json --git                               # the real diff a
   <img src="assets/demo-verify.gif" alt="Terminal recording: the allowed files from plan.json, one edit inside that boundary, one edit outside it, then ok verify prints Verification: Fail, reports [out_of_boundary] go/shipping/carrier.go, and exits 1." width="920">
 </p>
 
+## The Gate
+
+Every verification step a coding agent is given today is an instruction to the model. This one runs.
+
+```sh
+ok gate install claude --apply                     # once: hooks into .claude/settings.json (the plugin ships them too)
+ok gate start "add retry handling to token refresh" # the plan's boundary becomes the session's
+# ...the agent edits; every Edit/Write passes through the hook...
+ok gate finish                                     # verify the real change, write the Change Dossier
+```
+
+With a session active, an edit outside the declared boundary is denied (`enforce`) or allowed and reported (`warn`, the default) with the one command that widens it, `ok gate expand <path> --reason "<why>"`; a secret-like or generated path is denied in either. When the agent stops, the change is verified against the same boundary and written as a **Change Dossier**: what was declared, what the harness reported editing, what was denied, what actually changed (including files created with no hook at all), what verification found, and what is still uncertain. A `FAIL` holds the agent with the violations and the remedies. [`docs/gate.md`](docs/gate.md)
+
 Underneath: exact definitions, references, and dependency paths from source (and optional SCIP) are authoritative. Lexical, semantic, history, test, and runtime signals can reorder retrieval; they cannot overwrite repository truth.
 
 ## What Changed in 4.0.0
@@ -218,7 +231,7 @@ ok prove . --task "change token expiration"
 <details>
 <summary>All 38 top-level commands</summary>
 
-Current top-level commands (38): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `preflight`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `retrieval-bench`, `relationship-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
+Current top-level commands (39): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `preflight`, `verify-boundary`, `verify`, `gate`, `contract`, `bench`, `workflow-bench`, `retrieval-bench`, `relationship-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
 
 </details>
 
@@ -226,7 +239,7 @@ Full MCP tool reference: [`docs/mcp-tools.md`](docs/mcp-tools.md)
 
 ## Repository Layout
 
-This is a 43-crate Cargo workspace with a strict downward dependency direction: CLI / MCP → agent intelligence (`context`, `impact`, `tests`, `plan`, `patch`, `actions`) → code-intelligence kernel (`ingest`, `parse`, `tree-sitter`, `resolution`, `graph`, `architecture`) → storage and search (`storage-sqlite`, `search-tantivy`). `open-kioku-core` holds the evidence, graph, and report contracts; optional integrations (`scip`, `lsp`, `semantic`, `vector`, `qdrant`, `sentry`) return explicit disabled/unsupported diagnostics rather than degrading silently.
+This is a 44-crate Cargo workspace with a strict downward dependency direction: CLI / MCP → agent intelligence (`context`, `impact`, `tests`, `plan`, `patch`, `gate`, `actions`) → code-intelligence kernel (`ingest`, `parse`, `tree-sitter`, `resolution`, `graph`, `architecture`) → storage and search (`storage-sqlite`, `search-tantivy`). `open-kioku-core` holds the evidence, graph, and report contracts; optional integrations (`scip`, `lsp`, `semantic`, `vector`, `qdrant`, `sentry`) return explicit disabled/unsupported diagnostics rather than degrading silently.
 
 Architecture: [`docs/architecture.md`](docs/architecture.md) · Crate map: [`docs/crate-map.md`](docs/crate-map.md) · Storage: [`docs/storage-model.md`](docs/storage-model.md)
 

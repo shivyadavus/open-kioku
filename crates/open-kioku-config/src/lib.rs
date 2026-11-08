@@ -31,6 +31,8 @@ pub struct OkConfig {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub gate: GateConfig,
     pub mcp: McpConfig,
     pub security: SecurityConfig,
     pub commands: CommandsConfig,
@@ -122,6 +124,7 @@ impl Default for OkConfig {
             },
             memory: MemoryConfig::default(),
             runtime: RuntimeConfig::default(),
+            gate: GateConfig::default(),
             mcp: McpConfig {
                 mode: "read-only".into(),
                 transport: "stdio".into(),
@@ -416,6 +419,34 @@ pub struct MemoryConfig {
     pub enabled: bool,
 }
 
+/// The edit gate: how a gate session (`ok gate start`) holds the harness's edits to the
+/// declared boundary. `mode` is the default for new sessions (`ok gate start --mode`
+/// overrides it): `warn` allows an edit outside the boundary and tells the agent,
+/// `enforce` denies it until the agent widens the boundary with a reason, `observe` denies
+/// nothing and only records. A forbidden path (secrets, generated code, the index) is denied
+/// in both `warn` and `enforce`. `require_plan` denies every edit while no session is
+/// active, so an agent cannot edit before it has declared a plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateConfig {
+    #[serde(default = "default_gate_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub require_plan: bool,
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_gate_mode(),
+            require_plan: false,
+        }
+    }
+}
+
+fn default_gate_mode() -> String {
+    "warn".into()
+}
+
 /// Runtime error integration. The runtime tools answer with an explicit
 /// disabled response until a provider is configured, and advertising three
 /// permanently inert names taught agents to reach for evidence that is not
@@ -551,6 +582,15 @@ impl OkConfig {
                 "semantic external providers require semantic.external_provider_allowed = true"
                     .into(),
             ));
+        }
+        if !matches!(
+            self.gate.mode.trim().to_ascii_lowercase().as_str(),
+            "enforce" | "warn" | "observe"
+        ) {
+            return Err(OkError::Config(format!(
+                "gate.mode must be enforce, warn, or observe, not `{}`",
+                self.gate.mode
+            )));
         }
         if self.semantic.dimensions == 0 {
             return Err(OkError::Config(
