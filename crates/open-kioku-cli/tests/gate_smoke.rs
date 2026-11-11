@@ -1845,6 +1845,67 @@ fn gate_ci_judges_a_finished_change_from_the_task_text_alone() {
 }
 
 #[test]
+fn gate_denies_a_forbidden_path_with_no_session_and_with_no_index() {
+    let (_temp, repo) = demo_repo();
+    assert_eq!(gate_status(&repo)["active"], false);
+    let pre = |input: String| hook(&repo, "pre-tool", &input);
+    let shell = |command: &str| {
+        serde_json::json!({
+            "session_id": "A", "cwd": repo, "tool_name": "Bash", "tool_use_id": "t1",
+            "tool_input": {"command": command}
+        })
+        .to_string()
+    };
+    let denied = |output: String, path: &str| {
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{value}"
+        );
+        let reason = value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(reason.contains(path), "{reason}");
+        assert!(
+            reason.contains("with or without a gate session"),
+            "{reason}"
+        );
+    };
+    // No session: a prompt the planner had Low confidence in, a slash command, `auto = false`
+    // or a planner that is not done all leave the hooks here. The policy still holds.
+    denied(pre(edit_input(&repo, "Edit", ".env")), ".env");
+    denied(
+        pre(edit_input(&repo, "Write", "vendor/tinylib/util.py")),
+        "vendor/tinylib/util.py",
+    );
+    denied(
+        pre(edit_input(&repo, "Write", "web/node_modules/x/index.js")),
+        "web/node_modules/x/index.js",
+    );
+    denied(pre(shell("echo TOKEN=x > .env")), ".env");
+    denied(
+        pre(shell("sed -i s/a/b/ certs/server.pem")),
+        "certs/server.pem",
+    );
+    // Everything else passes, as before: there is no boundary to hold it to.
+    assert!(pre(edit_input(&repo, "Edit", "src/auth.rs"))
+        .trim()
+        .is_empty());
+    assert!(pre(shell("ls -la && cat .env")).trim().is_empty());
+
+    // The same with no index at all: the policy reads nothing but the path.
+    std::fs::remove_dir_all(repo.join(".ok")).unwrap();
+    denied(pre(edit_input(&repo, "Edit", ".env")), ".env");
+    assert!(pre(edit_input(&repo, "Edit", "src/auth.rs"))
+        .trim()
+        .is_empty());
+
+    // `observe` denies nothing, with or without a session.
+    set_gate_mode(&repo, "observe");
+    assert!(pre(edit_input(&repo, "Edit", ".env")).trim().is_empty());
+}
+
+#[test]
 fn gate_ci_takes_its_mode_from_the_base_revision_not_from_the_change_it_judges() {
     let (_temp, repo) = demo_repo();
     git(&repo, &["branch", "-M", "main"]);

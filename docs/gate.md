@@ -206,15 +206,19 @@ edits without widening instead of 81.0%, and reports 12 of 114 out-of-boundary d
 rather than denying them ([`benchmarks/gate/`](../benchmarks/gate/README.md)).
 The secret-path policy and the plan's forbidden rules still win.
 
-A forbidden path is one of three things, in every mode and every session:
+A forbidden path is one of three things. The first two are denied by the hooks in every mode
+but `observe`, **with or without a session**: a prompt whose plan had Low confidence, a slash
+command, `auto = false` or a repository with no index all leave no session, and a secret is
+refused all the same, because that policy reads nothing but the path. The third needs a plan:
 
 - one the secret-path policy matches (`.env`, `.env.*`, `.aws`, `.ssh`, SSH key names,
   key-material extensions such as `.pem`, `.key`, `.p12`), in any letter case;
 - one the gate's own policy matches: a dependency directory at any depth (`node_modules/`,
-  `third_party/`, `.venv/`) and a file named as generated output (`x_generated.rs`,
-  `x.generated.ts`), in any letter case;
-- one the plan's forbidden rules match: the directories the index pruned as build output or
-  dependencies, `vendor/`, `generated/`, `**/secrets/**`, `**/*Generated*`, `.git/`, `.ok/`. A
+  `third_party/`, `.venv/`) and `vendor/` at the root; generated output (a `generated/`
+  directory, a file named `x_generated.rs` or `x.generated.ts`, a path with `Generated` in
+  it); a `secrets/` directory; and `.git/` and `.ok/`. Directory names in any letter case;
+- one the plan's forbidden rules match: the same rules, plus the directories the index pruned
+  as build output or dependencies, which only an index can name. A
   rule written in lower case names a directory and matches any spelling of it, as a
   case-insensitive filesystem would; a rule with capitals is a naming convention and matches
   as written.
