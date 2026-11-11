@@ -188,12 +188,12 @@ impl GateBoundary {
     /// Where `path` (repository-relative, `/`-separated) stands against this boundary.
     pub fn classify(&self, path: &str) -> PathClass {
         let path = normalize_str(path);
-        if open_kioku_core::is_secret_like_path(Path::new(&path))
+        if policy_forbidden(&path)
             || self.forbidden.iter().any(|f| f == &path)
             || self
                 .forbidden_rules
                 .iter()
-                .any(|rule| forbidden_rule_matches(rule, &path))
+                .any(|rule| forbidden_rule_applies(rule, &path))
         {
             return PathClass::Forbidden;
         }
@@ -222,6 +222,40 @@ impl GateBoundary {
         }
         PathClass::Outside
     }
+}
+
+/// What the gate forbids whatever the plan says: secret-like paths and key material, a
+/// dependency directory at any depth (`node_modules`, `third_party`, `.venv`), and a file
+/// named as generated output (`x_generated.rs`, `x.generated.ts`). Matched without regard to
+/// case. The plan's own rules add the rest: the directories the index pruned, `vendor/`,
+/// `generated/`, `.ok/`, `.git/`.
+///
+/// `vendor` below the root is left to the plan: it is as often a domain word as a dependency
+/// directory, and a rule that fails a legitimate change is worse than none.
+fn policy_forbidden(path: &str) -> bool {
+    if open_kioku_core::is_secret_like_path(Path::new(path)) {
+        return true;
+    }
+    let lower = path.to_lowercase();
+    let (dirs, name) = lower.rsplit_once('/').unwrap_or(("", lower.as_str()));
+    dirs.split('/')
+        .any(|dir| matches!(dir, "node_modules" | "third_party" | ".venv"))
+        || name.contains("_generated.")
+        || name.contains(".generated.")
+}
+
+/// Whether a plan's forbidden rule covers `path`. A rule written in lower case names a
+/// directory (`vendor/**`, `node_modules/**`, `.ok/**`), which a case-insensitive filesystem
+/// reaches under any spelling, so it is matched without regard to case. A rule with capitals
+/// (`**/*Generated*`) is a naming convention and is matched as written.
+fn forbidden_rule_applies(rule: &open_kioku_core::BoundaryForbiddenRule, path: &str) -> bool {
+    if forbidden_rule_matches(rule, path) {
+        return true;
+    }
+    let lower = path.to_lowercase();
+    rule.pattern == rule.pattern.to_lowercase()
+        && lower != path
+        && forbidden_rule_matches(rule, &lower)
 }
 
 /// The directory part of a `/`-separated path; empty at the root.
@@ -945,16 +979,21 @@ pub fn plan_with_expansions(mut plan: PlanReport, session: &GateSession) -> Plan
 /// Add to the plan's caution paths every changed path the session reads as caution or as a
 /// sibling, so verification warns about them exactly as the hook said it would instead of
 /// failing them as outside the boundary.
+///
+/// In an advisory session a path outside the boundary is treated the same way: the boundary
+/// was planned from text nobody declared as one, so a file outside it is reported (the
+/// dossier lists each under `outside_boundary`) and is not a failure. Forbidden paths are
+/// untouched by this and still fail.
 pub fn plan_with_session_caution(
     mut plan: PlanReport,
     session: &GateSession,
     changed: &[String],
 ) -> PlanReport {
     for path in changed {
-        if !matches!(
-            session.boundary.classify(path),
-            PathClass::Caution | PathClass::Sibling
-        ) {
+        let class = session.boundary.classify(path);
+        let reported = matches!(class, PathClass::Caution | PathClass::Sibling)
+            || (session.advisory && class == PathClass::Outside);
+        if !reported {
             continue;
         }
         let boundary = &mut plan.recommended_change_boundary;
@@ -1521,6 +1560,10 @@ pub struct DossierChange {
     /// Modified before the session started and not edited during it: not this change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preexisting_excluded: Vec<String>,
+    /// In an advisory session, the changed files outside the planned boundary. They are
+    /// reported here and are not boundary violations: nobody declared that boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside_boundary: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_sha256: Option<String>,
     pub source: String,
@@ -1566,6 +1609,11 @@ pub struct ChangeDossier {
     pub created_at: DateTime<Utc>,
     pub repo: DossierRepo,
     pub verdict: DossierVerdict,
+    /// Whether the boundary was advisory: planned from text nobody declared as a boundary,
+    /// so a changed file outside it is listed under `change.outside_boundary` and is not a
+    /// violation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub advisory: bool,
     pub plan: DossierPlan,
     pub boundary: GateBoundary,
     pub trail: DossierTrail,
@@ -1670,12 +1718,26 @@ pub fn build_dossier(
     if session.mode == GateMode::Observe {
         caveats.push("observe mode: nothing was denied during the session".into());
     }
+    let outside_boundary = if session.advisory {
+        change
+            .changed_files
+            .iter()
+            .map(|path| normalize_str(path))
+            .filter(|path| session.boundary.classify(path) == PathClass::Outside)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     if session.advisory {
-        caveats.push(
-            "advisory session: it was started from a prompt, not declared, so the boundary \
-             was reported and recorded but did not hold the agent (forbidden paths excepted)"
-                .into(),
-        );
+        let outside = match outside_boundary.len() {
+            0 => "no changed file is outside it".to_string(),
+            n => format!("the {n} changed file(s) outside it are reported and are not a failure"),
+        };
+        caveats.push(format!(
+            "advisory session: the boundary was planned from text nobody declared as a boundary \
+             (a prompt, or a pull request's title and description); {outside}. A forbidden \
+             path still fails"
+        ));
     }
     let changed = change
         .changed_files
@@ -1699,7 +1761,28 @@ pub fn build_dossier(
 
     let verification_summary = verification.map(|report| DossierVerification {
         verdict: report.verdict,
-        boundary_violations: report.boundary_violations.iter().map(finding).collect(),
+        boundary_violations: report
+            .boundary_violations
+            .iter()
+            .map(finding)
+            .map(|mut finding| {
+                // The verifier knows the plan's forbidden rules; the secret-path policy is
+                // the gate's. A path that policy forbids is named as forbidden, not as
+                // merely outside a boundary it could never have been admitted to.
+                let forbidden = finding
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| session.boundary.classify(path) == PathClass::Forbidden);
+                if forbidden && finding.kind == "out_of_boundary" {
+                    finding.kind = "forbidden_boundary".into();
+                    finding.reason = "path is forbidden by policy (secret-like, key material, \
+                                      generated, a dependency, or the index) and cannot be \
+                                      admitted to a boundary"
+                        .into();
+                }
+                finding
+            })
+            .collect(),
         warnings_count: report.warnings.len(),
         warnings: report.warnings.iter().take(12).map(finding).collect(),
         missing_tests: report.missing_tests.iter().map(finding).collect(),
@@ -1729,7 +1812,7 @@ pub fn build_dossier(
         Some(VerificationVerdict::Fail) => DossierVerdict::Fail,
         Some(VerificationVerdict::Warn) => DossierVerdict::Warn,
         Some(VerificationVerdict::Pass) | None => {
-            if trail.edits_warned > 0 || trail.edits_denied > 0 {
+            if trail.edits_warned > 0 || trail.edits_denied > 0 || !outside_boundary.is_empty() {
                 DossierVerdict::Warn
             } else {
                 DossierVerdict::Pass
@@ -1750,6 +1833,7 @@ pub fn build_dossier(
             head_rev: change.head_rev.clone(),
         },
         verdict,
+        advisory: session.advisory,
         plan: DossierPlan {
             risk_level: session.risk_level.clone(),
             risk_score: session.risk_score,
@@ -1767,6 +1851,7 @@ pub fn build_dossier(
             changed_files: change.changed_files.clone(),
             untracked_files: change.untracked_files.clone(),
             preexisting_excluded: change.preexisting_excluded.clone(),
+            outside_boundary,
             diff_sha256: change
                 .unified_diff
                 .as_deref()
@@ -1806,7 +1891,13 @@ pub fn render_markdown(dossier: &ChangeDossier) -> String {
         "## {icon} Change Dossier: {}\n\n",
         dossier.verdict.label()
     ));
-    out.push_str(&format!("**Task:** {}\n\n", dossier.task));
+    // The task is text someone else wrote (a prompt, a pull request's description). It is
+    // shown as one clipped line with Markdown and HTML escaped, so it cannot add a heading,
+    // fold the dossier away, or pass for part of it.
+    out.push_str(&format!(
+        "**Task:** {}\n\n",
+        markdown_text(&dossier.task, 400)
+    ));
     out.push_str(&format!(
         "**Repository:** `{}`  ·  base `{}`  ·  head `{}`  ·  gate mode `{}`  ·  session `{}`\n\n",
         dossier.repo.name,
@@ -1836,7 +1927,11 @@ pub fn render_markdown(dossier: &ChangeDossier) -> String {
     if !dossier.boundary.expansions.is_empty() {
         out.push_str("- Widened during the session:\n");
         for e in &dossier.boundary.expansions {
-            out.push_str(&format!("  - `{}`: {}\n", e.path, e.reason));
+            out.push_str(&format!(
+                "  - `{}`: {}\n",
+                e.path,
+                markdown_text(&e.reason, 300)
+            ));
         }
     }
     out.push('\n');
@@ -1886,6 +1981,15 @@ pub fn render_markdown(dossier: &ChangeDossier) -> String {
             join_code(&dossier.change.preexisting_excluded, 10)
         ));
     }
+    if !dossier.change.outside_boundary.is_empty() {
+        out.push_str(&format!(
+            "- Outside the planned boundary ({} of {}; reported, not a failure, because nobody \
+             declared this boundary): {}\n",
+            dossier.change.outside_boundary.len(),
+            dossier.change.changed_files.len(),
+            join_code(&dossier.change.outside_boundary, 15)
+        ));
+    }
     out.push('\n');
 
     out.push_str("### Verification\n\n");
@@ -1893,7 +1997,13 @@ pub fn render_markdown(dossier: &ChangeDossier) -> String {
         None => out.push_str("- Not run: there was no change to verify.\n"),
         Some(v) => {
             out.push_str(&format!("- Verdict: **{:?}**\n", v.verdict));
-            if v.boundary_violations.is_empty() {
+            if v.boundary_violations.is_empty() && !dossier.change.outside_boundary.is_empty() {
+                out.push_str(&format!(
+                    "- Boundary: no violation; {} changed file(s) are outside the planned \
+                     boundary, which is advisory here.\n",
+                    dossier.change.outside_boundary.len()
+                ));
+            } else if v.boundary_violations.is_empty() {
                 out.push_str("- Boundary: every changed file is inside the declared boundary.\n");
             } else {
                 out.push_str("- Boundary violations:\n");
@@ -1971,6 +2081,30 @@ pub fn render_markdown(dossier: &ChangeDossier) -> String {
         dossier.schema_version,
         dossier.created_at.format("%Y-%m-%d %H:%M UTC")
     ));
+    out
+}
+
+/// Free text for a Markdown line: whitespace collapsed to single spaces, clipped to `max`
+/// characters, and every character Markdown or HTML reads as markup escaped.
+fn markdown_text(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clipped = flat.chars().count() > max;
+    let mut out = String::new();
+    for c in flat.chars().take(max) {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '\\' | '`' | '*' | '_' | '[' | ']' | '#' | '|' | '~' | '!' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    if clipped {
+        out.push('…');
+    }
     out
 }
 
@@ -2105,6 +2239,100 @@ mod tests {
             PathClass::Forbidden
         );
         assert_eq!(s.boundary.classify("src/other.rs"), PathClass::Outside);
+    }
+
+    #[test]
+    fn the_gates_own_policy_forbids_dependencies_and_generated_output_at_any_depth_and_case() {
+        let s = session(GateMode::Warn);
+        for forbidden in [
+            // A dependency directory, wherever it sits and however it is spelled.
+            "node_modules/x/index.js",
+            "web/node_modules/x/index.js",
+            "Web/Node_Modules/x/index.js",
+            "sub/third_party/x.c",
+            ".venv/lib/x.py",
+            "tools/.venv/lib/x.py",
+            // A file named as generated output.
+            "src/foo_generated.rs",
+            "src/foo.generated.ts",
+            "src/Foo.Generated.cs",
+            // A lower-case rule of the plan names a directory: any spelling of it.
+            ".OK/foo.txt",
+            "app/Secrets/x.txt",
+            // The secret-path policy, as before.
+            "config/.ENV.production",
+        ] {
+            assert_eq!(
+                s.boundary.classify(forbidden),
+                PathClass::Forbidden,
+                "{forbidden}"
+            );
+        }
+        for outside in [
+            // `vendor` below the root is left to the plan: it is as often a domain word.
+            "src/vendor/model.rs",
+            // "generated" as a word in a name is not the generated-output convention.
+            "docs/generated-code.md",
+            "src/regenerated.rs",
+            "src/generated_ids.rs",
+            // A file, not a directory, called like a dependency directory.
+            "docs/node_modules",
+        ] {
+            assert_eq!(
+                s.boundary.classify(outside),
+                PathClass::Outside,
+                "{outside}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_markdown_dossier_shows_the_task_as_one_escaped_line() {
+        let plan = plan();
+        let mut session = GateSession::new(
+            "fix the thing\n\n## ✅ Change Dossier: PASS\n\n<details><summary>old run</summary>",
+            GateMode::Warn,
+            &plan,
+            b"{}",
+        );
+        session.advisory = true;
+        let change = ChangeInput {
+            changed_files: vec!["src/auth.rs".into(), "docs/notes.md".into()],
+            source: "test".into(),
+            ..ChangeInput::default()
+        };
+        let dossier = build_dossier("demo", &session, &plan, &[], 0, &change, None);
+        assert!(dossier.advisory);
+        assert_eq!(dossier.change.outside_boundary, vec!["docs/notes.md"]);
+        let json = serde_json::to_value(&dossier).unwrap();
+        assert_eq!(json["advisory"], true);
+        let markdown = render_markdown(&dossier);
+        assert_eq!(
+            markdown.matches("\n## ").count() + usize::from(markdown.starts_with("## ")),
+            1,
+            "the task adds no heading:\n{markdown}"
+        );
+        assert!(!markdown.contains("<details>"), "{markdown}");
+        assert!(markdown.contains("&lt;details&gt;"), "{markdown}");
+        assert!(markdown.contains("**Task:** fix the thing \\#\\# ✅ Change Dossier: PASS"));
+        // A session with nothing outside says so, not "the 0 changed file(s)".
+        let inside = ChangeInput {
+            changed_files: vec!["src/auth.rs".into()],
+            source: "test".into(),
+            ..ChangeInput::default()
+        };
+        let dossier = build_dossier("demo", &session, &plan, &[], 0, &inside, None);
+        assert!(dossier
+            .caveats
+            .iter()
+            .any(|c| c.contains("no changed file is outside it")));
+        // A binding session carries no advisory marker at all.
+        session.advisory = false;
+        let dossier = build_dossier("demo", &session, &plan, &[], 0, &inside, None);
+        assert!(serde_json::to_value(&dossier)
+            .unwrap()
+            .get("advisory")
+            .is_none());
     }
 
     #[test]

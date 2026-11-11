@@ -97,6 +97,66 @@ jobs:
           path: artifacts/relationships
           if-no-files-found: error
 
+  change-dossier:
+    # This repository judges its own pull requests with the gate. The plan is built from the
+    # pull request's title and description, the branch's change is verified against that
+    # plan's boundary, and the Change Dossier is this job's summary. Without `--mode enforce`
+    # a file outside the planned boundary is reported, not failed: `docs/gate.md`, "In CI",
+    # has the measurement behind that default. A forbidden path fails the job.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ri3-compact-${{ hashFiles('**/Cargo.lock') }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Build the CLI
+        run: cargo build -p open-kioku-cli
+      - name: Index this checkout
+        run: target/debug/ok index .
+      - name: Judge the change against the pull request's own words
+        run: |
+          set -uo pipefail
+          # The title and description are text someone else wrote. They are read from the
+          # event file, never interpolated into this script, and clipped: a description can
+          # be longer than one argument may be.
+          task="$(python3 - <<'PY'
+          import json, os
+          pull = json.load(open(os.environ["GITHUB_EVENT_PATH"]))["pull_request"]
+          print(((pull.get("title") or "") + "\n\n" + (pull.get("body") or ""))[:6000])
+          PY
+          )"
+          # The checkout is the merge of the pull request into its base, so the base the
+          # change is read against is that merge's first parent: exactly what was merged,
+          # however far the base branch has moved since the event was written.
+          status=0
+          target/debug/ok gate ci --base 'HEAD^1' --task="$task" --format text \
+            --write "$RUNNER_TEMP/change-dossier.md" || status=$?
+          # The dossier is written before the verdict decides the exit status, so a missing
+          # dossier is the command itself failing.
+          if [ ! -f "$RUNNER_TEMP/change-dossier.md" ]; then
+            echo "ok gate ci wrote no dossier (exit status $status)" >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/change-dossier.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - name: Upload the Change Dossier
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: change-dossier
+          path: ${{ runner.temp }}/change-dossier.md
+          if-no-files-found: warn
+
   coverage:
     runs-on: ubuntu-latest
     steps:

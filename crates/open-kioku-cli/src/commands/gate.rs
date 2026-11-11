@@ -39,7 +39,8 @@ enum GateCommand {
     AutoIndex,
     /// Judge a finished change with no hooks: plan from the task text, verify every change
     /// since `--base`, print the dossier, exit non-zero on FAIL. For CI on any pull request,
-    /// whatever wrote it.
+    /// whatever wrote it. A forbidden path fails; a file outside the planned boundary is
+    /// listed, and fails only under `--mode enforce`.
     #[command(after_help = "Examples:
   ok gate ci --base origin/main --task \"$PR_TITLE\"
   ok gate ci --base HEAD~1 --task \"add retry handling\" --format json
@@ -49,9 +50,12 @@ enum GateCommand {
         #[arg(long, value_name = "REV")]
         base: String,
         /// What the change set out to do, in natural language (a pull request's title and body).
-        #[arg(long, value_name = "TEXT")]
+        /// It may begin with a dash.
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         task: String,
-        /// Boundary mode recorded in the dossier; the verdict is the same in every mode.
+        /// `enforce` makes the planned boundary binding: a changed file outside it fails. In
+        /// `warn` (the default) and `observe` such a file is listed and the run does not fail.
+        /// Without this flag the mode is `[gate] mode` of ok.toml as the base revision has it.
         #[arg(long, value_name = "MODE")]
         mode: Option<String>,
         /// Maximum context results the plan is built from.
@@ -484,7 +488,7 @@ fn gate_follow_config(repo: &Path, gate_store: &GateStore, session: &mut GateSes
         return;
     };
     let mode = GateMode::parse(&config.gate.mode).unwrap_or_default();
-    let advisory = mode == GateMode::Warn;
+    let advisory = mode != GateMode::Enforce;
     let sibling_caution = config.gate.sibling_caution;
     if session.mode != mode
         || session.advisory != advisory
@@ -670,8 +674,9 @@ fn gate_start_auto(repo: &Path, nonce: &str, limit: usize) -> anyhow::Result<()>
 
     let mut session = gate_new_session(repo, &config, &task, mode, &report, &plan_json);
     session.auto = true;
-    // Nobody declared this task: in `warn` the boundary informs and records, and holds nothing.
-    session.advisory = mode == GateMode::Warn;
+    // Nobody declared this task: unless the repository says `enforce`, the boundary informs
+    // and records, and holds nothing.
+    session.advisory = mode != GateMode::Enforce;
     session.harness_session =
         (!marker.harness_session.is_empty()).then(|| marker.harness_session.clone());
     // The baseline is the one the prompt hook captured: an edit made while this plan was
@@ -1184,12 +1189,37 @@ fn gate_ci(
     // histories, or a shallow clone that does not reach it).
     let base_rev = git(&["merge-base", &base_tip, "HEAD"]).unwrap_or(base_tip);
     let config = OkConfig::load_from_repo(repo)?;
-    let mode = gate_mode_from(mode, &config)?;
+    // How binding the judgement is must not be the judged change's own choice: `[gate]` is
+    // read from ok.toml as the base revision has it, so a branch cannot make itself advisory
+    // (or widen its boundary to siblings) by editing the file. `--mode` is the caller's.
+    let base_gate = git(&["show", &format!("{base_rev}:./ok.toml")])
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|value| value.get("gate").cloned());
+    let base_mode = base_gate
+        .as_ref()
+        .and_then(|gate| gate.get("mode"))
+        .and_then(|mode| mode.as_str())
+        .and_then(GateMode::parse)
+        .unwrap_or_default();
+    let base_sibling_caution = base_gate
+        .as_ref()
+        .and_then(|gate| gate.get("sibling_caution"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let flag_given = mode.is_some();
+    let mode = match mode {
+        Some(_) => gate_mode_from(mode, &config)?,
+        None => base_mode,
+    };
     let (plan, plan_json) = gate_build_plan(repo, &config, task, limit)?;
     let mut session = GateSession::new(task, mode, &plan, &plan_json);
     session.repo_name = gate_repo_name(repo, &config);
     session.base_rev = Some(base_rev);
-    session.boundary.sibling_caution = config.gate.sibling_caution;
+    session.boundary.sibling_caution = base_sibling_caution;
+    // The boundary is a plan built from the pull request's words. Nobody declared it and
+    // nobody is here to widen it with a reason, so unless the caller asks for `enforce` a file
+    // outside it is reported, not failed. Forbidden paths fail either way.
+    session.advisory = mode != GateMode::Enforce;
     // A dossier an earlier run wrote into the working tree is not the change. Only a file git
     // does not track is left out this way: naming a file the branch itself added or changed
     // as the dossier path must not take it out of what is judged.
@@ -1213,7 +1243,23 @@ fn gate_ci(
             session.preexisting_changes.push(relative);
         }
     }
-    let dossier = gate_verify(repo, &session, plan, &[], 0, run_commands)?;
+    let mut dossier = gate_verify(repo, &session, plan, &[], 0, run_commands)?;
+    let tree_mode = GateMode::parse(&config.gate.mode).unwrap_or_default();
+    if !flag_given && tree_mode != base_mode {
+        dossier.caveats.push(format!(
+            "ok.toml sets `[gate] mode = \"{}\"` in this change and `\"{}\"` at the base \
+             revision; the base revision's applies to a change's own judgement",
+            tree_mode.as_str(),
+            base_mode.as_str()
+        ));
+    }
+    if config.gate.sibling_caution != base_sibling_caution {
+        dossier.caveats.push(format!(
+            "ok.toml sets `[gate] sibling_caution = {}` in this change and `{}` at the base \
+             revision; the base revision's applies to a change's own judgement",
+            config.gate.sibling_caution, base_sibling_caution
+        ));
+    }
     let gate_store = GateStore::for_repo(repo);
     let (dossier_json, dossier_markdown) = gate_store.write_dossier(&dossier)?;
     let markdown = render_markdown(&dossier);
@@ -1560,14 +1606,21 @@ fn gate_summary_line(dossier: &ChangeDossier) -> String {
         .as_ref()
         .map(|v| v.boundary_violations.len())
         .unwrap_or(0);
-    format!(
+    let mut line = format!(
         "Change Dossier {}: {} changed file(s), {} boundary violation(s), {} edit(s) denied, {} warned",
         dossier.verdict.label(),
         dossier.change.changed_files.len(),
         violations,
         dossier.trail.edits_denied,
         dossier.trail.edits_warned
-    )
+    );
+    if !dossier.change.outside_boundary.is_empty() {
+        line.push_str(&format!(
+            ", {} outside the planned boundary (advisory)",
+            dossier.change.outside_boundary.len()
+        ));
+    }
+    line
 }
 
 /// The repository a hook serves. An explicit `--repo` wins; with the default `.`, the

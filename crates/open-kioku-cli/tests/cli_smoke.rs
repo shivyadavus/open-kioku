@@ -364,6 +364,38 @@ fn preflight_has_cli_mcp_parity() {
     assert_eq!(mcp["verdict"], cli["verdict"]);
     assert_eq!(mcp["confidence"], cli["confidence"]);
     assert_eq!(mcp["task"], cli["task"]);
+
+    // The short form, from both surfaces: the same decision in about a kilobyte of text.
+    let brief = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("preflight")
+            .arg("add token expiration")
+            .args(["--format", "brief", "--limit", "20"]);
+        command
+    });
+    assert!(brief.contains(" confidence ("), "{brief}");
+    assert!(brief.contains("Edit (1):\n  src/lib.rs"), "{brief}");
+    assert!(brief.len() < 2_400, "{} bytes", brief.len());
+    let mcp_brief = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan_change","arguments":{"task":"add token expiration","detail":"brief"}}}"#,
+    );
+    let mcp_brief: serde_json::Value = serde_json::from_str(mcp_brief.trim()).unwrap();
+    assert_eq!(
+        mcp_brief["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .trim_end(),
+        brief.trim_end(),
+        "{mcp_brief}"
+    );
 }
 
 /// `ok search` and MCP `search_code` answer through one ranking (#448). The repository's

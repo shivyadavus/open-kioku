@@ -710,14 +710,15 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Generate an evidence-backed pre-edit plan for a task: primary files to edit, expected impact, changed-line ranges, edit boundaries, and recommended test targets. `detail` chooses between the full plan, a concise preflight decision, and a patch plan that writes nothing. With persist=true the plan is turned into a versioned ChangeContractV1, stored under .ok/contracts by default, which verify_change can later hold the actual edit to. Use before editing to create an evidence-backed plan with expected files, ranges, impact, and tests. `detail` selects the artifact: `plan` for the full report, `preflight` for one concise start decision, `patch` for a patch plan that writes nothing. Set persist=true to turn the plan into a durable change contract that verify_change can later hold the edit to; it accepts `plan` or `plan_json` so a plan you already hold becomes a contract without re-planning, and store=false keeps it transient. With persist=false, the default, this is read-only.",
+        "description": "Generate an evidence-backed pre-edit plan for a task: primary files to edit, expected impact, changed-line ranges, edit boundaries, and recommended test targets. `detail` chooses between the full plan, a brief of a kilobyte or two, a preflight decision with every risk and caveat, and a patch plan that writes nothing. With persist=true the plan is turned into a versioned ChangeContractV1, stored under .ok/contracts by default, which verify_change can later hold the actual edit to. Use before editing to create an evidence-backed plan with expected files, ranges, impact, and tests. `detail` selects the artifact: `brief` for the decision in a kilobyte or two (verdict, files to edit, likely affected files, commands, top risks; read this first), `plan` for the full report, `preflight` for the start decision with every risk and caveat, `patch` for a patch plan that writes nothing. Set persist=true to turn the plan into a durable change contract that verify_change can later hold the edit to; it accepts `plan` or `plan_json` so a plan you already hold becomes a contract without re-planning, and store=false keeps it transient. With persist=false, the default, this is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "detail": {
-              "description": "Which artifact to return. 'plan' (default) is the full evidence-backed report; 'preflight' is one concise start decision with verdict, confirmed edit files, risks, and evidence quality; 'patch' is a patch plan that writes no files. Ignored when persist=true. An unknown value is an invalid-params error (-32602).",
+              "description": "Which artifact to return. 'plan' (default) is the full evidence-backed report, which on a large repository runs to tens of thousands of tokens; 'brief' is the same decision in a kilobyte or two of text (verdict, files to edit with line ranges, likely affected files, commands to run, top risks), whatever `format` says; 'preflight' is the start decision with verdict, confirmed edit files, every risk and caveat, and evidence quality; 'patch' is a patch plan that writes no files. Ignored when persist=true. An unknown value is an invalid-params error (-32602).",
               "enum": [
                 "plan",
+                "brief",
                 "preflight",
                 "patch"
               ],

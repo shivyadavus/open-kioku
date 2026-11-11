@@ -13,10 +13,11 @@ Who declared the task decides how binding the boundary is:
 
 | Declared by | How | The boundary |
 |---|---|---|
-| Nobody: the prompt | the hooks alone (`auto`, the default) | **advisory**: reported and recorded, holds nothing; forbidden paths still denied |
+| Nobody: the prompt | the hooks alone (`auto`, the default) | **advisory**: files outside it are reported and recorded, and are not a failure; forbidden paths are still denied |
 | The repository | `mode = "enforce"` in `ok.toml` | binding for every session, prompt-started ones included, from the next tool call after it is set |
 | A person | `ok gate start "<task>"` | binding: a failing change holds the agent at stop; `enforce` also denies at the edit |
-| The pull request | `ok gate ci --base … --task "<title and body>"` | binding: exit code for CI |
+| Nobody: a pull request's words | `ok gate ci --base … --task "<title>"` | **advisory**: files outside it are listed in the dossier; a forbidden path fails the check |
+| The team, for CI | `ok gate ci … --mode enforce`, or `mode = "enforce"` on the base branch | binding: a file outside the boundary fails the check |
 
 ## Zero commands
 
@@ -51,8 +52,11 @@ words, and a plan cannot tell a task from a remark: measured on this repository,
 boundary nobody declared. It tells the agent which edits fall outside it, with
 `ok gate expand <path> --reason "<why>"` as the way to record why one belongs; it denies the
 paths that are forbidden by policy rather than by plan (secrets, key material, generated code,
-dependencies, the index); and it writes the dossier with the true verdict. Holding the agent is
-for a boundary someone declared: the table above.
+dependencies, the index); and it writes the dossier, which lists every changed file outside the
+boundary under *Outside the planned boundary* and gives `WARN`, not `FAIL`, for them. A verdict
+that fails changes a reviewer would accept teaches everyone to ignore it, so `FAIL` is kept
+for what someone declared, and for forbidden paths. Holding the agent is for a boundary someone
+declared: the table above.
 
 This is `[gate] auto = true`, the default. Automatic work happens only at the top of a git
 working tree, indexed or not: the hooks stay silent anywhere else, do not index a repository
@@ -104,7 +108,33 @@ not counted as the change, and a `--write` path the repository tracks is refused
 cannot take one of its own files out of the judgement by naming it), and exits non-zero on
 `FAIL`. It judges a
 pull request whatever wrote it — any agent, any harness, a person — with the trail section
-empty, since no hook saw the edits. The GitHub Action is the natural caller.
+empty, since no hook saw the edits.
+
+By default the boundary is **advisory** here too, for the reason it is in a prompt-started
+session, and with a measurement behind it. Replayed over the last 20 merged commits of this
+repository, each judged against its own subject, a binding boundary fails all 20
+([`benchmarks/gate/`](../benchmarks/gate/README.md#ci-over-merged-history)): 269 of their 432
+changed files fall outside the plan, which names eight files to edit while a real pull request
+also changes its tests, its documentation, the changelog, a lockfile, and four in ten of its
+source files. So by default
+`ok gate ci` lists the files outside the planned boundary and exits 0 with `WARN`. It still
+fails on a [forbidden path](#modes) (a secret-like path or key material, a dependency
+directory, generated output) and, with `--run-commands`, on a validation command that fails.
+`--mode enforce` makes the boundary binding for a team that wants every file a pull request
+touches to be one its description leads to.
+
+Without `--mode`, the mode and `sibling_caution` are `[gate]` of `ok.toml` **as the base
+revision has it**, not as the judged change has it: a branch cannot make its own judgement
+advisory, or widen its own boundary, by editing the file, and the dossier says so when the two
+differ. `--mode` is the caller's. The task text may begin with a dash, and reaches the Markdown
+dossier as one clipped line with Markdown and HTML escaped, since a pull request's description
+is text someone else wrote.
+
+This repository runs it on its own pull requests: the `change-dossier` job in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) builds the plan from the pull
+request's title and description, reads the change against the first parent of the merge
+commit it checked out (`--base 'HEAD^1'`: exactly what was merged, however far the base branch
+has moved), and puts the dossier in the job summary.
 
 ## What the hooks do
 
@@ -153,8 +183,8 @@ The expansion and its reason are recorded in the Change Dossier.
 | Mode | Outside the boundary | Caution path | Forbidden path |
 |---|---|---|---|
 | `enforce` | denied until widened | allowed, reported | denied |
-| `warn` (default) | allowed, reported; verification fails, which holds the agent at stop unless the session is advisory | allowed, reported | denied |
-| `observe` | allowed, recorded | allowed, recorded | allowed, recorded |
+| `warn` (default) | allowed, reported; in a declared session verification fails, which holds the agent at stop; in an advisory one it is listed and the verdict is `WARN` | allowed, reported | denied |
+| `observe` | allowed, recorded; listed in the dossier, never a failure in an advisory session | allowed, recorded | allowed, recorded |
 
 Set the defaults in `ok.toml`:
 
@@ -176,10 +206,26 @@ edits without widening instead of 81.0%, and reports 12 of 114 out-of-boundary d
 rather than denying them ([`benchmarks/gate/`](../benchmarks/gate/README.md)).
 The secret-path policy and the plan's forbidden rules still win.
 
-A forbidden path is one the plan's forbidden rules match (generated code, dependencies, the
-index under `.ok/`) **or** one the secret-path policy matches (`.env`, `.env.*`, `.aws`, `.ssh`,
-SSH key names, key-material extensions such as `.pem`, `.key`, `.p12`). `ok gate expand`
-refuses a forbidden path: a boundary that can be widened to a secret is not a boundary.
+A forbidden path is one of three things, in every mode and every session:
+
+- one the secret-path policy matches (`.env`, `.env.*`, `.aws`, `.ssh`, SSH key names,
+  key-material extensions such as `.pem`, `.key`, `.p12`), in any letter case;
+- one the gate's own policy matches: a dependency directory at any depth (`node_modules/`,
+  `third_party/`, `.venv/`) and a file named as generated output (`x_generated.rs`,
+  `x.generated.ts`), in any letter case;
+- one the plan's forbidden rules match: the directories the index pruned as build output or
+  dependencies, `vendor/`, `generated/`, `**/secrets/**`, `**/*Generated*`, `.git/`, `.ok/`. A
+  rule written in lower case names a directory and matches any spelling of it, as a
+  case-insensitive filesystem would; a rule with capitals is a naming convention and matches
+  as written.
+
+`ok gate expand` refuses a forbidden path: a boundary that can be widened to a secret is not a
+boundary. What this does not cover, so that it is not read as more than it is: `vendor/` below
+the repository root (the word is as often a domain term as a dependency directory, and a rule
+that fails legitimate changes is worse than none); a secret copied to a file with an ordinary
+name, which is content and not a path; and a change under `.ok/` made outside the hooks, which
+is denied at the edit hook but left out of the change at verification, because the gate's own
+state lives there.
 
 ## Widening the boundary
 
@@ -214,7 +260,10 @@ request comment takes. It carries no source text: paths, counts, verdicts, reaso
   edits, a non-git repository, observe mode.
 
 The dossier's verdict is `FAIL` when verification fails, `WARN` when verification warns or any
-edit was denied or warned during the session, and `PASS` otherwise.
+edit was denied or warned during the session, and `PASS` otherwise. In an advisory session
+(started from a prompt in `warn` mode, or `ok gate ci` without `--mode enforce`) a changed file
+outside the planned boundary is listed under `change.outside_boundary`, makes the verdict
+`WARN`, and is not a boundary violation; a forbidden path is one in every session.
 
 ## Measured
 
