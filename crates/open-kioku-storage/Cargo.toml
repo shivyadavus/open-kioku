@@ -13,8 +13,8 @@ categories.workspace = true
 [dependencies]
 chrono.workspace = true
 fs4.workspace = true
-open-kioku-core = { version = "4.0.0", path = "../open-kioku-core" }
-open-kioku-errors = { version = "4.0.0", path = "../open-kioku-errors" }
+open-kioku-core = { version = "5.0.0", path = "../open-kioku-core" }
+open-kioku-errors = { version = "5.0.0", path = "../open-kioku-errors" }
 serde.workspace = true
 serde_json.workspace = true
 

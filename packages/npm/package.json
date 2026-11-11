@@ -1,6 +1,6 @@
 {
   "name": "open-kioku",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local-first repository intelligence for AI coding agents; nothing leaves your machine.",
   "mcpName": "open-kioku",
   "bin": {
@@ -8,10 +8,10 @@
     "open-kioku": "./bin/ok.js"
   },
   "optionalDependencies": {
-    "@open-kioku/darwin-arm64": "4.0.0",
-    "@open-kioku/linux-x64": "4.0.0",
-    "@open-kioku/linux-arm64": "4.0.0",
-    "@open-kioku/win32-x64": "4.0.0"
+    "@open-kioku/darwin-arm64": "5.0.0",
+    "@open-kioku/linux-x64": "5.0.0",
+    "@open-kioku/linux-arm64": "5.0.0",
+    "@open-kioku/win32-x64": "5.0.0"
   },
   "repository": {
     "type": "git",

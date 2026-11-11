@@ -24,7 +24,7 @@
 # so a hand edit or a skipped pin fails CI.
 FROM debian:bookworm-slim
 
-ARG OK_VERSION=4.0.0
+ARG OK_VERSION=5.0.0
 ARG OK_SHA256=ad18fc99a2d8ed84de194816d2b49e362faa940ffc861ff7b1a184a593adf75d
 
 RUN apt-get update \

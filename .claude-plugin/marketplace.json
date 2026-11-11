@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. A local, read-only MCP server with 16 tools: code and regex search, symbol definitions and references, dependency paths, impact analysis, context packs, plan_change and verify_change, from an index under the repository's .ok/ directory. No hosted index or embeddings API required.",
-    "version": "4.0.0"
+    "version": "5.0.0"
   },
   "plugins": [
     {
@@ -16,7 +16,7 @@
         "repo": "shivyadavus/open-kioku"
       },
       "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local, read-only MCP server with 16 tools — BM25 and regex code search, symbol resolution, references and call relationships, impact analysis, context packs, plan_change and verify_change — from a native binary and an index under .ok/. Supports Rust, TypeScript, Python, Go, Java, and JavaScript.",
-      "version": "4.0.0",
+      "version": "5.0.0",
       "author": {
         "name": "Shiv Yadav",
         "email": "shivyadavus@users.noreply.github.com"

@@ -289,8 +289,8 @@ enum Command {
         #[arg(long = "write-attestation", default_value_t = false)]
         write_attestation: bool,
     },
-    /// Hold a coding agent's edits to a declared boundary, and write the verified Change
-    /// Dossier when it stops.
+    /// [experimental] Hold a coding agent's edits to a declared boundary, and write the
+    /// verified Change Dossier when it stops.
     #[command(after_help = "Examples:
   ok gate install claude --apply
   ok gate start \"add retry handling to token refresh\"

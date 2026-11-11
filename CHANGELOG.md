@@ -5,7 +5,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [Unreleased]
+## [5.0.0] — 2026-11-11
+
+Two things need doing on upgrade: **run `ok index` to rebuild every existing index** (the parser and relationship-resolver semantics versions changed, and an index built by 4.0.0 reports `RebuildRequired` and withholds relationship evidence until it is rebuilt), and **build with Rust 1.89 or later** if you build from source (the SQLite security fix requires it).
 
 ### Breaking
 
@@ -330,6 +332,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - A test the runner skips is excluded wherever validation evidence is counted: `find_tests_for_change` and `ok tests` no longer return one, the selector never raises one to the Required tier however strong the overlap evidence, and `ok status` counts only targets that count as evidence, so a repository of `test.todo` stubs no longer reads as ready while every pack reports validation unavailable.
 - `ok trust` distinguishes an unreadable tests table from a repository without tests: the storage error becomes a caveat naming it and the missing-test list is omitted, instead of every source file being reported as untested.
 - `query_evidence_graph` and `ok graph query` read each WHERE field from the node or edge it names. `source`, `source_type` and `confidence` parsed on node variables and matched no row, because graph nodes carry no evidence; a one-hop edge can now be bound in MATCH and filtered on its evidence as `evidence_source`, `evidence_source_type` and `confidence` (`MATCH (a:Function)-[c:CALLS]->(b:Function) WHERE c.confidence >= 0.85 RETURN a, b`), `confidence` also takes `<`, `<=`, `>` and `>=` and compares the band's score (low 0.35, medium 0.6, high 0.85, exact 1.0) as a number, and those fields on a node variable are a `parse_error` naming the edge binding. `file_path` and `qualified_name` compared every node's label: `file_path` is now a File node's label and, on a symbol node, the path of the File node that defines it, and `qualified_name` is a symbol node's label. A field the variable's type does not take (`qualified_name` on a File node, `file_path` on a `ConfigKey`), an unknown `confidence` band and an unknown `evidence_source_type` are `parse_error`s listing what is accepted; when a matched node carries no `file_path` or `qualified_name` (a `Module` built from an import, a symbol no single File node defines), its row is excluded and a caveat reports at least how many scanned rows that cost, since the scan stops once the requested page is filled. An `evidence_source` value naming a node rather than a recording pass is rejected as well, instead of returning an empty result that reads as "nothing links these". A `file_path` filter reads the defining files of each scanned batch of candidate rows in one `GraphStore::edges_by_type_for_nodes` read (a new trait method, implemented by the SQLite store; a store whose default returns `Unsupported` is read once per symbol). In the schema, `syntax` lists the filter fields per node type, `examples` adds a symbol `file_path` query and an edge-evidence query, `unsupported` replaces `edge_variable` with `edge_variable_in_return` and adds `edge_variable_on_hop_range`, `field_the_node_type_does_not_carry` and `evidence_field_on_a_node`, and `query_features` adds `edge_evidence_filters` and `numeric_confidence_comparison`. A query that filtered a symbol's `file_path` or a File node's `qualified_name` against the label now returns different rows or a parse error.
+
+### Artifacts
+
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
 
 ## [4.0.0] — 2026-09-11
 
@@ -977,3 +992,4 @@ Two things need doing on upgrade, both detailed first below: **run `ok index` to
 [3.0.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.4
 [3.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.1.0
 [4.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v4.0.0
+[5.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v5.0.0

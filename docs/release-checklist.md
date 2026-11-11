@@ -41,10 +41,10 @@ install audit evidence expected on every release.
 
 ## Version And Tag
 
-- Confirm `Cargo.toml` `[workspace.package]` version is `4.0.0`.
-- Confirm `release-metadata.json` uses tag `v4.0.0`.
-- Confirm the GitHub release tag is exactly `v4.0.0`.
-- Confirm `CHANGELOG.md` has a `4.0.0` section and a matching `[4.0.0]` release link.
+- Confirm `Cargo.toml` `[workspace.package]` version is `5.0.0`.
+- Confirm `release-metadata.json` uses tag `v5.0.0`.
+- Confirm the GitHub release tag is exactly `v5.0.0`.
+- Confirm `CHANGELOG.md` has a `5.0.0` section and a matching `[5.0.0]` release link.
 
 ## Crates.io Publication
 

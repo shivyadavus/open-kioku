@@ -1,6 +1,6 @@
 {
   "name": "open-kioku",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. A local, read-only MCP server with 16 tools: code and regex search, symbol definitions and references, dependency paths, impact analysis, context packs, plan_change and verify_change, from an index under the repository's .ok/ directory. No hosted index or embeddings API required.",
   "author": {
     "name": "Shiv Yadav",
