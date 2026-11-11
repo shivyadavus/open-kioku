@@ -62,9 +62,14 @@ fn hook(repo: &Path, event: &str, stdin: &str) -> String {
     String::from_utf8(output.stdout).expect("stdout should be utf-8")
 }
 
+/// An edit tool call from conversation `A`, the one the prompts of these tests come from.
 fn edit_input(repo: &Path, tool: &str, relative: &str) -> String {
+    edit_input_as(repo, tool, relative, "A")
+}
+
+fn edit_input_as(repo: &Path, tool: &str, relative: &str, conversation: &str) -> String {
     serde_json::json!({
-        "session_id": "test",
+        "session_id": conversation,
         "cwd": repo,
         "hook_event_name": "PreToolUse",
         "tool_name": tool,
@@ -136,7 +141,7 @@ fn gate_install_is_idempotent_and_keeps_other_settings() {
         c
     }))
     .unwrap();
-    assert_eq!(applied["added"], 5);
+    assert_eq!(applied["added"], 6);
     let written: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(written["permissions"]["allow"][0], "Bash(cargo test)");
@@ -362,12 +367,9 @@ fn gate_enforces_the_boundary_through_the_hooks_and_writes_a_dossier() {
         &edit_input(&repo, "Write", "src/retry.rs"),
     );
     assert!(quiet.trim().is_empty(), "{quiet}");
-    let prompt: serde_json::Value =
-        serde_json::from_str(&hook(&repo, "prompt", r#"{"prompt":"hi"}"#)).unwrap();
-    assert!(prompt["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap()
-        .contains("ok gate start"));
+    // Auto mode with nothing to plan from says nothing at all.
+    let prompt = hook(&repo, "prompt", r#"{"prompt":"hi"}"#);
+    assert!(prompt.trim().is_empty(), "{prompt}");
 }
 
 #[test]
@@ -737,9 +739,8 @@ fn gate_edit_hook_fails_closed_and_require_plan_covers_shell_writes() {
     let (code, _, err) = hook_status(&repo, "pre-tool", "{not json");
     assert_eq!(code, Some(2), "{err}");
     assert!(err.contains("refused"), "{err}");
-    let (code, out, _) = hook_status(&repo, "prompt", "{not json");
-    assert_eq!(code, Some(0));
-    assert!(out.contains("additionalContext"));
+    let (code, _, _) = hook_status(&repo, "prompt", "{not json");
+    assert_eq!(code, Some(0), "an informing hook never fails on bad input");
 
     // A torn session file: refused, with the way out named.
     run({
@@ -1178,5 +1179,1093 @@ fn gate_reads_a_relative_path_from_the_current_directory_only_when_it_exists_the
     assert_eq!(
         status["session"]["boundary"]["expansions"][0]["path"],
         "src/local.rs"
+    );
+}
+
+fn wait_until(what: &str, timeout: std::time::Duration, mut check: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if check() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[test]
+fn gate_auto_mode_plans_from_the_prompt_and_lasts_for_the_conversation() {
+    let (_temp, repo) = demo_repo();
+    let prompt = |text: &str, conversation: &str| {
+        hook(
+            &repo,
+            "prompt",
+            &serde_json::json!({"prompt": text, "session_id": conversation, "cwd": repo})
+                .to_string(),
+        )
+    };
+    let planner_done = || {
+        wait_until(
+            "the planner to finish",
+            std::time::Duration::from_secs(60),
+            || !repo.join(".ok/gate/starting.json").exists(),
+        )
+    };
+    let status = || -> serde_json::Value {
+        serde_json::from_str(&run({
+            let mut c = ok();
+            c.arg("--json")
+                .arg("--repo")
+                .arg(&repo)
+                .args(["gate", "status"]);
+            c
+        }))
+        .unwrap()
+    };
+    let stop = |conversation: &str| {
+        hook(
+            &repo,
+            "stop",
+            &serde_json::json!({"cwd": repo, "session_id": conversation, "stop_hook_active": false})
+                .to_string(),
+        )
+    };
+
+    // A slash command is not a task: nothing is said, nothing starts.
+    assert!(prompt("/help", "A").trim().is_empty());
+    assert!(!repo.join(".ok/gate/starting.json").exists());
+
+    // A task starts a session in the background. A prompt that begins with dashes is a task
+    // like any other: it never reaches a command line.
+    let started: serde_json::Value =
+        serde_json::from_str(&prompt("--update the auth flow test for issue_token", "A")).unwrap();
+    assert!(started["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("planning an edit boundary"));
+    planner_done();
+    let first = status();
+    assert_eq!(first["session"]["auto"], true, "{first}");
+    assert_eq!(
+        first["session"]["advisory"], true,
+        "warn mode: nobody declared this"
+    );
+    assert_eq!(first["session"]["harness_session"], "A");
+    assert_eq!(
+        first["session"]["task"],
+        "--update the auth flow test for issue_token"
+    );
+    let session_id = first["session"]["id"].as_str().unwrap().to_string();
+    assert!(first["session"]["boundary"]["expansions"]
+        .as_array()
+        .is_none_or(|a| a.is_empty()));
+
+    // A follow-up prompt of the same conversation widens the boundary; it does not replace
+    // the session.
+    let follow: serde_json::Value =
+        serde_json::from_str(&prompt("change issue_token to take a ttl", "A")).unwrap();
+    assert!(follow["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("being added to the session's boundary"));
+    planner_done();
+    let widened = status();
+    assert_eq!(widened["session"]["id"], session_id.as_str());
+    let expansion = &widened["session"]["boundary"]["expansions"][0];
+    assert_eq!(expansion["path"], "README.md", "{widened}");
+    assert!(expansion["reason"]
+        .as_str()
+        .unwrap()
+        .contains("follow-up prompt: \"change issue_token to take a ttl\""));
+
+    // An edit inside the boundary and one outside it. The session is advisory, so the stop
+    // reports the failing verdict and holds nothing; the session stays for the conversation.
+    hook(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
+    let mut auth = std::fs::read_to_string(repo.join("src/auth.rs")).unwrap();
+    auth.push_str("// ttl\n");
+    std::fs::write(repo.join("src/auth.rs"), auth).unwrap();
+    hook(
+        &repo,
+        "post-tool",
+        &edit_input(&repo, "Edit", "src/auth.rs"),
+    );
+    let outside = hook(
+        &repo,
+        "pre-tool",
+        &edit_input(&repo, "Write", "docs/ttl.md"),
+    );
+    assert!(outside.trim().is_empty(), "advisory: allowed: {outside}");
+    std::fs::create_dir_all(repo.join("docs")).unwrap();
+    std::fs::write(repo.join("docs/ttl.md"), "ttl\n").unwrap();
+    let told: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "post-tool",
+        &edit_input(&repo, "Write", "docs/ttl.md"),
+    ))
+    .unwrap();
+    assert!(told["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("advisory"));
+    let stopped: serde_json::Value = serde_json::from_str(&stop("A")).unwrap();
+    assert!(
+        stopped.get("decision").is_none(),
+        "advisory never holds: {stopped}"
+    );
+    assert!(stopped["systemMessage"].as_str().unwrap().contains("FAIL"));
+    assert_eq!(status()["session"]["id"], session_id.as_str());
+
+    // Another conversation's first prompt closes this session, dossier kept, and starts its own.
+    prompt("rename login in src/auth.rs", "B");
+    wait_until(
+        "the replacement session",
+        std::time::Duration::from_secs(60),
+        || {
+            !repo.join(".ok/gate/starting.json").exists()
+                && status()["session"]["harness_session"] == "B"
+        },
+    );
+    let dossier = std::fs::read_to_string(
+        repo.join(".ok/gate/dossiers")
+            .join(format!("{session_id}.md")),
+    )
+    .unwrap();
+    assert!(dossier.contains("advisory session"), "{dossier}");
+    assert!(dossier.contains("docs/ttl.md"));
+    // The stop had verified exactly this state: closing the session did not verify it again.
+    let trail = std::fs::read_to_string(
+        repo.join(".ok/gate")
+            .join(format!("events-{session_id}.jsonl")),
+    )
+    .unwrap();
+    assert_eq!(trail.matches("\"verify_run\"").count(), 1, "{trail}");
+    // What the first conversation left uncommitted predates the second.
+    let second = status();
+    let preexisting = second["session"]["preexisting_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        preexisting.contains(&"docs/ttl.md".to_string()),
+        "{preexisting:?}"
+    );
+
+    // Nothing edited: the stop says nothing and writes nothing; the end of the conversation
+    // ends the session.
+    assert!(stop("B").trim().is_empty());
+    let dossiers_before = std::fs::read_dir(repo.join(".ok/gate/dossiers"))
+        .unwrap()
+        .count();
+    hook(
+        &repo,
+        "session-end",
+        &serde_json::json!({"cwd": repo, "session_id": "B"}).to_string(),
+    );
+    assert_eq!(status()["active"], false);
+    assert_eq!(
+        std::fs::read_dir(repo.join(".ok/gate/dossiers"))
+            .unwrap()
+            .count(),
+        dossiers_before,
+        "a session that changed nothing leaves no dossier"
+    );
+}
+
+#[test]
+fn gate_edit_hook_waits_for_a_session_being_planned() {
+    let (_temp, repo) = demo_repo();
+    let config = repo.join("ok.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let (head, gate) = text.split_once("[gate]\n").expect("a [gate] section");
+    let gate = gate.replacen("mode = \"warn\"", "mode = \"enforce\"", 1);
+    std::fs::write(&config, format!("{head}[gate]\n{gate}")).unwrap();
+    hook(
+        &repo,
+        "prompt",
+        r#"{"prompt":"update the auth flow test for issue_token"}"#,
+    );
+    // Immediately: no session yet, a fresh marker. The edit hook waits for the session and
+    // then judges the edit against it.
+    let outside: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "pre-tool",
+        &edit_input(&repo, "Write", "src/retry.rs"),
+    ))
+    .unwrap();
+    assert_eq!(
+        outside["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{outside}"
+    );
+    assert!(repo.join(".ok/gate/session.json").exists());
+    // The planner is done before the repository is deleted under it.
+    wait_until(
+        "the planner to finish",
+        std::time::Duration::from_secs(60),
+        || !repo.join(".ok/gate/starting.json").exists(),
+    );
+}
+
+#[test]
+fn gate_session_start_indexes_a_repository_that_has_no_index() {
+    let (_temp, repo) = demo_repo();
+    // A repository that neither tracks nor ignores `.ok/`, with the marker of an indexer that
+    // was killed: the marker is not believed, and indexing starts.
+    git(&repo, &["rm", "-r", "-q", "--cached", ".ok"]);
+    git(&repo, &["commit", "-qm", "untrack the index"]);
+    std::fs::remove_dir_all(repo.join(".ok")).unwrap();
+    std::fs::create_dir_all(repo.join(".ok/gate")).unwrap();
+    std::fs::write(
+        repo.join(".ok/gate/indexing.json"),
+        serde_json::json!({"at": utc_now(), "nonce": "i1", "pid": dead_pid()}).to_string(),
+    )
+    .unwrap();
+    let start: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "session-start", r#"{"source":"startup"}"#)).unwrap();
+    assert!(start["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("running in the background"));
+    wait_until("the index", std::time::Duration::from_secs(90), || {
+        ok().arg("--repo")
+            .arg(&repo)
+            .args(["status", "--exit-code"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    });
+    // The next prompt finds the index and plans.
+    let prompt: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "prompt",
+        r#"{"prompt":"add retry handling to token refresh in the auth module"}"#,
+    ))
+    .unwrap();
+    assert!(prompt["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("planning an edit boundary"));
+    assert!(!repo.join(".ok/gate/indexing.json").exists());
+    wait_until(
+        "the planner to finish",
+        std::time::Duration::from_secs(60),
+        || !repo.join(".ok/gate/starting.json").exists(),
+    );
+    // What the hooks created unasked (the index, the prompt, the plan) is not left for
+    // `git add -A` to pick up.
+    let porcelain = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .unwrap();
+    let porcelain = String::from_utf8_lossy(&porcelain.stdout).to_string();
+    assert!(!porcelain.contains(".ok"), "{porcelain}");
+}
+
+#[test]
+fn gate_does_not_index_unasked_a_repository_larger_than_the_limit_tracked_or_not() {
+    let (_temp, repo) = demo_repo();
+    std::fs::remove_dir_all(repo.join(".ok")).unwrap();
+    // One more file than the limit, none of them tracked: the indexer would walk them all.
+    std::fs::create_dir_all(repo.join("bulk")).unwrap();
+    for i in 0..20_001 {
+        std::fs::write(repo.join(format!("bulk/f{i}.txt")), "").unwrap();
+    }
+    let start: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "session-start", r#"{"source":"startup"}"#)).unwrap();
+    assert!(
+        start["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("more than the hooks index unasked"),
+        "{start}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!repo.join(".ok/gate/indexing.json").exists());
+    assert!(!repo.join(".ok/index.sqlite").exists());
+}
+
+#[test]
+fn gate_hooks_judge_a_conversation_only_against_its_own_session() {
+    let (_temp, repo) = demo_repo();
+    set_gate_mode(&repo, "enforce");
+    let as_conversation = |event: &str, conversation: &str| {
+        hook(
+            &repo,
+            event,
+            &serde_json::json!({"cwd": repo, "session_id": conversation, "stop_hook_active": false})
+                .to_string(),
+        )
+    };
+    hook(
+        &repo,
+        "prompt",
+        &serde_json::json!({"prompt": "rename login in src/auth.rs", "session_id": "A", "cwd": repo})
+            .to_string(),
+    );
+    planner_done(&repo);
+    assert_eq!(gate_status(&repo)["session"]["harness_session"], "A");
+
+    // Conversation B sent no task. A's session is not B's: B's edit is not judged against
+    // A's task, and B's stop is not held for it.
+    let edit = hook(
+        &repo,
+        "pre-tool",
+        &edit_input_as(&repo, "Write", "docs/b.md", "B"),
+    );
+    assert!(edit.trim().is_empty(), "{edit}");
+    std::fs::create_dir_all(repo.join("docs")).unwrap();
+    std::fs::write(repo.join("docs/b.md"), "b\n").unwrap();
+    let after = hook(
+        &repo,
+        "post-tool",
+        &edit_input_as(&repo, "Write", "docs/b.md", "B"),
+    );
+    assert!(after.trim().is_empty(), "{after}");
+    let stop = as_conversation("stop", "B");
+    assert!(stop.trim().is_empty(), "{stop}");
+    std::fs::remove_file(repo.join("docs/b.md")).unwrap();
+
+    // A is still held to its own boundary.
+    let denied: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "pre-tool",
+        &edit_input(&repo, "Write", "docs/a.md"),
+    ))
+    .unwrap();
+    assert_eq!(
+        denied["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{denied}"
+    );
+
+    // B's stop and B's tool calls leave a plan being built for A alone, and do not wait
+    // for it.
+    write_marker_json(
+        &repo,
+        serde_json::json!({
+            "at": utc_now(), "detail": "also update the auth flow test", "nonce": "nA",
+            "harness_session": "A", "pid": std::process::id(),
+        }),
+    );
+    let started = std::time::Instant::now();
+    assert!(as_conversation("stop", "B").trim().is_empty());
+    hook(
+        &repo,
+        "pre-tool",
+        &edit_input_as(&repo, "Write", "docs/b.md", "B"),
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(8));
+    assert!(repo.join(".ok/gate/starting.json").exists());
+    // The end of B's conversation ends neither A's plan nor A's session.
+    as_conversation("session-end", "B");
+    assert!(repo.join(".ok/gate/starting.json").exists());
+    assert_eq!(gate_status(&repo)["session"]["harness_session"], "A");
+    std::fs::remove_file(repo.join(".ok/gate/starting.json")).unwrap();
+}
+
+#[test]
+fn gate_starts_no_session_from_a_prompt_its_plan_has_low_confidence_in() {
+    let (_temp, repo) = demo_repo();
+    set_gate_mode(&repo, "enforce");
+    let prompt = |text: &str| {
+        hook(
+            &repo,
+            "prompt",
+            &serde_json::json!({"prompt": text, "session_id": "A", "cwd": repo}).to_string(),
+        )
+    };
+    // A greeting plans with Low confidence. It is not a task, and nothing is held to it.
+    prompt("hello, what does this project do?");
+    planner_done(&repo);
+    assert_eq!(gate_status(&repo)["active"], false);
+    let log = std::fs::read_to_string(repo.join(".ok/gate/start.log")).unwrap();
+    assert!(log.contains("Low confidence"), "{log}");
+    let edit = hook(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
+    assert!(edit.trim().is_empty(), "{edit}");
+
+    // The task that follows is planned on its own and becomes the session's task.
+    prompt("rename login in src/auth.rs");
+    planner_done(&repo);
+    let status = gate_status(&repo);
+    assert_eq!(status["session"]["task"], "rename login in src/auth.rs");
+}
+
+#[test]
+fn gate_stop_waits_for_the_plan_so_the_turns_edits_are_judged() {
+    let (_temp, repo) = demo_repo();
+    // The prompt arrived (its marker holds the baseline), the turn created a file, and the
+    // turn ends while the plan is still being built.
+    write_marker_json(
+        &repo,
+        serde_json::json!({
+            "at": utc_now(), "detail": "rename login in src/auth.rs", "nonce": "n1",
+            "harness_session": "A", "base_rev": head(&repo), "pid": std::process::id(),
+        }),
+    );
+    std::fs::write(repo.join("BYPASS.md"), "x\n").unwrap();
+    let stop = std::thread::spawn({
+        let repo = repo.clone();
+        move || {
+            hook(
+                &repo,
+                "stop",
+                &serde_json::json!({"cwd": repo, "session_id": "A", "stop_hook_active": false})
+                    .to_string(),
+            )
+        }
+    });
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    run({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "start", "--auto-nonce", "n1"]);
+        c
+    });
+    let stopped: serde_json::Value = serde_json::from_str(&stop.join().unwrap()).unwrap();
+    let message = stopped["systemMessage"].as_str().unwrap();
+    assert!(
+        message.contains("FAIL") && message.contains("1 boundary violation"),
+        "{message}"
+    );
+    assert!(gate_status(&repo)["session"]["preexisting_changes"].is_null());
+}
+
+#[test]
+fn gate_newer_prompt_supersedes_a_plan_still_being_built() {
+    let (_temp, repo) = demo_repo();
+    let base = head(&repo);
+    // A plan is being built for the conversation's first prompt; a file was created since.
+    write_marker_json(
+        &repo,
+        serde_json::json!({
+            "at": utc_now(), "detail": "update the auth flow test for issue_token",
+            "nonce": "n1", "harness_session": "A", "base_rev": base,
+            "pid": std::process::id(),
+        }),
+    );
+    std::fs::write(repo.join("BYPASS.md"), "x\n").unwrap();
+    let answer: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "prompt",
+        &serde_json::json!({"prompt": "rename login in src/auth.rs", "session_id": "A", "cwd": repo})
+            .to_string(),
+    ))
+    .unwrap();
+    assert!(answer["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("planning an edit boundary"));
+    planner_done(&repo);
+    // The earlier planner finds its marker replaced and backs out.
+    let earlier = run({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "start", "--auto-nonce", "n1"]);
+        c
+    });
+    assert!(earlier.contains("nothing started"), "{earlier}");
+    // Both prompts are the task, and the baseline is the first prompt's: the file created in
+    // between is the session's change.
+    let status = gate_status(&repo);
+    assert_eq!(
+        status["session"]["task"],
+        "update the auth flow test for issue_token rename login in src/auth.rs"
+    );
+    assert!(
+        status["session"]["preexisting_changes"].is_null(),
+        "{status}"
+    );
+}
+
+#[test]
+fn gate_binding_follows_the_configuration_as_it_is_now() {
+    let (_temp, repo) = demo_repo();
+    hook(
+        &repo,
+        "prompt",
+        &serde_json::json!({"prompt": "rename login in src/auth.rs", "session_id": "A", "cwd": repo})
+            .to_string(),
+    );
+    planner_done(&repo);
+    assert_eq!(gate_status(&repo)["session"]["advisory"], true);
+    let outside = || {
+        hook(
+            &repo,
+            "pre-tool",
+            &edit_input(&repo, "Write", "docs/ttl.md"),
+        )
+    };
+    assert!(outside().trim().is_empty(), "advisory: nothing is denied");
+    // `enforce` set while the conversation is under way binds from the next tool call.
+    set_gate_mode(&repo, "enforce");
+    let denied: serde_json::Value = serde_json::from_str(&outside()).unwrap();
+    assert_eq!(
+        denied["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{denied}"
+    );
+    let status = gate_status(&repo);
+    assert_eq!(status["session"]["mode"], "enforce");
+    assert!(status["session"].get("advisory").is_none(), "{status}");
+}
+
+#[test]
+fn gate_ci_judges_a_finished_change_from_the_task_text_alone() {
+    let (_temp, repo) = demo_repo();
+    let mut auth = std::fs::read_to_string(repo.join("src/auth.rs")).unwrap();
+    auth.push_str("// retry\n");
+    std::fs::write(repo.join("src/auth.rs"), auth).unwrap();
+    std::fs::write(repo.join("BYPASS.md"), "x\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "agent change"]);
+    let (stdout, stderr) = run_failure({
+        let mut c = ok();
+        c.arg("--json").arg("--repo").arg(&repo).args([
+            "gate",
+            "ci",
+            "--base",
+            "HEAD~1",
+            "--task",
+            "add retry handling to token refresh",
+            "--write",
+            _temp.path().join("dossier.md").to_str().unwrap(),
+        ]);
+        c
+    });
+    assert!(stderr.contains("FAIL"), "{stderr}");
+    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let dossier = &output["dossier"];
+    assert_eq!(dossier["verdict"], "fail");
+    let violations = dossier["verification"]["boundary_violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(violations, vec!["BYPASS.md".to_string()]);
+    assert_eq!(dossier["trail"]["events_total"], 0, "no hooks ran");
+    let written = std::fs::read_to_string(_temp.path().join("dossier.md")).unwrap();
+    assert!(written.starts_with("## "), "{written}");
+    assert!(
+        !repo.join(".ok/gate/session.json").exists(),
+        "ci leaves no session"
+    );
+    // Removing the bypass passes.
+    git(&repo, &["rm", "-q", "BYPASS.md"]);
+    git(&repo, &["commit", "-qm", "drop bypass"]);
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "ci",
+            "--base",
+            "HEAD~2",
+            "--task",
+            "add retry handling to token refresh",
+            "--format",
+            "text",
+        ]);
+        c
+    });
+}
+
+#[test]
+fn gate_sibling_caution_admits_a_neighbour_with_a_warning_when_enabled() {
+    let (_temp, repo) = demo_repo();
+    let config = repo.join("ok.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let (head, gate) = text.split_once("[gate]\n").expect("a [gate] section");
+    let gate = gate
+        .replacen("mode = \"warn\"", "mode = \"enforce\"", 1)
+        .replacen("sibling_caution = false", "sibling_caution = true", 1);
+    assert!(gate.contains("sibling_caution = true"), "{gate}");
+    std::fs::write(&config, format!("{head}[gate]\n{gate}")).unwrap();
+    run({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "start", "add retry handling to token refresh"]);
+        c
+    });
+    let check: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "check", "src/retry.rs"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(check["class"], "sibling");
+    assert_eq!(check["action"], "warn");
+    let (_, err) = run_failure({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "check", "docs/new.md"]);
+        c
+    });
+    assert!(err.contains("would be denied"), "{err}");
+    // A top-level name is not a sibling of the allowed top-level files.
+    let (_, err) = run_failure({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "check", "LICENSE"]);
+        c
+    });
+    assert!(err.contains("would be denied"), "{err}");
+    // Verification says what the hook said: the sibling is a warning, not a violation.
+    hook(
+        &repo,
+        "pre-tool",
+        &edit_input(&repo, "Write", "src/retry.rs"),
+    );
+    std::fs::write(repo.join("src/retry.rs"), "pub fn retry() {}\n").unwrap();
+    hook(
+        &repo,
+        "post-tool",
+        &edit_input(&repo, "Write", "src/retry.rs"),
+    );
+    let finished: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "finish"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(finished["dossier"]["verdict"], "warn", "{finished}");
+    assert!(finished["dossier"]["verification"]["boundary_violations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(finished["dossier"]["trail"]["edits_caution"], 1);
+}
+
+fn write_marker(repo: &Path, nonce: &str, task: &str) {
+    write_marker_json(
+        repo,
+        serde_json::json!({"at": utc_now(), "detail": task, "nonce": nonce}),
+    );
+}
+
+fn write_marker_json(repo: &Path, marker: serde_json::Value) {
+    std::fs::create_dir_all(repo.join(".ok/gate")).unwrap();
+    std::fs::write(repo.join(".ok/gate/starting.json"), marker.to_string()).unwrap();
+}
+
+/// The id of a process that has exited and been reaped.
+fn dead_pid() -> u32 {
+    let mut child = Command::new("git")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("git should run");
+    let pid = child.id();
+    child.wait().expect("git should exit");
+    pid
+}
+
+fn head(repo: &Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git should run");
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn gate_status(repo: &Path) -> serde_json::Value {
+    serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(repo)
+            .args(["gate", "status"]);
+        c
+    }))
+    .unwrap()
+}
+
+fn set_gate_mode(repo: &Path, mode: &str) {
+    let config = repo.join("ok.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let (head, gate) = text.split_once("[gate]\n").expect("a [gate] section");
+    let gate = gate
+        .replacen("mode = \"warn\"", &format!("mode = \"{mode}\""), 1)
+        .replacen("mode = \"enforce\"", &format!("mode = \"{mode}\""), 1);
+    std::fs::write(&config, format!("{head}[gate]\n{gate}")).unwrap();
+}
+
+fn planner_done(repo: &Path) {
+    wait_until(
+        "the planner to finish",
+        std::time::Duration::from_secs(60),
+        || !repo.join(".ok/gate/starting.json").exists(),
+    );
+}
+
+/// The current time as RFC 3339, from `date`, so the test needs no time crate.
+fn utc_now() -> String {
+    let output = Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .expect("date should run");
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn gate_planner_backs_out_when_its_prompt_is_gone_or_a_manual_session_took_over() {
+    let (_temp, repo) = demo_repo();
+    let auto_start = |nonce: &str| {
+        run({
+            let mut c = ok();
+            c.arg("--repo")
+                .arg(&repo)
+                .args(["gate", "start", "--auto-nonce", nonce]);
+            c
+        })
+    };
+    // A planner whose process is gone is not waited for: the stop returns at once, the
+    // marker is cleared, and a planner that somehow ran later would find its prompt gone.
+    write_marker_json(
+        &repo,
+        serde_json::json!({
+            "at": utc_now(), "detail": "rename login in src/auth.rs", "nonce": "n1",
+            "pid": dead_pid(),
+        }),
+    );
+    let started = std::time::Instant::now();
+    let stop = hook(
+        &repo,
+        "stop",
+        &serde_json::json!({"cwd": repo, "stop_hook_active": false}).to_string(),
+    );
+    assert!(stop.trim().is_empty(), "{stop}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!repo.join(".ok/gate/starting.json").exists());
+    let out = auto_start("n1");
+    assert!(out.contains("nothing started"), "{out}");
+    assert!(!repo.join(".ok/gate/session.json").exists());
+
+    // The end of the conversation cancels a plan that outlasts the wait.
+    write_marker_json(
+        &repo,
+        serde_json::json!({
+            "at": utc_now(), "detail": "rename login in src/auth.rs", "nonce": "n1b",
+            "harness_session": "A", "pid": std::process::id(),
+        }),
+    );
+    hook(
+        &repo,
+        "session-end",
+        &serde_json::json!({"cwd": repo, "session_id": "A"}).to_string(),
+    );
+    assert!(!repo.join(".ok/gate/starting.json").exists());
+    assert!(auto_start("n1b").contains("nothing started"));
+
+    // A session started by hand takes the marker, and a planner that was already running
+    // for a prompt finds the manual session and leaves it alone.
+    write_marker(&repo, "n2", "rename login in src/auth.rs");
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "enforce",
+        ]);
+        c
+    });
+    assert!(
+        !repo.join(".ok/gate/starting.json").exists(),
+        "a manual start takes the marker"
+    );
+    assert!(auto_start("n2").contains("nothing started"));
+    write_marker(&repo, "n2", "rename login in src/auth.rs");
+    let out = auto_start("n2");
+    assert!(out.contains("a session started by hand is active"), "{out}");
+    let status: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "status"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(
+        status["session"]["task"],
+        "add retry handling to token refresh"
+    );
+    assert_eq!(status["session"]["mode"], "enforce");
+    assert!(status["session"].get("auto").is_none(), "{status}");
+
+    // A marker dated in the future, or one whose planner died, does not hold tool calls.
+    std::fs::write(
+        repo.join(".ok/gate/starting.json"),
+        r#"{"at":"2099-01-01T00:00:00Z","detail":"x","nonce":"n3"}"#,
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let inside = hook(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
+    assert!(inside.trim().is_empty(), "{inside}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!repo.join(".ok/gate/starting.json").exists());
+}
+
+#[test]
+fn gate_judges_an_edit_made_while_the_plan_was_still_being_built() {
+    let (_temp, repo) = demo_repo();
+    // The baseline is taken when the prompt arrives. A file created before the planner has
+    // written the session is therefore the session's change, not something that predates it.
+    hook(
+        &repo,
+        "prompt",
+        &serde_json::json!({"prompt": "rename login in src/auth.rs", "session_id": "A", "cwd": repo})
+            .to_string(),
+    );
+    std::fs::write(repo.join("BYPASS.md"), "x\n").unwrap();
+    wait_until(
+        "the planner to finish",
+        std::time::Duration::from_secs(60),
+        || !repo.join(".ok/gate/starting.json").exists(),
+    );
+    let status: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "status"]);
+        c
+    }))
+    .unwrap();
+    assert!(
+        status["session"]["preexisting_changes"].is_null(),
+        "nothing predates the prompt: {status}"
+    );
+    let stopped: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "stop",
+        &serde_json::json!({"cwd": repo, "session_id": "A", "stop_hook_active": false}).to_string(),
+    ))
+    .unwrap();
+    let message = stopped["systemMessage"].as_str().unwrap();
+    assert!(
+        message.contains("FAIL") && message.contains("1 boundary violation"),
+        "{message}"
+    );
+}
+
+#[test]
+fn gate_enforce_in_the_configuration_makes_a_prompt_started_session_binding() {
+    let (_temp, repo) = demo_repo();
+    let config = repo.join("ok.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let (head, gate) = text.split_once("[gate]\n").expect("a [gate] section");
+    let gate = gate.replacen("mode = \"warn\"", "mode = \"enforce\"", 1);
+    std::fs::write(&config, format!("{head}[gate]\n{gate}")).unwrap();
+    hook(
+        &repo,
+        "prompt",
+        &serde_json::json!({"prompt": "rename login in src/auth.rs", "session_id": "A", "cwd": repo})
+            .to_string(),
+    );
+    wait_until(
+        "the planner to finish",
+        std::time::Duration::from_secs(60),
+        || !repo.join(".ok/gate/starting.json").exists(),
+    );
+    let stop = |active: bool| -> serde_json::Value {
+        serde_json::from_str(&hook(
+            &repo,
+            "stop",
+            &serde_json::json!({"cwd": repo, "session_id": "A", "stop_hook_active": active})
+                .to_string(),
+        ))
+        .unwrap()
+    };
+    std::fs::write(repo.join("BYPASS.md"), "x\n").unwrap();
+    assert_eq!(stop(false)["decision"], "block");
+    // Continuing after the hold does not end the session: the failing change is still its
+    // change, and the next prompt of the conversation belongs to it.
+    assert!(stop(true)["systemMessage"]
+        .as_str()
+        .unwrap()
+        .contains("FAIL"));
+    let status: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "status"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(status["active"], true);
+    assert!(status["session"].get("advisory").is_none(), "{status}");
+    // A manual start replaces the auto session without --force.
+    run({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "start", "add retry handling to token refresh"]);
+        c
+    });
+}
+
+#[test]
+fn gate_does_nothing_automatic_outside_a_git_repository_or_with_a_broken_configuration() {
+    // A plain directory: not indexed, not a git working tree. The hooks stay out of it.
+    let temp = tempfile::tempdir().unwrap();
+    let plain = temp.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("notes.txt"), "x\n").unwrap();
+    let out = hook(&plain, "session-start", r#"{"source":"startup"}"#);
+    assert!(out.trim().is_empty(), "{out}");
+    let out = hook(
+        &plain,
+        "prompt",
+        r#"{"prompt":"add retry handling to token refresh"}"#,
+    );
+    assert!(out.trim().is_empty(), "{out}");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        !plain.join(".ok").exists(),
+        "nothing was indexed or written"
+    );
+
+    // An index does not change that: an indexed directory outside git, and an indexed
+    // subdirectory of a git working tree, get no prompt-started session.
+    let nogit = temp.path().join("nogit");
+    run({
+        let mut command = ok();
+        command.arg("demo").arg("--path").arg(&nogit);
+        command
+    });
+    let parent = temp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    git(&parent, &["init", "-q"]);
+    let sub = parent.join("sub");
+    run({
+        let mut command = ok();
+        command.arg("demo").arg("--path").arg(&sub);
+        command
+    });
+    for place in [&nogit, &sub] {
+        let out = hook(
+            place,
+            "prompt",
+            r#"{"prompt":"rename login in src/auth.rs"}"#,
+        );
+        assert!(out.trim().is_empty(), "{out}");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!place.join(".ok/gate/starting.json").exists());
+        assert!(!place.join(".ok/gate/session.json").exists());
+    }
+
+    // A configuration that cannot be read turns automatic mode off, and says so.
+    let (_temp, repo) = demo_repo();
+    std::fs::remove_dir_all(repo.join(".ok")).unwrap();
+    std::fs::write(repo.join("ok.toml"), "[gate\nauto = false\n").unwrap();
+    let out: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "session-start", r#"{"source":"startup"}"#)).unwrap();
+    assert!(out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("ok.toml cannot be read"));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!repo.join(".ok/gate/indexing.json").exists());
+    assert!(!repo.join(".ok/index.sqlite").exists());
+}
+
+#[test]
+fn gate_ci_reads_the_change_from_the_merge_base_and_ignores_its_own_dossier_file() {
+    let (_temp, repo) = demo_repo();
+    git(&repo, &["branch", "-M", "main"]);
+    git(&repo, &["checkout", "-q", "-b", "feature"]);
+    let mut auth = std::fs::read_to_string(repo.join("src/auth.rs")).unwrap();
+    auth.push_str("// retry\n");
+    std::fs::write(repo.join("src/auth.rs"), auth).unwrap();
+    git(&repo, &["commit", "-qam", "feature change"]);
+    // main moves on with files the feature branch never touched.
+    git(&repo, &["checkout", "-q", "main"]);
+    std::fs::write(repo.join("NOTES.md"), "notes\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "main moves on"]);
+    git(&repo, &["checkout", "-q", "feature"]);
+    let ci = || -> serde_json::Value {
+        let output = ok()
+            .arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args([
+                "gate",
+                "ci",
+                "--base",
+                "main",
+                "--task",
+                "add retry handling to token refresh",
+                "--write",
+            ])
+            .arg(repo.join("dossier.md"))
+            .output()
+            .unwrap();
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap()
+    };
+    let first = ci();
+    assert_eq!(
+        first["dossier"]["change"]["changed_files"],
+        serde_json::json!(["src/auth.rs"]),
+        "only what the branch added since it left main: {first}"
+    );
+    assert_ne!(first["dossier"]["verdict"], "fail");
+    // The dossier the first run wrote into the repository is not the second run's change.
+    let second = ci();
+    assert_eq!(
+        second["dossier"]["change"]["changed_files"],
+        serde_json::json!(["src/auth.rs"])
+    );
+    assert_eq!(
+        second["dossier"]["change"]["preexisting_excluded"],
+        serde_json::json!(["dossier.md"])
+    );
+
+    // Naming a file the branch itself added as the dossier path does not take it out of
+    // what is judged, and does not overwrite it: the run is refused.
+    std::fs::create_dir_all(repo.join("docs")).unwrap();
+    std::fs::write(repo.join("docs/OUTSIDE.md"), "outside\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "an out-of-boundary file"]);
+    let (_, stderr) = run_failure({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args([
+                "gate",
+                "ci",
+                "--base",
+                "main",
+                "--task",
+                "add retry handling to token refresh",
+                "--write",
+            ])
+            .arg(repo.join("docs/OUTSIDE.md"));
+        c
+    });
+    assert!(
+        stderr.contains("names a file this repository tracks"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("docs/OUTSIDE.md")).unwrap(),
+        "outside\n"
     );
 }

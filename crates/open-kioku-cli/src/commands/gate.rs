@@ -1,7 +1,8 @@
 use open_kioku_gate::{
-    build_dossier, plan_with_expansions, render_markdown, shell_write_targets, ChangeDossier,
-    ChangeInput, DossierVerdict, EventKind, GateEvent, GateMode, GateSession, GateStore,
-    HookAction, HookInput, HookResponse, LastVerify, PathDecision, EMPTY_TREE_REV,
+    build_dossier, plan_with_expansions, plan_with_session_caution, render_markdown,
+    shell_write_targets, BackgroundMarker, ChangeDossier, ChangeInput, DossierVerdict, EventKind,
+    GateEvent, GateMode, GateSession, GateStore, HookAction, HookInput, HookResponse, LastVerify,
+    PathDecision, EMPTY_TREE_REV,
 };
 
 #[derive(Subcommand)]
@@ -14,7 +15,7 @@ enum GateCommand {
   ok gate start \"fix the doctor probe\" --limit 20")]
     Start {
         /// The change to make, in natural language.
-        task: String,
+        task: Option<String>,
         /// How edits outside the boundary are treated: enforce (deny), warn (allow and tell
         /// the agent), or observe (record only). Defaults to `[gate] mode` in ok.toml.
         #[arg(long, value_name = "MODE")]
@@ -27,6 +28,44 @@ enum GateCommand {
         /// trail is kept as `.ok/gate/events-<session>.jsonl`.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Started by the prompt hook: the task and its baseline are read from the starting
+        /// marker this nonce names, never from the command line.
+        #[arg(long, value_name = "NONCE", hide = true)]
+        auto_nonce: Option<String>,
+    },
+    /// Index the repository for the hooks, in the background, and clear the indexing marker
+    /// however it ends.
+    #[command(hide = true)]
+    AutoIndex,
+    /// Judge a finished change with no hooks: plan from the task text, verify every change
+    /// since `--base`, print the dossier, exit non-zero on FAIL. For CI on any pull request,
+    /// whatever wrote it.
+    #[command(after_help = "Examples:
+  ok gate ci --base origin/main --task \"$PR_TITLE\"
+  ok gate ci --base HEAD~1 --task \"add retry handling\" --format json
+  ok gate ci --base origin/main --task \"$PR_TITLE\" --write dossier.md")]
+    Ci {
+        /// The revision the change is read against (a commit, branch, or `origin/main`).
+        #[arg(long, value_name = "REV")]
+        base: String,
+        /// What the change set out to do, in natural language (a pull request's title and body).
+        #[arg(long, value_name = "TEXT")]
+        task: String,
+        /// Boundary mode recorded in the dossier; the verdict is the same in every mode.
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+        /// Maximum context results the plan is built from.
+        #[arg(long, default_value_t = 12)]
+        limit: usize,
+        /// Execute the plan's validation commands locally and record their exit codes.
+        #[arg(long, default_value_t = false)]
+        run_commands: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = GateFormat::Markdown)]
+        format: GateFormat,
+        /// Also write the Markdown dossier to this path (for a pull request comment).
+        #[arg(long, value_name = "PATH")]
+        write: Option<PathBuf>,
     },
     /// Show the active session: task, mode, boundary, and the edits reported so far.
     Status,
@@ -104,6 +143,8 @@ enum GateHookEvent {
     Prompt,
     /// When a session starts or resumes: the same.
     SessionStart,
+    /// When the harness conversation ends: write the dossier and end its session.
+    SessionEnd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -159,7 +200,41 @@ fn handle_gate_command(json: bool, repo: &Path, command: GateCommand) -> anyhow:
             mode,
             limit,
             force,
-        } => gate_start(json, repo, &task, mode.as_deref(), limit, force),
+            auto_nonce,
+        } => match auto_nonce {
+            Some(nonce) => {
+                // However planning ends, this run's marker is spent; a newer prompt's is not.
+                let result = gate_start_auto(repo, &nonce, limit);
+                GateStore::for_repo(repo).clear_starting_if(&nonce);
+                result
+            }
+            None => {
+                let task = task.ok_or_else(|| {
+                    caller_input_error("a task is required: ok gate start \"<task>\"")
+                })?;
+                gate_start(json, repo, &task, mode.as_deref(), limit, force)
+            }
+        },
+        GateCommand::AutoIndex => gate_auto_index_run(repo),
+        GateCommand::Ci {
+            base,
+            task,
+            mode,
+            limit,
+            run_commands,
+            format,
+            write,
+        } => gate_ci(
+            json,
+            repo,
+            &base,
+            &task,
+            mode.as_deref(),
+            limit,
+            run_commands,
+            format,
+            write.as_deref(),
+        ),
         GateCommand::Status => gate_status(json, repo),
         GateCommand::Check { path } => gate_check(json, repo, &path),
         GateCommand::Expand { path, reason } => gate_expand(json, repo, &path, &reason),
@@ -225,38 +300,16 @@ fn gate_base_rev(repo: &Path) -> Option<String> {
         .or_else(|| gate_in_git(repo).then(|| EMPTY_TREE_REV.to_string()))
 }
 
-fn gate_start(
-    json: bool,
+/// The plan `ok plan` would build for `task`, and its JSON.
+fn gate_build_plan(
     repo: &Path,
+    config: &OkConfig,
     task: &str,
-    mode: Option<&str>,
     limit: usize,
-    force: bool,
-) -> anyhow::Result<()> {
-    let gate_store = GateStore::for_repo(repo);
-    let active = gate_store.active_session()?;
-    if let Some(active) = &active {
-        if !force {
-            anyhow::bail!(
-                "a gate session is already active for task \"{}\" (started {}); finish it with \
-                 `ok gate finish`, drop it with `ok gate abandon`, or pass --force",
-                active.task,
-                active.started_at.format("%Y-%m-%d %H:%M UTC")
-            );
-        }
-    }
-    let config = OkConfig::load_from_repo(repo)?;
-    let mode = match mode {
-        Some(value) => GateMode::parse(value).ok_or_else(|| {
-            caller_input_error(format!(
-                "--mode must be enforce, warn, or observe, not `{value}`"
-            ))
-        })?,
-        None => GateMode::parse(&config.gate.mode).unwrap_or_default(),
-    };
+) -> anyhow::Result<(PlanReport, Vec<u8>)> {
     let store = open_store(repo)?;
     require_authoritative_relationships(&store)?;
-    let context = build_context_pack_with_config(repo, &store, task, limit, &config)?;
+    let context = build_context_pack_with_config(repo, &store, task, limit, config)?;
     let index_dir = default_index_dir(repo);
     let search_index = if TantivySearchIndex::exists(&index_dir) {
         Some(TantivySearchIndex::open_or_create(&index_dir)?)
@@ -270,8 +323,207 @@ fn gate_start(
         .with_memory_enabled(config.memory.enabled)
         .plan_from_context(task, limit, context)?;
     let plan_json = serde_json::to_vec_pretty(&report)?;
-    let mut session = GateSession::new(task, mode, &report, &plan_json);
-    session.repo_name = gate_repo_name(repo, &config);
+    Ok((report, plan_json))
+}
+
+fn gate_mode_from(mode: Option<&str>, config: &OkConfig) -> anyhow::Result<GateMode> {
+    match mode {
+        Some(value) => GateMode::parse(value).ok_or_else(|| {
+            caller_input_error(format!(
+                "--mode must be enforce, warn, or observe, not `{value}`"
+            ))
+        }),
+        None => Ok(GateMode::parse(&config.gate.mode).unwrap_or_default()),
+    }
+}
+
+/// A session for `task` from its plan, with the repository's settings applied.
+fn gate_new_session(
+    repo: &Path,
+    config: &OkConfig,
+    task: &str,
+    mode: GateMode,
+    report: &PlanReport,
+    plan_json: &[u8],
+) -> GateSession {
+    let mut session = GateSession::new(task, mode, report, plan_json);
+    session.repo_name = gate_repo_name(repo, config);
+    session.boundary.sibling_caution = config.gate.sibling_caution;
+    session
+}
+
+fn gate_trail_has_edits(events: &[GateEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e.kind,
+            EventKind::EditAllowed
+                | EventKind::EditCaution
+                | EventKind::EditWarned
+                | EventKind::EditDenied
+        )
+    })
+}
+
+/// End `session` for good: write its dossier first when it did anything, so replacing or
+/// closing a session never drops its record. A failed verification is reported and does not
+/// keep the session open.
+fn gate_close_session(
+    repo: &Path,
+    gate_store: &GateStore,
+    session: &GateSession,
+) -> anyhow::Result<()> {
+    let (events, _) = gate_store.events().unwrap_or_default();
+    let changed = gate_change_input(repo, session, &events)
+        .map(|change| !change.changed_files.is_empty())
+        .unwrap_or(false);
+    // A stop that verified this very state already wrote the dossier: nothing to do again.
+    let verified = gate_verify_fingerprint(repo, gate_store, session)
+        .ok()
+        .zip(gate_store.read_last_verify())
+        .is_some_and(|(fingerprint, last)| last.fingerprint == fingerprint);
+    if (gate_trail_has_edits(&events) || changed) && !verified {
+        if let Err(err) = gate_run_verification(repo, gate_store, session, false) {
+            eprintln!(
+                "gate: session {} ended without a dossier: {err:#}",
+                session.id
+            );
+        }
+    }
+    gate_store.finish(session)?;
+    Ok(())
+}
+
+/// Whether an auto session belongs to the harness conversation `harness` names. Unknown on
+/// either side counts as the same: only a known, different conversation replaces a session.
+fn gate_same_conversation(session: &GateSession, harness: &str) -> bool {
+    match session.harness_session.as_deref() {
+        Some(own) if !own.is_empty() && !harness.is_empty() => own == harness,
+        _ => true,
+    }
+}
+
+/// Whether `session` is another conversation's: an auto session started from a prompt of a
+/// harness conversation other than the one this hook serves. Such a session is not this
+/// conversation's to be judged against, to extend, or to end. A session started by hand
+/// binds everyone working in the repository.
+fn gate_foreign(session: &GateSession, input: &HookInput) -> bool {
+    session.auto && !gate_same_conversation(session, &input.session_id)
+}
+
+/// Whether the starting marker is for a prompt of the conversation this hook serves (or of
+/// one that cannot be told apart from it).
+fn gate_marker_ours(marker: &BackgroundMarker, input: &HookInput) -> bool {
+    marker.harness_session.is_empty()
+        || input.session_id.is_empty()
+        || marker.harness_session == input.session_id
+}
+
+/// Whether process `pid` is still running. Where that cannot be told, it is assumed to be:
+/// the marker's age then decides.
+fn gate_pid_alive(pid: u32) -> bool {
+    if Path::new("/proc/self/stat").exists() {
+        // The state is the field after the parenthesised command name; `Z` is a process that
+        // has exited and only awaits reaping.
+        return match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next().map(|state| state != "Z"))
+                .unwrap_or(true),
+            Err(_) => false,
+        };
+    }
+    #[cfg(unix)]
+    {
+        ProcessCommand::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// Whether the background work behind `marker` is over without having cleared it: its
+/// process is gone, or, where the process is not known, the marker is older than
+/// `unknown_max`. A known, running process is given `known_max`.
+fn gate_marker_spent(
+    marker: &BackgroundMarker,
+    unknown_max: chrono::Duration,
+    known_max: chrono::Duration,
+) -> bool {
+    match marker.pid {
+        Some(pid) => !gate_pid_alive(pid) || marker.is_stale(known_max),
+        None => marker.is_stale(unknown_max),
+    }
+}
+
+/// A planner whose process is unknown is given 90 seconds; one that is running, ten minutes.
+fn gate_planner_spent(marker: &BackgroundMarker) -> bool {
+    gate_marker_spent(
+        marker,
+        chrono::Duration::seconds(90),
+        chrono::Duration::minutes(10),
+    )
+}
+
+/// For a session started from a prompt, how binding the boundary is follows the repository's
+/// configuration as it is now, not as it was when the conversation began: `mode = "enforce"`
+/// set mid-conversation binds from the next tool call. A configuration that cannot be read
+/// changes nothing here.
+fn gate_follow_config(repo: &Path, gate_store: &GateStore, session: &mut GateSession) {
+    if !session.auto {
+        return;
+    }
+    let Ok(config) = OkConfig::load_from_repo(repo) else {
+        return;
+    };
+    let mode = GateMode::parse(&config.gate.mode).unwrap_or_default();
+    let advisory = mode == GateMode::Warn;
+    let sibling_caution = config.gate.sibling_caution;
+    if session.mode != mode
+        || session.advisory != advisory
+        || session.boundary.sibling_caution != sibling_caution
+    {
+        session.mode = mode;
+        session.advisory = advisory;
+        session.boundary.sibling_caution = sibling_caution;
+        let _ = gate_store.write_session(session);
+    }
+}
+
+fn gate_start(
+    json: bool,
+    repo: &Path,
+    task: &str,
+    mode: Option<&str>,
+    limit: usize,
+    force: bool,
+) -> anyhow::Result<()> {
+    let gate_store = GateStore::for_repo(repo);
+    // A session asked for by hand wins over one the prompt hook is still planning.
+    gate_store.clear_starting();
+    let active = gate_store.active_session()?;
+    if let Some(active) = &active {
+        // An auto session gives way to an explicit start; a manual one needs --force.
+        if !force && !active.auto {
+            anyhow::bail!(
+                "a gate session is already active for task \"{}\" (started {}); finish it with \
+                 `ok gate finish`, drop it with `ok gate abandon`, or pass --force",
+                active.task,
+                active.started_at.format("%Y-%m-%d %H:%M UTC")
+            );
+        }
+    }
+    let config = OkConfig::load_from_repo(repo)?;
+    let mode = gate_mode_from(mode, &config)?;
+    let (report, plan_json) = gate_build_plan(repo, &config, task, limit)?;
+    let mut session = gate_new_session(repo, &config, task, mode, &report, &plan_json);
     session.base_rev = gate_base_rev(repo);
     session.preexisting_changes = match &active {
         // Replacing a session: what was dirty before the first session started is still
@@ -283,8 +535,9 @@ fn gate_start(
         },
     };
     // The plan is built, so the new session can start: only now does a replaced session end.
-    if let Some(active) = &active {
-        gate_store.finish(active)?;
+    // The session that is active now is the one replaced, whichever it was when planning began.
+    if let Some(current) = gate_store.active_session()? {
+        gate_store.finish(&current)?;
     }
     gate_store.start(&session, &plan_json)?;
     let output = GateStartOutput {
@@ -340,6 +593,114 @@ fn gate_start(
     Ok(())
 }
 
+/// The planner the prompt hook starts in the background. The task, the conversation and the
+/// baseline come from the starting marker `nonce` names; the planner acts only while that
+/// marker stands, so a stop, a newer prompt or a manual `ok gate start` cancels it.
+///
+/// No session: it starts one. An auto session of the same conversation: it widens that
+/// session's boundary with this prompt's plan, unless the plan's confidence is Low. An auto
+/// session of another conversation: it closes that one, dossier included, and starts anew.
+/// A manual session is never touched.
+fn gate_start_auto(repo: &Path, nonce: &str, limit: usize) -> anyhow::Result<()> {
+    let gate_store = GateStore::for_repo(repo);
+    let ours = |store: &GateStore| store.starting().filter(|marker| marker.nonce == nonce);
+    let Some(marker) = ours(&gate_store) else {
+        println!("gate: the prompt this plan was for is gone; nothing started");
+        return Ok(());
+    };
+    let task = marker.detail.clone();
+    let before = gate_store.active_session()?;
+    if before.as_ref().is_some_and(|session| !session.auto) {
+        println!("gate: a session started by hand is active; the prompt changes nothing");
+        return Ok(());
+    }
+    let config = OkConfig::load_from_repo(repo)?;
+    let mode = GateMode::parse(&config.gate.mode).unwrap_or_default();
+    let (report, plan_json) = gate_build_plan(repo, &config, &task, limit)?;
+    let low_confidence = report.confidence_breakdown.overall_enum == Confidence::Low;
+
+    // Planning took time. Act only if this run's marker still stands and the session that was
+    // active when planning began (or its absence) is still what is there.
+    if ours(&gate_store).is_none() {
+        println!("gate: cancelled while planning; nothing started");
+        return Ok(());
+    }
+    // A plan the planner itself has Low confidence in is no boundary to judge anything by: a
+    // greeting or a question about the project plans like that. Nothing starts and nothing is
+    // widened; the next prompt is planned on its own.
+    if low_confidence {
+        println!(
+            "gate: the plan for this prompt has Low confidence ({}); no session is started \
+             from it and no boundary is changed",
+            report.confidence_summary
+        );
+        return Ok(());
+    }
+    let now = gate_store.active_session()?;
+    match (&before, now) {
+        (None, None) => {}
+        (Some(was), Some(mut current)) if was.id == current.id => {
+            if gate_same_conversation(&current, &marker.harness_session) {
+                let boundary = &report.recommended_change_boundary;
+                let allowed = boundary
+                    .allowed_files
+                    .iter()
+                    .map(open_kioku_gate::normalize)
+                    .collect::<Vec<_>>();
+                let caution = boundary
+                    .caution_files
+                    .iter()
+                    .map(open_kioku_gate::normalize)
+                    .collect::<Vec<_>>();
+                let added = gate_store.extend(&mut current, &task, &allowed, &caution)?;
+                println!(
+                    "gate: follow-up prompt widened session {} by {added} path(s)",
+                    current.id
+                );
+                return Ok(());
+            }
+            // Another conversation's session: close it with its record, then start anew.
+            gate_close_session(repo, &gate_store, &current)?;
+        }
+        _ => {
+            println!("gate: the session changed while planning; nothing started");
+            return Ok(());
+        }
+    }
+
+    let mut session = gate_new_session(repo, &config, &task, mode, &report, &plan_json);
+    session.auto = true;
+    // Nobody declared this task: in `warn` the boundary informs and records, and holds nothing.
+    session.advisory = mode == GateMode::Warn;
+    session.harness_session =
+        (!marker.harness_session.is_empty()).then(|| marker.harness_session.clone());
+    // The baseline is the one the prompt hook captured: an edit made while this plan was
+    // being built is the session's change, not something that predates it.
+    match marker.base_rev.clone() {
+        Some(base) => {
+            session.base_rev = Some(base);
+            session.preexisting_changes = marker.preexisting.clone();
+        }
+        None => {
+            session.base_rev = gate_base_rev(repo);
+            if let Some(base) = session.base_rev.as_deref() {
+                session.preexisting_changes = gate_changed_since(repo, base)?;
+            }
+        }
+    }
+    gate_store.start(&session, &plan_json)?;
+    println!(
+        "gate: session {} started from the prompt ({} mode{}): {} allowed, {} caution; {}",
+        session.id,
+        mode.as_str(),
+        if session.advisory { ", advisory" } else { "" },
+        session.boundary.allowed.len(),
+        session.boundary.caution.len(),
+        session.confidence_summary
+    );
+    Ok(())
+}
+
 fn gate_status(json: bool, repo: &Path) -> anyhow::Result<()> {
     let gate_store = GateStore::for_repo(repo);
     let session = gate_store.active_session()?;
@@ -369,9 +730,11 @@ fn gate_status(json: bool, repo: &Path) -> anyhow::Result<()> {
         None => println!("No active gate session. Start one: ok gate start \"<task>\""),
         Some(session) => {
             println!(
-                "Gate session {} ({} mode), started {}",
+                "Gate session {} ({} mode{}{}), started {}",
                 session.id,
                 session.mode.as_str(),
+                if session.auto { ", started from the prompt" } else { "" },
+                if session.advisory { ", advisory" } else { "" },
                 session.started_at.format("%Y-%m-%d %H:%M UTC")
             );
             println!("Task: {}", session.task);
@@ -693,8 +1056,34 @@ fn gate_run_verification(
     run_commands: bool,
 ) -> anyhow::Result<GateRun> {
     let (events, malformed) = gate_store.events()?;
-    let change = gate_change_input(repo, session, &events)?;
-    let plan = plan_with_expansions(gate_store.saved_plan()?, session);
+    let plan = gate_store.saved_plan_for(session)?;
+    let dossier = gate_verify(repo, session, plan, &events, malformed, run_commands)?;
+    let (dossier_json, dossier_markdown) = gate_store.write_dossier(&dossier)?;
+    gate_store.append_event(
+        &GateEvent::new(&session.id, EventKind::VerifyRun)
+            .with_detail(dossier.verdict.label().to_ascii_lowercase()),
+    )?;
+    Ok(GateRun {
+        dossier,
+        dossier_json,
+        dossier_markdown,
+    })
+}
+
+/// The dossier for `session`'s change, verified against `plan` widened by the session's
+/// expansions. Writes nothing.
+fn gate_verify(
+    repo: &Path,
+    session: &GateSession,
+    plan: PlanReport,
+    events: &[GateEvent],
+    malformed: usize,
+    run_commands: bool,
+) -> anyhow::Result<ChangeDossier> {
+    let change = gate_change_input(repo, session, events)?;
+    let plan = plan_with_expansions(plan, session);
+    // What the hook called caution (the plan's own, or a sibling) verification warns about.
+    let plan = plan_with_session_caution(plan, session, &change.changed_files);
     let verification = if change.changed_files.is_empty() {
         None
     } else {
@@ -741,25 +1130,352 @@ fn gate_run_verification(
     } else {
         session.repo_name.clone()
     };
-    let dossier = build_dossier(
+    Ok(build_dossier(
         &repo_name,
         session,
         &plan,
-        &events,
+        events,
         malformed,
         &change,
         verification.as_ref(),
-    );
+    ))
+}
+
+/// `ok gate ci`: a session that never had hooks, judged once against the diff from `base`.
+#[allow(clippy::too_many_arguments)]
+fn gate_ci(
+    json: bool,
+    repo: &Path,
+    base: &str,
+    task: &str,
+    mode: Option<&str>,
+    limit: usize,
+    run_commands: bool,
+    format: GateFormat,
+    write: Option<&Path>,
+) -> anyhow::Result<()> {
+    let git = |args: &[&str]| -> Option<String> {
+        let output = ProcessCommand::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+    let base_commit = format!("{base}^{{commit}}");
+    let Some(base_tip) = git(&[
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        &base_commit,
+    ]) else {
+        return Err(caller_input_error(format!(
+            "`{base}` is not a revision of this repository"
+        )));
+    };
+    // The change is what this branch added since it left the base, not what the base gained
+    // since: the merge base is the comparison, the base itself when there is none (unrelated
+    // histories, or a shallow clone that does not reach it).
+    let base_rev = git(&["merge-base", &base_tip, "HEAD"]).unwrap_or(base_tip);
+    let config = OkConfig::load_from_repo(repo)?;
+    let mode = gate_mode_from(mode, &config)?;
+    let (plan, plan_json) = gate_build_plan(repo, &config, task, limit)?;
+    let mut session = GateSession::new(task, mode, &plan, &plan_json);
+    session.repo_name = gate_repo_name(repo, &config);
+    session.base_rev = Some(base_rev);
+    session.boundary.sibling_caution = config.gate.sibling_caution;
+    // A dossier an earlier run wrote into the working tree is not the change. Only a file git
+    // does not track is left out this way: naming a file the branch itself added or changed
+    // as the dossier path must not take it out of what is judged.
+    if let Some(path) = write {
+        if let Some(relative) = gate_relative(repo, &std::path::absolute(path)?) {
+            let tracked = ProcessCommand::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["ls-files", "--error-unmatch", "--"])
+                .arg(&relative)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if tracked {
+                return Err(caller_input_error(format!(
+                    "--write {relative} names a file this repository tracks; the dossier \
+                     would overwrite it. Write it to a path git does not track."
+                )));
+            }
+            session.preexisting_changes.push(relative);
+        }
+    }
+    let dossier = gate_verify(repo, &session, plan, &[], 0, run_commands)?;
+    let gate_store = GateStore::for_repo(repo);
     let (dossier_json, dossier_markdown) = gate_store.write_dossier(&dossier)?;
-    gate_store.append_event(
-        &GateEvent::new(&session.id, EventKind::VerifyRun)
-            .with_detail(dossier.verdict.label().to_ascii_lowercase()),
-    )?;
-    Ok(GateRun {
-        dossier,
+    let markdown = render_markdown(&dossier);
+    if let Some(path) = write {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(path, &markdown)?;
+    }
+    let output = GateFinishOutput {
         dossier_json,
         dossier_markdown,
-    })
+        session_ended: true,
+        dossier,
+    };
+    match (json, format) {
+        (true, _) | (_, GateFormat::Json) => {
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        (_, GateFormat::Markdown) => print!("{markdown}"),
+        (_, GateFormat::Text) => println!("{}", gate_summary_line(&output.dossier)),
+    }
+    if output.dossier.verdict == DossierVerdict::Fail {
+        anyhow::bail!("change dossier verdict is FAIL");
+    }
+    Ok(())
+}
+
+/// Run `ok <args>` for `repo` in the background, detached from the hook's process group so
+/// the harness's timeout cannot take it down, with its output written to `log` (one run's
+/// output: the file is emptied each time, and written in append mode, so an earlier run
+/// still going adds whole lines after it rather than writing over this run's). Returns the
+/// child's process id.
+fn gate_spawn_detached(repo: &Path, args: &[&str], log: &Path) -> anyhow::Result<u32> {
+    if let Some(parent) = log.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(log, b"")?;
+    let log_file = fs::OpenOptions::new().append(true).open(log)?;
+    let mut command = ProcessCommand::new(std::env::current_exe()?);
+    // The child runs in the repository, with the repository named, so no positional default
+    // of `.` can point it at the hook's own working directory.
+    command
+        .current_dir(repo)
+        .arg("--repo")
+        .arg(repo)
+        .args(args)
+        .env("RUST_BACKTRACE", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    Ok(command.spawn()?.id())
+}
+
+/// Whether the repository has an index the gate can plan from.
+fn gate_indexed(repo: &Path) -> bool {
+    SqliteStore::open_repo_index(repo).ok().flatten().is_some()
+}
+
+/// The most files (tracked, and untracked but not ignored: what the indexer walks) a
+/// repository may have for the hooks to index it unasked. Indexing
+/// is minutes of CPU and gigabytes of memory on a very large repository; past this size it
+/// is the user's decision to run `ok index`.
+const GATE_AUTO_INDEX_MAX_FILES: usize = 20_000;
+
+/// What the hooks do about a repository with no index.
+enum GateAutoIndex {
+    /// There is an index: carry on.
+    Ready,
+    /// Not ready; tell the agent this.
+    Notice(String),
+    /// Not a place the hooks set up unasked (not the top of a git working tree): say nothing.
+    Silent,
+}
+
+/// Start indexing in the background when the repository has no index, nothing is indexing
+/// it already, it is the top of a git working tree, and it is not too large to index unasked.
+fn gate_auto_index(repo: &Path, gate_store: &GateStore) -> anyhow::Result<GateAutoIndex> {
+    // Nothing automatic happens anywhere but the top of a git working tree, index or not.
+    let is_toplevel = gate_git_toplevel(repo)
+        .is_some_and(|top| gate_canonical_lossy(&top) == gate_canonical_lossy(repo));
+    if !is_toplevel {
+        return Ok(GateAutoIndex::Silent);
+    }
+    if gate_indexed(repo) {
+        gate_store.clear_indexing();
+        return Ok(GateAutoIndex::Ready);
+    }
+    if let Some(marker) = gate_store.indexing() {
+        // An indexer that was killed leaves its marker; it is retried, not waited for.
+        if !gate_marker_spent(
+            &marker,
+            chrono::Duration::minutes(30),
+            chrono::Duration::hours(6),
+        ) {
+            return Ok(GateAutoIndex::Notice(
+                "Open Kioku gate: the repository is being indexed in the background; the \
+                 gate starts on the first prompt after the index is ready."
+                    .into(),
+            ));
+        }
+    }
+    // What the indexer would walk: tracked files and untracked ones git does not ignore. A
+    // repository git cannot list is not indexed unasked.
+    let listed = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .output();
+    let files = match listed {
+        Ok(output) if output.status.success() => {
+            output.stdout.iter().filter(|b| **b == 0).count()
+        }
+        _ => return Ok(GateAutoIndex::Silent),
+    };
+    if files > GATE_AUTO_INDEX_MAX_FILES {
+        return Ok(GateAutoIndex::Notice(format!(
+            "Open Kioku gate: this repository has {files} files, more than the hooks index \
+             unasked ({GATE_AUTO_INDEX_MAX_FILES}). Run `ok index` once to enable the gate."
+        )));
+    }
+    gate_ignore_index_dir(repo);
+    gate_store.mark_indexing(None)?;
+    match gate_spawn_detached(
+        repo,
+        &["gate", "auto-index"],
+        &gate_store.root().join("index.log"),
+    ) {
+        Ok(pid) => gate_store.mark_indexing(Some(pid))?,
+        Err(err) => {
+            gate_store.clear_indexing();
+            return Err(err);
+        }
+    }
+    Ok(GateAutoIndex::Notice(
+        "Open Kioku gate: this repository has no index yet, so `ok index` is running in the \
+         background (`.ok/gate/index.log`); the gate starts on the first prompt after it is \
+         ready."
+            .into(),
+    ))
+}
+
+/// Before the hooks create `.ok/` unasked: if git would show the index as untracked, ignore
+/// the directory from inside it. A repository that already ignores `.ok/`, or that has put
+/// its own `.gitignore` there, is left as it is.
+fn gate_ignore_index_dir(repo: &Path) {
+    let ok_dir = repo.join(".ok");
+    let ignore = ok_dir.join(".gitignore");
+    if ignore.exists() {
+        return;
+    }
+    let ignored = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["check-ignore", "-q", ".ok/index.sqlite"])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !ignored && fs::create_dir_all(&ok_dir).is_ok() {
+        let _ = fs::write(ignore, open_kioku_gate::IGNORE_FILE_TEXT);
+    }
+}
+
+/// `ok gate auto-index`: index, and clear the marker however indexing ends (a panic
+/// included), so a failure is retried by the next session rather than reported as "being
+/// indexed" for half an hour.
+fn gate_auto_index_run(repo: &Path) -> anyhow::Result<()> {
+    struct ClearIndexing(GateStore);
+    impl Drop for ClearIndexing {
+        fn drop(&mut self) {
+            self.0.clear_indexing();
+        }
+    }
+    let clear = ClearIndexing(GateStore::for_repo(repo));
+    let result = index_repo(repo);
+    drop(clear);
+    let snapshot = result?;
+    println!(
+        "Indexed {} files, {} symbols for the gate",
+        snapshot.files.len(),
+        snapshot.symbols.len()
+    );
+    Ok(())
+}
+
+/// The task a prompt declares, or `None` for a prompt the gate does not plan from: a slash
+/// command, a shell (`!`) or memory (`#`) line, or nothing to speak of. How much a prompt
+/// says is not judged here; the plan's own confidence decides what the gate does with it.
+fn gate_task_from_prompt(prompt: &str) -> Option<String> {
+    let text = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.starts_with(['/', '!', '#']) || text.chars().count() < 3 {
+        return None;
+    }
+    Some(text.chars().take(GATE_TASK_MAX_CHARS).collect())
+}
+
+/// The most characters of prompt text a plan is built from.
+const GATE_TASK_MAX_CHARS: usize = 400;
+
+/// The active session, after waiting briefly for a planner the prompt hook started: a new
+/// session being planned, or a follow-up prompt widening the active one.
+///
+/// The session returned is this conversation's to be judged against: another conversation's
+/// prompt-started session is not, and its planner is not waited for.
+fn gate_wait_for_session(
+    repo: &Path,
+    gate_store: &GateStore,
+    input: &HookInput,
+) -> anyhow::Result<Option<GateSession>> {
+    let own = |gate_store: &GateStore| -> anyhow::Result<Option<GateSession>> {
+        let mut session = gate_store
+            .active_session()?
+            .filter(|session| !gate_foreign(session, input));
+        if let Some(session) = session.as_mut() {
+            gate_follow_config(repo, gate_store, session);
+        }
+        Ok(session)
+    };
+    let Some(marker) = gate_store.starting() else {
+        return own(gate_store);
+    };
+    if gate_planner_spent(&marker) {
+        // The planner died or hung; its marker must not hold every tool call.
+        gate_store.clear_starting_if(&marker.nonce);
+        return own(gate_store);
+    }
+    if !gate_marker_ours(&marker, input) {
+        return own(gate_store);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+    while std::time::Instant::now() < deadline {
+        if !gate_store
+            .starting()
+            .is_some_and(|current| current.nonce == marker.nonce)
+        {
+            break;
+        }
+        if marker.pid.is_some_and(|pid| !gate_pid_alive(pid)) {
+            gate_store.clear_starting_if(&marker.nonce);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Read the session only now: the planner writes it before it clears its marker.
+    own(gate_store)
+}
+
+/// The newest dossier on disk, for a `finish` that finds no session to finish.
+fn gate_latest_dossier(gate_store: &GateStore) -> Option<PathBuf> {
+    fs::read_dir(gate_store.root().join("dossiers"))
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
 }
 
 fn gate_finish(
@@ -770,7 +1486,15 @@ fn gate_finish(
     keep: bool,
 ) -> anyhow::Result<()> {
     let gate_store = GateStore::for_repo(repo);
-    let session = require_active_session(&gate_store)?;
+    let Some(session) = gate_store.active_session()? else {
+        return Err(caller_input_error(match gate_latest_dossier(&gate_store) {
+            Some(path) => format!(
+                "no active gate session; the last one already wrote its dossier: {}",
+                path.display()
+            ),
+            None => "no active gate session; start one with `ok gate start \"<task>\"`".into(),
+        }));
+    };
     let run = gate_run_verification(repo, &gate_store, &session, run_commands)?;
     if !keep {
         gate_store.finish(&session)?;
@@ -908,50 +1632,199 @@ fn gate_hook(repo: &Path, event: GateHookEvent) -> anyhow::Result<()> {
     let input = parsed.unwrap_or_default();
     let repo = gate_hook_repo(repo, &input)?;
     let gate_store = GateStore::for_repo(&repo);
-    let session = gate_store.active_session()?;
+    // Every hook serves one conversation. A session another conversation's prompt started is
+    // not this one's: it is neither judged against it nor shown it.
+    let own_session = |gate_store: &GateStore| -> anyhow::Result<Option<GateSession>> {
+        let mut session = gate_store
+            .active_session()?
+            .filter(|session| !gate_foreign(session, &input));
+        if let Some(session) = session.as_mut() {
+            gate_follow_config(&repo, gate_store, session);
+        }
+        Ok(session)
+    };
     match event {
         GateHookEvent::PreTool => unreachable!("handled above"),
-        GateHookEvent::PostTool => gate_hook_post_tool(&repo, &gate_store, session, &input),
-        GateHookEvent::Stop => gate_hook_stop(&repo, &gate_store, session, &input),
+        GateHookEvent::PostTool => {
+            gate_hook_post_tool(&repo, &gate_store, own_session(&gate_store)?, &input)
+        }
+        GateHookEvent::Stop => {
+            // A plan still being built for this conversation is waited for, so what the turn
+            // edited is judged now. If the planner outlasts the wait it is left to finish:
+            // the session it starts carries the prompt's baseline, and the next stop, or the
+            // end of the conversation, judges those edits.
+            let session = gate_wait_for_session(&repo, &gate_store, &input)?;
+            gate_hook_stop(&repo, &gate_store, session, &input)
+        }
         GateHookEvent::Prompt | GateHookEvent::SessionStart => {
-            let event_name = if event == GateHookEvent::Prompt {
-                "UserPromptSubmit"
-            } else {
-                "SessionStart"
-            };
-            let text = match &session {
-                Some(session) => format!(
-                    "Open Kioku gate session is active ({} mode) for task \"{}\": {} allowed \
-                     path(s), {} caution, {} widened. Edits are held to that boundary; widen it \
-                     with `ok gate expand <path> --reason \"<why>\"`, finish with `ok gate finish`.",
-                    session.mode.as_str(),
-                    session.task,
-                    session.boundary.allowed.len(),
-                    session.boundary.caution.len(),
-                    session.boundary.expansions.len()
-                ),
-                None => {
-                    let config = OkConfig::load_from_repo(&repo).unwrap_or_default();
-                    if config.gate.require_plan {
-                        "Open Kioku gate: no session is active and this repository requires \
-                         one (`[gate] require_plan = true`). Source edits are denied until \
-                         `ok gate start \"<task>\"` declares a plan and boundary."
-                            .to_string()
-                    } else {
-                        "Open Kioku gate: no session is active for this repository. Before \
-                         editing source for a task, `ok gate start \"<task>\"` declares a plan \
-                         and boundary that every edit is then held to, and `ok gate finish` \
-                         writes the verified Change Dossier."
-                            .to_string()
-                    }
+            gate_hook_prompt(&repo, &gate_store, own_session(&gate_store)?, &input, event)
+        }
+        GateHookEvent::SessionEnd => {
+            // The conversation is over. Its planner, if one is still running, is given the
+            // usual wait so that edits already made are judged; past that it has nothing to
+            // start. Its auto session ends with its dossier written.
+            let session = gate_wait_for_session(&repo, &gate_store, &input)?;
+            if let Some(marker) = gate_store.starting() {
+                if gate_marker_ours(&marker, &input) {
+                    gate_store.clear_starting_if(&marker.nonce);
                 }
-            };
-            gate_emit(HookResponse::Context {
-                event: event_name.into(),
-                text,
-            })
+            }
+            match session {
+                Some(session) if session.auto => gate_close_session(&repo, &gate_store, &session),
+                _ => Ok(()),
+            }
         }
     }
+}
+
+/// The prompt and session-start hooks: in auto mode, index a repository that has no index
+/// and plan from the prompt in the background; otherwise say where the session stands.
+fn gate_hook_prompt(
+    repo: &Path,
+    gate_store: &GateStore,
+    session: Option<GateSession>,
+    input: &HookInput,
+    event: GateHookEvent,
+) -> anyhow::Result<()> {
+    let event_name = if event == GateHookEvent::Prompt {
+        "UserPromptSubmit"
+    } else {
+        "SessionStart"
+    };
+    let emit = |text: String| {
+        gate_emit(HookResponse::Context {
+            event: event_name.into(),
+            text,
+        })
+    };
+    let config = match OkConfig::load_from_repo(repo) {
+        Ok(config) => config,
+        // A configuration that cannot be read is not permission to act: nothing automatic
+        // runs until it is fixed.
+        Err(err) => {
+            return emit(format!(
+                "Open Kioku gate: ok.toml cannot be read ({err}); the gate does nothing \
+                 automatic until it is fixed."
+            ))
+        }
+    };
+    // A session someone started by hand is theirs: nothing automatic touches it.
+    let manual_session = session.as_ref().is_some_and(|session| !session.auto);
+    if config.gate.auto && !manual_session {
+        match gate_auto_index(repo, gate_store)? {
+            GateAutoIndex::Ready => {}
+            GateAutoIndex::Notice(text) => return emit(text),
+            GateAutoIndex::Silent => return Ok(()),
+        }
+        if event == GateHookEvent::Prompt {
+            if let Some(text) = gate_auto_plan(repo, gate_store, session.as_ref(), input)? {
+                return emit(text);
+            }
+        }
+    }
+    let text = match &session {
+        Some(session) => format!(
+            "Open Kioku gate session is active ({} mode{}) for task \"{}\": {} allowed \
+             path(s), {} caution, {} widened. Edits are judged against that boundary; widen it \
+             with `ok gate expand <path> --reason \"<why>\"`{}.",
+            session.mode.as_str(),
+            if session.advisory { ", advisory" } else { "" },
+            session.task.chars().take(160).collect::<String>(),
+            session.boundary.allowed.len(),
+            session.boundary.caution.len(),
+            session.boundary.expansions.len(),
+            if session.auto {
+                ""
+            } else {
+                ", finish with `ok gate finish`"
+            }
+        ),
+        None if config.gate.auto => return Ok(()),
+        None if config.gate.require_plan => {
+            "Open Kioku gate: no session is active and this repository requires \
+             one (`[gate] require_plan = true`). Source edits are denied until \
+             `ok gate start \"<task>\"` declares a plan and boundary."
+                .to_string()
+        }
+        None => "Open Kioku gate: no session is active for this repository. Before \
+                 editing source for a task, `ok gate start \"<task>\"` declares a plan \
+                 and boundary that every edit is then held to, and `ok gate finish` \
+                 writes the verified Change Dossier."
+            .to_string(),
+    };
+    emit(text)
+}
+
+/// Plan from the prompt in the background, and say so. `None` when the prompt is not a task.
+/// With no auto session the plan starts one; with one, it widens its boundary (or, for a
+/// different conversation, replaces it). The baseline is captured here, at the prompt, so an
+/// edit made while the plan is being built belongs to the session.
+fn gate_auto_plan(
+    repo: &Path,
+    gate_store: &GateStore,
+    session: Option<&GateSession>,
+    input: &HookInput,
+) -> anyhow::Result<Option<String>> {
+    let Some(task) = input.prompt.as_deref().and_then(gate_task_from_prompt) else {
+        return Ok(None);
+    };
+    // A plan still being built for an earlier prompt of this conversation is superseded: the
+    // new marker replaces the old one, whose planner backs out, and the new plan is built
+    // from both prompts with the earlier prompt's baseline, so neither prompt's words and no
+    // edit made in between is dropped. Another conversation's plan in progress is replaced
+    // outright: one repository holds one prompt-started session.
+    let superseded = gate_store
+        .starting()
+        .filter(|marker| !gate_planner_spent(marker) && gate_marker_ours(marker, input));
+    let continues = session.is_some_and(|s| gate_same_conversation(s, &input.session_id));
+    let task = match &superseded {
+        Some(earlier) if !earlier.detail.is_empty() && earlier.detail != task => {
+            format!("{} {}", earlier.detail, task)
+                .chars()
+                .take(GATE_TASK_MAX_CHARS)
+                .collect()
+        }
+        _ => task,
+    };
+    let mut marker = BackgroundMarker::new(&task);
+    marker.harness_session = input.session_id.clone();
+    match &superseded {
+        Some(earlier) if earlier.base_rev.is_some() => {
+            marker.base_rev = earlier.base_rev.clone();
+            marker.preexisting = earlier.preexisting.clone();
+        }
+        _ if !continues => {
+            marker.base_rev = gate_base_rev(repo);
+            if let Some(base) = marker.base_rev.as_deref() {
+                marker.preexisting = gate_changed_since(repo, base).unwrap_or_default();
+            }
+        }
+        _ => {}
+    }
+    gate_store.mark_starting(&marker)?;
+    match gate_spawn_detached(
+        repo,
+        &["gate", "start", "--auto-nonce", &marker.nonce],
+        &gate_store.root().join("start.log"),
+    ) {
+        Ok(pid) => gate_store.set_starting_pid(&marker.nonce, pid)?,
+        Err(err) => {
+            gate_store.clear_starting_if(&marker.nonce);
+            return Err(err);
+        }
+    }
+    Ok(Some(if continues {
+        "Open Kioku gate: this prompt's plan is being added to the session's boundary in \
+         the background."
+            .to_string()
+    } else {
+        "Open Kioku gate: planning an edit boundary from this prompt in the background. If \
+         the prompt reads as a task, edits are judged against that boundary once it is ready, \
+         an edit outside it is reported with `ok gate expand <path> --reason \"<why>\"` as \
+         the way to record why it belongs, and a Change Dossier is written when you stop. \
+         `ok gate status` shows the session, `.ok/gate/start.log` why there is none."
+            .to_string()
+    }))
 }
 
 fn gate_hook_pre_tool_entry(repo: &Path, input: &HookInput) -> anyhow::Result<()> {
@@ -960,7 +1833,23 @@ fn gate_hook_pre_tool_entry(repo: &Path, input: &HookInput) -> anyhow::Result<()
     }
     let repo = gate_hook_repo(repo, input)?;
     let gate_store = GateStore::for_repo(&repo);
-    let session = gate_store.active_session()?;
+    let session = gate_wait_for_session(&repo, &gate_store, input)?;
+    let planning = gate_store
+        .starting()
+        .is_some_and(|marker| gate_marker_ours(&marker, input));
+    if session.is_none() && planning && input.is_edit_tool() {
+        // The planner outlasted the wait. The edit proceeds and verification judges it,
+        // unless the repository insists on a plan first.
+        let config = OkConfig::load_from_repo(&repo)?;
+        if config.gate.require_plan {
+            return gate_emit(HookResponse::Deny {
+                event: "PreToolUse".into(),
+                reason: "Open Kioku gate: the boundary for this prompt is still being planned; \
+                         retry the edit in a moment."
+                    .into(),
+            });
+        }
+    }
     gate_hook_pre_tool(&repo, &gate_store, session, input)
 }
 
@@ -1259,7 +2148,14 @@ fn gate_verify_fingerprint(
         Some(base) => gate_changed_since(repo, base)?,
         None => Vec::new(),
     };
-    let mut text = format!("{trail}\n{malformed}\n");
+    // The session and its boundary are part of what a verdict depends on: another session's
+    // record, or one from before the boundary was widened or the mode changed, does not stand.
+    let mut text = format!(
+        "{}\n{}\n{}\n{trail}\n{malformed}\n",
+        session.id,
+        session.mode.as_str(),
+        serde_json::to_string(&session.boundary)?
+    );
     for path in &dirty {
         text.push_str(path);
         text.push('\n');
@@ -1281,8 +2177,22 @@ fn gate_hook_stop(
     input: &HookInput,
 ) -> anyhow::Result<()> {
     let Some(session) = session else {
+        // No session of this conversation. A planner still running is left to finish (the
+        // caller waited for it already); another conversation's is none of this stop's.
         return Ok(());
     };
+    if session.auto {
+        // Nothing edited and nothing changed: the conversation has not touched the
+        // repository yet, so there is nothing to verify and no dossier to write.
+        let (events, _) = gate_store.events()?;
+        if !gate_trail_has_edits(&events)
+            && gate_change_input(repo, &session, &events)?
+                .changed_files
+                .is_empty()
+        {
+            return Ok(());
+        }
+    }
     // A stop with nothing changed since the last verification answers from that verification
     // instead of opening the index again.
     let fingerprint = gate_verify_fingerprint(repo, gate_store, &session)?;
@@ -1306,7 +2216,10 @@ fn gate_hook_stop(
             last
         }
     };
-    if last.verdict == DossierVerdict::Fail && !input.stop_hook_active {
+    // A failing change holds the agent only where the boundary is binding: not in observe
+    // mode, and not in an advisory session, whose boundary nobody declared.
+    let binding = !session.advisory && session.mode != GateMode::Observe;
+    if last.verdict == DossierVerdict::Fail && binding && !input.stop_hook_active {
         let mut reason = format!(
             "Open Kioku gate: the change does not verify against the declared boundary. {}.",
             last.summary
@@ -1327,7 +2240,9 @@ fn gate_hook_stop(
         reason.push('.');
         return gate_emit(HookResponse::Block { reason });
     }
-    // Informational only: a message the user sees, which neither blocks nor continues the turn.
+    // Informational only: a message the user sees, which neither blocks nor continues the
+    // turn. A session, auto or not, stays open after a stop: a FAIL the agent was held on,
+    // and the next prompt of the same conversation, both belong to it.
     gate_emit(HookResponse::SystemMessage {
         text: format!(
             "Open Kioku gate: {}. Dossier: {}",
@@ -1365,6 +2280,9 @@ fn gate_claude_hooks() -> serde_json::Value {
         }],
         "Stop": [{
             "hooks": [command("stop", 600)]
+        }],
+        "SessionEnd": [{
+            "hooks": [command("session-end", 60)]
         }]
     })
 }
@@ -1483,7 +2401,7 @@ mod gate_tests {
             }
         });
         let added = merge_gate_hooks(&mut settings);
-        assert_eq!(added, 5);
+        assert_eq!(added, 6);
         assert_eq!(settings["permissions"]["allow"][0], "Bash(ls)");
         assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         assert_eq!(settings["hooks"]["PreToolUse"][0]["matcher"], "Bash");
@@ -1494,7 +2412,7 @@ mod gate_tests {
     #[test]
     fn gate_hooks_replace_a_non_object_settings_value() {
         let mut settings = serde_json::json!("junk");
-        assert_eq!(merge_gate_hooks(&mut settings), 5);
+        assert_eq!(merge_gate_hooks(&mut settings), 6);
         assert!(settings["hooks"]["UserPromptSubmit"].is_array());
     }
 

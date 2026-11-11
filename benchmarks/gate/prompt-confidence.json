@@ -1,0 +1,362 @@
+[
+ {
+  "kind": "commit",
+  "task": "fix(git): name diff entries git writes without file headers (#671) (#6",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 8,
+  "admitted": 8
+ },
+ {
+  "kind": "commit",
+  "task": "fix(graph): merge node writes independently of order and rewrite chang",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 4,
+  "admitted": 3
+ },
+ {
+  "kind": "commit",
+  "task": "fix(ingest): read the mod items of a size-skipped #[path]-mounted Rust",
+  "confidence": "medium",
+  "score": 0.6,
+  "gold": 5,
+  "admitted": 5
+ },
+ {
+  "kind": "commit",
+  "task": "fix(ingest): keep Rust use lookups cut short by a cycle, and stop read",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 3,
+  "admitted": 3
+ },
+ {
+  "kind": "commit",
+  "task": "fix(tree-sitter): bound a Rust trait-impl member through relative path",
+  "confidence": "medium",
+  "score": 0.6,
+  "gold": 2,
+  "admitted": 2
+ },
+ {
+  "kind": "commit",
+  "task": "fix(patch,cli): report test findings and endpoints by file path, not f",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 4,
+  "admitted": 4
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution,tree-sitter): read Rust crate::, self:: and super:: typ",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 7,
+  "admitted": 4
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution,ingest): read Rust field types through aliases and smar",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 10,
+  "admitted": 8
+ },
+ {
+  "kind": "commit",
+  "task": "fix(ingest): place a cfg_attr-only path module at its default location",
+  "confidence": "low",
+  "score": 0.5,
+  "gold": 8,
+  "admitted": 8
+ },
+ {
+  "kind": "commit",
+  "task": "fix(ingest): follow cfg_attr path mounts below a #[path]-mounted Rust ",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 3,
+  "admitted": 3
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution,ingest): read Rust names per namespace, and follow enum",
+  "confidence": "medium",
+  "score": 0.6,
+  "gold": 9,
+  "admitted": 7
+ },
+ {
+  "kind": "commit",
+  "task": "fix(core,impact): match SSH key files, not source named after them (#6",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 10,
+  "admitted": 8
+ },
+ {
+  "kind": "commit",
+  "task": "fix(core): hash analysis node labels case-sensitively except SQL table",
+  "confidence": "medium",
+  "score": 0.6,
+  "gold": 3,
+  "admitted": 3
+ },
+ {
+  "kind": "commit",
+  "task": "perf(storage-sqlite): list symbols through an indexed order key again ",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 2,
+  "admitted": 1
+ },
+ {
+  "kind": "commit",
+  "task": "feat(graph): report and filter edge authority in graph queries (#651) ",
+  "confidence": "high",
+  "score": 0.9288889,
+  "gold": 8,
+  "admitted": 7
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution): resolve a Rust call path that starts at a module in s",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 4,
+  "admitted": 4
+ },
+ {
+  "kind": "commit",
+  "task": "fix(graph): show an edge's earliest call site and fold its writes inde",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 2,
+  "admitted": 2
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution,ingest): keep an unproven edge per file for Rust module",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 12,
+  "admitted": 8
+ },
+ {
+  "kind": "commit",
+  "task": "fix(ingest): narrow Rust crate-sharing marks and mark #[path]-mounted ",
+  "confidence": "medium",
+  "score": 0.6,
+  "gold": 7,
+  "admitted": 7
+ },
+ {
+  "kind": "commit",
+  "task": "fix(tests,storage-sqlite): break validation-target ties by repository ",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 3,
+  "admitted": 3
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution,ingest): read Rust calls inside a configuration-selecte",
+  "confidence": "medium",
+  "score": 0.6,
+  "gold": 8,
+  "admitted": 6
+ },
+ {
+  "kind": "commit",
+  "task": "fix(graph): say when a path search stopped at the hop limit (#666) (#6",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 12,
+  "admitted": 9
+ },
+ {
+  "kind": "commit",
+  "task": "fix(tree-sitter): record a generic impl's owner without its generic ar",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 3,
+  "admitted": 3
+ },
+ {
+  "kind": "commit",
+  "task": "fix(tree-sitter,ingest): read Go type aliases through to the type they",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 9,
+  "admitted": 6
+ },
+ {
+  "kind": "commit",
+  "task": "fix(plan): place boundary symbols by file path, not file id (#648) (#6",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 2,
+  "admitted": 1
+ },
+ {
+  "kind": "commit",
+  "task": "feat(ingest,core): prune .NET build output, price NuGet packages as de",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 9,
+  "admitted": 7
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution): external trait impls, generic-annotated receivers, an",
+  "confidence": "medium",
+  "score": 0.6,
+  "gold": 10,
+  "admitted": 7
+ },
+ {
+  "kind": "commit",
+  "task": "fix(ingest): match registry names alone only where a token can name th",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 2,
+  "admitted": 2
+ },
+ {
+  "kind": "commit",
+  "task": "fix(plan): cut tied validation targets by path, not file id (#644) (#6",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 2,
+  "admitted": 2
+ },
+ {
+  "kind": "commit",
+  "task": "fix(ingest): keep a digest label after a multi-byte character from pan",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 1,
+  "admitted": 1
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution,ingest): follow Rust paths through use re-exports (#476",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 11,
+  "admitted": 7
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution,ingest): keep an unproven edge per file for a Rust impo",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 11,
+  "admitted": 8
+ },
+ {
+  "kind": "commit",
+  "task": "fix(impact): read hub windows past 40 proven edges and report deleted ",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 5,
+  "admitted": 4
+ },
+ {
+  "kind": "commit",
+  "task": "fix(core,ingest): name the directories behind a coverage gap and price",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 8,
+  "admitted": 7
+ },
+ {
+  "kind": "commit",
+  "task": "fix(git,patch): read supplied diffs under every git prefix style (#675",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 3,
+  "admitted": 3
+ },
+ {
+  "kind": "commit",
+  "task": "fix(ingest): read an imported receiver by its import in the symbol reg",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 3,
+  "admitted": 3
+ },
+ {
+  "kind": "commit",
+  "task": "fix(graph): return the strongest of equally short routes, and route au",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 9,
+  "admitted": 7
+ },
+ {
+  "kind": "commit",
+  "task": "fix(resolution,ingest): bind Rust use paths that start at a module in ",
+  "confidence": "high",
+  "score": 0.94,
+  "gold": 10,
+  "admitted": 7
+ },
+ {
+  "kind": "noise",
+  "task": "yes, do it",
+  "confidence": "low",
+  "score": 0.3,
+  "allowed": 8
+ },
+ {
+  "kind": "noise",
+  "task": "the second one please",
+  "confidence": "high",
+  "score": 0.94,
+  "allowed": 8
+ },
+ {
+  "kind": "noise",
+  "task": "looks good, continue",
+  "confidence": "low",
+  "score": 0.5,
+  "allowed": 8
+ },
+ {
+  "kind": "noise",
+  "task": "why is that?",
+  "confidence": "high",
+  "score": 0.94,
+  "allowed": 8
+ },
+ {
+  "kind": "noise",
+  "task": "can you explain how this works",
+  "confidence": "high",
+  "score": 0.94,
+  "allowed": 8
+ },
+ {
+  "kind": "noise",
+  "task": "ok thanks",
+  "confidence": "low",
+  "score": 0.3,
+  "allowed": 8
+ },
+ {
+  "kind": "noise",
+  "task": "try again",
+  "confidence": "high",
+  "score": 0.94,
+  "allowed": 8
+ },
+ {
+  "kind": "noise",
+  "task": "fix it",
+  "confidence": "high",
+  "score": 0.94,
+  "allowed": 8
+ }
+]

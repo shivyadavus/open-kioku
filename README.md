@@ -93,13 +93,18 @@ ok verify --plan plan.json --git                               # the real diff a
 Every verification step a coding agent is given today is an instruction to the model. This one runs.
 
 ```sh
-ok gate install claude --apply                     # once: hooks into .claude/settings.json (the plugin ships them too)
-ok gate start "add retry handling to token refresh" # the plan's boundary becomes the session's
-# ...the agent edits; every Edit/Write passes through the hook...
-ok gate finish                                     # verify the real change, write the Change Dossier
+ok gate install claude --apply     # once per repository; the Claude Code plugin ships the same hooks
 ```
 
-With a session active, an edit outside the declared boundary is denied (`enforce`) or allowed and reported (`warn`, the default) with the one command that widens it, `ok gate expand <path> --reason "<why>"`; a secret-like or generated path is denied in either. When the agent stops, the change is verified against the same boundary and written as a **Change Dossier**: what was declared, what the harness reported editing, what was denied, what actually changed (including files created with no hook at all), what verification found, and what is still uncertain. A `FAIL` holds the agent with the violations and the remedies. [`docs/gate.md`](docs/gate.md)
+That is the whole setup. The first prompt of a conversation plans an edit boundary in the background; later prompts widen it; every Edit, Write and shell write is judged against it; every stop that follows a change verifies the real change (files created with no hook included) and writes a **Change Dossier**: what was declared, what the harness reported, what was denied, what actually changed, what verification found, and what is still uncertain.
+
+A session started from a prompt is **advisory**: it tells the agent which edits fall outside the boundary and records them, denies secret-like and generated paths, and holds nothing, because a plan built from a prompt cannot tell a task from a remark (measured: `"fix it"` plans with the same confidence as a real commit subject). The boundary is binding where someone declared it: `ok gate start "<task>"`, `mode = "enforce"` in `ok.toml`, or the pull request itself in CI. There a `FAIL` holds the agent, or fails the check, with the violations and the one remedy, `ok gate expand <path> --reason "<why>"`.
+
+```sh
+ok gate ci --base origin/main --task "$PR_TITLE" --write dossier.md   # the same judgement for any pull request, no hooks
+```
+
+Measured on commit-derived sessions and three live Claude Code sessions; method, numbers and caveats in [`benchmarks/gate/`](benchmarks/gate/README.md). [`docs/gate.md`](docs/gate.md)
 
 Underneath: exact definitions, references, and dependency paths from source (and optional SCIP) are authoritative. Lexical, semantic, history, test, and runtime signals can reorder retrieval; they cannot overwrite repository truth.
 

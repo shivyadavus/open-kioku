@@ -860,7 +860,7 @@ fn task_anchors(task: &str) -> Vec<(String, AnchorStrength)> {
     let mut anchors: Vec<(String, AnchorStrength)> = Vec::new();
     // A stray backtick shifts every later span between quoted and unquoted, which would demote
     // a quoted name to a weak anchor; with an odd count no token is demoted.
-    let balanced_backticks = task.matches('`').count() % 2 == 0;
+    let balanced_backticks = task.matches('`').count().is_multiple_of(2);
     for (index, span) in task.split('`').enumerate() {
         // Odd spans sit between a pair of backticks.
         let quoted = index % 2 == 1;
@@ -5481,7 +5481,7 @@ pub fn group_thousands(value: usize) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(digit);

@@ -357,7 +357,7 @@ fn record(id: usize, dimensions: usize) -> VectorRecord {
     VectorRecord {
         id: VectorId((id + 1) as u64),
         target_id: format!("synthetic-{id}"),
-        target_kind: if id % 5 == 0 { "doc" } else { "code" }.into(),
+        target_kind: if id.is_multiple_of(5) { "doc" } else { "code" }.into(),
         vector: deterministic_unit_vector(id as u64 + 1, dimensions),
     }
 }

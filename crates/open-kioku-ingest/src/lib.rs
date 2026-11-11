@@ -3137,7 +3137,7 @@ fn dedupe_analysis_facts(mut facts: Vec<AnalysisFact>) -> Vec<AnalysisFact> {
 }
 
 fn should_emit_progress(done: usize, total: usize) -> bool {
-    done == total || done % 500 == 0
+    done == total || done.is_multiple_of(500)
 }
 
 fn mode_quality_notes(mode: IndexMode) -> Vec<QualityNote> {

@@ -68,11 +68,38 @@ below are about what was caught, where, and what a faithful agent paid.
 - Latency: hook median 5.2 ms, p95 6.5 ms; `start` 4.4 s; `finish` 13.5 s (more changed files to
   verify per case than in enforce mode, since drift lands).
 
+## Sibling caution — the same 38 cases, `sibling_caution = true`
+
+`[gate] sibling_caution` reads a path in the directory of an allowed path as a *sibling*:
+allowed and reported at the hook, a warning rather than a violation at verification. Same
+cases, same seed, same binary, the one setting changed
+([`commit-derived-enforce-sibling.json`](commit-derived-enforce-sibling.json)):
+
+| | off (the default) | on |
+|---|---|---|
+| Faithful edits admitted without widening | 188 of 232 (81.0%) | 204 of 232 (87.9%) |
+| Faithful edits denied (each needs an `expand` with a reason) | 44 | 28 |
+| Out-of-boundary drift edits denied at the hook | 114 of 114 | 102 of 114 |
+| Drift edits let through as reported siblings | 0 | 12 |
+| Forbidden paths (secrets, build output) denied | 76 of 76 | 76 of 76 |
+| Writes that bypass the hooks, failed at finish | 38 of 38 | 38 of 38 |
+
+The setting removes 16 of the 44 denials a faithful agent meets, and in exchange 12 of the 114
+synthetic drift edits (a file dropped beside an allowed one) are no longer denied: each is
+reported to the agent, recorded in the trail and listed in the dossier as a caution, and none
+fails verification. That is the trade stated in numbers, which is why the setting is off by
+default: turn it on where the cost of asking an agent to justify a new module beside the one it
+is changing is higher than the cost of a stray file next to it being reported rather than
+refused. Forbidden paths and writes that bypass the hooks are unaffected.
+
 ## Live sessions
 
-[`live-runs.md`](live-runs.md) records three real Claude Code sessions driven under the gate in
-`enforce` mode on this repository: what the boundary declared, what the agent edited, where it
-widened the boundary and why, and what it did unprompted with `ok gate check` and `ok gate finish`.
+[`live-runs.md`](live-runs.md) records four real Claude Code sessions on this repository: three
+driven under the gate in `enforce` mode (what the boundary declared, what the agent edited, where
+it widened the boundary and why, and what it did unprompted with `ok gate check` and
+`ok gate finish`), and one with no gate command typed, where the hooks alone planned from the
+prompt and the session was advisory. [`prompt-confidence.json`](prompt-confidence.json) is the
+measurement behind that default: a plan's confidence does not tell a task from a remark.
 
 ## Reading it
 
@@ -95,4 +122,7 @@ OK_BIN=target/release/ok scripts/gate-sim.py --repo /tmp/sim-repo --cases 40 --m
   --write benchmarks/gate/commit-derived-enforce.json
 OK_BIN=target/release/ok scripts/gate-sim.py --repo /tmp/sim-repo --cases 20 --mode warn --seed 11 \
   --write benchmarks/gate/commit-derived-warn.json
+# sibling caution: set `sibling_caution = true` under `[gate]` in /tmp/sim-repo/ok.toml, then
+OK_BIN=target/release/ok scripts/gate-sim.py --repo /tmp/sim-repo --cases 40 --mode enforce --seed 7 \
+  --write benchmarks/gate/commit-derived-enforce-sibling.json
 ```

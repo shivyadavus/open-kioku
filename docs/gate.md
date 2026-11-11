@@ -1,15 +1,70 @@
 # The gate
 
-`ok gate` is the gate between a coding agent and the merge button. The agent declares a task;
-the plan's recommended change boundary becomes the session's boundary; the harness's edit hooks
-hold every edit to it; and when the agent stops, the actual change is verified against the same
-boundary and written as a **Change Dossier**: one versioned artifact that says what was declared,
-what was edited, what was blocked, what verification found, and what is still uncertain.
+`ok gate` is the gate between a coding agent and the merge button. A task is declared; its
+plan's recommended change boundary becomes the session's boundary; the harness's hooks judge
+every edit against it; and the actual change is verified against the same boundary and written
+as a **Change Dossier**: one versioned artifact that says what was declared, what was edited,
+what was blocked, what verification found, and what is still uncertain.
 
 Every other verification step a coding agent is given today is an instruction to the model.
 This one runs.
 
-## Two commands
+Who declared the task decides how binding the boundary is:
+
+| Declared by | How | The boundary |
+|---|---|---|
+| Nobody: the prompt | the hooks alone (`auto`, the default) | **advisory**: reported and recorded, holds nothing; forbidden paths still denied |
+| The repository | `mode = "enforce"` in `ok.toml` | binding for every session, prompt-started ones included, from the next tool call after it is set |
+| A person | `ok gate start "<task>"` | binding: a failing change holds the agent at stop; `enforce` also denies at the edit |
+| The pull request | `ok gate ci --base … --task "<title and body>"` | binding: exit code for CI |
+
+## Zero commands
+
+Install the Claude Code plugin (or run `ok gate install claude --apply` once) and the gate runs
+itself. The first prompt of a conversation plans a boundary in the background and starts a
+session; each later prompt of the same conversation widens that boundary with its own plan,
+recorded with the prompt as the reason; every edit is judged against it; every stop that
+follows a change verifies it and refreshes the dossier; the session ends when the conversation
+does. A conversation that changes nothing writes nothing. A repository with no index is
+indexed in the background the first time a session opens.
+
+A prompt whose plan has Low confidence starts nothing and widens nothing: a greeting or a
+question about the project plans that way, and nothing is held to it. The next prompt is
+planned on its own (`.ok/gate/start.log` says what the last planner decided). Under
+`require_plan` an edit with no session is denied, so there a task the planner has Low
+confidence in needs `ok gate start`.
+
+A prompt-started session belongs to the conversation that sent the prompt. Every hook carries
+its conversation's id, and a conversation is judged only against its own session: a second
+conversation open in the same repository is not denied, warned or held for the first one's
+task, and its stop and its end leave the first one's session and plan alone. One repository
+holds one prompt-started session, so the second conversation's first task prompt closes the
+first one's session, dossier written, and starts its own; what the first left uncommitted then
+predates the second. Two conversations editing one working tree share one diff: a file either
+of them changes is in the change of whichever session is active. A session started by hand
+binds everyone working in the repository.
+
+A session started this way is **advisory**. Its boundary is a plan built from the prompt's
+words, and a plan cannot tell a task from a remark: measured on this repository, `"fix it"` and
+`"try again"` plan with the same High confidence as a real commit subject
+([`benchmarks/gate/`](../benchmarks/gate/README.md)). So the gate does not hold an agent to a
+boundary nobody declared. It tells the agent which edits fall outside it, with
+`ok gate expand <path> --reason "<why>"` as the way to record why one belongs; it denies the
+paths that are forbidden by policy rather than by plan (secrets, key material, generated code,
+dependencies, the index); and it writes the dossier with the true verdict. Holding the agent is
+for a boundary someone declared: the table above.
+
+This is `[gate] auto = true`, the default. Automatic work happens only at the top of a git
+working tree, indexed or not: the hooks stay silent anywhere else, do not index a repository
+with more than 20,000 files (tracked, or untracked and not ignored: what the indexer would
+walk; they say to run `ok index` once instead), and do nothing automatic while `ok.toml` cannot
+be read. The first 400 characters of a prompt become the session's task, stored under
+`.ok/gate/` and shown in the dossier. That directory holds prompt text, so the gate writes a
+`.gitignore` into `.ok/gate/` when it creates it, and into `.ok/` when the hooks index a
+repository that does not already ignore it: nothing the hooks create unasked is left for
+`git add -A` to pick up. Set `auto = false` to run the gate only by hand.
+
+## By hand
 
 ```sh
 ok gate install claude --apply        # once per repository: hooks into .claude/settings.json
@@ -33,6 +88,24 @@ writes `.ok/gate/dossiers/<session>.json` and `.md`, ends the session, and exits
 `FAIL`. Pass `--run-commands` to execute the plan's validation commands and record their exit
 codes; `--keep` writes the dossier and leaves the session active.
 
+## In CI, for any pull request
+
+```sh
+ok gate ci --base origin/main --task "$PR_TITLE
+
+$PR_BODY" --write dossier.md
+```
+
+No hooks, no session: `ci` plans from the task text, verifies what the branch added since it
+left `--base` (the merge base, so what the base gained meanwhile is not counted) plus untracked
+files against the plan's boundary, prints the dossier (and writes the Markdown to `--write` for
+a pull request comment; an untracked dossier file an earlier run left in the working tree is
+not counted as the change, and a `--write` path the repository tracks is refused, so a branch
+cannot take one of its own files out of the judgement by naming it), and exits non-zero on
+`FAIL`. It judges a
+pull request whatever wrote it — any agent, any harness, a person — with the trail section
+empty, since no hook saw the edits. The GitHub Action is the natural caller.
+
 ## What the hooks do
 
 The Claude Code plugin ships [`hooks/hooks.json`](../hooks/hooks.json); `ok gate install claude`
@@ -45,12 +118,23 @@ is `ok gate hook <event>`: it reads the harness's JSON on stdin and answers on s
 | `pre-tool` | `PreToolUse` on `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | Classifies each path against the boundary. Denies a forbidden path in every mode but `observe`; denies an outside path in `enforce`; records each denial to `.ok/gate/events.jsonl`. Never opens the index: one small JSON read per edit. |
 | `post-tool` | `PostToolUse`, same tools | Records the edit now that it has happened (a call the user refused or that failed is not an edit) and, after one outside or on a caution path, tells the agent so, with the command that widens the boundary. |
 | `pre-tool`, `post-tool` | `PreToolUse` / `PostToolUse` on `Bash` | A shell command can write files the edit tools never see. Before it runs, the paths it names as write targets (`>`/`>>` redirections, `tee`, `sed -i`, `cp`/`mv` destinations, `touch`, `rm`, `git mv`/`git rm`) are judged like edits, and a dirty-tree snapshot is taken; a target outside the repository (`/tmp`, `/dev/null`) is not the gate's concern. After it runs, every path that became dirty and was not named is recorded in the trail and, when outside the boundary, reported to the agent. A write that already landed is recorded as warned, never denied. |
-| `stop` | `Stop` | Verifies the change and writes the dossier. On `FAIL` it holds the agent with the violations and the remedies; when `stop_hook_active` is set (the agent is already continuing because of a stop hook) it reports and never blocks again, so a condition the agent cannot resolve cannot loop. A stop with nothing changed since the last verification (same trail, same dirty tree) answers from that verification instead of opening the index again. |
-| `prompt`, `session-start` | `UserPromptSubmit`, `SessionStart` | One factual line: whether a session is active, its task and boundary size, and how to start, widen, or finish one. |
+| `stop` | `Stop` | Verifies the change and writes the dossier. On `FAIL` in a binding session it holds the agent with the violations and the remedies; when `stop_hook_active` is set (the agent is already continuing because of a stop hook) it reports and never blocks again, so a condition the agent cannot resolve cannot loop. In an advisory session and in `observe` it reports and never holds. A stop with nothing changed since the last verification answers from that verification instead of opening the index again; a prompt-started session that has changed nothing is not verified at all. A session stays open after a stop. A plan still being built for the conversation is waited for (up to twelve seconds), so what the turn edited is judged now; a planner that outlasts the wait is left to finish, and the next stop or the end of the conversation judges those edits against the baseline the prompt recorded. |
+| `prompt`, `session-start` | `UserPromptSubmit`, `SessionStart` | With `auto`: index the repository in the background when it has none; on a prompt, plan in the background, starting a session or widening the conversation's (a slash command, a `!` or `#` line, or a prompt under three characters is not a task; a prompt whose plan has Low confidence starts nothing and changes nothing). The prompt reaches the planner through a marker file, never a command line. A session started by hand is never touched. Otherwise one factual line: whether a session is active, its task and boundary size, and how to widen it. |
+| `session-end` | `SessionEnd` | Ends the conversation's prompt-started session, writing its dossier if it changed anything since the last verification, and cancels a plan still being built for it once the usual wait is over. A new conversation's first task prompt does the same for a session a crash left behind, which in the meantime judges nobody else. |
 
-The edit hook fails closed: malformed input, an unreadable `ok.toml` or a torn session file
-refuse the tool call (exit 2, with the way out on stderr) rather than let an edit through
-unjudged. `ok gate abandon` removes a session file the hooks cannot read, so that way out
+While a prompt's plan is still being built, the edit hook waits up to twelve seconds for it;
+if the planner is not done, the edit proceeds and verification judges it, because the
+session's baseline is taken when the prompt arrives, not when the plan is ready (under
+`require_plan` the agent is asked to retry in a moment instead). A planner acts only while its
+own marker stands: a newer prompt, the end of the conversation or a manual `ok gate start`
+replaces or removes the marker and the planner backs out. A newer prompt of the same
+conversation does not drop the earlier one: the new plan is built from both prompts' words and
+keeps the earlier prompt's baseline. The marker records the planner's process, and a marker
+whose process is gone is ignored at once (so is one with no known process after ninety
+seconds, and the marker of an indexer that was killed): a dead planner never stalls a tool
+call. The edit hook fails closed:
+malformed input, an unreadable `ok.toml` or a torn session file refuse the tool call (exit 2,
+with the way out on stderr) rather than let an edit through unjudged. `ok gate abandon` removes a session file the hooks cannot read, so that way out
 always works. The informing hooks (`prompt`, `session-start`, `post-tool`, `stop`) never block
 on their own errors; a stop that passes reports with `systemMessage`, which the user sees and
 which neither blocks nor continues the agent's turn.
@@ -69,16 +153,28 @@ The expansion and its reason are recorded in the Change Dossier.
 | Mode | Outside the boundary | Caution path | Forbidden path |
 |---|---|---|---|
 | `enforce` | denied until widened | allowed, reported | denied |
-| `warn` (default) | allowed, reported; verification fails | allowed, reported | denied |
+| `warn` (default) | allowed, reported; verification fails, which holds the agent at stop unless the session is advisory | allowed, reported | denied |
 | `observe` | allowed, recorded | allowed, recorded | allowed, recorded |
 
-Set the default in `ok.toml`:
+Set the defaults in `ok.toml`:
 
 ```toml
 [gate]
-mode = "warn"          # enforce | warn | observe; `ok gate start --mode` overrides it
-require_plan = false   # true: deny every source edit while no session is active
+mode = "warn"            # enforce | warn | observe; `ok gate start --mode` overrides it
+require_plan = false     # true: deny every source edit while no session is active
+auto = true              # plan from each prompt, index when needed; such sessions are advisory in `warn`
+sibling_caution = false  # true: a path beside an allowed path is allowed and reported, not outside
 ```
+
+`sibling_caution` reads a path in the same directory as an allowed (or widened) path as a
+*sibling*: allowed and reported, never denied, and a warning rather than a violation at
+verification. It does not apply at the repository root, where one allowed file would make
+every top-level name a sibling. A new module beside the touched one is the most
+common legitimate edit a plan cannot name, so this trades some of `enforce`'s strictness for
+less friction. Measured on 38 commit-derived sessions, it admits 87.9% of a faithful agent's
+edits without widening instead of 81.0%, and reports 12 of 114 out-of-boundary drift edits
+rather than denying them ([`benchmarks/gate/`](../benchmarks/gate/README.md)).
+The secret-path policy and the plan's forbidden rules still win.
 
 A forbidden path is one the plan's forbidden rules match (generated code, dependencies, the
 index under `.ok/`) **or** one the secret-path policy matches (`.env`, `.env.*`, `.aws`, `.ssh`,
