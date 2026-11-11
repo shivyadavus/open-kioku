@@ -1714,6 +1714,13 @@ fn gate_binding_follows_the_configuration_as_it_is_now() {
     let status = gate_status(&repo);
     assert_eq!(status["session"]["mode"], "enforce");
     assert!(status["session"].get("advisory").is_none(), "{status}");
+    // `observe` is no more binding than `warn`: the session is advisory again, and a file
+    // outside its boundary is reported, not failed.
+    set_gate_mode(&repo, "observe");
+    assert!(outside().trim().is_empty());
+    let status = gate_status(&repo);
+    assert_eq!(status["session"]["mode"], "observe");
+    assert_eq!(status["session"]["advisory"], true, "{status}");
 }
 
 #[test]
@@ -1835,6 +1842,95 @@ fn gate_ci_judges_a_finished_change_from_the_task_text_alone() {
         .map(|f| f["kind"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
     assert_eq!(kinds, vec!["forbidden_boundary".to_string()], "{output}");
+}
+
+#[test]
+fn gate_ci_takes_its_mode_from_the_base_revision_not_from_the_change_it_judges() {
+    let (_temp, repo) = demo_repo();
+    git(&repo, &["branch", "-M", "main"]);
+    // The repository declares the boundary binding, on its main branch.
+    set_gate_mode(&repo, "enforce");
+    git(&repo, &["commit", "-qam", "bind the boundary"]);
+    // A branch adds a file outside any plan for its task, and edits ok.toml to make its own
+    // judgement advisory.
+    git(&repo, &["checkout", "-q", "-b", "feature"]);
+    std::fs::create_dir_all(repo.join("src/billing")).unwrap();
+    std::fs::write(repo.join("src/billing/unrelated.rs"), "pub fn x() {}\n").unwrap();
+    set_gate_mode(&repo, "warn");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "feature"]);
+    let ci = |extra: &[&str]| {
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "ci", "--base", "main"])
+            .args(extra);
+        c
+    };
+    // The base revision's mode applies: the outside file fails, and the dossier says which
+    // setting it went by.
+    let (stdout, _) = run_failure(ci(&["--task", "change token expiration"]));
+    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let dossier = &output["dossier"];
+    assert_eq!(dossier["verdict"], "fail", "{dossier}");
+    assert_eq!(dossier["mode"], "enforce");
+    assert!(dossier.get("advisory").is_none());
+    assert!(
+        dossier["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c.as_str().unwrap().contains("the base revision's applies")),
+        "{dossier}"
+    );
+    // The caller of the check, not the change, may say otherwise.
+    let advisory: serde_json::Value = serde_json::from_str(&run(ci(&[
+        "--task",
+        "change token expiration",
+        "--mode",
+        "warn",
+    ])))
+    .unwrap();
+    assert_eq!(advisory["dossier"]["verdict"], "warn");
+    assert_eq!(advisory["dossier"]["advisory"], true);
+
+    // A task that begins with a dash is a task, in either spelling of the option, and reaches
+    // the Markdown as one escaped line.
+    for spelling in [
+        vec!["--task", "--fix <b>token</b> expiration", "--mode", "warn"],
+        vec!["--task=- [x] fix token expiration", "--mode", "warn"],
+    ] {
+        let dashed: serde_json::Value = serde_json::from_str(&run(ci(&spelling))).unwrap();
+        assert!(dashed["dossier"]["task"]
+            .as_str()
+            .unwrap()
+            .ends_with("expiration"));
+    }
+    let markdown = run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "ci",
+            "--base",
+            "main",
+            "--mode",
+            "warn",
+            "--task",
+            "--fix <b>token</b> expiration\n\n## not a heading",
+        ]);
+        c
+    });
+    assert!(
+        markdown
+            .contains("**Task:** --fix &lt;b&gt;token&lt;/b&gt; expiration \\#\\# not a heading"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("outside the planned boundary, which is advisory here"),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("every changed file is inside the declared boundary"));
 }
 
 #[test]

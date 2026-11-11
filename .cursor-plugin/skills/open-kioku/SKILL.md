@@ -48,7 +48,7 @@ parameter named below says otherwise.
    `excluded`, before concluding the change has no tests — skipped tests are
    counted there, not listed.
 7. **`plan_change`** — the evidence-backed plan with edit boundaries. Start with
-   `detail: "brief"`: the decision in about a kilobyte (verdict, files to edit with
+   `detail: "brief"`: the decision in a kilobyte or two (verdict, files to edit with
    line ranges, likely affected files, commands, top risks). The default full plan
    runs to tens of thousands of tokens on a large repository; ask for it when you
    need the evidence behind a file. `detail: "preflight"` for the decision with every

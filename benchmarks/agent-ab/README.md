@@ -11,8 +11,8 @@ Six real commits of this repository. For each, a clone checked out at the commit
 indexed with `ok index` (10 to 12 seconds each). The same prompt, the commit's subject, asks
 Claude Code (`claude -p`, default model, read-only tools, edits disallowed) which existing files
 have to change, answered as a list of at most twelve paths. The list is scored against the
-files the real commit changed (`CHANGELOG.md` and `Cargo.lock` left out). One run per arm per
-task.
+files the real commit changed that already exist at its parent; `CHANGELOG.md` and `Cargo.lock`
+are left out of both the gold files and the answers. One run per arm per task.
 
 | Arm | What the agent had |
 |---|---|
@@ -25,47 +25,48 @@ task.
 
 | Task (commit) | Arm | Recall | Precision | Turns | Cost (USD) | Time (s) |
 |---|---|---|---|---|---|---|
-| `9dc7179a0f` fix(git): diff entries without file headers | plain | 0.25 | 0.75 | 3 | 0.37 | 13.6 |
-| | kioku | 0.25 | 0.75 | 6 | 0.49 | 18.5 |
-| | brief | 0.25 | 1.00 | 6 | 0.51 | 19.7 |
-| | impact | 0.25 | 1.00 | 6 | 0.63 | 19.6 |
+| `9dc7179a0f` fix(git): diff entries without file headers | plain | 0.25 | 1.00 | 3 | 0.37 | 13.6 |
+|  | kioku | 0.25 | 1.00 | 6 | 0.49 | 18.5 |
+|  | brief | 0.25 | 1.00 | 6 | 0.51 | 19.7 |
+|  | impact | 0.25 | 1.00 | 6 | 0.63 | 19.6 |
 | `bc7f3cdb34` fix(patch,cli): findings by file path | plain | 0.40 | 0.50 | 4 | 0.68 | 13.0 |
-| | brief | 0.40 | 0.40 | 7 | 0.32 | 18.5 |
-| | impact | 0.40 | 1.00 | 4 | 0.24 | 15.4 |
-| `ef1c3bec14` fix(core,impact): SSH key files | plain | 0.41 | 0.88 | 5 | 0.39 | 18.9 |
-| | brief | 0.41 | 0.88 | 4 | 0.28 | 16.9 |
-| | impact | 0.35 | 0.86 | 6 | 0.34 | 19.6 |
-| `d387a7bca2` feat(graph): edge authority in graph queries | plain | 0.71 | 0.83 | 11 | 0.68 | 27.6 |
-| | brief | 0.64 | 0.90 | 6 | 0.55 | 30.4 |
-| | impact | 0.64 | 0.82 | 10 | 0.52 | 24.4 |
-| `c1c3ee4d6c` fix(impact): hub windows and deleted files | plain | 0.64 | 0.58 | 7 | 0.44 | 21.9 |
-| | brief | 0.55 | 0.60 | 8 | 0.48 | 31.4 |
-| | impact | 0.27 | 0.43 | 5 | 0.35 | 21.3 |
-| `7b8aaf0661` fix(tree-sitter,ingest): Go type aliases | plain | 0.83 | 0.83 | 22 | 0.73 | 52.8 |
-| | brief | 0.33 | 1.00 | 15 | 0.76 | 46.1 |
-| | impact | 0.92 | 0.92 | 10 | 0.52 | 25.8 |
+|  | brief | 0.40 | 0.40 | 7 | 0.32 | 18.5 |
+|  | impact | 0.40 | 1.00 | 4 | 0.24 | 15.4 |
+| `ef1c3bec14` fix(core,impact): SSH key files | plain | 0.41 | 1.00 | 5 | 0.39 | 18.9 |
+|  | brief | 0.41 | 1.00 | 4 | 0.28 | 16.9 |
+|  | impact | 0.35 | 1.00 | 6 | 0.34 | 19.6 |
+| `d387a7bca2` feat(graph): edge authority in graph queries | plain | 0.71 | 0.91 | 11 | 0.68 | 27.6 |
+|  | brief | 0.64 | 1.00 | 6 | 0.55 | 30.4 |
+|  | impact | 0.64 | 0.90 | 10 | 0.52 | 24.4 |
+| `c1c3ee4d6c` fix(impact): hub windows and deleted files | plain | 0.64 | 0.64 | 7 | 0.44 | 21.9 |
+|  | brief | 0.55 | 0.67 | 8 | 0.48 | 31.4 |
+|  | impact | 0.27 | 0.43 | 5 | 0.35 | 21.3 |
+| `7b8aaf0661` fix(tree-sitter,ingest): Go type aliases | plain | 0.83 | 0.91 | 22 | 0.73 | 52.8 |
+|  | brief | 0.33 | 1.00 | 15 | 0.75 | 46.1 |
+|  | impact | 0.92 | 1.00 | 10 | 0.52 | 25.8 |
 
 Means over the six tasks:
 
 | Arm | Recall | Precision | Turns | Cost (USD) | Time (s) |
 |---|---|---|---|---|---|
-| plain | 0.54 | 0.73 | 8.7 | 0.55 | 24.6 |
-| brief | 0.43 | 0.80 | 7.7 | 0.48 | 27.2 |
-| impact | 0.47 | 0.84 | 6.8 | 0.43 | 21.0 |
+| plain | 0.54 | 0.83 | 8.7 | 0.55 | 24.6 |
+| brief | 0.43 | 0.84 | 7.7 | 0.48 | 27.2 |
+| impact | 0.47 | 0.89 | 6.8 | 0.43 | 21.0 |
 
 The `kioku` arm was run on one task. The MCP server was connected and the agent called none of
-its tools: it used Grep and Read, as the plain arm did. The other five were not run, because
-the arm is the plain arm for as long as the agent does not choose a tool it did not choose.
+its tools: its five tool calls were Grep, Read and shell commands (`cd`, `grep`). The other five were not run,
+because the arm is the plain arm for as long as the agent does not choose a tool it did not
+choose.
 
 ## What it says
 
 1. **As shipped, the agent does not reach for Open Kioku.** Sixteen connected tools and no
    reason to use them are, for this agent, the same as no tools.
 2. **Handing the agent the index's knowledge up front did not improve which files it named.**
-   Recall went from 0.54 to 0.43 and 0.47, precision from 0.73 to 0.80 and 0.84, and turns and
+   Recall went from 0.54 to 0.43 and 0.47, precision from 0.83 to 0.84 and 0.89, and turns and
    cost fell by 10 to 20 percent. With one run per cell these differences are inside the
-   run-to-run noise: the four arms of the first task all returned the same three files and
-   cost between USD 0.37 and 0.63.
+   run-to-run noise: the four arms of the first task all named the same three files and cost
+   between USD 0.37 and 0.63.
 3. **The index did hold true facts the agent did not act on.** For `9dc7179a0f`, `ok impact`
    named `contract.rs`, `impact/src/lib.rs` and `mcp/src/lib.rs` as callers of the function
    being changed. The real commit changed all three; no arm listed any of them, the arm that
@@ -82,7 +83,7 @@ the arm is the plain arm for as long as the agent does not choose a tool it did 
   command once with the tests it stands for, the first three risks, and counts of what was left
   out. On the task measured above it is 1.9 KB. The tool description and the agent skill say to
   read it first.
-- `ok preflight` names a shared validation command once, in every format.
+- `ok preflight` names a shared validation command once in its text and Markdown forms.
 - The weight of the product moved to what did change an agent's behaviour in the live sessions
   ([`../gate/live-runs.md`](../gate/live-runs.md)): a refusal with a stated remedy, and a
   verified record of the change for the person reviewing it ([`docs/gate.md`](../../docs/gate.md)).
@@ -90,9 +91,19 @@ the arm is the plain arm for as long as the agent does not choose a tool it did 
 
 ## Limits
 
+The first published scoring of these runs counted `CHANGELOG.md` against an answer that named
+it while leaving it out of the gold files; the tables above are recomputed from the stored
+answers without that penalty (precision rose by 0.05 to 0.10 in every arm; recall is
+unchanged). The checkouts these runs used also kept a local branch that reached the answer
+commit. The two recorded transcripts that ran git ran `git log` on the detached parent, which
+does not show it, but the plain arm kept no transcript, so a read of that branch cannot be
+ruled out for it. The harness now deletes every ref and prunes, and refuses to run on a
+checkout that still holds the commit.
+
 One repository (Open Kioku's own: Rust, well laid out, commit subjects that name the crate), six
-tasks, one run each, one frontier model, a read-only task, and a gold standard, every file the
-commit touched, that includes tests and documentation nobody could name from the subject alone.
+tasks, one run each, one frontier model, a read-only task, and a gold standard, every existing
+file the commit touched, that includes tests and documentation nobody could name from the
+subject alone.
 It does not measure an editing task end to end, a large or unfamiliar or polyglot repository, or
 a weaker model, and it says nothing about them. Nineteen runs, USD 9.26.
 

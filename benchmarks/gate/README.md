@@ -123,9 +123,9 @@ A plan built from a title names where a change starts. It does not name the test
 it, the documentation and changelog a maintainer writes with it, or four source files in ten.
 Adding the commit body to the task did not help: it lowered the plan's stated confidence (to
 Low on 14 of the 20) and left the verdicts as they were. That is why `ok gate ci` treats the
-boundary as advisory unless `--mode enforce` is given: by default it fails only on a forbidden
-path (none of the 20 has one), lists the files outside the boundary in the dossier, and exits 0
-with `WARN`. Before this measurement the default was the binding rule, and it would have failed
+boundary as advisory unless `--mode enforce` is given: by default it fails on a forbidden path
+(none of the 20 has one), lists the files outside the boundary in the dossier, and otherwise
+exits 0 with `WARN`. Before this measurement the default was the binding rule, and it would have failed
 all 20.
 
 What this does not show: how often a binding boundary fails a change that *should* be refused.

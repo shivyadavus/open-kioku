@@ -112,7 +112,7 @@ pub enum PreflightFormat {
     Markdown,
     Json,
     Html,
-    /// The decision in about a kilobyte: the verdict, the files, the commands and the top
+    /// The decision in a kilobyte or two: the verdict, the files, the commands and the top
     /// risks, each list capped and counted. What an agent reads before it starts; the other
     /// formats carry every risk, caveat and evidence reference.
     Brief,
@@ -245,6 +245,21 @@ const BRIEF_COMMANDS: usize = 4;
 const BRIEF_TEST_NAMES: usize = 3;
 const BRIEF_RISKS: usize = 3;
 const BRIEF_LINE_CHARS: usize = 200;
+const BRIEF_PATH_CHARS: usize = 96;
+const BRIEF_COMMAND_CHARS: usize = 96;
+const BRIEF_NAME_CHARS: usize = 48;
+
+/// `text` cut to its last `max` characters, with an ellipsis in front when cut: the end of a
+/// path is the part that names the file.
+fn brief_clip_start(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let mut clipped = String::from("…");
+    clipped.extend(text.chars().skip(count - max.saturating_sub(1)));
+    clipped
+}
 
 /// `text` cut to `max` characters on a character boundary, with an ellipsis when cut.
 fn brief_clip(text: &str, max: usize) -> String {
@@ -273,7 +288,11 @@ fn write_brief_files(out: &mut String, heading: &str, files: &[PreflightFile], m
             .as_ref()
             .map(|range| format!(":{}-{}", range.start, range.end))
             .unwrap_or_default();
-        out.push_str(&format!("  {}{}\n", file.path.display(), range));
+        out.push_str(&format!(
+            "  {}{}\n",
+            brief_clip_start(&file.path.display().to_string(), BRIEF_PATH_CHARS),
+            range
+        ));
     }
 }
 
@@ -302,8 +321,9 @@ fn render_preflight_brief(report: &PreflightReport) -> String {
                 .iter()
                 .filter(|test| test.name != *command)
                 .take(BRIEF_TEST_NAMES)
-                .map(|test| test.name.as_str())
+                .map(|test| brief_clip(&test.name, BRIEF_NAME_CHARS))
                 .collect::<Vec<_>>();
+            let command = brief_clip(command, BRIEF_COMMAND_CHARS);
             let named = tests.iter().filter(|test| test.name != *command).count();
             if names.is_empty() {
                 out.push_str(&format!("  {command}\n"));
@@ -4132,6 +4152,42 @@ mod tests {
         // No evidence reference reaches the short form.
         assert!(!brief.contains(&"a".repeat(64)));
         assert!(brief.ends_with("the evidence behind each file.\n"));
+
+        // Long paths, names and commands are clipped, so the size stays bounded whatever the
+        // repository's layout: a path keeps its end, which names the file.
+        let deep = format!("{}/leaf_module.rs", "very_long_directory_name".repeat(9));
+        preflight.edit_files = (0..12)
+            .map(|_| PreflightFile {
+                path: PathBuf::from(&deep),
+                line_range: None,
+                reason: String::new(),
+                evidence_refs: Vec::new(),
+            })
+            .collect();
+        preflight.likely_affected_files = preflight.edit_files.clone();
+        preflight.validation = (0..6)
+            .map(|index| {
+                test(
+                    &format!("test_{index}_{}", "a_very_long_test_name_".repeat(6)),
+                    &format!("pytest {}", "tests/some/deep/path/".repeat(8)),
+                )
+            })
+            .collect();
+        let long = PreflightFormat::Brief.render(&preflight).unwrap();
+        assert!(long.len() < 4_200, "{} bytes:\n{long}", long.len());
+        assert!(long.contains("…"), "{long}");
+        assert!(
+            long.lines()
+                .filter(|line| line.ends_with("leaf_module.rs"))
+                .all(|line| line.chars().count() <= 2 + 96),
+            "{long}"
+        );
+        assert_eq!(
+            long.lines()
+                .filter(|line| line.ends_with("leaf_module.rs"))
+                .count(),
+            16
+        );
 
         // With nothing selected and nothing confirmed it still says so in a line each.
         preflight.edit_files.clear();

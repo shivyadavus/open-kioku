@@ -71,9 +71,20 @@ def prepare(source, work, sha, ok_bin):
     dest = work / sha[:10]
     if not dest.exists():
         sh(["git", "clone", "-q", "--no-hardlinks", source, str(dest)])
-        sh(["git", "-C", str(dest), "checkout", "-q", f"{sha}^"])
-        # The clone's history must not hold the answer.
-        sh(["git", "-C", str(dest), "remote", "remove", "origin"])
+        git = ["git", "-C", str(dest)]
+        sh(git + ["checkout", "-q", "--detach", f"{sha}^"])
+        # The clone must not hold the answer: no remote, no branch or tag that reaches the
+        # commit, no reflog entry, and the unreachable objects pruned. `git log --all` in the
+        # checkout then ends at the parent.
+        sh(git + ["remote", "remove", "origin"])
+        refs = sh(git + ["for-each-ref", "--format=%(refname)"]).split()
+        for ref in refs:
+            sh(git + ["update-ref", "-d", ref])
+        sh(git + ["reflog", "expire", "--expire=now", "--all"])
+        sh(git + ["gc", "-q", "--prune=now"])
+        held = subprocess.run(git + ["cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True)
+        if held.returncode == 0:
+            raise RuntimeError(f"{dest} still holds {sha}: the checkout would leak the answer")
     if not (dest / ".ok" / "index.sqlite").exists():
         started = time.time()
         sh([ok_bin, "index", "."], cwd=str(dest))
@@ -227,13 +238,24 @@ def parse_files(answer):
         paths = json.loads(found)
     except json.JSONDecodeError:
         return None
-    return [str(p).strip().lstrip("./") for p in paths if isinstance(p, str)]
+    cleaned = []
+    for path in paths:
+        if not isinstance(path, str):
+            continue
+        path = path.strip()
+        while path.startswith("./"):
+            path = path[2:]
+        cleaned.append(path)
+    return cleaned
 
 
 def score(answered, gold):
     if answered is None:
         return {"answered": None, "hits": 0, "recall": 0.0, "precision": 0.0, "first_hit_rank": None}
     gold_set = set(gold)
+    # A file left out of the gold standard is left out of the answer too: naming the
+    # changelog is neither a hit nor a miss.
+    answered = [p for p in answered if p.rsplit("/", 1)[-1] not in SKIP_GOLD]
     hits = [p for p in answered if p in gold_set]
     first = next((i + 1 for i, p in enumerate(answered) if p in gold_set), None)
     return {
@@ -271,7 +293,10 @@ def main():
         task_out.mkdir(exist_ok=True)
         prompt = PROMPT.format(subject=task)
         # Alternate which arm goes first, so neither always meets a warm or a cold service.
+        # The impact arm is seeded from the plain arm's answer, so plain stays ahead of it.
         arms = args.arms if index % 2 == 0 else list(reversed(args.arms))
+        if "impact" in arms and "plain" in arms and arms.index("impact") < arms.index("plain"):
+            arms = ["plain"] + [arm for arm in arms if arm != "plain"]
         row = {"sha": sha[:10], "task": task, "gold": gold, "gold_existing": gold_existing, "arms": {}}
         for arm in arms:
             done = task_out / f"{arm}.result.json"

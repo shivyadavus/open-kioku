@@ -1,5 +1,5 @@
 {
-  "method": "Six real commits; the agent names the files it would change from the commit subject, at the parent commit; scored against the files the commit changed (CHANGELOG.md and Cargo.lock left out). One run per arm per task.",
+  "method": "Six real commits; the agent names the files it would change from the commit subject, at the parent commit; scored against the files the commit changed that exist at its parent (`gold_scored`; CHANGELOG.md and Cargo.lock are left out of both the gold files and the answers). One run per arm per task.",
   "harness": "scripts/agent-ab.py",
   "agent": "Claude Code 2.1.322, `claude -p`, default model, read-only tools",
   "date": "2026-11-11",
@@ -26,13 +26,12 @@
           "arm": "plain",
           "answered": [
             "crates/open-kioku-git/src/lib.rs",
-            "CHANGELOG.md",
             "crates/open-kioku-git/src/unified_diff.rs",
             "crates/open-kioku-patch/src/lib.rs"
           ],
           "hits": 3,
           "recall": 0.25,
-          "precision": 0.75,
+          "precision": 1.0,
           "first_hit_rank": 1,
           "turns": 3,
           "cost_usd": 0.3702,
@@ -50,12 +49,11 @@
           "answered": [
             "crates/open-kioku-git/src/lib.rs",
             "crates/open-kioku-git/src/unified_diff.rs",
-            "CHANGELOG.md",
             "crates/open-kioku-patch/src/lib.rs"
           ],
           "hits": 3,
           "recall": 0.25,
-          "precision": 0.75,
+          "precision": 1.0,
           "first_hit_rank": 1,
           "turns": 6,
           "cost_usd": 0.4906,
@@ -143,6 +141,20 @@
             "crates/open-kioku-git/src/unified_diff.rs"
           ]
         }
+      ],
+      "gold_scored": [
+        "crates/open-kioku-cli/src/commands/contract.rs",
+        "crates/open-kioku-cli/src/commands/mod.rs",
+        "crates/open-kioku-cli/tests/cli_smoke.rs",
+        "crates/open-kioku-git/src/lib.rs",
+        "crates/open-kioku-git/src/unified_diff.rs",
+        "crates/open-kioku-impact/src/lib.rs",
+        "crates/open-kioku-mcp/src/lib.rs",
+        "crates/open-kioku-patch/src/lib.rs",
+        "crates/open-kioku-tests/snapshots/tools_list.json",
+        "docs/graph-model.md",
+        "docs/mcp-tools.md",
+        "docs/proof.md"
       ]
     },
     {
@@ -244,6 +256,13 @@
             "crates/open-kioku-cli/src/reports/trust.rs"
           ]
         }
+      ],
+      "gold_scored": [
+        "crates/open-kioku-cli/src/lib.rs",
+        "crates/open-kioku-cli/src/reports/trust.rs",
+        "crates/open-kioku-patch/src/lib.rs",
+        "crates/open-kioku-plan/src/lib.rs",
+        "docs/context-pack-spec.md"
       ]
     },
     {
@@ -278,12 +297,11 @@
             "crates/open-kioku-ingest/src/imports.rs",
             "crates/open-kioku-ingest/src/lib.rs",
             "docs/security-model.md",
-            "CHANGELOG.md",
             "crates/open-kioku-cli/tests/cli_smoke.rs"
           ],
           "hits": 7,
           "recall": 0.412,
-          "precision": 0.875,
+          "precision": 1.0,
           "first_hit_rank": 1,
           "turns": 5,
           "cost_usd": 0.3919,
@@ -305,12 +323,11 @@
             "crates/open-kioku-ingest/src/lib.rs",
             "crates/open-kioku-ingest/tests/coverage.rs",
             "docs/security-model.md",
-            "CHANGELOG.md",
             "crates/open-kioku-cli/tests/cli_smoke.rs"
           ],
           "hits": 7,
           "recall": 0.412,
-          "precision": 0.875,
+          "precision": 1.0,
           "first_hit_rank": 1,
           "turns": 4,
           "cost_usd": 0.2754,
@@ -338,13 +355,12 @@
             "crates/open-kioku-impact/src/lib.rs",
             "crates/open-kioku-ingest/tests/coverage.rs",
             "crates/open-kioku-ingest/src/imports.rs",
-            "CHANGELOG.md",
             "docs/security-model.md",
             "crates/open-kioku-ingest/src/lib.rs"
           ],
           "hits": 6,
           "recall": 0.353,
-          "precision": 0.857,
+          "precision": 1.0,
           "first_hit_rank": 1,
           "turns": 6,
           "cost_usd": 0.339,
@@ -370,6 +386,25 @@
             "crates/open-kioku-impact/src/lib.rs"
           ]
         }
+      ],
+      "gold_scored": [
+        "crates/open-kioku-cli/src/reports/status_setup_doctor.rs",
+        "crates/open-kioku-cli/tests/cli_smoke.rs",
+        "crates/open-kioku-core/src/analysis_semantics.rs",
+        "crates/open-kioku-core/src/lib.rs",
+        "crates/open-kioku-impact/src/lib.rs",
+        "crates/open-kioku-ingest/src/imports.rs",
+        "crates/open-kioku-ingest/src/lib.rs",
+        "crates/open-kioku-ingest/src/redaction.rs",
+        "crates/open-kioku-ingest/tests/coverage.rs",
+        "crates/open-kioku-languages/src/lib.rs",
+        "crates/open-kioku-mcp/snapshots/mcp/evidence_schema.json",
+        "crates/open-kioku-mcp/snapshots/mcp/repo_status.json",
+        "crates/open-kioku-mcp/snapshots/mcp/repo_status_coverage_gaps.json",
+        "crates/open-kioku-mcp/snapshots/mcp/repo_status_full.json",
+        "docs/mcp-tools.md",
+        "docs/proof.md",
+        "docs/security-model.md"
       ]
     },
     {
@@ -403,7 +438,6 @@
             "docs/graph-model.md",
             "crates/open-kioku-cli/src/commands/mod.rs",
             "docs/mcp-tools.md",
-            "CHANGELOG.md",
             "crates/open-kioku-mcp/snapshots/mcp/evidence_schema.json",
             "crates/open-kioku-core/src/lib.rs",
             "crates/open-kioku-graph/tests/sqlite_where_filters.rs",
@@ -412,7 +446,7 @@
           ],
           "hits": 10,
           "recall": 0.714,
-          "precision": 0.833,
+          "precision": 0.909,
           "first_hit_rank": 1,
           "turns": 11,
           "cost_usd": 0.6817,
@@ -433,7 +467,6 @@
             "crates/open-kioku-mcp/snapshots/mcp/evidence_schema.json",
             "crates/open-kioku-graph/tests/sqlite_where_filters.rs",
             "docs/mcp-tools.md",
-            "CHANGELOG.md",
             "crates/open-kioku-core/src/relationship.rs",
             "crates/open-kioku-core/src/lib.rs",
             "crates/open-kioku-mcp/src/lib.rs",
@@ -441,7 +474,7 @@
           ],
           "hits": 9,
           "recall": 0.643,
-          "precision": 0.9,
+          "precision": 1.0,
           "first_hit_rank": 1,
           "turns": 6,
           "cost_usd": 0.5472,
@@ -473,12 +506,11 @@
             "crates/open-kioku-graph/tests/sqlite_where_filters.rs",
             "docs/graph-model.md",
             "docs/mcp-tools.md",
-            "CHANGELOG.md",
             "crates/open-kioku-tests/tests/integration.rs"
           ],
           "hits": 9,
           "recall": 0.643,
-          "precision": 0.818,
+          "precision": 0.9,
           "first_hit_rank": 1,
           "turns": 10,
           "cost_usd": 0.5243,
@@ -503,6 +535,22 @@
             "crates/open-kioku-graph/src/schema.rs"
           ]
         }
+      ],
+      "gold_scored": [
+        "crates/open-kioku-cli/src/commands/mod.rs",
+        "crates/open-kioku-cli/tests/cli_smoke.rs",
+        "crates/open-kioku-core/src/lib.rs",
+        "crates/open-kioku-core/src/relationship.rs",
+        "crates/open-kioku-graph/src/query.rs",
+        "crates/open-kioku-graph/src/schema.rs",
+        "crates/open-kioku-graph/tests/sqlite_where_filters.rs",
+        "crates/open-kioku-mcp/snapshots/mcp/evidence_schema.json",
+        "crates/open-kioku-mcp/snapshots/mcp/query_evidence_graph.json",
+        "crates/open-kioku-mcp/src/lib.rs",
+        "crates/open-kioku-tests/snapshots/tools_list.json",
+        "docs/graph-model.md",
+        "docs/mcp-tools.md",
+        "docs/proof.md"
       ]
     },
     {
@@ -526,7 +574,6 @@
           "arm": "plain",
           "answered": [
             "crates/open-kioku-impact/src/lib.rs",
-            "CHANGELOG.md",
             "crates/open-kioku-core/src/lib.rs",
             "crates/open-kioku-mcp/src/lib.rs",
             "crates/open-kioku-cli/src/commands/mod.rs",
@@ -540,7 +587,7 @@
           ],
           "hits": 7,
           "recall": 0.636,
-          "precision": 0.583,
+          "precision": 0.636,
           "first_hit_rank": 1,
           "turns": 7,
           "cost_usd": 0.4366,
@@ -557,7 +604,6 @@
           "arm": "brief",
           "answered": [
             "crates/open-kioku-impact/src/lib.rs",
-            "CHANGELOG.md",
             "crates/open-kioku-core/src/lib.rs",
             "docs/mcp-tools.md",
             "crates/open-kioku-mcp/src/lib.rs",
@@ -569,7 +615,7 @@
           ],
           "hits": 6,
           "recall": 0.545,
-          "precision": 0.6,
+          "precision": 0.667,
           "first_hit_rank": 1,
           "turns": 8,
           "cost_usd": 0.4769,
@@ -630,6 +676,19 @@
             "crates/open-kioku-core/src/lib.rs"
           ]
         }
+      ],
+      "gold_scored": [
+        "crates/open-kioku-cli/src/commands/mod.rs",
+        "crates/open-kioku-cli/tests/cli_smoke.rs",
+        "crates/open-kioku-core/src/lib.rs",
+        "crates/open-kioku-impact/src/lib.rs",
+        "crates/open-kioku-mcp/snapshots/mcp/impact_analysis_symbol.json",
+        "crates/open-kioku-mcp/src/lib.rs",
+        "crates/open-kioku-tests/snapshots/plan_change.json",
+        "crates/open-kioku-tests/snapshots/tools_list.json",
+        "docs/graph-model.md",
+        "docs/mcp-tools.md",
+        "docs/proof.md"
       ]
     },
     {
@@ -659,7 +718,6 @@
           "answered": [
             "crates/open-kioku-tree-sitter/src/lib.rs",
             "crates/open-kioku-ingest/src/symbol_registry.rs",
-            "CHANGELOG.md",
             "crates/open-kioku-core/src/lib.rs",
             "docs/graph-model.md",
             "crates/open-kioku-ingest/src/project_model.rs",
@@ -672,7 +730,7 @@
           ],
           "hits": 10,
           "recall": 0.833,
-          "precision": 0.833,
+          "precision": 0.909,
           "first_hit_rank": 1,
           "turns": 22,
           "cost_usd": 0.7301,
@@ -725,7 +783,6 @@
             "crates/open-kioku-tree-sitter/src/lib.rs",
             "crates/open-kioku-ingest/src/symbol_registry.rs",
             "crates/open-kioku-core/src/analysis_semantics.rs",
-            "CHANGELOG.md",
             "crates/open-kioku-mcp/snapshots/mcp/evidence_schema.json",
             "crates/open-kioku-mcp/snapshots/mcp/repo_status.json",
             "crates/open-kioku-mcp/snapshots/mcp/repo_status_coverage_gaps.json",
@@ -737,7 +794,7 @@
           ],
           "hits": 11,
           "recall": 0.917,
-          "precision": 0.917,
+          "precision": 1.0,
           "first_hit_rank": 1,
           "turns": 10,
           "cost_usd": 0.5174,
@@ -764,32 +821,50 @@
             "crates/open-kioku-ingest/src/symbol_registry.rs"
           ]
         }
+      ],
+      "gold_scored": [
+        "crates/open-kioku-core/src/analysis_semantics.rs",
+        "crates/open-kioku-core/src/lib.rs",
+        "crates/open-kioku-ingest/src/lib.rs",
+        "crates/open-kioku-ingest/src/symbol_registry.rs",
+        "crates/open-kioku-mcp/snapshots/mcp/evidence_schema.json",
+        "crates/open-kioku-mcp/snapshots/mcp/repo_status.json",
+        "crates/open-kioku-mcp/snapshots/mcp/repo_status_coverage_gaps.json",
+        "crates/open-kioku-mcp/snapshots/mcp/repo_status_full.json",
+        "crates/open-kioku-tests/tests/semantic_resolution_corpus.rs",
+        "crates/open-kioku-tree-sitter/src/lib.rs",
+        "docs/graph-model.md",
+        "docs/proof.md"
       ]
     }
   ],
   "means_over_six_tasks": {
     "plain": {
       "recall": 0.541,
-      "precision": 0.729,
+      "precision": 0.826,
       "turns": 8.667,
       "cost_usd": 0.548,
       "duration_s": 24.633
     },
     "brief": {
       "recall": 0.431,
-      "precision": 0.796,
+      "precision": 0.845,
       "turns": 7.667,
       "cost_usd": 0.48,
       "duration_s": 27.167
     },
     "impact": {
       "recall": 0.473,
-      "precision": 0.837,
+      "precision": 0.888,
       "turns": 6.833,
       "cost_usd": 0.433,
       "duration_s": 21.017
     }
   },
   "total_runs": 19,
-  "total_cost_usd": 9.26
+  "total_cost_usd": 9.26,
+  "notes": [
+    "Scores were recomputed from the stored answers on 2026-11-11 after a review: CHANGELOG.md, left out of the gold files, had not been left out of the answers, which lowered precision for every run that named it. Recall is unchanged.",
+    "The checkouts these runs used kept a local branch that reached the answer commit. The two recorded transcripts that ran git ran `git log` on the detached parent, which does not show it; the plain arm kept no transcript. scripts/agent-ab.py now deletes every ref and prunes before a run."
+  ]
 }

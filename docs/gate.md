@@ -16,8 +16,8 @@ Who declared the task decides how binding the boundary is:
 | Nobody: the prompt | the hooks alone (`auto`, the default) | **advisory**: files outside it are reported and recorded, and are not a failure; forbidden paths are still denied |
 | The repository | `mode = "enforce"` in `ok.toml` | binding for every session, prompt-started ones included, from the next tool call after it is set |
 | A person | `ok gate start "<task>"` | binding: a failing change holds the agent at stop; `enforce` also denies at the edit |
-| Nobody: a pull request's words | `ok gate ci --base … --task "<title>"` | **advisory**: files outside it are listed in the dossier; only a forbidden path fails the check |
-| The team, for CI | `ok gate ci … --mode enforce` | binding: a file outside the boundary fails the check |
+| Nobody: a pull request's words | `ok gate ci --base … --task "<title>"` | **advisory**: files outside it are listed in the dossier; a forbidden path fails the check |
+| The team, for CI | `ok gate ci … --mode enforce`, or `mode = "enforce"` on the base branch | binding: a file outside the boundary fails the check |
 
 ## Zero commands
 
@@ -117,14 +117,24 @@ repository, each judged against its own subject, a binding boundary fails all 20
 changed files fall outside the plan, which names eight files to edit while a real pull request
 also changes its tests, its documentation, the changelog, a lockfile, and four in ten of its
 source files. So by default
-`ok gate ci` fails only on a forbidden path (a secret, key material, generated output, a
-dependency directory, the index), lists the files outside the planned boundary, and exits 0
-with `WARN`. `--mode enforce` (or `mode = "enforce"` in `ok.toml`) makes the boundary binding
-for a team that wants every file a pull request touches to be one its description leads to.
+`ok gate ci` lists the files outside the planned boundary and exits 0 with `WARN`. It still
+fails on a [forbidden path](#modes) (a secret-like path or key material, a dependency
+directory, generated output) and, with `--run-commands`, on a validation command that fails.
+`--mode enforce` makes the boundary binding for a team that wants every file a pull request
+touches to be one its description leads to.
 
-This repository runs it on its own pull requests, report-only: the `change-dossier` job in
+Without `--mode`, the mode and `sibling_caution` are `[gate]` of `ok.toml` **as the base
+revision has it**, not as the judged change has it: a branch cannot make its own judgement
+advisory, or widen its own boundary, by editing the file, and the dossier says so when the two
+differ. `--mode` is the caller's. The task text may begin with a dash, and reaches the Markdown
+dossier as one clipped line with Markdown and HTML escaped, since a pull request's description
+is text someone else wrote.
+
+This repository runs it on its own pull requests: the `change-dossier` job in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) builds the plan from the pull
-request's title and description and puts the dossier in the job summary.
+request's title and description, reads the change against the first parent of the merge
+commit it checked out (`--base 'HEAD^1'`: exactly what was merged, however far the base branch
+has moved), and puts the dossier in the job summary.
 
 ## What the hooks do
 
@@ -173,8 +183,8 @@ The expansion and its reason are recorded in the Change Dossier.
 | Mode | Outside the boundary | Caution path | Forbidden path |
 |---|---|---|---|
 | `enforce` | denied until widened | allowed, reported | denied |
-| `warn` (default) | allowed, reported; verification fails, which holds the agent at stop unless the session is advisory | allowed, reported | denied |
-| `observe` | allowed, recorded | allowed, recorded | allowed, recorded |
+| `warn` (default) | allowed, reported; in a declared session verification fails, which holds the agent at stop; in an advisory one it is listed and the verdict is `WARN` | allowed, reported | denied |
+| `observe` | allowed, recorded; listed in the dossier, never a failure in an advisory session | allowed, recorded | allowed, recorded |
 
 Set the defaults in `ok.toml`:
 
@@ -196,10 +206,26 @@ edits without widening instead of 81.0%, and reports 12 of 114 out-of-boundary d
 rather than denying them ([`benchmarks/gate/`](../benchmarks/gate/README.md)).
 The secret-path policy and the plan's forbidden rules still win.
 
-A forbidden path is one the plan's forbidden rules match (generated code, dependencies, the
-index under `.ok/`) **or** one the secret-path policy matches (`.env`, `.env.*`, `.aws`, `.ssh`,
-SSH key names, key-material extensions such as `.pem`, `.key`, `.p12`). `ok gate expand`
-refuses a forbidden path: a boundary that can be widened to a secret is not a boundary.
+A forbidden path is one of three things, in every mode and every session:
+
+- one the secret-path policy matches (`.env`, `.env.*`, `.aws`, `.ssh`, SSH key names,
+  key-material extensions such as `.pem`, `.key`, `.p12`), in any letter case;
+- one the gate's own policy matches: a dependency directory at any depth (`node_modules/`,
+  `third_party/`, `.venv/`) and a file named as generated output (`x_generated.rs`,
+  `x.generated.ts`), in any letter case;
+- one the plan's forbidden rules match: the directories the index pruned as build output or
+  dependencies, `vendor/`, `generated/`, `**/secrets/**`, `**/*Generated*`, `.git/`, `.ok/`. A
+  rule written in lower case names a directory and matches any spelling of it, as a
+  case-insensitive filesystem would; a rule with capitals is a naming convention and matches
+  as written.
+
+`ok gate expand` refuses a forbidden path: a boundary that can be widened to a secret is not a
+boundary. What this does not cover, so that it is not read as more than it is: `vendor/` below
+the repository root (the word is as often a domain term as a dependency directory, and a rule
+that fails legitimate changes is worse than none); a secret copied to a file with an ordinary
+name, which is content and not a path; and a change under `.ok/` made outside the hooks, which
+is denied at the edit hook but left out of the change at verification, because the gate's own
+state lives there.
 
 ## Widening the boundary
 
