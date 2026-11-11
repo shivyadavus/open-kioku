@@ -93,13 +93,16 @@ ok verify --plan plan.json --git                               # the real diff a
 Every verification step a coding agent is given today is an instruction to the model. This one runs.
 
 ```sh
-ok gate install claude --apply                     # once: hooks into .claude/settings.json (the plugin ships them too)
-ok gate start "add retry handling to token refresh" # the plan's boundary becomes the session's
-# ...the agent edits; every Edit/Write passes through the hook...
-ok gate finish                                     # verify the real change, write the Change Dossier
+ok gate install claude --apply     # once per repository; the Claude Code plugin ships the same hooks
 ```
 
-With a session active, an edit outside the declared boundary is denied (`enforce`) or allowed and reported (`warn`, the default) with the one command that widens it, `ok gate expand <path> --reason "<why>"`; a secret-like or generated path is denied in either. When the agent stops, the change is verified against the same boundary and written as a **Change Dossier**: what was declared, what the harness reported editing, what was denied, what actually changed (including files created with no hook at all), what verification found, and what is still uncertain. A `FAIL` holds the agent with the violations and the remedies. [`docs/gate.md`](docs/gate.md)
+That is the whole setup. Each prompt starts a session in the background with the prompt as the task and the plan's edit boundary as its limits; every Edit, Write and shell write is held to that boundary before it lands; a clean stop verifies the real change (files created with no hook included) and writes a **Change Dossier**: what was declared, what the harness reported, what was denied, what actually changed, what verification found, and what is still uncertain. An edit outside the boundary is denied (`enforce`) or allowed and reported (`warn`, the default) with the one remedy, `ok gate expand <path> --reason "<why>"`; a secret-like or generated path is denied in either. A `FAIL` holds the agent with the violations.
+
+```sh
+ok gate ci --base origin/main --task "$PR_TITLE" --write dossier.md   # the same judgement for any pull request, no hooks
+```
+
+Measured on commit-derived sessions and three live Claude Code sessions; method, numbers and caveats in [`benchmarks/gate/`](benchmarks/gate/README.md). [`docs/gate.md`](docs/gate.md)
 
 Underneath: exact definitions, references, and dependency paths from source (and optional SCIP) are authoritative. Lexical, semantic, history, test, and runtime signals can reorder retrieval; they cannot overwrite repository truth.
 

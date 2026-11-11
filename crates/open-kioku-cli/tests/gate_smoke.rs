@@ -1180,3 +1180,281 @@ fn gate_reads_a_relative_path_from_the_current_directory_only_when_it_exists_the
         "src/local.rs"
     );
 }
+
+fn wait_until(what: &str, timeout: std::time::Duration, mut check: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if check() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[test]
+fn gate_auto_mode_starts_from_the_prompt_and_ends_on_a_clean_stop() {
+    let (_temp, repo) = demo_repo();
+    // A question is not a task: nothing starts.
+    let quiet: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "prompt", r#"{"prompt":"/help"}"#)).unwrap();
+    assert!(quiet["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("ok gate start"));
+    assert!(!repo.join(".ok/gate/starting.json").exists());
+
+    // A task starts a session in the background.
+    let started: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "prompt",
+        r#"{"prompt":"add retry handling to token refresh in the auth module"}"#,
+    ))
+    .unwrap();
+    assert!(started["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("planning the edit boundary"));
+    wait_until(
+        "the auto session",
+        std::time::Duration::from_secs(60),
+        || repo.join(".ok/gate/session.json").exists(),
+    );
+    let status: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "status"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(status["session"]["auto"], true, "{status}");
+    assert!(
+        !repo.join(".ok/gate/starting.json").exists(),
+        "the marker is spent"
+    );
+    // A second prompt while the session is active does not start another.
+    let again: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "prompt",
+        r#"{"prompt":"now also add a test for the retry path"}"#,
+    ))
+    .unwrap();
+    assert!(again["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("session is active"));
+
+    // Edit inside the boundary, stop: the dossier is written and the session ends.
+    hook(&repo, "pre-tool", &edit_input(&repo, "Edit", "src/auth.rs"));
+    let mut auth = std::fs::read_to_string(repo.join("src/auth.rs")).unwrap();
+    auth.push_str("// retry\n");
+    std::fs::write(repo.join("src/auth.rs"), auth).unwrap();
+    hook(
+        &repo,
+        "post-tool",
+        &edit_input(&repo, "Edit", "src/auth.rs"),
+    );
+    let stop: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "stop",
+        &serde_json::json!({"cwd": repo, "hook_event_name": "Stop", "stop_hook_active": false})
+            .to_string(),
+    ))
+    .unwrap();
+    let message = stop["systemMessage"].as_str().unwrap();
+    assert!(message.contains("Session ended"), "{message}");
+    assert!(!repo.join(".ok/gate/session.json").exists());
+    assert_eq!(
+        std::fs::read_dir(repo.join(".ok/gate/dossiers"))
+            .unwrap()
+            .count(),
+        2
+    );
+
+    // A prompt that leads to no edit ends silently with no dossier.
+    hook(
+        &repo,
+        "prompt",
+        r#"{"prompt":"explain how the token refresh works in this repository"}"#,
+    );
+    wait_until(
+        "the second auto session",
+        std::time::Duration::from_secs(60),
+        || repo.join(".ok/gate/session.json").exists(),
+    );
+    let silent = hook(
+        &repo,
+        "stop",
+        &serde_json::json!({"cwd": repo, "hook_event_name": "Stop", "stop_hook_active": false})
+            .to_string(),
+    );
+    assert!(silent.trim().is_empty(), "{silent}");
+    assert!(!repo.join(".ok/gate/session.json").exists());
+    assert_eq!(
+        std::fs::read_dir(repo.join(".ok/gate/dossiers"))
+            .unwrap()
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn gate_edit_hook_waits_for_a_session_being_planned() {
+    let (_temp, repo) = demo_repo();
+    let config = repo.join("ok.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let (head, gate) = text.split_once("[gate]\n").expect("a [gate] section");
+    let gate = gate.replacen("mode = \"warn\"", "mode = \"enforce\"", 1);
+    std::fs::write(&config, format!("{head}[gate]\n{gate}")).unwrap();
+    hook(
+        &repo,
+        "prompt",
+        r#"{"prompt":"add retry handling to token refresh in the auth module"}"#,
+    );
+    // Immediately: no session yet, a fresh marker. The edit hook waits for the session and
+    // then judges the edit against it.
+    let outside: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "pre-tool",
+        &edit_input(&repo, "Write", "src/retry.rs"),
+    ))
+    .unwrap();
+    assert_eq!(
+        outside["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{outside}"
+    );
+    assert!(repo.join(".ok/gate/session.json").exists());
+}
+
+#[test]
+fn gate_session_start_indexes_a_repository_that_has_no_index() {
+    let (_temp, repo) = demo_repo();
+    std::fs::remove_dir_all(repo.join(".ok")).unwrap();
+    let start: serde_json::Value =
+        serde_json::from_str(&hook(&repo, "session-start", r#"{"source":"startup"}"#)).unwrap();
+    assert!(start["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("running in the background"));
+    wait_until("the index", std::time::Duration::from_secs(90), || {
+        ok().arg("--repo")
+            .arg(&repo)
+            .args(["status", "--exit-code"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    });
+    // The next prompt finds the index and plans.
+    let prompt: serde_json::Value = serde_json::from_str(&hook(
+        &repo,
+        "prompt",
+        r#"{"prompt":"add retry handling to token refresh in the auth module"}"#,
+    ))
+    .unwrap();
+    assert!(prompt["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("planning the edit boundary"));
+    assert!(!repo.join(".ok/gate/indexing.json").exists());
+}
+
+#[test]
+fn gate_ci_judges_a_finished_change_from_the_task_text_alone() {
+    let (_temp, repo) = demo_repo();
+    let mut auth = std::fs::read_to_string(repo.join("src/auth.rs")).unwrap();
+    auth.push_str("// retry\n");
+    std::fs::write(repo.join("src/auth.rs"), auth).unwrap();
+    std::fs::write(repo.join("BYPASS.md"), "x\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "agent change"]);
+    let (stdout, stderr) = run_failure({
+        let mut c = ok();
+        c.arg("--json").arg("--repo").arg(&repo).args([
+            "gate",
+            "ci",
+            "--base",
+            "HEAD~1",
+            "--task",
+            "add retry handling to token refresh",
+            "--write",
+            _temp.path().join("dossier.md").to_str().unwrap(),
+        ]);
+        c
+    });
+    assert!(stderr.contains("FAIL"), "{stderr}");
+    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let dossier = &output["dossier"];
+    assert_eq!(dossier["verdict"], "fail");
+    let violations = dossier["verification"]["boundary_violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(violations, vec!["BYPASS.md".to_string()]);
+    assert_eq!(dossier["trail"]["events_total"], 0, "no hooks ran");
+    let written = std::fs::read_to_string(_temp.path().join("dossier.md")).unwrap();
+    assert!(written.starts_with("## "), "{written}");
+    assert!(
+        !repo.join(".ok/gate/session.json").exists(),
+        "ci leaves no session"
+    );
+    // Removing the bypass passes.
+    git(&repo, &["rm", "-q", "BYPASS.md"]);
+    git(&repo, &["commit", "-qm", "drop bypass"]);
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "ci",
+            "--base",
+            "HEAD~2",
+            "--task",
+            "add retry handling to token refresh",
+            "--format",
+            "text",
+        ]);
+        c
+    });
+}
+
+#[test]
+fn gate_sibling_caution_admits_a_neighbour_with_a_warning_when_enabled() {
+    let (_temp, repo) = demo_repo();
+    let config = repo.join("ok.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let (head, gate) = text.split_once("[gate]\n").expect("a [gate] section");
+    let gate = gate
+        .replacen("mode = \"warn\"", "mode = \"enforce\"", 1)
+        .replacen("sibling_caution = false", "sibling_caution = true", 1);
+    assert!(gate.contains("sibling_caution = true"), "{gate}");
+    std::fs::write(&config, format!("{head}[gate]\n{gate}")).unwrap();
+    run({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "start", "add retry handling to token refresh"]);
+        c
+    });
+    let check: serde_json::Value = serde_json::from_str(&run({
+        let mut c = ok();
+        c.arg("--json")
+            .arg("--repo")
+            .arg(&repo)
+            .args(["gate", "check", "src/retry.rs"]);
+        c
+    }))
+    .unwrap();
+    assert_eq!(check["class"], "caution");
+    assert_eq!(check["action"], "warn");
+    let (_, err) = run_failure({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "check", "docs/new.md"]);
+        c
+    });
+    assert!(err.contains("would be denied"), "{err}");
+}

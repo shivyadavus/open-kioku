@@ -9,7 +9,19 @@ what was edited, what was blocked, what verification found, and what is still un
 Every other verification step a coding agent is given today is an instruction to the model.
 This one runs.
 
-## Two commands
+## Zero commands
+
+Install the Claude Code plugin (or run `ok gate install claude --apply` once) and the gate runs
+itself. Each prompt the harness reports starts a session in the background with the prompt as
+the task; edits are held to its boundary once it is ready; a clean stop verifies the change,
+writes the dossier, and ends the session, so the next prompt starts the next one. A prompt
+that leads to no edit ends silently. A repository with no index is indexed in the background
+the first time a session opens, and the gate starts on the first prompt after that.
+
+This is `[gate] auto = true`, the default. Every hook says what it is doing in one line. Set
+`auto = false` to run the gate only by hand.
+
+## By hand
 
 ```sh
 ok gate install claude --apply        # once per repository: hooks into .claude/settings.json
@@ -33,6 +45,20 @@ writes `.ok/gate/dossiers/<session>.json` and `.md`, ends the session, and exits
 `FAIL`. Pass `--run-commands` to execute the plan's validation commands and record their exit
 codes; `--keep` writes the dossier and leaves the session active.
 
+## In CI, for any pull request
+
+```sh
+ok gate ci --base origin/main --task "$PR_TITLE
+
+$PR_BODY" --write dossier.md
+```
+
+No hooks, no session: `ci` plans from the task text, verifies every tracked change since
+`--base` plus untracked files against the plan's boundary, prints the dossier (and writes the
+Markdown to `--write` for a pull request comment), and exits non-zero on `FAIL`. It judges a
+pull request whatever wrote it — any agent, any harness, a person — with the trail section
+empty, since no hook saw the edits. The GitHub Action is the natural caller.
+
 ## What the hooks do
 
 The Claude Code plugin ships [`hooks/hooks.json`](../hooks/hooks.json); `ok gate install claude`
@@ -46,11 +72,13 @@ is `ok gate hook <event>`: it reads the harness's JSON on stdin and answers on s
 | `post-tool` | `PostToolUse`, same tools | Records the edit now that it has happened (a call the user refused or that failed is not an edit) and, after one outside or on a caution path, tells the agent so, with the command that widens the boundary. |
 | `pre-tool`, `post-tool` | `PreToolUse` / `PostToolUse` on `Bash` | A shell command can write files the edit tools never see. Before it runs, the paths it names as write targets (`>`/`>>` redirections, `tee`, `sed -i`, `cp`/`mv` destinations, `touch`, `rm`, `git mv`/`git rm`) are judged like edits, and a dirty-tree snapshot is taken; a target outside the repository (`/tmp`, `/dev/null`) is not the gate's concern. After it runs, every path that became dirty and was not named is recorded in the trail and, when outside the boundary, reported to the agent. A write that already landed is recorded as warned, never denied. |
 | `stop` | `Stop` | Verifies the change and writes the dossier. On `FAIL` it holds the agent with the violations and the remedies; when `stop_hook_active` is set (the agent is already continuing because of a stop hook) it reports and never blocks again, so a condition the agent cannot resolve cannot loop. A stop with nothing changed since the last verification (same trail, same dirty tree) answers from that verification instead of opening the index again. |
-| `prompt`, `session-start` | `UserPromptSubmit`, `SessionStart` | One factual line: whether a session is active, its task and boundary size, and how to start, widen, or finish one. |
+| `prompt`, `session-start` | `UserPromptSubmit`, `SessionStart` | With `auto`: index the repository in the background when it has none; start a session from the prompt when none is active (a slash command or a prompt under twelve characters is not a task); say what is happening in one line. Otherwise one factual line: whether a session is active, its task and boundary size, and how to start, widen, or finish one. |
 
-The edit hook fails closed: malformed input, an unreadable `ok.toml` or a torn session file
-refuse the tool call (exit 2, with the way out on stderr) rather than let an edit through
-unjudged. `ok gate abandon` removes a session file the hooks cannot read, so that way out
+While a prompt's session is still being planned, the edit hook waits up to twelve seconds for
+it; if the planner is not done, the edit proceeds and verification at stop judges it (under
+`require_plan` the agent is asked to retry in a moment instead). The edit hook fails closed:
+malformed input, an unreadable `ok.toml` or a torn session file refuse the tool call (exit 2,
+with the way out on stderr) rather than let an edit through unjudged. `ok gate abandon` removes a session file the hooks cannot read, so that way out
 always works. The informing hooks (`prompt`, `session-start`, `post-tool`, `stop`) never block
 on their own errors; a stop that passes reports with `systemMessage`, which the user sees and
 which neither blocks nor continues the agent's turn.
@@ -72,13 +100,21 @@ The expansion and its reason are recorded in the Change Dossier.
 | `warn` (default) | allowed, reported; verification fails | allowed, reported | denied |
 | `observe` | allowed, recorded | allowed, recorded | allowed, recorded |
 
-Set the default in `ok.toml`:
+Set the defaults in `ok.toml`:
 
 ```toml
 [gate]
-mode = "warn"          # enforce | warn | observe; `ok gate start --mode` overrides it
-require_plan = false   # true: deny every source edit while no session is active
+mode = "warn"            # enforce | warn | observe; `ok gate start --mode` overrides it
+require_plan = false     # true: deny every source edit while no session is active
+auto = true              # start from the prompt, index when needed, end on a clean stop
+sibling_caution = false  # true: a path beside an allowed path is caution, not outside
 ```
+
+`sibling_caution` reads a path in the same directory as an allowed (or widened) path as
+*caution*: allowed and reported, never denied. A new module beside the touched one is the most
+common legitimate edit a plan cannot name, so this trades some of `enforce`'s strictness for
+less friction; the measured effect is in [`benchmarks/gate/`](../benchmarks/gate/README.md).
+The secret-path policy and the plan's forbidden rules still win.
 
 A forbidden path is one the plan's forbidden rules match (generated code, dependencies, the
 index under `.ok/`) **or** one the secret-path policy matches (`.env`, `.env.*`, `.aws`, `.ssh`,

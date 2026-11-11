@@ -34,6 +34,24 @@ const EVENTS_FILE: &str = "events.jsonl";
 const DOSSIER_DIR: &str = "dossiers";
 const SNAPSHOT_DIR: &str = "snapshots";
 const LAST_VERIFY_FILE: &str = "last-verify.json";
+const STARTING_FILE: &str = "starting.json";
+const INDEXING_FILE: &str = "indexing.json";
+
+/// A marker for work the hooks started in the background: a session being planned, or the
+/// repository being indexed. The age tells a hook whether to wait for it or to assume the
+/// background process died.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackgroundMarker {
+    pub at: DateTime<Utc>,
+    #[serde(default)]
+    pub detail: String,
+}
+
+impl BackgroundMarker {
+    pub fn age(&self) -> chrono::Duration {
+        Utc::now().signed_duration_since(self.at)
+    }
+}
 
 /// Git's empty tree: the base of a session started in a repository with no commits yet, so
 /// every tracked file counts as the session's change.
@@ -104,6 +122,9 @@ pub struct GateBoundary {
     pub forbidden_rules: Vec<BoundaryForbiddenRule>,
     #[serde(default)]
     pub expansions: Vec<BoundaryExpansion>,
+    /// Whether a path in the directory of an allowed or expanded path reads as `caution`.
+    #[serde(default)]
+    pub sibling_caution: bool,
 }
 
 impl GateBoundary {
@@ -115,6 +136,7 @@ impl GateBoundary {
             forbidden: boundary.forbidden_files.iter().map(normalize).collect(),
             forbidden_rules: boundary.forbidden_rules.clone(),
             expansions: Vec::new(),
+            sibling_caution: false,
         }
     }
 
@@ -139,8 +161,24 @@ impl GateBoundary {
         if self.caution.iter().any(|c| c == &path) {
             return PathClass::Caution;
         }
+        if self.sibling_caution {
+            let dir = parent_dir(&path);
+            if self
+                .allowed
+                .iter()
+                .chain(self.expansions.iter().map(|e| &e.path))
+                .any(|known| parent_dir(known) == dir)
+            {
+                return PathClass::Caution;
+            }
+        }
         PathClass::Outside
     }
+}
+
+/// The directory part of a `/`-separated path; empty at the root.
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
 }
 
 /// The relation of one path to the boundary.
@@ -204,6 +242,9 @@ pub struct GateSession {
     /// The name the dossier gives the repository; set by the CLI from ok.toml or the directory.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub repo_name: String,
+    /// Started by the prompt hook rather than by a command; ends on a clean stop.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
     pub boundary: GateBoundary,
     /// Paths already modified or untracked when the session started. A path here that no
     /// hook reported editing during the session is not the session's change and is left out
@@ -227,6 +268,7 @@ impl GateSession {
             risk_score: plan.risk.score,
             confidence_summary: plan.confidence_summary.clone(),
             repo_name: String::new(),
+            auto: false,
             boundary: GateBoundary::from_plan(plan),
             preexisting_changes: Vec::new(),
         }
@@ -453,6 +495,51 @@ impl GateStore {
         Ok(())
     }
 
+    fn write_marker(&self, name: &str, detail: &str) -> Result<()> {
+        fs::create_dir_all(&self.root)?;
+        let marker = BackgroundMarker {
+            at: Utc::now(),
+            detail: detail.to_string(),
+        };
+        fs::write(self.root.join(name), serde_json::to_string(&marker)?)?;
+        Ok(())
+    }
+
+    fn read_marker(&self, name: &str) -> Option<BackgroundMarker> {
+        let bytes = fs::read(self.root.join(name)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn clear_marker(&self, name: &str) {
+        let _ = fs::remove_file(self.root.join(name));
+    }
+
+    /// Say a session is being planned in the background for `task`.
+    pub fn mark_starting(&self, task: &str) -> Result<()> {
+        self.write_marker(STARTING_FILE, task)
+    }
+
+    pub fn starting(&self) -> Option<BackgroundMarker> {
+        self.read_marker(STARTING_FILE)
+    }
+
+    pub fn clear_starting(&self) {
+        self.clear_marker(STARTING_FILE)
+    }
+
+    /// Say the repository is being indexed in the background.
+    pub fn mark_indexing(&self) -> Result<()> {
+        self.write_marker(INDEXING_FILE, "")
+    }
+
+    pub fn indexing(&self) -> Option<BackgroundMarker> {
+        self.read_marker(INDEXING_FILE)
+    }
+
+    pub fn clear_indexing(&self) {
+        self.clear_marker(INDEXING_FILE)
+    }
+
     /// The last verification's fingerprint and outcome, so a stop with nothing changed since
     /// answers from it instead of verifying again.
     pub fn write_last_verify(&self, record: &LastVerify) -> Result<()> {
@@ -661,6 +748,9 @@ pub struct HookInput {
     pub tool_use_id: Option<String>,
     #[serde(default)]
     pub stop_hook_active: bool,
+    /// The user's prompt, on `UserPromptSubmit`.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 impl HookInput {
@@ -1767,6 +1857,45 @@ mod tests {
             PathClass::Forbidden
         );
         assert_eq!(s.boundary.classify("src/other.rs"), PathClass::Outside);
+    }
+
+    #[test]
+    fn sibling_caution_reads_a_neighbour_of_an_allowed_path_as_caution() {
+        let mut s = session(GateMode::Enforce);
+        assert_eq!(s.boundary.classify("src/retry.rs"), PathClass::Outside);
+        s.boundary.sibling_caution = true;
+        assert_eq!(s.boundary.classify("src/retry.rs"), PathClass::Caution);
+        assert_eq!(s.decide("src/retry.rs").action, HookAction::Warn);
+        assert_eq!(s.boundary.classify("src/deep/x.rs"), PathClass::Outside);
+        assert_eq!(s.boundary.classify("README.md"), PathClass::Outside);
+        assert_eq!(
+            s.boundary.classify(".env"),
+            PathClass::Forbidden,
+            "policy still wins"
+        );
+        s.boundary.expansions.push(BoundaryExpansion {
+            path: "src/deep/mod.rs".into(),
+            reason: "r".into(),
+            at: Utc::now(),
+        });
+        assert_eq!(s.boundary.classify("src/deep/x.rs"), PathClass::Caution);
+    }
+
+    #[test]
+    fn background_markers_round_trip_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GateStore::for_repo(dir.path());
+        assert!(store.starting().is_none());
+        store.mark_starting("add retry").unwrap();
+        let marker = store.starting().unwrap();
+        assert_eq!(marker.detail, "add retry");
+        assert!(marker.age().num_seconds() < 5);
+        store.clear_starting();
+        assert!(store.starting().is_none());
+        store.mark_indexing().unwrap();
+        assert!(store.indexing().is_some());
+        store.clear_indexing();
+        assert!(store.indexing().is_none());
     }
 
     #[test]

@@ -432,6 +432,17 @@ pub struct GateConfig {
     pub mode: String,
     #[serde(default)]
     pub require_plan: bool,
+    /// Start a session from each prompt the harness reports while none is active, index
+    /// the repository when it has no index, and end a session on a clean stop, so the gate
+    /// runs with no command typed. The plugin's hooks alone are then the whole setup.
+    #[serde(default = "default_true")]
+    pub auto: bool,
+    /// Read a path in the same directory as an allowed path as `caution` (allowed and
+    /// reported) rather than `outside`: a new module beside the touched one is the most
+    /// common legitimate edit a plan cannot name. Off by default; measured in
+    /// `benchmarks/gate/`.
+    #[serde(default)]
+    pub sibling_caution: bool,
 }
 
 impl Default for GateConfig {
@@ -439,6 +450,8 @@ impl Default for GateConfig {
         Self {
             mode: default_gate_mode(),
             require_plan: false,
+            auto: true,
+            sibling_caution: false,
         }
     }
 }

@@ -27,6 +27,39 @@ enum GateCommand {
         /// trail is kept as `.ok/gate/events-<session>.jsonl`.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Started by the prompt hook: the session ends on a clean stop.
+        #[arg(long, default_value_t = false, hide = true)]
+        auto: bool,
+    },
+    /// Judge a finished change with no hooks: plan from the task text, verify every change
+    /// since `--base`, print the dossier, exit non-zero on FAIL. For CI on any pull request,
+    /// whatever wrote it.
+    #[command(after_help = "Examples:
+  ok gate ci --base origin/main --task \"$PR_TITLE\"
+  ok gate ci --base HEAD~1 --task \"add retry handling\" --format json
+  ok gate ci --base origin/main --task \"$PR_TITLE\" --write dossier.md")]
+    Ci {
+        /// The revision the change is read against (a commit, branch, or `origin/main`).
+        #[arg(long, value_name = "REV")]
+        base: String,
+        /// What the change set out to do, in natural language (a pull request's title and body).
+        #[arg(long, value_name = "TEXT")]
+        task: String,
+        /// Boundary mode recorded in the dossier; the verdict is the same in every mode.
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+        /// Maximum context results the plan is built from.
+        #[arg(long, default_value_t = 12)]
+        limit: usize,
+        /// Execute the plan's validation commands locally and record their exit codes.
+        #[arg(long, default_value_t = false)]
+        run_commands: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = GateFormat::Markdown)]
+        format: GateFormat,
+        /// Also write the Markdown dossier to this path (for a pull request comment).
+        #[arg(long, value_name = "PATH")]
+        write: Option<PathBuf>,
     },
     /// Show the active session: task, mode, boundary, and the edits reported so far.
     Status,
@@ -159,7 +192,32 @@ fn handle_gate_command(json: bool, repo: &Path, command: GateCommand) -> anyhow:
             mode,
             limit,
             force,
-        } => gate_start(json, repo, &task, mode.as_deref(), limit, force),
+            auto,
+        } => {
+            // However planning ends, the prompt hook's "starting" marker is spent.
+            let result = gate_start(json, repo, &task, mode.as_deref(), limit, force, auto);
+            GateStore::for_repo(repo).clear_starting();
+            result
+        }
+        GateCommand::Ci {
+            base,
+            task,
+            mode,
+            limit,
+            run_commands,
+            format,
+            write,
+        } => gate_ci(
+            json,
+            repo,
+            &base,
+            &task,
+            mode.as_deref(),
+            limit,
+            run_commands,
+            format,
+            write.as_deref(),
+        ),
         GateCommand::Status => gate_status(json, repo),
         GateCommand::Check { path } => gate_check(json, repo, &path),
         GateCommand::Expand { path, reason } => gate_expand(json, repo, &path, &reason),
@@ -225,6 +283,44 @@ fn gate_base_rev(repo: &Path) -> Option<String> {
         .or_else(|| gate_in_git(repo).then(|| EMPTY_TREE_REV.to_string()))
 }
 
+/// The plan `ok plan` would build for `task`, and its JSON.
+fn gate_build_plan(
+    repo: &Path,
+    config: &OkConfig,
+    task: &str,
+    limit: usize,
+) -> anyhow::Result<(PlanReport, Vec<u8>)> {
+    let store = open_store(repo)?;
+    require_authoritative_relationships(&store)?;
+    let context = build_context_pack_with_config(repo, &store, task, limit, config)?;
+    let index_dir = default_index_dir(repo);
+    let search_index = if TantivySearchIndex::exists(&index_dir) {
+        Some(TantivySearchIndex::open_or_create(&index_dir)?)
+    } else {
+        None
+    };
+    let report = PlanEngine::new(&store as &dyn OkStore)
+        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+        .with_history_store(Some(&store))
+        .with_memory_facts(RepoMemoryStore::search_repo(repo, task, 8)?)
+        .with_memory_enabled(config.memory.enabled)
+        .plan_from_context(task, limit, context)?;
+    let plan_json = serde_json::to_vec_pretty(&report)?;
+    Ok((report, plan_json))
+}
+
+fn gate_mode_from(mode: Option<&str>, config: &OkConfig) -> anyhow::Result<GateMode> {
+    match mode {
+        Some(value) => GateMode::parse(value).ok_or_else(|| {
+            caller_input_error(format!(
+                "--mode must be enforce, warn, or observe, not `{value}`"
+            ))
+        }),
+        None => Ok(GateMode::parse(&config.gate.mode).unwrap_or_default()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn gate_start(
     json: bool,
     repo: &Path,
@@ -232,6 +328,7 @@ fn gate_start(
     mode: Option<&str>,
     limit: usize,
     force: bool,
+    auto: bool,
 ) -> anyhow::Result<()> {
     let gate_store = GateStore::for_repo(repo);
     let active = gate_store.active_session()?;
@@ -246,32 +343,12 @@ fn gate_start(
         }
     }
     let config = OkConfig::load_from_repo(repo)?;
-    let mode = match mode {
-        Some(value) => GateMode::parse(value).ok_or_else(|| {
-            caller_input_error(format!(
-                "--mode must be enforce, warn, or observe, not `{value}`"
-            ))
-        })?,
-        None => GateMode::parse(&config.gate.mode).unwrap_or_default(),
-    };
-    let store = open_store(repo)?;
-    require_authoritative_relationships(&store)?;
-    let context = build_context_pack_with_config(repo, &store, task, limit, &config)?;
-    let index_dir = default_index_dir(repo);
-    let search_index = if TantivySearchIndex::exists(&index_dir) {
-        Some(TantivySearchIndex::open_or_create(&index_dir)?)
-    } else {
-        None
-    };
-    let report = PlanEngine::new(&store as &dyn OkStore)
-        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
-        .with_history_store(Some(&store))
-        .with_memory_facts(RepoMemoryStore::search_repo(repo, task, 8)?)
-        .with_memory_enabled(config.memory.enabled)
-        .plan_from_context(task, limit, context)?;
-    let plan_json = serde_json::to_vec_pretty(&report)?;
+    let mode = gate_mode_from(mode, &config)?;
+    let (report, plan_json) = gate_build_plan(repo, &config, task, limit)?;
     let mut session = GateSession::new(task, mode, &report, &plan_json);
     session.repo_name = gate_repo_name(repo, &config);
+    session.auto = auto;
+    session.boundary.sibling_caution = config.gate.sibling_caution;
     session.base_rev = gate_base_rev(repo);
     session.preexisting_changes = match &active {
         // Replacing a session: what was dirty before the first session started is still
@@ -693,8 +770,32 @@ fn gate_run_verification(
     run_commands: bool,
 ) -> anyhow::Result<GateRun> {
     let (events, malformed) = gate_store.events()?;
-    let change = gate_change_input(repo, session, &events)?;
-    let plan = plan_with_expansions(gate_store.saved_plan()?, session);
+    let plan = gate_store.saved_plan()?;
+    let dossier = gate_verify(repo, session, plan, &events, malformed, run_commands)?;
+    let (dossier_json, dossier_markdown) = gate_store.write_dossier(&dossier)?;
+    gate_store.append_event(
+        &GateEvent::new(&session.id, EventKind::VerifyRun)
+            .with_detail(dossier.verdict.label().to_ascii_lowercase()),
+    )?;
+    Ok(GateRun {
+        dossier,
+        dossier_json,
+        dossier_markdown,
+    })
+}
+
+/// The dossier for `session`'s change, verified against `plan` widened by the session's
+/// expansions. Writes nothing.
+fn gate_verify(
+    repo: &Path,
+    session: &GateSession,
+    plan: PlanReport,
+    events: &[GateEvent],
+    malformed: usize,
+    run_commands: bool,
+) -> anyhow::Result<ChangeDossier> {
+    let change = gate_change_input(repo, session, events)?;
+    let plan = plan_with_expansions(plan, session);
     let verification = if change.changed_files.is_empty() {
         None
     } else {
@@ -741,25 +842,181 @@ fn gate_run_verification(
     } else {
         session.repo_name.clone()
     };
-    let dossier = build_dossier(
+    Ok(build_dossier(
         &repo_name,
         session,
         &plan,
-        &events,
+        events,
         malformed,
         &change,
         verification.as_ref(),
-    );
+    ))
+}
+
+/// `ok gate ci`: a session that never had hooks, judged once against the diff from `base`.
+#[allow(clippy::too_many_arguments)]
+fn gate_ci(
+    json: bool,
+    repo: &Path,
+    base: &str,
+    task: &str,
+    mode: Option<&str>,
+    limit: usize,
+    run_commands: bool,
+    format: GateFormat,
+    write: Option<&Path>,
+) -> anyhow::Result<()> {
+    let base_rev = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")])
+        .output()?;
+    if !base_rev.status.success() {
+        return Err(caller_input_error(format!(
+            "`{base}` is not a revision of this repository"
+        )));
+    }
+    let base_rev = String::from_utf8_lossy(&base_rev.stdout).trim().to_string();
+    let config = OkConfig::load_from_repo(repo)?;
+    let mode = gate_mode_from(mode, &config)?;
+    let (plan, plan_json) = gate_build_plan(repo, &config, task, limit)?;
+    let mut session = GateSession::new(task, mode, &plan, &plan_json);
+    session.repo_name = gate_repo_name(repo, &config);
+    session.base_rev = Some(base_rev);
+    session.boundary.sibling_caution = config.gate.sibling_caution;
+    let dossier = gate_verify(repo, &session, plan, &[], 0, run_commands)?;
+    let gate_store = GateStore::for_repo(repo);
     let (dossier_json, dossier_markdown) = gate_store.write_dossier(&dossier)?;
-    gate_store.append_event(
-        &GateEvent::new(&session.id, EventKind::VerifyRun)
-            .with_detail(dossier.verdict.label().to_ascii_lowercase()),
-    )?;
-    Ok(GateRun {
-        dossier,
+    let markdown = render_markdown(&dossier);
+    if let Some(path) = write {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(path, &markdown)?;
+    }
+    let output = GateFinishOutput {
         dossier_json,
         dossier_markdown,
-    })
+        session_ended: true,
+        dossier,
+    };
+    match (json, format) {
+        (true, _) | (_, GateFormat::Json) => {
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        (_, GateFormat::Markdown) => print!("{markdown}"),
+        (_, GateFormat::Text) => println!("{}", gate_summary_line(&output.dossier)),
+    }
+    if output.dossier.verdict == DossierVerdict::Fail {
+        anyhow::bail!("change dossier verdict is FAIL");
+    }
+    Ok(())
+}
+
+/// Run `ok <args>` for `repo` in the background, detached from the hook's process group so
+/// the harness's timeout cannot take it down, with its output appended to `log`.
+fn gate_spawn_detached(repo: &Path, args: &[&str], log: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = log.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let log_file = fs::OpenOptions::new().create(true).append(true).open(log)?;
+    let mut command = ProcessCommand::new(std::env::current_exe()?);
+    // The child runs in the repository, with the repository named, so no positional default
+    // of `.` can point it at the hook's own working directory.
+    command
+        .current_dir(repo)
+        .arg("--repo")
+        .arg(repo)
+        .args(args)
+        .env("RUST_BACKTRACE", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn()?;
+    Ok(())
+}
+
+/// Whether the repository has an index the gate can plan from.
+fn gate_indexed(repo: &Path) -> bool {
+    SqliteStore::open_repo_index(repo)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Start indexing in the background if nothing is, and say what is happening. `None` when
+/// the repository is already indexed.
+fn gate_auto_index(repo: &Path, gate_store: &GateStore) -> anyhow::Result<Option<String>> {
+    if gate_indexed(repo) {
+        gate_store.clear_indexing();
+        return Ok(None);
+    }
+    if let Some(marker) = gate_store.indexing() {
+        if marker.age() < chrono::Duration::minutes(30) {
+            return Ok(Some(
+                "Open Kioku gate: the repository is being indexed in the background; the \
+                 gate starts on the first prompt after the index is ready."
+                    .into(),
+            ));
+        }
+    }
+    gate_store.mark_indexing()?;
+    let repo_arg = repo.to_string_lossy().into_owned();
+    gate_spawn_detached(
+        repo,
+        &["index", &repo_arg],
+        &gate_store.root().join("index.log"),
+    )?;
+    Ok(Some(
+        "Open Kioku gate: this repository has no index yet, so `ok index` is running in the \
+         background (`.ok/gate/index.log`); the gate starts on the first prompt after it is \
+         ready."
+            .into(),
+    ))
+}
+
+/// The task a prompt declares, or `None` for a prompt the gate should not plan from: a slash
+/// command, or too short to describe a change.
+fn gate_task_from_prompt(prompt: &str) -> Option<String> {
+    let text = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.starts_with('/') || text.chars().count() < 12 {
+        return None;
+    }
+    Some(text.chars().take(400).collect())
+}
+
+/// Wait briefly for a session the prompt hook is planning in the background.
+fn gate_wait_for_session(gate_store: &GateStore) -> anyhow::Result<Option<GateSession>> {
+    if let Some(session) = gate_store.active_session()? {
+        return Ok(Some(session));
+    }
+    let Some(marker) = gate_store.starting() else {
+        return Ok(None);
+    };
+    if marker.age() > chrono::Duration::seconds(90) {
+        // The planner died or hung; a stale marker must not hold every edit.
+        gate_store.clear_starting();
+        return Ok(None);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if let Some(session) = gate_store.active_session()? {
+            return Ok(Some(session));
+        }
+        if gate_store.starting().is_none() {
+            // Planning finished without a session: it failed, and its log says why.
+            return Ok(None);
+        }
+    }
+    Ok(None)
 }
 
 fn gate_finish(
@@ -919,6 +1176,23 @@ fn gate_hook(repo: &Path, event: GateHookEvent) -> anyhow::Result<()> {
             } else {
                 "SessionStart"
             };
+            let config = OkConfig::load_from_repo(&repo).unwrap_or_default();
+            if session.is_none() && config.gate.auto {
+                if let Some(text) = gate_auto_index(&repo, &gate_store)? {
+                    return gate_emit(HookResponse::Context {
+                        event: event_name.into(),
+                        text,
+                    });
+                }
+                if event == GateHookEvent::Prompt {
+                    if let Some(text) = gate_auto_start(&repo, &gate_store, &config, &input)? {
+                        return gate_emit(HookResponse::Context {
+                            event: event_name.into(),
+                            text,
+                        });
+                    }
+                }
+            }
             let text = match &session {
                 Some(session) => format!(
                     "Open Kioku gate session is active ({} mode) for task \"{}\": {} allowed \
@@ -931,7 +1205,6 @@ fn gate_hook(repo: &Path, event: GateHookEvent) -> anyhow::Result<()> {
                     session.boundary.expansions.len()
                 ),
                 None => {
-                    let config = OkConfig::load_from_repo(&repo).unwrap_or_default();
                     if config.gate.require_plan {
                         "Open Kioku gate: no session is active and this repository requires \
                          one (`[gate] require_plan = true`). Source edits are denied until \
@@ -960,8 +1233,55 @@ fn gate_hook_pre_tool_entry(repo: &Path, input: &HookInput) -> anyhow::Result<()
     }
     let repo = gate_hook_repo(repo, input)?;
     let gate_store = GateStore::for_repo(&repo);
-    let session = gate_store.active_session()?;
+    let session = gate_wait_for_session(&gate_store)?;
+    if session.is_none() && gate_store.starting().is_some() && input.is_edit_tool() {
+        let config = OkConfig::load_from_repo(&repo)?;
+        if config.gate.require_plan {
+            return gate_emit(HookResponse::Deny {
+                event: "PreToolUse".into(),
+                reason: "Open Kioku gate: the boundary for this prompt is still being planned; \
+                         retry the edit in a moment."
+                    .into(),
+            });
+        }
+    }
     gate_hook_pre_tool(&repo, &gate_store, session, input)
+}
+
+/// Start a session from the prompt in the background, and say so. `None` when the prompt
+/// is not a task.
+fn gate_auto_start(
+    repo: &Path,
+    gate_store: &GateStore,
+    config: &OkConfig,
+    input: &HookInput,
+) -> anyhow::Result<Option<String>> {
+    let Some(task) = input.prompt.as_deref().and_then(gate_task_from_prompt) else {
+        return Ok(None);
+    };
+    if let Some(marker) = gate_store.starting() {
+        if marker.age() < chrono::Duration::seconds(90) {
+            return Ok(Some(format!(
+                "Open Kioku gate: a boundary is being planned in the background for \"{}\"; \
+                 edits are judged against it once it is ready.",
+                marker.detail.chars().take(80).collect::<String>()
+            )));
+        }
+    }
+    gate_store.mark_starting(&task)?;
+    let mode = GateMode::parse(&config.gate.mode).unwrap_or_default();
+    gate_spawn_detached(
+        repo,
+        &["gate", "start", &task, "--mode", mode.as_str(), "--auto", "--json"],
+        &gate_store.root().join("start.log"),
+    )?;
+    Ok(Some(format!(
+        "Open Kioku gate: planning the edit boundary for this prompt in the background ({} \
+         mode). Edits are held to it once it is ready; an edit outside it names `ok gate \
+         expand <path> --reason \"<why>\"` as the remedy, and a verified Change Dossier is \
+         written when you stop.",
+        mode.as_str()
+    )))
 }
 
 /// Decide the paths an edit tool writes. A path outside the repository is judged by mode: a
@@ -1283,6 +1603,24 @@ fn gate_hook_stop(
     let Some(session) = session else {
         return Ok(());
     };
+    if session.auto {
+        // A prompt that led to no edit and no change was not a task: the session ends with
+        // nothing written, so questions leave no dossiers behind.
+        let (events, _) = gate_store.events()?;
+        let edited = events.iter().any(|e| {
+            matches!(
+                e.kind,
+                EventKind::EditAllowed
+                    | EventKind::EditCaution
+                    | EventKind::EditWarned
+                    | EventKind::EditDenied
+            )
+        });
+        if !edited && gate_change_input(repo, &session, &events)?.changed_files.is_empty() {
+            gate_store.finish(&session)?;
+            return Ok(());
+        }
+    }
     // A stop with nothing changed since the last verification answers from that verification
     // instead of opening the index again.
     let fingerprint = gate_verify_fingerprint(repo, gate_store, &session)?;
@@ -1327,10 +1665,17 @@ fn gate_hook_stop(
         reason.push('.');
         return gate_emit(HookResponse::Block { reason });
     }
+    // An auto session ends here; the next prompt starts the next one.
+    let ended = if session.auto {
+        gate_store.finish(&session)?;
+        " Session ended; the next prompt starts a new one."
+    } else {
+        ""
+    };
     // Informational only: a message the user sees, which neither blocks nor continues the turn.
     gate_emit(HookResponse::SystemMessage {
         text: format!(
-            "Open Kioku gate: {}. Dossier: {}",
+            "Open Kioku gate: {}. Dossier: {}{ended}",
             last.summary,
             last.dossier_markdown.display()
         ),
