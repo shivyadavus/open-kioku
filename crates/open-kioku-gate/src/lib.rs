@@ -37,6 +37,9 @@ const LAST_VERIFY_FILE: &str = "last-verify.json";
 const STARTING_FILE: &str = "starting.json";
 const INDEXING_FILE: &str = "indexing.json";
 
+/// The `.gitignore` the gate writes into a directory it creates unasked.
+pub const IGNORE_FILE_TEXT: &str = "# Written by Open Kioku: this directory holds local state (the index, prompt text, plans,\n# dossiers) and stays out of version control.\n*\n";
+
 /// A marker for work the hooks started in the background: a session being planned, or the
 /// repository being indexed. The age tells a hook whether to wait for it or to assume the
 /// background process died.
@@ -60,6 +63,10 @@ pub struct BackgroundMarker {
     pub base_rev: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preexisting: Vec<String>,
+    /// The background process doing the work, once it is running: a marker whose process is
+    /// gone is spent, whatever its age.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 impl BackgroundMarker {
@@ -75,6 +82,7 @@ impl BackgroundMarker {
             harness_session: String::new(),
             base_rev: None,
             preexisting: Vec::new(),
+            pid: None,
         }
     }
 
@@ -533,10 +541,38 @@ impl GateStore {
         Ok(Some(session))
     }
 
+    /// Write `bytes` to `path` so a reader sees the old file or the new one, never part of
+    /// one: a hook can read any of the gate's files while another process rewrites it.
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tmp = path.with_file_name(format!("{name}.tmp-{}", std::process::id()));
+        fs::write(&tmp, bytes)?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Keep the gate's state out of version control: it holds prompt text, plans and
+    /// dossiers, and a repository that does not ignore `.ok/` would otherwise show all of it
+    /// as untracked. Written once; a file someone put there is left alone.
+    pub fn ensure_ignored(&self) -> Result<()> {
+        fs::create_dir_all(&self.root)?;
+        let ignore = self.root.join(".gitignore");
+        if !ignore.exists() {
+            fs::write(ignore, IGNORE_FILE_TEXT)?;
+        }
+        Ok(())
+    }
+
     /// Start a session: write the plan and the session, and reset the event trail.
     pub fn start(&self, session: &GateSession, plan_json: &[u8]) -> Result<()> {
-        fs::create_dir_all(&self.root)?;
-        fs::write(self.plan_path(), plan_json)?;
+        self.ensure_ignored()?;
+        self.write_atomic(&self.plan_path(), plan_json)?;
         self.archive_events()?;
         fs::write(self.events_path(), b"")?;
         self.append_event(&GateEvent::new(&session.id, EventKind::SessionStarted))?;
@@ -583,11 +619,11 @@ impl GateStore {
     }
 
     fn write_marker(&self, name: &str, marker: &BackgroundMarker) -> Result<()> {
-        fs::create_dir_all(&self.root)?;
-        let tmp = self.root.join(format!("{name}.tmp-{}", std::process::id()));
-        fs::write(&tmp, serde_json::to_string(marker)?)?;
-        fs::rename(&tmp, self.root.join(name))?;
-        Ok(())
+        self.ensure_ignored()?;
+        self.write_atomic(
+            &self.root.join(name),
+            serde_json::to_string(marker)?.as_bytes(),
+        )
     }
 
     fn read_marker(&self, name: &str) -> Option<BackgroundMarker> {
@@ -620,9 +656,23 @@ impl GateStore {
         self.clear_marker(STARTING_FILE)
     }
 
-    /// Say the repository is being indexed in the background.
-    pub fn mark_indexing(&self) -> Result<()> {
-        self.write_marker(INDEXING_FILE, &BackgroundMarker::new(""))
+    /// Record the process planning for the starting marker `nonce` names, if that marker
+    /// still stands.
+    pub fn set_starting_pid(&self, nonce: &str, pid: u32) -> Result<()> {
+        match self.starting() {
+            Some(mut marker) if marker.nonce == nonce => {
+                marker.pid = Some(pid);
+                self.write_marker(STARTING_FILE, &marker)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Say the repository is being indexed in the background, by process `pid` when known.
+    pub fn mark_indexing(&self, pid: Option<u32>) -> Result<()> {
+        let mut marker = BackgroundMarker::new("");
+        marker.pid = pid;
+        self.write_marker(INDEXING_FILE, &marker)
     }
 
     pub fn indexing(&self) -> Option<BackgroundMarker> {
@@ -636,12 +686,10 @@ impl GateStore {
     /// The last verification's fingerprint and outcome, so a stop with nothing changed since
     /// answers from it instead of verifying again.
     pub fn write_last_verify(&self, record: &LastVerify) -> Result<()> {
-        fs::create_dir_all(&self.root)?;
-        fs::write(
-            self.root.join(LAST_VERIFY_FILE),
-            serde_json::to_string(record)?,
-        )?;
-        Ok(())
+        self.write_atomic(
+            &self.root.join(LAST_VERIFY_FILE),
+            serde_json::to_string(record)?.as_bytes(),
+        )
     }
 
     pub fn read_last_verify(&self) -> Option<LastVerify> {
@@ -652,14 +700,10 @@ impl GateStore {
     /// Write the session atomically: a hook reading it while `expand` rewrites it sees the
     /// old session or the new one, never a torn file.
     pub fn write_session(&self, session: &GateSession) -> Result<()> {
-        fs::create_dir_all(&self.root)?;
-        let text = serde_json::to_string_pretty(session)?;
-        let tmp = self
-            .root
-            .join(format!("{SESSION_FILE}.tmp-{}", std::process::id()));
-        fs::write(&tmp, text)?;
-        fs::rename(&tmp, self.session_path())?;
-        Ok(())
+        self.write_atomic(
+            &self.session_path(),
+            serde_json::to_string_pretty(session)?.as_bytes(),
+        )
     }
 
     /// Remember the dirty paths before a shell command, keyed by the tool call, so the
@@ -683,6 +727,26 @@ impl GateStore {
         let bytes = fs::read(&path)?;
         let _ = fs::remove_file(&path);
         Ok(serde_json::from_slice(&bytes).ok())
+    }
+
+    /// The plan on disk, when it is the one `session` was started from. A session replaced
+    /// while a hook was still verifying the old one leaves the new session's plan here; the
+    /// old session must not be judged against it.
+    pub fn saved_plan_for(&self, session: &GateSession) -> Result<PlanReport> {
+        let bytes = fs::read(self.plan_path())?;
+        if sha256_hex(&bytes) != session.plan_sha256 {
+            return Err(OkError::Storage(format!(
+                "{} is not the plan session {} was started from; the session was replaced",
+                self.plan_path().display(),
+                session.id
+            )));
+        }
+        serde_json::from_slice(&bytes).map_err(|err| {
+            OkError::Storage(format!(
+                "{} is not a saved plan: {err}",
+                self.plan_path().display()
+            ))
+        })
     }
 
     pub fn saved_plan(&self) -> Result<PlanReport> {
@@ -748,8 +812,21 @@ impl GateStore {
         Ok(true)
     }
 
+    /// Bring `session` up to date with the file before changing it: another process (an
+    /// `ok gate expand` beside a follow-up prompt's planner) may have widened it since the
+    /// caller read it, and a write from the older copy would drop that.
+    fn refresh(&self, session: &mut GateSession) -> Result<()> {
+        if let Some(current) = self.active_session()? {
+            if current.id == session.id {
+                *session = current;
+            }
+        }
+        Ok(())
+    }
+
     /// Widen the active session's boundary by one path, recording why.
     pub fn expand(&self, session: &mut GateSession, path: &str, reason: &str) -> Result<()> {
+        self.refresh(session)?;
         let path = normalize_str(path);
         if reason.trim().is_empty() {
             return Err(OkError::InvalidInput(
@@ -787,6 +864,7 @@ impl GateStore {
         allowed: &[String],
         caution: &[String],
     ) -> Result<usize> {
+        self.refresh(session)?;
         let excerpt: String = prompt.chars().take(120).collect();
         let reason = format!("follow-up prompt: \"{excerpt}\"");
         let mut added = 0usize;
@@ -837,8 +915,11 @@ impl GateStore {
         fs::create_dir_all(&dir)?;
         let json_path = self.dossier_path(&dossier.session_id, "json");
         let md_path = self.dossier_path(&dossier.session_id, "md");
-        fs::write(&json_path, serde_json::to_string_pretty(dossier)?)?;
-        fs::write(&md_path, render_markdown(dossier))?;
+        self.write_atomic(
+            &json_path,
+            serde_json::to_string_pretty(dossier)?.as_bytes(),
+        )?;
+        self.write_atomic(&md_path, render_markdown(dossier).as_bytes())?;
         Ok((json_path, md_path))
     }
 }
@@ -2169,7 +2250,7 @@ mod tests {
         assert!(old.is_stale(chrono::Duration::seconds(90)));
         old.at = Utc::now() + chrono::Duration::seconds(600);
         assert!(old.is_stale(chrono::Duration::seconds(90)));
-        store.mark_indexing().unwrap();
+        store.mark_indexing(None).unwrap();
         assert!(store.indexing().is_some());
         store.clear_indexing();
         assert!(store.indexing().is_none());
@@ -2439,6 +2520,79 @@ mod tests {
         store.finish(&second).unwrap();
         assert!(!store.root().join("snapshots").exists());
         assert!(store.read_last_verify().is_none());
+    }
+
+    #[test]
+    fn a_session_is_verified_only_against_the_plan_it_was_started_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GateStore::for_repo(dir.path());
+        let plan = plan();
+        let first_json = serde_json::to_vec_pretty(&plan).unwrap();
+        let first = GateSession::new("first", GateMode::Warn, &plan, &first_json);
+        store.start(&first, &first_json).unwrap();
+        assert!(store.saved_plan_for(&first).is_ok());
+        // Another session replaces it: the plan on disk is no longer the first session's.
+        let mut second_json = first_json.clone();
+        second_json.push(b'\n');
+        let second = GateSession::new("second", GateMode::Warn, &plan, &second_json);
+        store.start(&second, &second_json).unwrap();
+        assert!(store.saved_plan_for(&second).is_ok());
+        let err = store.saved_plan_for(&first).unwrap_err().to_string();
+        assert!(err.contains("the session was replaced"), "{err}");
+    }
+
+    #[test]
+    fn the_gate_directory_ignores_itself_and_keeps_an_ignore_file_it_finds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GateStore::for_repo(dir.path());
+        let mut marker = BackgroundMarker::new("rename login");
+        store.mark_starting(&marker).unwrap();
+        let ignore = store.root().join(".gitignore");
+        assert!(std::fs::read_to_string(&ignore).unwrap().ends_with("*\n"));
+        // The planner's process is recorded only on the marker it belongs to.
+        store.set_starting_pid("someone-else", 7).unwrap();
+        assert_eq!(store.starting().unwrap().pid, None);
+        store.set_starting_pid(&marker.nonce, 7).unwrap();
+        assert_eq!(store.starting().unwrap().pid, Some(7));
+        marker.pid = Some(7);
+        // A file someone put there is theirs.
+        std::fs::write(&ignore, "dossiers/\n").unwrap();
+        store.mark_starting(&marker).unwrap();
+        assert_eq!(std::fs::read_to_string(&ignore).unwrap(), "dossiers/\n");
+    }
+
+    #[test]
+    fn widening_starts_from_the_session_on_disk_not_the_callers_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GateStore::for_repo(dir.path());
+        let plan = plan();
+        let plan_json = serde_json::to_vec_pretty(&plan).unwrap();
+        let session = GateSession::new("task", GateMode::Warn, &plan, &plan_json);
+        store.start(&session, &plan_json).unwrap();
+        // Two processes read the session, then each widens it.
+        let mut by_hand = store.active_session().unwrap().unwrap();
+        let mut by_planner = store.active_session().unwrap().unwrap();
+        store
+            .expand(&mut by_hand, "docs/notes.md", "the notes change too")
+            .unwrap();
+        store
+            .extend(
+                &mut by_planner,
+                "also the guide",
+                &["docs/guide.md".into()],
+                &[],
+            )
+            .unwrap();
+        let paths = store
+            .active_session()
+            .unwrap()
+            .unwrap()
+            .boundary
+            .expansions
+            .iter()
+            .map(|e| e.path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["docs/notes.md", "docs/guide.md"]);
     }
 
     #[test]

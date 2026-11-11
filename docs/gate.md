@@ -14,7 +14,7 @@ Who declared the task decides how binding the boundary is:
 | Declared by | How | The boundary |
 |---|---|---|
 | Nobody: the prompt | the hooks alone (`auto`, the default) | **advisory**: reported and recorded, holds nothing; forbidden paths still denied |
-| The repository | `mode = "enforce"` in `ok.toml` | binding for every session, prompt-started ones included |
+| The repository | `mode = "enforce"` in `ok.toml` | binding for every session, prompt-started ones included, from the next tool call after it is set |
 | A person | `ok gate start "<task>"` | binding: a failing change holds the agent at stop; `enforce` also denies at the edit |
 | The pull request | `ok gate ci --base … --task "<title and body>"` | binding: exit code for CI |
 
@@ -28,6 +28,22 @@ follows a change verifies it and refreshes the dossier; the session ends when th
 does. A conversation that changes nothing writes nothing. A repository with no index is
 indexed in the background the first time a session opens.
 
+A prompt whose plan has Low confidence starts nothing and widens nothing: a greeting or a
+question about the project plans that way, and nothing is held to it. The next prompt is
+planned on its own (`.ok/gate/start.log` says what the last planner decided). Under
+`require_plan` an edit with no session is denied, so there a task the planner has Low
+confidence in needs `ok gate start`.
+
+A prompt-started session belongs to the conversation that sent the prompt. Every hook carries
+its conversation's id, and a conversation is judged only against its own session: a second
+conversation open in the same repository is not denied, warned or held for the first one's
+task, and its stop and its end leave the first one's session and plan alone. One repository
+holds one prompt-started session, so the second conversation's first task prompt closes the
+first one's session, dossier written, and starts its own; what the first left uncommitted then
+predates the second. Two conversations editing one working tree share one diff: a file either
+of them changes is in the change of whichever session is active. A session started by hand
+binds everyone working in the repository.
+
 A session started this way is **advisory**. Its boundary is a plan built from the prompt's
 words, and a plan cannot tell a task from a remark: measured on this repository, `"fix it"` and
 `"try again"` plan with the same High confidence as a real commit subject
@@ -39,11 +55,14 @@ dependencies, the index); and it writes the dossier with the true verdict. Holdi
 for a boundary someone declared: the table above.
 
 This is `[gate] auto = true`, the default. Automatic work happens only at the top of a git
-working tree: the hooks stay silent anywhere else, do not index a repository that tracks more
-than 20,000 files (they say to run `ok index` once instead), and do nothing automatic while
-`ok.toml` cannot be read. The first 400 characters of a prompt become the session's task,
-stored under `.ok/gate/` and shown in the dossier. Set `auto = false` to run the gate only by
-hand.
+working tree, indexed or not: the hooks stay silent anywhere else, do not index a repository
+with more than 20,000 files (tracked, or untracked and not ignored: what the indexer would
+walk; they say to run `ok index` once instead), and do nothing automatic while `ok.toml` cannot
+be read. The first 400 characters of a prompt become the session's task, stored under
+`.ok/gate/` and shown in the dossier. That directory holds prompt text, so the gate writes a
+`.gitignore` into `.ok/gate/` when it creates it, and into `.ok/` when the hooks index a
+repository that does not already ignore it: nothing the hooks create unasked is left for
+`git add -A` to pick up. Set `auto = false` to run the gate only by hand.
 
 ## By hand
 
@@ -80,8 +99,10 @@ $PR_BODY" --write dossier.md
 No hooks, no session: `ci` plans from the task text, verifies what the branch added since it
 left `--base` (the merge base, so what the base gained meanwhile is not counted) plus untracked
 files against the plan's boundary, prints the dossier (and writes the Markdown to `--write` for
-a pull request comment; a dossier file an earlier run left in the repository is not counted as
-the change), and exits non-zero on `FAIL`. It judges a
+a pull request comment; an untracked dossier file an earlier run left in the working tree is
+not counted as the change, and a `--write` path the repository tracks is refused, so a branch
+cannot take one of its own files out of the judgement by naming it), and exits non-zero on
+`FAIL`. It judges a
 pull request whatever wrote it — any agent, any harness, a person — with the trail section
 empty, since no hook saw the edits. The GitHub Action is the natural caller.
 
@@ -97,16 +118,21 @@ is `ok gate hook <event>`: it reads the harness's JSON on stdin and answers on s
 | `pre-tool` | `PreToolUse` on `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | Classifies each path against the boundary. Denies a forbidden path in every mode but `observe`; denies an outside path in `enforce`; records each denial to `.ok/gate/events.jsonl`. Never opens the index: one small JSON read per edit. |
 | `post-tool` | `PostToolUse`, same tools | Records the edit now that it has happened (a call the user refused or that failed is not an edit) and, after one outside or on a caution path, tells the agent so, with the command that widens the boundary. |
 | `pre-tool`, `post-tool` | `PreToolUse` / `PostToolUse` on `Bash` | A shell command can write files the edit tools never see. Before it runs, the paths it names as write targets (`>`/`>>` redirections, `tee`, `sed -i`, `cp`/`mv` destinations, `touch`, `rm`, `git mv`/`git rm`) are judged like edits, and a dirty-tree snapshot is taken; a target outside the repository (`/tmp`, `/dev/null`) is not the gate's concern. After it runs, every path that became dirty and was not named is recorded in the trail and, when outside the boundary, reported to the agent. A write that already landed is recorded as warned, never denied. |
-| `stop` | `Stop` | Verifies the change and writes the dossier. On `FAIL` in a binding session it holds the agent with the violations and the remedies; when `stop_hook_active` is set (the agent is already continuing because of a stop hook) it reports and never blocks again, so a condition the agent cannot resolve cannot loop. In an advisory session and in `observe` it reports and never holds. A stop with nothing changed since the last verification answers from that verification instead of opening the index again; a prompt-started session that has changed nothing is not verified at all. A session stays open after a stop. With no session, a stop cancels a plan still being built. |
-| `prompt`, `session-start` | `UserPromptSubmit`, `SessionStart` | With `auto`: index the repository in the background when it has none; on a prompt, plan in the background, starting a session or widening the conversation's (a slash command, a `!` or `#` line, or a prompt under three characters is not a task; a follow-up whose plan has Low confidence changes nothing). The prompt reaches the planner through a marker file, never a command line. A session started by hand is never touched. Otherwise one factual line: whether a session is active, its task and boundary size, and how to widen it. |
-| `session-end` | `SessionEnd` | Ends the conversation's prompt-started session, writing its dossier if it changed anything, and cancels a plan still being built for it. A new conversation's first prompt does the same for a session a crash left behind. |
+| `stop` | `Stop` | Verifies the change and writes the dossier. On `FAIL` in a binding session it holds the agent with the violations and the remedies; when `stop_hook_active` is set (the agent is already continuing because of a stop hook) it reports and never blocks again, so a condition the agent cannot resolve cannot loop. In an advisory session and in `observe` it reports and never holds. A stop with nothing changed since the last verification answers from that verification instead of opening the index again; a prompt-started session that has changed nothing is not verified at all. A session stays open after a stop. A plan still being built for the conversation is waited for (up to twelve seconds), so what the turn edited is judged now; a planner that outlasts the wait is left to finish, and the next stop or the end of the conversation judges those edits against the baseline the prompt recorded. |
+| `prompt`, `session-start` | `UserPromptSubmit`, `SessionStart` | With `auto`: index the repository in the background when it has none; on a prompt, plan in the background, starting a session or widening the conversation's (a slash command, a `!` or `#` line, or a prompt under three characters is not a task; a prompt whose plan has Low confidence starts nothing and changes nothing). The prompt reaches the planner through a marker file, never a command line. A session started by hand is never touched. Otherwise one factual line: whether a session is active, its task and boundary size, and how to widen it. |
+| `session-end` | `SessionEnd` | Ends the conversation's prompt-started session, writing its dossier if it changed anything since the last verification, and cancels a plan still being built for it once the usual wait is over. A new conversation's first task prompt does the same for a session a crash left behind, which in the meantime judges nobody else. |
 
 While a prompt's plan is still being built, the edit hook waits up to twelve seconds for it;
 if the planner is not done, the edit proceeds and verification judges it, because the
 session's baseline is taken when the prompt arrives, not when the plan is ready (under
 `require_plan` the agent is asked to retry in a moment instead). A planner acts only while its
-own marker stands: a stop, a newer prompt, the end of the conversation or a manual
-`ok gate start` cancels it, and a marker older than ninety seconds is ignored. The edit hook fails closed:
+own marker stands: a newer prompt, the end of the conversation or a manual `ok gate start`
+replaces or removes the marker and the planner backs out. A newer prompt of the same
+conversation does not drop the earlier one: the new plan is built from both prompts' words and
+keeps the earlier prompt's baseline. The marker records the planner's process, and a marker
+whose process is gone is ignored at once (so is one with no known process after ninety
+seconds, and the marker of an indexer that was killed): a dead planner never stalls a tool
+call. The edit hook fails closed:
 malformed input, an unreadable `ok.toml` or a torn session file refuse the tool call (exit 2,
 with the way out on stderr) rather than let an edit through unjudged. `ok gate abandon` removes a session file the hooks cannot read, so that way out
 always works. The informing hooks (`prompt`, `session-start`, `post-tool`, `stop`) never block
@@ -145,7 +171,9 @@ sibling_caution = false  # true: a path beside an allowed path is allowed and re
 verification. It does not apply at the repository root, where one allowed file would make
 every top-level name a sibling. A new module beside the touched one is the most
 common legitimate edit a plan cannot name, so this trades some of `enforce`'s strictness for
-less friction; the measured effect is in [`benchmarks/gate/`](../benchmarks/gate/README.md).
+less friction. Measured on 38 commit-derived sessions, it admits 87.9% of a faithful agent's
+edits without widening instead of 81.0%, and reports 12 of 114 out-of-boundary drift edits
+rather than denying them ([`benchmarks/gate/`](../benchmarks/gate/README.md)).
 The secret-path policy and the plan's forbidden rules still win.
 
 A forbidden path is one the plan's forbidden rules match (generated code, dependencies, the
