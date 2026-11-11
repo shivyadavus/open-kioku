@@ -13,10 +13,11 @@ Who declared the task decides how binding the boundary is:
 
 | Declared by | How | The boundary |
 |---|---|---|
-| Nobody: the prompt | the hooks alone (`auto`, the default) | **advisory**: reported and recorded, holds nothing; forbidden paths still denied |
+| Nobody: the prompt | the hooks alone (`auto`, the default) | **advisory**: files outside it are reported and recorded, and are not a failure; forbidden paths are still denied |
 | The repository | `mode = "enforce"` in `ok.toml` | binding for every session, prompt-started ones included, from the next tool call after it is set |
 | A person | `ok gate start "<task>"` | binding: a failing change holds the agent at stop; `enforce` also denies at the edit |
-| The pull request | `ok gate ci --base … --task "<title and body>"` | binding: exit code for CI |
+| Nobody: a pull request's words | `ok gate ci --base … --task "<title>"` | **advisory**: files outside it are listed in the dossier; only a forbidden path fails the check |
+| The team, for CI | `ok gate ci … --mode enforce` | binding: a file outside the boundary fails the check |
 
 ## Zero commands
 
@@ -51,8 +52,11 @@ words, and a plan cannot tell a task from a remark: measured on this repository,
 boundary nobody declared. It tells the agent which edits fall outside it, with
 `ok gate expand <path> --reason "<why>"` as the way to record why one belongs; it denies the
 paths that are forbidden by policy rather than by plan (secrets, key material, generated code,
-dependencies, the index); and it writes the dossier with the true verdict. Holding the agent is
-for a boundary someone declared: the table above.
+dependencies, the index); and it writes the dossier, which lists every changed file outside the
+boundary under *Outside the planned boundary* and gives `WARN`, not `FAIL`, for them. A verdict
+that fails changes a reviewer would accept teaches everyone to ignore it, so `FAIL` is kept
+for what someone declared, and for forbidden paths. Holding the agent is for a boundary someone
+declared: the table above.
 
 This is `[gate] auto = true`, the default. Automatic work happens only at the top of a git
 working tree, indexed or not: the hooks stay silent anywhere else, do not index a repository
@@ -104,7 +108,22 @@ not counted as the change, and a `--write` path the repository tracks is refused
 cannot take one of its own files out of the judgement by naming it), and exits non-zero on
 `FAIL`. It judges a
 pull request whatever wrote it — any agent, any harness, a person — with the trail section
-empty, since no hook saw the edits. The GitHub Action is the natural caller.
+empty, since no hook saw the edits.
+
+By default the boundary is **advisory** here too, for the reason it is in a prompt-started
+session, and with a measurement behind it. Replayed over the last 20 merged commits of this
+repository, each judged against its own subject, a binding boundary fails every one of them
+([`benchmarks/gate/`](../benchmarks/gate/README.md#ci-over-merged-history)): a plan names at
+most eight files to edit, and a real pull request also changes its tests, its documentation,
+the changelog, a lockfile, and source files no one could name from a title. So by default
+`ok gate ci` fails only on a forbidden path (a secret, key material, generated output, a
+dependency directory, the index), lists the files outside the planned boundary, and exits 0
+with `WARN`. `--mode enforce` (or `mode = "enforce"` in `ok.toml`) makes the boundary binding
+for a team that wants every file a pull request touches to be one its description leads to.
+
+This repository runs it on its own pull requests, report-only: the `change-dossier` job in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) builds the plan from the pull
+request's title and description and puts the dossier in the job summary.
 
 ## What the hooks do
 
@@ -214,7 +233,10 @@ request comment takes. It carries no source text: paths, counts, verdicts, reaso
   edits, a non-git repository, observe mode.
 
 The dossier's verdict is `FAIL` when verification fails, `WARN` when verification warns or any
-edit was denied or warned during the session, and `PASS` otherwise.
+edit was denied or warned during the session, and `PASS` otherwise. In an advisory session
+(started from a prompt in `warn` mode, or `ok gate ci` without `--mode enforce`) a changed file
+outside the planned boundary is listed under `change.outside_boundary`, makes the verdict
+`WARN`, and is not a boundary violation; a forbidden path is one in every session.
 
 ## Measured
 

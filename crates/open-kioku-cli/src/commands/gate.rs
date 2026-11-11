@@ -1190,6 +1190,10 @@ fn gate_ci(
     session.repo_name = gate_repo_name(repo, &config);
     session.base_rev = Some(base_rev);
     session.boundary.sibling_caution = config.gate.sibling_caution;
+    // The boundary is a plan built from the pull request's words. Nobody declared it and
+    // nobody is here to widen it with a reason, so unless the caller asks for `enforce` a file
+    // outside it is reported, not failed. Forbidden paths fail either way.
+    session.advisory = mode != GateMode::Enforce;
     // A dossier an earlier run wrote into the working tree is not the change. Only a file git
     // does not track is left out this way: naming a file the branch itself added or changed
     // as the dossier path must not take it out of what is judged.
@@ -1560,14 +1564,21 @@ fn gate_summary_line(dossier: &ChangeDossier) -> String {
         .as_ref()
         .map(|v| v.boundary_violations.len())
         .unwrap_or(0);
-    format!(
+    let mut line = format!(
         "Change Dossier {}: {} changed file(s), {} boundary violation(s), {} edit(s) denied, {} warned",
         dossier.verdict.label(),
         dossier.change.changed_files.len(),
         violations,
         dossier.trail.edits_denied,
         dossier.trail.edits_warned
-    )
+    );
+    if !dossier.change.outside_boundary.is_empty() {
+        line.push_str(&format!(
+            ", {} outside the planned boundary (advisory)",
+            dossier.change.outside_boundary.len()
+        ));
+    }
+    line
 }
 
 /// The repository a hook serves. An explicit `--repo` wins; with the default `.`, the

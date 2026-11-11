@@ -945,16 +945,21 @@ pub fn plan_with_expansions(mut plan: PlanReport, session: &GateSession) -> Plan
 /// Add to the plan's caution paths every changed path the session reads as caution or as a
 /// sibling, so verification warns about them exactly as the hook said it would instead of
 /// failing them as outside the boundary.
+///
+/// In an advisory session a path outside the boundary is treated the same way: the boundary
+/// was planned from text nobody declared as one, so a file outside it is reported (the
+/// dossier lists each under `outside_boundary`) and is not a failure. Forbidden paths are
+/// untouched by this and still fail.
 pub fn plan_with_session_caution(
     mut plan: PlanReport,
     session: &GateSession,
     changed: &[String],
 ) -> PlanReport {
     for path in changed {
-        if !matches!(
-            session.boundary.classify(path),
-            PathClass::Caution | PathClass::Sibling
-        ) {
+        let class = session.boundary.classify(path);
+        let reported = matches!(class, PathClass::Caution | PathClass::Sibling)
+            || (session.advisory && class == PathClass::Outside);
+        if !reported {
             continue;
         }
         let boundary = &mut plan.recommended_change_boundary;
@@ -1521,6 +1526,10 @@ pub struct DossierChange {
     /// Modified before the session started and not edited during it: not this change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preexisting_excluded: Vec<String>,
+    /// In an advisory session, the changed files outside the planned boundary. They are
+    /// reported here and are not boundary violations: nobody declared that boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside_boundary: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_sha256: Option<String>,
     pub source: String,
@@ -1670,12 +1679,23 @@ pub fn build_dossier(
     if session.mode == GateMode::Observe {
         caveats.push("observe mode: nothing was denied during the session".into());
     }
+    let outside_boundary = if session.advisory {
+        change
+            .changed_files
+            .iter()
+            .map(|path| normalize_str(path))
+            .filter(|path| session.boundary.classify(path) == PathClass::Outside)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     if session.advisory {
-        caveats.push(
-            "advisory session: it was started from a prompt, not declared, so the boundary \
-             was reported and recorded but did not hold the agent (forbidden paths excepted)"
-                .into(),
-        );
+        caveats.push(format!(
+            "advisory session: the boundary was planned from text nobody declared as a boundary \
+             (a prompt, or a pull request's title and description), so the {} changed file(s) \
+             outside it are reported and are not a failure; forbidden paths still fail",
+            outside_boundary.len()
+        ));
     }
     let changed = change
         .changed_files
@@ -1699,7 +1719,28 @@ pub fn build_dossier(
 
     let verification_summary = verification.map(|report| DossierVerification {
         verdict: report.verdict,
-        boundary_violations: report.boundary_violations.iter().map(finding).collect(),
+        boundary_violations: report
+            .boundary_violations
+            .iter()
+            .map(finding)
+            .map(|mut finding| {
+                // The verifier knows the plan's forbidden rules; the secret-path policy is
+                // the gate's. A path that policy forbids is named as forbidden, not as
+                // merely outside a boundary it could never have been admitted to.
+                let forbidden = finding
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| session.boundary.classify(path) == PathClass::Forbidden);
+                if forbidden && finding.kind == "out_of_boundary" {
+                    finding.kind = "forbidden_boundary".into();
+                    finding.reason = "path is forbidden by policy (secret-like, key material, \
+                                      generated, a dependency, or the index) and cannot be \
+                                      admitted to a boundary"
+                        .into();
+                }
+                finding
+            })
+            .collect(),
         warnings_count: report.warnings.len(),
         warnings: report.warnings.iter().take(12).map(finding).collect(),
         missing_tests: report.missing_tests.iter().map(finding).collect(),
@@ -1729,7 +1770,7 @@ pub fn build_dossier(
         Some(VerificationVerdict::Fail) => DossierVerdict::Fail,
         Some(VerificationVerdict::Warn) => DossierVerdict::Warn,
         Some(VerificationVerdict::Pass) | None => {
-            if trail.edits_warned > 0 || trail.edits_denied > 0 {
+            if trail.edits_warned > 0 || trail.edits_denied > 0 || !outside_boundary.is_empty() {
                 DossierVerdict::Warn
             } else {
                 DossierVerdict::Pass
@@ -1767,6 +1808,7 @@ pub fn build_dossier(
             changed_files: change.changed_files.clone(),
             untracked_files: change.untracked_files.clone(),
             preexisting_excluded: change.preexisting_excluded.clone(),
+            outside_boundary,
             diff_sha256: change
                 .unified_diff
                 .as_deref()
@@ -1884,6 +1926,15 @@ pub fn render_markdown(dossier: &ChangeDossier) -> String {
         out.push_str(&format!(
             "- Left out (modified before the session, not edited during it): {}\n",
             join_code(&dossier.change.preexisting_excluded, 10)
+        ));
+    }
+    if !dossier.change.outside_boundary.is_empty() {
+        out.push_str(&format!(
+            "- Outside the planned boundary ({} of {}; reported, not a failure, because nobody \
+             declared this boundary): {}\n",
+            dossier.change.outside_boundary.len(),
+            dossier.change.changed_files.len(),
+            join_code(&dossier.change.outside_boundary, 15)
         ));
     }
     out.push('\n');

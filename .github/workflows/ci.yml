@@ -97,6 +97,61 @@ jobs:
           path: artifacts/relationships
           if-no-files-found: error
 
+  change-dossier:
+    # This repository judges its own pull requests with the gate. The plan is built from the
+    # pull request's title and description, the branch's change is verified against that
+    # plan's boundary, and the Change Dossier is this job's summary. Report-only: a FAIL
+    # verdict is shown and does not fail the job; `docs/gate.md` says why.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ri3-compact-${{ hashFiles('**/Cargo.lock') }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Build the CLI
+        run: cargo build -p open-kioku-cli
+      - name: Index this checkout
+        run: target/debug/ok index .
+      - name: Judge the change against the pull request's own words
+        env:
+          # Passed through the environment, never interpolated into the script: a title or
+          # description is text someone else wrote.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+          task="$(printf '%s\n\n%s' "$PR_TITLE" "$PR_BODY")"
+          status=0
+          target/debug/ok gate ci --base "$BASE_SHA" --task "$task" --format text \
+            --write "$RUNNER_TEMP/change-dossier.md" || status=$?
+          # The dossier is written before the verdict decides the exit status, so a missing
+          # dossier is the command itself failing, and that fails the job. A FAIL verdict
+          # is reported in the summary and not enforced here.
+          if [ ! -f "$RUNNER_TEMP/change-dossier.md" ]; then
+            echo "ok gate ci wrote no dossier (exit status $status)" >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/change-dossier.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "ok gate ci exit status: $status (0: pass or warn, 1: fail; report-only)"
+      - name: Upload the Change Dossier
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: change-dossier
+          path: ${{ runner.temp }}/change-dossier.md
+          if-no-files-found: warn
+
   coverage:
     runs-on: ubuntu-latest
     steps:
