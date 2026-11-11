@@ -112,10 +112,11 @@ empty, since no hook saw the edits.
 
 By default the boundary is **advisory** here too, for the reason it is in a prompt-started
 session, and with a measurement behind it. Replayed over the last 20 merged commits of this
-repository, each judged against its own subject, a binding boundary fails every one of them
-([`benchmarks/gate/`](../benchmarks/gate/README.md#ci-over-merged-history)): a plan names at
-most eight files to edit, and a real pull request also changes its tests, its documentation,
-the changelog, a lockfile, and source files no one could name from a title. So by default
+repository, each judged against its own subject, a binding boundary fails all 20
+([`benchmarks/gate/`](../benchmarks/gate/README.md#ci-over-merged-history)): 269 of their 432
+changed files fall outside the plan, which names eight files to edit while a real pull request
+also changes its tests, its documentation, the changelog, a lockfile, and four in ten of its
+source files. So by default
 `ok gate ci` fails only on a forbidden path (a secret, key material, generated output, a
 dependency directory, the index), lists the files outside the planned boundary, and exits 0
 with `WARN`. `--mode enforce` (or `mode = "enforce"` in `ok.toml`) makes the boundary binding

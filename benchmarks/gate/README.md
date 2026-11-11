@@ -92,6 +92,47 @@ default: turn it on where the cost of asking an agent to justify a new module be
 is changing is higher than the cost of a stray file next to it being reported rather than
 refused. Forbidden paths and writes that bypass the hooks are unaffected.
 
+## CI over merged history
+
+[`scripts/gate-ci-history.py`](../../scripts/gate-ci-history.py) replays `ok gate ci` over the
+last 20 merged first-parent commits of `main` (head `fe2c88a3db`), each checked out, indexed,
+and judged against its own subject. Every one of these changes was reviewed and merged, so a
+`FAIL` here is the gate refusing a change its maintainers accepted
+([`ci-history.json`](ci-history.json)):
+
+| Mode | PASS | WARN | FAIL |
+|---|---|---|---|
+| default (boundary advisory) | 0 | 20 | 0 |
+| `--mode enforce`, task is the subject | 0 | 0 | 20 |
+| `--mode enforce`, task is the subject and the body | 0 | 0 | 20 |
+
+Under a binding boundary every merged commit fails. The 20 commits changed 432 files, a median
+of 17.5 each; a plan allowed 8 files and marked 8 to 23 as caution; 269 of the 432 fell outside
+it:
+
+| Kind of file | Changed | Outside the planned boundary |
+|---|---|---|
+| source | 232 | 96 |
+| tests and snapshots | 96 | 79 |
+| documentation | 64 | 64 |
+| changelog | 20 | 20 |
+| manifest or data | 15 | 5 |
+| lockfile | 5 | 5 |
+
+A plan built from a title names where a change starts. It does not name the tests that follow
+it, the documentation and changelog a maintainer writes with it, or four source files in ten.
+Adding the commit body to the task did not help: it lowered the plan's stated confidence (to
+Low on 14 of the 20) and left the verdicts as they were. That is why `ok gate ci` treats the
+boundary as advisory unless `--mode enforce` is given: by default it fails only on a forbidden
+path (none of the 20 has one), lists the files outside the boundary in the dossier, and exits 0
+with `WARN`. Before this measurement the default was the binding rule, and it would have failed
+all 20.
+
+What this does not show: how often a binding boundary fails a change that *should* be refused.
+These are all accepted changes. The simulation above measures that side, on sessions where the
+boundary is declared with `ok gate start` and the agent can widen it with a reason; in CI nobody
+is present to widen anything, which is the other reason the default there is to report.
+
 ## Live sessions
 
 [`live-runs.md`](live-runs.md) records four real Claude Code sessions on this repository: three
@@ -122,6 +163,8 @@ OK_BIN=target/release/ok scripts/gate-sim.py --repo /tmp/sim-repo --cases 40 --m
   --write benchmarks/gate/commit-derived-enforce.json
 OK_BIN=target/release/ok scripts/gate-sim.py --repo /tmp/sim-repo --cases 20 --mode warn --seed 11 \
   --write benchmarks/gate/commit-derived-warn.json
+scripts/gate-ci-history.py --source . --work /tmp/gate-ci-history --ok-bin target/release/ok \
+  --commits 20 --write benchmarks/gate/ci-history.json
 # sibling caution: set `sibling_caution = true` under `[gate]` in /tmp/sim-repo/ok.toml, then
 OK_BIN=target/release/ok scripts/gate-sim.py --repo /tmp/sim-repo --cases 40 --mode enforce --seed 7 \
   --write benchmarks/gate/commit-derived-enforce-sibling.json
