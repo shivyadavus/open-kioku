@@ -136,6 +136,27 @@ request's title and description, reads the change against the first parent of th
 commit it checked out (`--base 'HEAD^1'`: exactly what was merged, however far the base branch
 has moved), and puts the dossier in the job summary.
 
+## For any agent: the git hook
+
+```sh
+ok gate install git --apply     # once per clone: a pre-commit hook
+```
+
+Claude Code is the one harness whose hooks the gate speaks. Every agent, and every person,
+commits through git, so `ok gate install git` puts the forbidden-path policy there:
+`ok gate hook pre-commit` reads the staged paths and refuses the commit when one of them is
+secret-like, key material, a dependency directory or generated output, with no session, no
+index and no harness needed. A staged deletion is not judged: removing a committed secret is
+the remedy. In a binding `enforce` session it also refuses a staged path outside the boundary
+and names the `ok gate expand` that widens it; in any other session it names such paths and
+lets the commit through. `observe` refuses nothing.
+
+The installer writes where git looks (`core.hooksPath` included), never overwrites a
+pre-commit hook that is not its own (it prints the one line to add to it), and writes nothing
+without `--apply`. A local hook can be skipped by whoever runs git, an agent included; the
+check that cannot be skipped that way is `ok gate ci` on the pull request. The two are meant
+together: the hook stops the mistake where it is made, and CI is the one that holds.
+
 ## What the hooks do
 
 The Claude Code plugin ships [`hooks/hooks.json`](../hooks/hooks.json); `ok gate install claude`
@@ -270,6 +291,11 @@ outside the planned boundary is listed under `change.outside_boundary`, makes th
 `WARN`, and is not a boundary violation; a forbidden path is one in every session.
 
 ## Measured
+
+On a repository that is not this one (`pallets/click`), with only the hooks installed and a
+real agent: the gate did not change what the agent produced on four real commits, took about six
+seconds longer per task, wrote a dossier every time, and refused the one edit to a secret file,
+which the same agent made without it ([`benchmarks/agent-ab/outside-repository.md`](../benchmarks/agent-ab/outside-repository.md)).
 
 [`scripts/gate-sim.py`](../scripts/gate-sim.py) drives synthetic agent sessions against an
 indexed repository: tasks are the subjects of real commits, legitimate edits are the files those

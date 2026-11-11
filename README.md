@@ -102,6 +102,7 @@ A session started from a prompt is **advisory**: it tells the agent which edits 
 
 ```sh
 ok gate ci --base origin/main --task "$PR_TITLE" --write dossier.md   # a dossier for any pull request, no hooks; fails on forbidden paths
+ok gate install git --apply        # any agent, any person: a pre-commit hook that refuses a staged secret
 ```
 
 Measured on commit-derived sessions and three live Claude Code sessions; method, numbers and caveats in [`benchmarks/gate/`](benchmarks/gate/README.md). [`docs/gate.md`](docs/gate.md)

@@ -5,6 +5,11 @@ for this agent, on this task. The numbers and their limits are below, with what 
 Kioku because of them. The harness is [`scripts/agent-ab.py`](../../scripts/agent-ab.py); every
 run's record is in [`results.json`](results.json).
 
+A second measurement, on a repository that is not Open Kioku and with the agent editing, is in
+[`outside-repository.md`](outside-repository.md): it found that the gate does not change what
+the agent produces, costs about six seconds a task, and that the forbidden-path policy did not
+hold without a session until it was fixed.
+
 ## Method
 
 Six real commits of this repository. For each, a clone checked out at the commit's parent and
