@@ -2014,22 +2014,51 @@ fn gate_hook_pre_tool(
     input: &HookInput,
 ) -> anyhow::Result<()> {
     let Some(session) = session else {
-        // No session: nothing to hold edits to, unless the repository requires one. A
-        // configuration that cannot be read is an error, which the caller fails closed on.
+        // No session: there is no boundary to hold edits to, but the forbidden-path policy
+        // does not depend on one. A secret-like path, a dependency directory or generated
+        // output is refused here exactly as it is inside a session, in every mode but
+        // `observe`. A configuration that cannot be read is an error, which the caller fails
+        // closed on.
         let config = OkConfig::load_from_repo(repo)?;
+        let mut targets = input
+            .edited_paths()
+            .iter()
+            .filter_map(|path| gate_relative(repo, path))
+            .collect::<Vec<_>>();
+        targets.extend(gate_shell_targets(
+            repo,
+            &gate_shell_cwd(repo, input),
+            input.shell_command().unwrap_or_default(),
+        ));
+        if GateMode::parse(&config.gate.mode).unwrap_or_default() != GateMode::Observe {
+            let forbidden = targets
+                .iter()
+                .filter_map(|path| {
+                    open_kioku_gate::policy_forbidden_reason(path)
+                        .map(|reason| format!("`{path}` is {reason}"))
+                })
+                .collect::<Vec<_>>();
+            if !forbidden.is_empty() {
+                return gate_emit(HookResponse::Deny {
+                    event: "PreToolUse".into(),
+                    reason: format!(
+                        "Open Kioku gate denied this {}. {}. Such a path is forbidden by policy \
+                         with or without a gate session, and no boundary can be widened to it. \
+                         If it has to change, say so to the user and leave the change to them.",
+                        if input.is_shell_tool() {
+                            "command"
+                        } else {
+                            "edit"
+                        },
+                        forbidden.join("; ")
+                    ),
+                });
+            }
+        }
         if !config.gate.require_plan {
             return Ok(());
         }
-        let writes_repo_files = input
-            .edited_paths()
-            .iter()
-            .any(|path| gate_relative(repo, path).is_some())
-            || !gate_shell_targets(
-                repo,
-                &gate_shell_cwd(repo, input),
-                input.shell_command().unwrap_or_default(),
-            )
-            .is_empty();
+        let writes_repo_files = !targets.is_empty();
         if !writes_repo_files {
             return Ok(());
         }

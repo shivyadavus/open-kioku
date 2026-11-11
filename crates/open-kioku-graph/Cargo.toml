@@ -12,16 +12,16 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-open-kioku-core = { version = "4.0.0", path = "../open-kioku-core" }
-open-kioku-errors = { version = "4.0.0", path = "../open-kioku-errors" }
-open-kioku-storage = { version = "4.0.0", path = "../open-kioku-storage" }
+open-kioku-core = { version = "5.0.0", path = "../open-kioku-core" }
+open-kioku-errors = { version = "5.0.0", path = "../open-kioku-errors" }
+open-kioku-storage = { version = "5.0.0", path = "../open-kioku-storage" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 regex.workspace = true
 
 [dev-dependencies]
-open-kioku-storage-sqlite = { version = "4.0.0", path = "../open-kioku-storage-sqlite" }
+open-kioku-storage-sqlite = { version = "5.0.0", path = "../open-kioku-storage-sqlite" }
 schemars.workspace = true
 
 

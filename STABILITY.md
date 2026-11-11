@@ -92,6 +92,12 @@ and tools:
 - Are labeled with `[experimental]` in `ok --help` output
 - Should not be depended on in automation or scripts
 
+`ok gate`, new in 5.0.0, is experimental: its subcommands, the hook input it reads, its
+`[gate]` settings and the Change Dossier (`schema_version` 1) may change in a minor release.
+Its verdict rules changed twice between its first merge and this release, each time after a
+measurement ([`benchmarks/gate/`](benchmarks/gate/README.md)); expect that to continue until
+it is listed above.
+
 When an experimental feature is promoted to stable, it will be announced in the
 [CHANGELOG](CHANGELOG.md) as part of a minor release.
 

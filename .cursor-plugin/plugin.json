@@ -1,7 +1,7 @@
 {
   "name": "open-kioku",
   "displayName": "Open Kioku — Evidence before edits",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local-first code intelligence MCP for Cursor: 16 read-only tools over a Tree-sitter symbol index, SQLite dependency graph, and BM25 full-text search under .ok/. Code and regex search, symbol navigation, impact analysis, plan_change and verify_change. No hosted index or embeddings API required. Supports Rust, TypeScript, Python, JavaScript, Go, and Java.",
   "author": {
     "name": "Shiv Yadav",

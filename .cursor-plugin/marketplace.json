@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local-first code intelligence MCP for Cursor with 16 read-only tools under .ok/. No hosted index or embeddings API required.",
-    "version": "4.0.0"
+    "version": "5.0.0"
   },
   "plugins": [
     {

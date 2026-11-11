@@ -224,24 +224,62 @@ impl GateBoundary {
     }
 }
 
-/// What the gate forbids whatever the plan says: secret-like paths and key material, a
-/// dependency directory at any depth (`node_modules`, `third_party`, `.venv`), and a file
-/// named as generated output (`x_generated.rs`, `x.generated.ts`). Matched without regard to
-/// case. The plan's own rules add the rest: the directories the index pruned, `vendor/`,
-/// `generated/`, `.ok/`, `.git/`.
+/// What the gate forbids whatever the plan says, and whether or not there is a plan at all:
+///
+/// - secret-like paths and key material (`open_kioku_core::is_secret_like_path`);
+/// - a dependency directory at any depth (`node_modules`, `third_party`, `.venv`) and
+///   `vendor/` at the repository root;
+/// - generated output: a `generated/` directory, a file named `x_generated.rs` or
+///   `x.generated.ts`, a path with `Generated` in it;
+/// - a `secrets/` directory, and the repository's own machinery, `.git/` and `.ok/`.
+///
+/// Directory names and the lower-case file conventions are matched without regard to case.
+/// These are the rules a plan carries in every repository, plus the ones a plan's rules miss
+/// below the root; a plan adds the directories the index pruned. They hold with no session
+/// too: a hook that only refused a secret while a plan happened to exist would not be
+/// refusing it.
 ///
 /// `vendor` below the root is left to the plan: it is as often a domain word as a dependency
 /// directory, and a rule that fails a legitimate change is worse than none.
-fn policy_forbidden(path: &str) -> bool {
-    if open_kioku_core::is_secret_like_path(Path::new(path)) {
-        return true;
+///
+/// Returns why the path is forbidden.
+pub fn policy_forbidden_reason(path: &str) -> Option<&'static str> {
+    let path = normalize_str(path);
+    if open_kioku_core::is_secret_like_path(Path::new(&path)) {
+        return Some("a secret-like path or key material");
     }
     let lower = path.to_lowercase();
     let (dirs, name) = lower.rsplit_once('/').unwrap_or(("", lower.as_str()));
-    dirs.split('/')
-        .any(|dir| matches!(dir, "node_modules" | "third_party" | ".venv"))
+    let mut dirs = dirs.split('/').filter(|dir| !dir.is_empty());
+    let first = dirs.clone().next();
+    if matches!(first, Some(".git")) {
+        return Some("git's own files");
+    }
+    if matches!(first, Some(".ok")) {
+        return Some("Open Kioku's index and gate state");
+    }
+    if matches!(first, Some("vendor"))
+        || dirs
+            .clone()
+            .any(|dir| matches!(dir, "node_modules" | "third_party" | ".venv"))
+    {
+        return Some("a dependency directory");
+    }
+    if dirs.clone().any(|dir| dir == "secrets") {
+        return Some("a secrets directory");
+    }
+    if dirs.any(|dir| dir == "generated")
         || name.contains("_generated.")
         || name.contains(".generated.")
+        || path.contains("Generated")
+    {
+        return Some("generated output, which is changed through its generator");
+    }
+    None
+}
+
+fn policy_forbidden(path: &str) -> bool {
+    policy_forbidden_reason(path).is_some()
 }
 
 /// Whether a plan's forbidden rule covers `path`. A rule written in lower case names a
@@ -2283,6 +2321,35 @@ mod tests {
                 PathClass::Outside,
                 "{outside}"
             );
+        }
+    }
+
+    #[test]
+    fn the_forbidden_policy_needs_no_plan_and_says_why() {
+        for (path, why) in [
+            (".env", "secret-like"),
+            ("deploy/id_rsa", "secret-like"),
+            (".git/hooks/pre-commit", "git's own files"),
+            (".ok/index.sqlite", "Open Kioku's index"),
+            ("vendor/lib/a.go", "dependency directory"),
+            ("web/node_modules/x/index.js", "dependency directory"),
+            ("tools/.venv/lib/x.py", "dependency directory"),
+            ("ops/secrets/db.txt", "secrets directory"),
+            ("src/generated/schema.rs", "generated output"),
+            ("src/FooGenerated.java", "generated output"),
+            ("api/client.generated.ts", "generated output"),
+        ] {
+            let reason = policy_forbidden_reason(path).unwrap_or_else(|| panic!("{path}"));
+            assert!(reason.contains(why), "{path}: {reason}");
+        }
+        for path in [
+            "src/auth.rs",
+            "src/vendor/model.rs",
+            "docs/generated-code.md",
+            "src/gitignore.rs",
+            "README.md",
+        ] {
+            assert_eq!(policy_forbidden_reason(path), None, "{path}");
         }
     }
 
