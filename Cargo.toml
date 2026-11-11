@@ -57,7 +57,7 @@ homepage = "https://openkioku.com"
 description = "Local-first code intelligence for AI agents. Plan before edit. Verify after edit."
 keywords = ["mcp", "code-search", "code-intelligence", "local-first", "ai"]
 categories = ["development-tools"]
-rust-version = "1.86"
+rust-version = "1.89"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -75,7 +75,7 @@ notify = "6"
 rayon = "1.10"
 regex = "1.10"
 roxmltree = "0.20"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 schemars = { version = "0.8", features = ["chrono"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
