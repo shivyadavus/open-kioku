@@ -112,6 +112,10 @@ pub enum PreflightFormat {
     Markdown,
     Json,
     Html,
+    /// The decision in about a kilobyte: the verdict, the files, the commands and the top
+    /// risks, each list capped and counted. What an agent reads before it starts; the other
+    /// formats carry every risk, caveat and evidence reference.
+    Brief,
 }
 
 impl PreflightReport {
@@ -212,8 +216,139 @@ impl PreflightFormat {
             Self::Markdown => Ok(render_preflight_markdown(report)),
             Self::Html => Ok(render_preflight_html(report)),
             Self::Text => Ok(render_preflight_text(report)),
+            Self::Brief => Ok(render_preflight_brief(report)),
         }
     }
+}
+
+/// The validation commands of a preflight, each once, in the order they were selected, with
+/// the tests it stands for. Several selected tests usually share one command (`cargo test`);
+/// printing it once per test says nothing eight times.
+fn preflight_commands(report: &PreflightReport) -> Vec<(String, Vec<&PreflightValidation>)> {
+    let mut commands: Vec<(String, Vec<&PreflightValidation>)> = Vec::new();
+    for validation in &report.validation {
+        let command = validation
+            .command
+            .clone()
+            .unwrap_or_else(|| validation.name.clone());
+        match commands.iter_mut().find(|(known, _)| *known == command) {
+            Some((_, tests)) => tests.push(validation),
+            None => commands.push((command, vec![validation])),
+        }
+    }
+    commands
+}
+
+const BRIEF_EDIT_FILES: usize = 8;
+const BRIEF_AFFECTED_FILES: usize = 8;
+const BRIEF_COMMANDS: usize = 4;
+const BRIEF_TEST_NAMES: usize = 3;
+const BRIEF_RISKS: usize = 3;
+const BRIEF_LINE_CHARS: usize = 200;
+
+/// `text` cut to `max` characters on a character boundary, with an ellipsis when cut.
+fn brief_clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut clipped: String = text.chars().take(max.saturating_sub(1)).collect();
+    clipped.push('…');
+    clipped
+}
+
+fn write_brief_files(out: &mut String, heading: &str, files: &[PreflightFile], max: usize) {
+    if files.is_empty() {
+        out.push_str(&format!("{heading}: none confirmed\n"));
+        return;
+    }
+    let shown = files.len().min(max);
+    if shown < files.len() {
+        out.push_str(&format!("{heading} ({} of {}):\n", shown, files.len()));
+    } else {
+        out.push_str(&format!("{heading} ({}):\n", files.len()));
+    }
+    for file in &files[..shown] {
+        let range = file
+            .line_range
+            .as_ref()
+            .map(|range| format!(":{}-{}", range.start, range.end))
+            .unwrap_or_default();
+        out.push_str(&format!("  {}{}\n", file.path.display(), range));
+    }
+}
+
+fn render_preflight_brief(report: &PreflightReport) -> String {
+    let mut out = format!(
+        "{} — {} confidence ({:.2})\n{}\n",
+        report.verdict.label(),
+        confidence_label(report.confidence),
+        report.confidence_score,
+        brief_clip(&report.summary, BRIEF_LINE_CHARS)
+    );
+    write_brief_files(&mut out, "Edit", &report.edit_files, BRIEF_EDIT_FILES);
+    write_brief_files(
+        &mut out,
+        "Likely affected",
+        &report.likely_affected_files,
+        BRIEF_AFFECTED_FILES,
+    );
+    let commands = preflight_commands(report);
+    if commands.is_empty() {
+        out.push_str("Run: no test target was identified; validate manually.\n");
+    } else {
+        out.push_str("Run:\n");
+        for (command, tests) in commands.iter().take(BRIEF_COMMANDS) {
+            let names = tests
+                .iter()
+                .filter(|test| test.name != *command)
+                .take(BRIEF_TEST_NAMES)
+                .map(|test| test.name.as_str())
+                .collect::<Vec<_>>();
+            let named = tests.iter().filter(|test| test.name != *command).count();
+            if names.is_empty() {
+                out.push_str(&format!("  {command}\n"));
+            } else {
+                let more = named.saturating_sub(names.len());
+                out.push_str(&format!(
+                    "  {command}  (selected: {}{})\n",
+                    names.join(", "),
+                    if more > 0 {
+                        format!(", and {more} more")
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+        }
+        if commands.len() > BRIEF_COMMANDS {
+            out.push_str(&format!(
+                "  and {} more command(s)\n",
+                commands.len() - BRIEF_COMMANDS
+            ));
+        }
+    }
+    if !report.risks.is_empty() {
+        let shown = report.risks.len().min(BRIEF_RISKS);
+        if shown < report.risks.len() {
+            out.push_str(&format!("Risks ({} of {}):\n", shown, report.risks.len()));
+        } else {
+            out.push_str("Risks:\n");
+        }
+        for risk in &report.risks[..shown] {
+            out.push_str(&format!("  - {}\n", brief_clip(risk, BRIEF_LINE_CHARS)));
+        }
+    }
+    if !report.caveats.is_empty() {
+        out.push_str(&format!(
+            "Caveats: {} about how complete this evidence is.\n",
+            report.caveats.len()
+        ));
+    }
+    out.push_str(
+        "This is the short form. The text and markdown forms list every risk and caveat; the \
+         full plan adds the evidence behind each file.\n",
+    );
+    out
 }
 
 fn render_preflight_text(report: &PreflightReport) -> String {
@@ -230,11 +365,15 @@ fn render_preflight_text(report: &PreflightReport) -> String {
     if report.validation.is_empty() {
         out.push_str("  - No test target was identified; validate manually before merging.\n");
     } else {
-        for validation in &report.validation {
-            out.push_str(&format!(
-                "  - {}\n",
-                validation.command.as_deref().unwrap_or(&validation.name)
-            ));
+        for (command, tests) in preflight_commands(report) {
+            if tests.len() > 1 {
+                out.push_str(&format!(
+                    "  - {command}  ({} selected tests)\n",
+                    tests.len()
+                ));
+            } else {
+                out.push_str(&format!("  - {command}\n"));
+            }
         }
     }
     if !report.risks.is_empty() {
@@ -280,12 +419,15 @@ fn render_preflight_markdown(report: &PreflightReport) -> String {
     write_preflight_files_markdown(&mut out, "Edit", &report.edit_files);
     write_preflight_files_markdown(&mut out, "Likely affected", &report.likely_affected_files);
     out.push_str("## Run\n\n");
-    for validation in &report.validation {
-        out.push_str(&format!(
-            "- `{}` — {}\n",
-            validation.command.as_deref().unwrap_or(&validation.name),
-            validation.reason
-        ));
+    for (command, tests) in preflight_commands(report) {
+        // One line per command. The reason is the first selected test's; the tests a shared
+        // command stands for are named under it.
+        out.push_str(&format!("- `{command}` — {}\n", tests[0].reason));
+        if tests.len() > 1 {
+            for test in &tests {
+                out.push_str(&format!("  - `{}`\n", test.name));
+            }
+        }
     }
     write_markdown_section(&mut out, "Risks", &report.risks);
     write_markdown_section(&mut out, "Caveats", &report.caveats);
@@ -3932,6 +4074,72 @@ mod tests {
         assert!(rendered.contains("Run:"));
         let markdown = PreflightFormat::Markdown.render(&preflight).unwrap();
         assert!(markdown.contains("# Preflight: token"));
+    }
+
+    #[test]
+    fn preflight_names_a_shared_command_once_and_the_brief_stays_small() {
+        let store = test_store();
+        let plan = PlanEngine::new(&store).plan("token", 10).unwrap();
+        let mut preflight = PreflightReport::from_plan(&plan);
+        // A large repository's answer: many files, eight selected tests behind one command,
+        // one test with its own, and more risks and caveats than anyone reads first.
+        let file = |index: usize| PreflightFile {
+            path: PathBuf::from(format!("crates/sample/src/module_{index:02}.rs")),
+            line_range: Some(LineRange { start: 10, end: 40 }),
+            reason: "tantivy hybrid lexical match".into(),
+            evidence_refs: vec!["a".repeat(64); 12],
+        };
+        preflight.edit_files = (0..12).map(file).collect();
+        preflight.likely_affected_files = (20..45).map(file).collect();
+        let test = |name: &str, command: &str| PreflightValidation {
+            name: name.into(),
+            command: Some(command.into()),
+            reason: "test metadata matches changed file stem".into(),
+            confidence: Confidence::High,
+            evidence_refs: Vec::new(),
+        };
+        preflight.validation = (0..8)
+            .map(|index| test(&format!("covers_case_{index}"), "cargo test"))
+            .chain([test("auth_flow", "cargo test --test auth_flow")])
+            .collect();
+        preflight.risks = (0..33)
+            .map(|index| format!("risk {index}: {}", "detail ".repeat(60)))
+            .collect();
+        preflight.caveats = (0..24).map(|index| format!("caveat {index}")).collect();
+
+        let text = PreflightFormat::Text.render(&preflight).unwrap();
+        assert_eq!(
+            text.matches("  - cargo test  (8 selected tests)").count(),
+            1
+        );
+        assert_eq!(text.matches("cargo test --test auth_flow").count(), 1);
+        let markdown = PreflightFormat::Markdown.render(&preflight).unwrap();
+        assert_eq!(markdown.matches("- `cargo test` — ").count(), 1);
+        assert!(markdown.contains("  - `covers_case_7`"));
+
+        let brief = PreflightFormat::Brief.render(&preflight).unwrap();
+        assert!(brief.len() < 2_400, "{} bytes:\n{brief}", brief.len());
+        assert!(brief.contains("Edit (8 of 12):"), "{brief}");
+        assert!(brief.contains("  crates/sample/src/module_00.rs:10-40\n"));
+        assert!(!brief.contains("module_08.rs"), "capped at eight");
+        assert!(brief.contains("Likely affected (8 of 25):"));
+        assert!(brief.contains(
+            "  cargo test  (selected: covers_case_0, covers_case_1, covers_case_2, and 5 more)"
+        ));
+        assert!(brief.contains("  cargo test --test auth_flow  (selected: auth_flow)"));
+        assert!(brief.contains("Risks (3 of 33):"));
+        assert!(brief.contains("Caveats: 24 "));
+        // No evidence reference reaches the short form.
+        assert!(!brief.contains(&"a".repeat(64)));
+        assert!(brief.ends_with("the evidence behind each file.\n"));
+
+        // With nothing selected and nothing confirmed it still says so in a line each.
+        preflight.edit_files.clear();
+        preflight.likely_affected_files.clear();
+        preflight.validation.clear();
+        let empty = PreflightFormat::Brief.render(&preflight).unwrap();
+        assert!(empty.contains("Edit: none confirmed"));
+        assert!(empty.contains("Run: no test target was identified"));
     }
 
     #[test]

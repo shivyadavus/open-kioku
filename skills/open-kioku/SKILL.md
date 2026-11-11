@@ -47,9 +47,13 @@ parameter named below says otherwise.
    not proof of coverage. An empty `tests` list comes with a caveat: read it, and
    `excluded`, before concluding the change has no tests — skipped tests are
    counted there, not listed.
-7. **`plan_change`** — the evidence-backed plan with edit boundaries.
-   `detail: "preflight"` for a short start decision, `detail: "patch"` for a patch
-   plan, `persist: true` to store a versioned change contract (this writes).
+7. **`plan_change`** — the evidence-backed plan with edit boundaries. Start with
+   `detail: "brief"`: the decision in about a kilobyte (verdict, files to edit with
+   line ranges, likely affected files, commands, top risks). The default full plan
+   runs to tens of thousands of tokens on a large repository; ask for it when you
+   need the evidence behind a file. `detail: "preflight"` for the decision with every
+   risk and caveat, `detail: "patch"` for a patch plan, `persist: true` to store a
+   versioned change contract (this writes).
    - `build_context_pack` when you want the grounding bundle instead of the plan; `compress: true` returns handles (this writes) that `retrieve_context` expands.
 8. **`verify_change`** — hold the edit to what was declared. Pass the saved plan,
    or a `contract_id`. A green test run is not proof the right files changed.

@@ -61,7 +61,7 @@ against this list by `scripts/validate-docs.sh`.
 | `explain_flow` | Explain a control or data flow through the graph |
 | `build_context_pack` | Build a ranked, token-budgeted context pack (`compress` to persist it) |
 | `retrieve_context` | Retrieve a previously persisted context pack |
-| `plan_change` | Generate a change plan (`detail` for preflight or patch, `persist` for a contract) |
+| `plan_change` | Generate a change plan (`detail` for brief, preflight or patch, `persist` for a contract) |
 | `verify_change` | Verify changed files against a plan or contract |
 | `find_tests_for_change` | Identify tests affected by a changed file |
 | `query_evidence_graph` | Query the evidence graph; with no `query`, return its schema |
