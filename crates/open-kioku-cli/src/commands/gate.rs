@@ -149,11 +149,17 @@ enum GateHookEvent {
     SessionStart,
     /// When the harness conversation ends: write the dossier and end its session.
     SessionEnd,
+    /// From git's pre-commit hook: refuse a commit that stages a forbidden path, or, in a
+    /// binding `enforce` session, a path outside its boundary. Reads no input.
+    PreCommit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum GateClient {
+    /// Claude Code: hook entries in `.claude/settings.json`.
     Claude,
+    /// Git itself: a `pre-commit` hook, which every agent and every person commits through.
+    Git,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +200,9 @@ fn handle_gate_command(json: bool, repo: &Path, command: GateCommand) -> anyhow:
     // on an absolute root, so an absolute path given to `check` or `expand` is compared
     // against an absolute repository and not against `.`.
     if let GateCommand::Hook { event } = command {
+        if event == GateHookEvent::PreCommit {
+            return gate_hook_pre_commit(&gate_command_repo(repo)?);
+        }
         return gate_hook(repo, event);
     }
     let repo = gate_command_repo(repo)?;
@@ -1697,7 +1706,7 @@ fn gate_hook(repo: &Path, event: GateHookEvent) -> anyhow::Result<()> {
         Ok(session)
     };
     match event {
-        GateHookEvent::PreTool => unreachable!("handled above"),
+        GateHookEvent::PreTool | GateHookEvent::PreCommit => unreachable!("handled above"),
         GateHookEvent::PostTool => {
             gate_hook_post_tool(&repo, &gate_store, own_session(&gate_store)?, &input)
         }
@@ -2419,8 +2428,184 @@ fn merge_gate_hooks(settings: &mut serde_json::Value) -> usize {
     added
 }
 
+/// The line the git hook runs. `ok` is found on PATH, as for every other hook.
+const GATE_GIT_HOOK_COMMAND: &str = "ok gate hook pre-commit";
+
+/// `ok gate hook pre-commit`: what git's pre-commit hook asks. Every agent and every person
+/// commits through git, so this is the gate for a harness with no hooks of its own.
+///
+/// A staged path the forbidden policy covers refuses the commit, with or without a session,
+/// in every mode but `observe`. A deletion is not judged: removing a committed secret is the
+/// remedy, not the offence. In a binding `enforce` session a staged path outside the boundary
+/// refuses it too, with the way to widen the boundary; in any other session such a path is
+/// named and the commit goes ahead.
+///
+/// A local hook can be skipped by whoever runs git. The check that cannot be skipped that way
+/// is `ok gate ci` on the pull request.
+fn gate_hook_pre_commit(repo: &Path) -> anyhow::Result<()> {
+    let config = OkConfig::load_from_repo(repo)?;
+    if GateMode::parse(&config.gate.mode).unwrap_or_default() == GateMode::Observe {
+        return Ok(());
+    }
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT"])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git could not list the staged files: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let staged = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect::<Vec<_>>();
+    let gate_store = GateStore::for_repo(repo);
+    let mut session = gate_store.active_session().ok().flatten();
+    if let Some(session) = session.as_mut() {
+        gate_follow_config(repo, &gate_store, session);
+    }
+    let mut forbidden = Vec::new();
+    let mut outside = Vec::new();
+    for path in &staged {
+        if let Some(reason) = open_kioku_gate::policy_forbidden_reason(path) {
+            forbidden.push(format!("  {path}: {reason}"));
+            continue;
+        }
+        let Some(session) = &session else { continue };
+        match session.boundary.classify(path) {
+            open_kioku_gate::PathClass::Forbidden => {
+                forbidden.push(format!("  {path}: forbidden by the plan's rules"));
+            }
+            open_kioku_gate::PathClass::Outside => outside.push(path.clone()),
+            _ => {}
+        }
+    }
+    let binding = session
+        .as_ref()
+        .is_some_and(|session| !session.advisory && session.mode == GateMode::Enforce);
+    if forbidden.is_empty() && (outside.is_empty() || !binding) {
+        if let (Some(session), false) = (&session, outside.is_empty()) {
+            eprintln!(
+                "Open Kioku gate: {} staged file(s) are outside the boundary for task \"{}\" \
+                 (reported, not refused): {}",
+                outside.len(),
+                session.task.chars().take(80).collect::<String>(),
+                outside.join(", ")
+            );
+        }
+        return Ok(());
+    }
+    let mut message = String::from("Open Kioku gate: this commit is refused.\n");
+    if !forbidden.is_empty() {
+        message.push_str(
+            "These staged paths are forbidden by policy (no boundary can be widened to them):\n",
+        );
+        message.push_str(&forbidden.join("\n"));
+        message.push('\n');
+    }
+    if binding && !outside.is_empty() {
+        let session = session.as_ref().expect("binding implies a session");
+        message.push_str(&format!(
+            "These staged paths are outside the boundary declared for task \"{}\":\n",
+            session.task.chars().take(80).collect::<String>()
+        ));
+        for path in &outside {
+            message.push_str(&format!(
+                "  {path}: widen it with `ok gate expand {path} --reason \"<why>\"`\n"
+            ));
+        }
+    }
+    message.push_str(
+        "Unstage them (`git restore --staged <path>`) and commit again. If you are an agent, \
+         stop here and tell the user what you wanted to commit and why.",
+    );
+    eprintln!("{message}");
+    std::process::exit(1);
+}
+
+/// `ok gate install git`: put the gate in git's pre-commit hook, where git looks for it
+/// (`core.hooksPath` included). A hook that is already there and is not the gate's is never
+/// overwritten: the line to add to it is printed.
+fn gate_install_git(json: bool, repo: &Path, apply: bool) -> anyhow::Result<()> {
+    let located = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--git-path", "hooks/pre-commit"])
+        .output()?;
+    if !located.status.success() {
+        return Err(caller_input_error(format!(
+            "{} is not inside a git working tree; `ok gate install git` needs one",
+            repo.display()
+        )));
+    }
+    let relative = PathBuf::from(String::from_utf8_lossy(&located.stdout).trim());
+    let path = if relative.is_absolute() {
+        relative
+    } else {
+        repo.join(relative)
+    };
+    let script = format!(
+        "#!/bin/sh\n# Open Kioku gate: refuse a commit that stages a forbidden path. Installed by\n\
+         # `ok gate install git`; `ok` must be on PATH.\nexec {GATE_GIT_HOOK_COMMAND}\n"
+    );
+    let existing = fs::read_to_string(&path).ok();
+    let state = match &existing {
+        Some(text) if text.contains(GATE_GIT_HOOK_COMMAND) => "present",
+        Some(_) => "foreign",
+        None => "absent",
+    };
+    let text = match (state, apply) {
+        ("present", _) => format!(
+            "{} already runs the gate; nothing changed.",
+            path.display()
+        ),
+        ("foreign", _) => format!(
+            "{} exists and is not the gate's, so it is left as it is. Add this line to it, \
+             before anything that should not run on a refused commit:\n  {GATE_GIT_HOOK_COMMAND} || exit 1",
+            path.display()
+        ),
+        (_, false) => format!(
+            "Proposed {} (nothing written without --apply):\n{script}",
+            path.display()
+        ),
+        (_, true) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&path, &script)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+            }
+            format!(
+                "Wrote {}.\nEvery `git commit` in this repository now passes `{GATE_GIT_HOOK_COMMAND}`: a \
+                 staged secret-like, dependency or generated path refuses the commit, whoever \
+                 or whatever made it. `ok` must be on PATH for git.",
+                path.display()
+            )
+        }
+    };
+    print_text_or_json(
+        json,
+        &text,
+        &serde_json::json!({
+            "path": path,
+            "state": state,
+            "applied": apply && state == "absent",
+        }),
+    )
+}
+
 fn gate_install(json: bool, repo: &Path, client: GateClient, apply: bool) -> anyhow::Result<()> {
-    let GateClient::Claude = client;
+    if client == GateClient::Git {
+        return gate_install_git(json, repo, apply);
+    }
     let path = repo.join(".claude").join("settings.json");
     let mut settings = if path.exists() {
         let text = fs::read_to_string(&path)?;

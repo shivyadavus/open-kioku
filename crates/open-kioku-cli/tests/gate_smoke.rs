@@ -1844,6 +1844,177 @@ fn gate_ci_judges_a_finished_change_from_the_task_text_alone() {
     assert_eq!(kinds, vec!["forbidden_boundary".to_string()], "{output}");
 }
 
+/// `git commit` in `repo` with `ok` on PATH, the way git finds the hook's command.
+fn commit(repo: &Path, message: &str) -> std::process::Output {
+    let ok_dir = Path::new(env!("CARGO_BIN_EXE_ok")).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![ok_dir.to_path_buf()];
+    paths.extend(std::env::split_paths(&path));
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["-c", "user.email=gate@test", "-c", "user.name=gate"])
+        .args(["commit", "-q", "-m", message])
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("RUST_BACKTRACE", "0")
+        .output()
+        .expect("git should run")
+}
+
+#[test]
+fn gate_git_hook_refuses_a_commit_of_a_forbidden_path_from_anyone() {
+    let (_temp, repo) = demo_repo();
+    let install = |apply: bool| {
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args(["gate", "install", "git"]);
+        if apply {
+            c.arg("--apply");
+        }
+        run(c)
+    };
+    // The preview writes nothing; `--apply` writes an executable hook; a second run changes
+    // nothing.
+    let hook_path = repo.join(".git/hooks/pre-commit");
+    assert!(install(false).contains("nothing written without --apply"));
+    assert!(!hook_path.exists());
+    assert!(install(true).contains("Wrote"));
+    let script = std::fs::read_to_string(&hook_path).unwrap();
+    assert!(script.contains("exec ok gate hook pre-commit"), "{script}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(
+            std::fs::metadata(&hook_path).unwrap().permissions().mode() & 0o111,
+            0
+        );
+    }
+    assert!(install(true).contains("already runs the gate"));
+
+    // No session, no harness, no hooks but git's: a staged secret refuses the commit.
+    std::fs::write(repo.join(".env"), "TOKEN=x\n").unwrap();
+    let mut auth = std::fs::read_to_string(repo.join("src/auth.rs")).unwrap();
+    auth.push_str("// retry\n");
+    std::fs::write(repo.join("src/auth.rs"), &auth).unwrap();
+    git(&repo, &["add", "-f", ".env", "src/auth.rs"]);
+    let refused = commit(&repo, "a change with a secret in it");
+    assert!(!refused.status.success());
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(said.contains("this commit is refused"), "{said}");
+    assert!(said.contains(".env: a secret-like path"), "{said}");
+    assert!(!said.contains("src/auth.rs"), "{said}");
+
+    // Without the secret the same commit goes through.
+    git(&repo, &["restore", "--staged", ".env"]);
+    let accepted = commit(&repo, "the change");
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+
+    // Removing a secret that is already committed is the remedy, and is not refused.
+    git(&repo, &["add", "-f", ".env"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "a committed secret",
+        ],
+    );
+    git(&repo, &["rm", "-q", ".env"]);
+    let removed = commit(&repo, "remove the secret");
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+
+    // A binding `enforce` session also holds a commit to its boundary; widening it with a
+    // reason lets the commit through.
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "start",
+            "add retry handling to token refresh",
+            "--mode",
+            "enforce",
+        ]);
+        c
+    });
+    std::fs::create_dir_all(repo.join("docs")).unwrap();
+    std::fs::write(repo.join("docs/extra.md"), "x\n").unwrap();
+    git(&repo, &["add", "docs/extra.md"]);
+    let outside = commit(&repo, "a file outside the boundary");
+    assert!(!outside.status.success());
+    let said = String::from_utf8_lossy(&outside.stderr);
+    assert!(
+        said.contains("ok gate expand docs/extra.md --reason"),
+        "{said}"
+    );
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args([
+            "gate",
+            "expand",
+            "docs/extra.md",
+            "--reason",
+            "the notes for this change",
+        ]);
+        c
+    });
+    let widened = commit(&repo, "a file the boundary was widened to");
+    assert!(
+        widened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&widened.stderr)
+    );
+
+    // `observe` refuses nothing.
+    run({
+        let mut c = ok();
+        c.arg("--repo").arg(&repo).args(["gate", "abandon"]);
+        c
+    });
+    set_gate_mode(&repo, "observe");
+    std::fs::write(repo.join(".env"), "TOKEN=y\n").unwrap();
+    git(&repo, &["add", "-f", ".env", "ok.toml"]);
+    assert!(commit(&repo, "observed").status.success());
+}
+
+#[test]
+fn gate_git_install_leaves_a_hook_that_is_not_its_own() {
+    let (_temp, repo) = demo_repo();
+    let hook_path = repo.join(".git/hooks/pre-commit");
+    std::fs::write(&hook_path, "#!/bin/sh\necho lint\n").unwrap();
+    let out = run({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(&repo)
+            .args(["gate", "install", "git", "--apply"]);
+        c
+    });
+    assert!(out.contains("is left as it is"), "{out}");
+    assert!(out.contains("ok gate hook pre-commit || exit 1"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&hook_path).unwrap(),
+        "#!/bin/sh\necho lint\n"
+    );
+    // Outside a git working tree there is no hook to install.
+    let temp = tempfile::tempdir().unwrap();
+    let (_, stderr) = run_failure({
+        let mut c = ok();
+        c.arg("--repo")
+            .arg(temp.path())
+            .args(["gate", "install", "git", "--apply"]);
+        c
+    });
+    assert!(stderr.contains("not inside a git working tree"), "{stderr}");
+}
+
 #[test]
 fn gate_denies_a_forbidden_path_with_no_session_and_with_no_index() {
     let (_temp, repo) = demo_repo();

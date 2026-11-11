@@ -136,6 +136,27 @@ request's title and description, reads the change against the first parent of th
 commit it checked out (`--base 'HEAD^1'`: exactly what was merged, however far the base branch
 has moved), and puts the dossier in the job summary.
 
+## For any agent: the git hook
+
+```sh
+ok gate install git --apply     # once per clone: a pre-commit hook
+```
+
+Claude Code is the one harness whose hooks the gate speaks. Every agent, and every person,
+commits through git, so `ok gate install git` puts the forbidden-path policy there:
+`ok gate hook pre-commit` reads the staged paths and refuses the commit when one of them is
+secret-like, key material, a dependency directory or generated output, with no session, no
+index and no harness needed. A staged deletion is not judged: removing a committed secret is
+the remedy. In a binding `enforce` session it also refuses a staged path outside the boundary
+and names the `ok gate expand` that widens it; in any other session it names such paths and
+lets the commit through. `observe` refuses nothing.
+
+The installer writes where git looks (`core.hooksPath` included), never overwrites a
+pre-commit hook that is not its own (it prints the one line to add to it), and writes nothing
+without `--apply`. A local hook can be skipped by whoever runs git, an agent included; the
+check that cannot be skipped that way is `ok gate ci` on the pull request. The two are meant
+together: the hook stops the mistake where it is made, and CI is the one that holds.
+
 ## What the hooks do
 
 The Claude Code plugin ships [`hooks/hooks.json`](../hooks/hooks.json); `ok gate install claude`
