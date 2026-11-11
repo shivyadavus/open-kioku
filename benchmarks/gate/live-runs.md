@@ -50,3 +50,43 @@ the gate in the prompt. Transcripts, event trails, dossiers and diffs were kept 
   follow-up; it is not in this PR.
 - **An agent that wants to cheat.** Nothing stops `ok gate expand` with a hollow reason. The gate records;
   the reviewer judges. That is the design, and the reviewer should know it.
+
+## Run 4: automatic mode, no gate command typed (2026-11-11)
+
+Setup: a fresh clone of `main` at `4c3a139`, indexed, with only the hooks installed
+(`ok gate install claude --apply`) and no `ok.toml`, so every default applied: `warn` mode,
+`auto = true`. Nobody ran `ok gate start`. The prompt was the task: add a `--quiet` flag to
+`ok gate finish` and cover it in the smoke test.
+
+| What happened | Evidence in the trail |
+|---|---|
+| The prompt hook started the session by itself | `session_started` 00:52:36, before the agent's first tool call |
+| Six edits to `gate.rs` and `gate_smoke.rs`, all inside the planned boundary | six `edit_allowed` |
+| One edit to `docs/gate.md`, outside the boundary: allowed, and the agent was told | `edit_warned docs/gate.md` |
+| The agent recorded why that file belonged, unprompted | `boundary_expanded docs/gate.md`: "documents the new --quiet flag beside the other gate finish flags" |
+| The stop hook verified the change and wrote the dossier | `verify_run warn` |
+
+22 turns, 2 m 13 s, $0.51; the change passed its own tests. This run was made with the first
+version of automatic mode, in which a session lasted one prompt and ended at the stop; the
+conversation-length session and the advisory rule came from the review that followed it and
+are exercised by the end-to-end tests, not by this run.
+
+## What the prompt-planned boundary can and cannot know
+
+Before deciding how binding a prompt-started session should be, the plan's own confidence was
+measured as a possible signal ([`prompt-confidence.json`](prompt-confidence.json)): the 38
+commit subjects of the simulation, and eight remarks that are not tasks.
+
+| Prompt | Plan confidence | Boundary quality |
+|---|---|---|
+| 30 of 38 commit subjects | High | admitted 143 of 180 real edits (79%) |
+| 7 of 38 | Medium | 37 of 44 (84%) |
+| 1 of 38 | Low | 8 of 8 |
+| `"fix it"`, `"try again"`, `"why is that?"`, `"the second one please"`, `"can you explain how this works"` | High (0.94) | none: there is no task |
+| `"yes, do it"`, `"ok thanks"`, `"looks good, continue"` | Low | none |
+
+Confidence does not separate a task from a remark, and does not predict how well a boundary
+fits. A session started from a prompt therefore holds nothing in `warn` mode (it is
+*advisory*); the boundary binds where someone declared it. A follow-up prompt whose plan has
+Low confidence leaves the boundary unchanged, which filters plain acknowledgements and nothing
+more.

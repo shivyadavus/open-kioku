@@ -74,18 +74,23 @@ at a small fraction of the cost of the JSON rendering.
 
 ## The gate
 
-When this repository has the gate hooks installed (`ok gate install claude --apply`,
-or the plugin), hold your edits to a declared boundary:
+When this repository has the gate hooks installed (the plugin, or
+`ok gate install claude --apply`), a session is planned from the user's prompt
+in the background and every edit is judged against its boundary. A hook line
+tells you when one is active.
 
-1. Before editing for a task, run `ok gate start "<task>"`. The plan's boundary
-   becomes the session's; the hooks then classify every `Edit`/`Write`.
-2. A denied edit names the one command that widens the boundary:
-   `ok gate expand <path> --reason "<why this file must change>"`. Give a real
-   reason; it is recorded in the dossier. A forbidden path (secrets, generated
-   code, the index) cannot be widened to; change the approach instead.
-3. When the change is done, run `ok gate finish`. It verifies the real diff
-   against the boundary and writes `.ok/gate/dossiers/<session>.md`, the record
-   to hand to review. A `FAIL` lists the paths to revert or widen.
+1. An edit the hook reports as outside the boundary is either not needed, or
+   needed for a reason you can state. If it is needed, record why:
+   `ok gate expand <path> --reason "<why this file must change>"`. Give the real
+   reason; the reviewer reads it in the dossier. A forbidden path (secrets,
+   generated code, the index) cannot be widened to; change the approach.
+2. Edit repository files with the Edit and Write tools, not with shell
+   redirection, so each path is judged before it changes.
+3. When you stop, the change is verified against the boundary and written to
+   `.ok/gate/dossiers/<session>.md`, the record to hand to review. If the stop
+   is held, the message lists the paths to revert or to widen with a reason.
+4. `ok gate start "<task>"` declares a task by hand and makes its boundary
+   binding; `ok gate finish` verifies it and ends the session.
 
 ## Rules
 

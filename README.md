@@ -96,7 +96,9 @@ Every verification step a coding agent is given today is an instruction to the m
 ok gate install claude --apply     # once per repository; the Claude Code plugin ships the same hooks
 ```
 
-That is the whole setup. Each prompt starts a session in the background with the prompt as the task and the plan's edit boundary as its limits; every Edit, Write and shell write is held to that boundary before it lands; a clean stop verifies the real change (files created with no hook included) and writes a **Change Dossier**: what was declared, what the harness reported, what was denied, what actually changed, what verification found, and what is still uncertain. An edit outside the boundary is denied (`enforce`) or allowed and reported (`warn`, the default) with the one remedy, `ok gate expand <path> --reason "<why>"`; a secret-like or generated path is denied in either. A `FAIL` holds the agent with the violations.
+That is the whole setup. The first prompt of a conversation plans an edit boundary in the background; later prompts widen it; every Edit, Write and shell write is judged against it; every stop that follows a change verifies the real change (files created with no hook included) and writes a **Change Dossier**: what was declared, what the harness reported, what was denied, what actually changed, what verification found, and what is still uncertain.
+
+A session started from a prompt is **advisory**: it tells the agent which edits fall outside the boundary and records them, denies secret-like and generated paths, and holds nothing, because a plan built from a prompt cannot tell a task from a remark (measured: `"fix it"` plans with the same confidence as a real commit subject). The boundary is binding where someone declared it: `ok gate start "<task>"`, `mode = "enforce"` in `ok.toml`, or the pull request itself in CI. There a `FAIL` holds the agent, or fails the check, with the violations and the one remedy, `ok gate expand <path> --reason "<why>"`.
 
 ```sh
 ok gate ci --base origin/main --task "$PR_TITLE" --write dossier.md   # the same judgement for any pull request, no hooks
