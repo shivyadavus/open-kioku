@@ -5,6 +5,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `benchmarks/agent-ab/outside-repository.md`: the gate on a repository that is not Open Kioku. A real Claude Code session per task and arm on `pallets/click`, with only the hooks installed and every default: four real commits and two constructed tasks, harness `scripts/agent-edit-ab.py`. On the real commits both arms edited the commit's source file in 4 of 4 tasks and touched the same share of its hunks (9 of 18 plain, 10 of 18 with the gate), the gate arm took about six seconds longer per task, every gate session ended with a dossier, and in three of four the agent recorded a reason for each file outside the planned boundary with `ok gate expand` although the session was advisory. Asked to rotate a token in `.env`, the plain arm edited the file and the gate arm was refused and told the user which line to change. This is the measurement that found the no-session hole fixed in 5.0.0, and the record of the run before the fix is kept beside it.
+
+---
+
 ## [5.0.0] — 2026-11-11
 
 Upgrading from 4.0.0, in the order to do it:

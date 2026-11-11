@@ -271,6 +271,11 @@ outside the planned boundary is listed under `change.outside_boundary`, makes th
 
 ## Measured
 
+On a repository that is not this one (`pallets/click`), with only the hooks installed and a
+real agent: the gate did not change what the agent produced on four real commits, took about six
+seconds longer per task, wrote a dossier every time, and refused the one edit to a secret file,
+which the same agent made without it ([`benchmarks/agent-ab/outside-repository.md`](../benchmarks/agent-ab/outside-repository.md)).
+
 [`scripts/gate-sim.py`](../scripts/gate-sim.py) drives synthetic agent sessions against an
 indexed repository: tasks are the subjects of real commits, legitimate edits are the files those
 commits changed, and drifting edits are files outside the boundary, forbidden paths, and files
