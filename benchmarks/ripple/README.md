@@ -29,7 +29,8 @@ repository's own authors did:
 The rules were written against eight repositories, then run on new ones in rounds. After each
 round the alarms were read, the causes that were general were fixed, and the next round used
 repositories not looked at before. This table is each round **as it first came out**, with the
-rules as they stood before that round's fixes:
+rules as they stood before that round's fixes. All five rounds used the first form of the
+check, which read a call from its text; [the review below](#an-independent-review) replaced it.
 
 | Round | New repositories | Commits that change code | Sites named from the declaring file | The commit then changed | Complete commits with an alarm | Real | False |
 |---|---|---|---|---|---|---|---|
@@ -55,7 +56,9 @@ right about.
 
 ### What the false alarms were
 
-Each is a rule in [`docs/ripple.md`](../../docs/ripple.md) now, with a test:
+Each is a rule in [`docs/ripple.md`](../../docs/ripple.md) now, with a test. Those about
+strings and comments are no longer rules of their own: the check reads identifier nodes of the
+syntax tree, and a string or a comment has none.
 
 | Round | Cause | Rule since |
 |---|---|---|
@@ -87,40 +90,81 @@ run in.
 | `gorilla/mux` | `65cc9b5df8` | The type `queryMatcher` was removed; `old_test.go` still declares a field of it and constructs it four times. Gone at the head. |
 | `sindresorhus/p-queue` | `68dfe953e5` | `AbortError` is no longer exported from `source/index.ts`; `test/test.ts` still imports it. Fixed later. |
 
-## Every repository, with the rules as shipped
+## An independent review
 
-All 46 again with the rules as they are in this release. **This is not a held-out measurement**:
-the rules were changed after looking at these repositories, and the last four rule changes
-(round 5's) have not been run on repositories they were not written against.
+Before it was merged, the change was handed to a reviewer that had no part in writing it and
+was asked to break it. It built more than two dozen small repositories of ordinary code and
+reported 18 findings. Its verdict: **not safe to hold an agent's stop on by default.**
+
+| What it found | Examples | What changed |
+|---|---|---|
+| A call's arguments were counted from its text | `Grow(1<<10, 2)`, an f-string with a comma, a comment inside the call, a bracket inside a quoted string, a string longer than the line limit | Arguments are counted from the argument nodes of the syntax tree |
+| A name in the wrong place was read as a use | a method declaration with the function's name, the name inside a multi-line string or comment, an import that rebinds it (`from tenacity import retry`), an export list that keeps it | A use is an identifier node; a name the file still binds is not a removal |
+| A site was attributed by how its receiver is spelled | `http.Get` with `net/http` imported and a local package `http`; `cache.lookup()` where `cache = redis.Redis()` | A qualifier counts only when an import binds it to the declaring module; in Go, by the module path in `go.mod` |
+| A call that never fit was reported as newly broken | a decorated function (`@click.command()`), a C# extension method called on its class, `super().get(id)` in an override whose signature changed | A call is counted only when it fit the parameter list before the change and does not fit it after |
+| The hold was not scoped to the conversation | a stop held on a colleague's uncommitted change; on an unreadable `ok.toml`; in `observe` with no session; forever, when the record of the conversation could not be written | The hooks look only at files the conversation edited; every failure reports and none holds; **`report` is the default and `hold` is opt-in** |
+| An index that could not be read turned the check off or failed the run | an index built by an earlier version | The same as no index, and the report says so |
+| Cost grew with the size of the change | 2,000 changed files: 9.4 s; one name on thousands of lines: 18.9 s | 300 changed files and ten seconds per run, each file parsed once: 1.8 s and 0.49 s on the same two cases |
+
+All of its reproductions now report nothing broken, except the one that has two really broken
+calls, which reports those two.
+
+The rewritten check was then replayed over the 46 repositories. Its first run raised a false
+alarm on six complete commits, with these causes, each fixed with a test before the run below:
+
+| Cause | Rule since |
+|---|---|
+| A method moved to another file of its C# partial class | A removed method that its type still declares elsewhere has moved: `possible` |
+| A removed nested type whose name another declaration, or a package opened by a project-wide `using`, still provides | A removed type whose name is declared elsewhere: `possible` |
+| The ten-second budget ran out before the file that now declares a moved type was read | With a file that holds the name unread, nothing about that name is counted |
+| `*slog.Logger` read as a local type `Logger` | A qualified type name is reached through its qualifier, like a call |
+| A function that became `export const name = create(...)` in another module | A name another module binds at its top level may have moved there: `possible` |
+| The compilation symbol on a C# `#if` line | Preprocessor lines are not read |
+
+## Every repository, with the check as shipped
+
+All 46 again with the check as it is in this release. **This is not a held-out measurement**:
+the rules were changed after looking at these repositories, and neither the rewrite nor the six
+rules above have been run on repositories they were not written against. That, and the review's
+verdict, is why the hooks report and do not hold unless asked to.
 
 | Set | Repositories | Commits that change code | Breaking changes found | Sites named from the declaring file | The commit then changed | Sites left by complete commits |
 |---|---|---|---|---|---|---|
-| Written against | 8 | 1,304 | 555 | 80 | 80 | 0 |
-| Round 1 | 8 | 1,345 | 397 | 88 | 88 | 0 |
-| Rounds 2 and 4 | 10 | 1,553 | 694 | 141 | 139 | 5 in 1 commit |
-| Round 3 | 10 | 1,894 | 506 | 92 | 88 | 4 in 1 commit |
-| Round 5 | 10 | 1,615 | 942 | 313 | 307 | 6 in 2 commits |
-| **All** | **46** | **7,711** | **3,094** | **714** | **702** | **15 in 4 commits** |
+| Written against | 8 | 1,304 | 525 | 88 | 88 | 0 |
+| Round 1 | 8 | 1,345 | 366 | 117 | 117 | 0 |
+| Rounds 2 and 4 | 10 | 1,553 | 665 | 199 | 197 | 5 in 1 commit |
+| Round 3 | 10 | 1,894 | 487 | 160 | 151 | 4 in 1 commit |
+| Round 5 | 10 | 1,615 | 903 | 349 | 343 | 6 in 2 commits |
+| **All** | **46** | **7,711** | **2,946** | **913** | **896** | **15 in 4 commits** |
 
-The 4 commits are the four real ones above, and the 12 named sites their commits did not go on
-to change are theirs too. No false alarm is left on these repositories.
+The 4 commits are the four real ones above. Of the 17 named sites their commits did not go on
+to change, 12 are those leftovers. The other 5 are in `tokio-rs/bytes` `43ac8e5494`, which
+removed `Bytes::with_capacity` and put the tests that call it inside a block comment instead of
+changing them: named from the half-made change, and rightly not named on the complete commit.
+No false alarm is left on these repositories.
+
+Before the review, the same 46 gave 714 sites named and 702 then changed, with the same four
+commits. The syntax-tree reader names more (it follows `Type::method` and the qualifiers an
+import binds) and counts fewer changes as breaking (a name that is still bound is no longer a
+removal).
 
 By language:
 
 | Language | Repositories | Commits that change code | Breaking changes found | Sites named | Then changed | Possible only |
 |---|---|---|---|---|---|---|
-| Python | 10 | 1,439 | 514 | 299 | 299 | 230 |
-| Go | 8 | 1,546 | 553 | 176 | 169 | 1,068 |
-| Rust | 8 | 1,581 | 747 | 96 | 96 | 18,680 |
-| C# | 5 | 769 | 645 | 50 | 50 | 1,031 |
-| Java | 5 | 722 | 216 | 46 | 46 | 896 |
-| TypeScript | 5 | 974 | 328 | 39 | 34 | 177 |
-| JavaScript | 5 | 680 | 91 | 8 | 8 | 31 |
+| Python | 10 | 1,439 | 490 | 407 | 407 | 3,951 |
+| Go | 8 | 1,546 | 531 | 156 | 149 | 2,483 |
+| Rust | 8 | 1,581 | 726 | 147 | 142 | 21,934 |
+| C# | 5 | 769 | 616 | 85 | 85 | 1,483 |
+| Java | 5 | 722 | 201 | 64 | 64 | 2,389 |
+| TypeScript | 5 | 974 | 305 | 52 | 47 | 407 |
+| JavaScript | 5 | 680 | 77 | 2 | 2 | 4,104 |
 
 "Possible only" is what the caution costs: sites where the name was used and nothing led to the
 declaring module, or the call could not be read. They are listed, never counted and never held
 on. Most of Rust's are in one repository, where a removed or changed `new` or `len` has
-thousands of namesakes.
+thousands of namesakes. JavaScript calls are not held to an argument count, so only removals
+and renames can be named there.
 
 ## What this does not measure
 
@@ -128,8 +172,8 @@ thousands of namesakes.
   needs a compiler or a type checker per repository, and none was run. What it is known to
   miss is in [`docs/ripple.md`](../../docs/ripple.md#what-it-does-not-do): a method on a receiver
   of unknown type, a call through an alias without an index, a name several declarations share,
-  a changed type with the same parameter count. In 3,094 breaking changes it named a site for
-  227.
+  a changed type with the same parameter count, a declaration that moved. In 2,946 breaking
+  changes it named a site for 268.
 - **The index.** Every run used `--no-index`. The `proven` marking is covered by a test and by
   this repository's own CI dossier, and is not measured here.
 - **Merged history is not an agent's history.** Authors and CI had already fixed almost
@@ -143,7 +187,9 @@ its callers in other files. The checkout is the commit's parent; the prompt stat
 signature and says "update whatever else in this repository has to change with it"; no code is
 run. One arm has the hooks installed (`ok gate install claude --apply`, every default), the
 other does not. When the agent stops, the harness runs `ok ripple` on the checkout in both arms.
-One Claude Code session per cell, frontier model.
+One Claude Code session per cell, frontier model. These runs were made with the first form of
+the check, before the review, when the default was still to hold a stop; no stop was held in
+any of them, and they have not been repeated with the rewritten check.
 
 | Task | Arm | Sites left broken | Calls now fitting | Turns | Cost (USD) | Time (s) |
 |---|---|---|---|---|---|---|
@@ -169,7 +215,7 @@ told. In the hooks arm the notice reached the agent after its first edit in all 
 with the sites listed, and no stop was held because nothing was left to hold on. Turns, cost
 and time are within the noise of one run per cell; the hook did not cost any.
 
-What it does show: the notice is delivered and is correct in a live session, in three
+What it does show: the notice is delivered and was correct in a live session, in three
 languages, on repositories the rules were not tuned on; and it costs nothing when the agent
 needs no help. Whether it helps an agent that was *not* asked to look, a weaker model, or a
 repository too large to `grep` by eye is not measured here. Ten runs, USD 5.16.

@@ -2738,10 +2738,32 @@ fn ripple_lists_the_calls_a_change_broke_with_no_index() {
     assert!(run(ripple(&["--base", "HEAD~1"])).contains("pkg/core.py:5"));
 }
 
+/// Sets `[gate] ripple` in the configuration `ok init` wrote.
+fn set_ripple(repo: &Path, value: &str) {
+    if !repo.join("ok.toml").exists() {
+        run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("init");
+            command
+        });
+    }
+    let config = std::fs::read_to_string(repo.join("ok.toml")).unwrap();
+    let line = config
+        .lines()
+        .find(|line| line.starts_with("ripple = "))
+        .expect("the configuration names the setting")
+        .to_string();
+    std::fs::write(
+        repo.join("ok.toml"),
+        config.replacen(&line, &format!("ripple = \"{value}\""), 1),
+    )
+    .unwrap();
+}
+
 #[test]
-fn gate_hooks_tell_the_agent_its_ripple_after_the_edit_and_hold_one_stop_on_it() {
+fn gate_hooks_tell_the_agent_its_ripple_after_the_edit_and_report_it_at_the_stop() {
     let (_temp, repo) = ripple_repo();
-    // No session, no index, no configuration: the hooks alone.
+    // No session, no index, no configuration: the hooks alone, and every default.
     let post = |conversation: &str| {
         hook(
             &repo,
@@ -2760,36 +2782,33 @@ fn gate_hooks_tell_the_agent_its_ripple_after_the_edit_and_hold_one_stop_on_it()
     assert_eq!(stop("A"), "");
     break_the_caller(&repo);
 
+    // A conversation that edited nothing is told nothing about a tree someone else changed.
+    assert_eq!(stop("B"), "");
+
     let told: serde_json::Value = serde_json::from_str(&post("A")).unwrap();
     let context = told["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap();
     assert_eq!(told["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert!(context.contains("1 call site(s) elsewhere"), "{context}");
+    assert!(context.contains("pkg/core.py:5"), "{context}");
     assert!(
-        context.contains("1 site(s) elsewhere no longer fit"),
+        context.contains("does not pass `strict`, which is required now"),
         "{context}"
     );
-    assert!(context.contains("pkg/core.py:5"), "{context}");
     assert_eq!(post("A"), "", "the same sites are shown once");
 
-    let held: serde_json::Value = serde_json::from_str(&stop("A")).unwrap();
-    assert_eq!(held["decision"], "block", "{held}");
-    let reason = held["reason"].as_str().unwrap();
-    assert!(reason.contains("pkg/core.py:5"), "{reason}");
-    assert!(reason.contains("not held twice"), "{reason}");
-    // The agent stops again without fixing it: told, not held.
-    let again: serde_json::Value = serde_json::from_str(&stop("A")).unwrap();
-    assert!(again.get("decision").is_none(), "{again}");
+    // By default a stop is told, never held.
+    let reported: serde_json::Value = serde_json::from_str(&stop("A")).unwrap();
+    assert!(reported.get("decision").is_none(), "{reported}");
     assert!(
-        again["systemMessage"]
+        reported["systemMessage"]
             .as_str()
             .unwrap()
-            .contains("1 site(s) no longer fit"),
-        "{again}"
+            .contains("1 call site(s)"),
+        "{reported}"
     );
-    // Another conversation has not been told.
-    let other: serde_json::Value = serde_json::from_str(&stop("B")).unwrap();
-    assert_eq!(other["decision"], "block");
+    assert_eq!(stop("B"), "", "still not the other conversation's");
     // The hooks' own state stays out of version control.
     let status = Command::new("git")
         .arg("-C")
@@ -2813,16 +2832,12 @@ fn gate_hooks_tell_the_agent_its_ripple_after_the_edit_and_hold_one_stop_on_it()
 }
 
 #[test]
-fn gate_ripple_setting_makes_the_hooks_report_only_or_stay_silent() {
+fn gate_ripple_holds_a_stop_only_where_asked_and_only_once() {
     let (_temp, repo) = ripple_repo();
+    set_ripple(&repo, "hold");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "configure"]);
     break_the_caller(&repo);
-    let stop = |conversation: &str| {
-        hook(
-            &repo,
-            "stop",
-            &conversation_input(&repo, conversation, None),
-        )
-    };
     let post = |conversation: &str| {
         hook(
             &repo,
@@ -2830,38 +2845,81 @@ fn gate_ripple_setting_makes_the_hooks_report_only_or_stay_silent() {
             &conversation_input(&repo, conversation, Some("pkg/util.py")),
         )
     };
-    // `ok init` writes the configuration with the default, which is to hold.
-    run({
-        let mut command = ok();
-        command.arg("--repo").arg(&repo).arg("init");
-        command
-    });
-    let set = |value: &str| {
-        let config = std::fs::read_to_string(repo.join("ok.toml")).unwrap();
-        let line = config
-            .lines()
-            .find(|line| line.starts_with("ripple = "))
-            .expect("the default configuration names the setting")
-            .to_string();
-        assert!(line == "ripple = \"hold\"" || !value.is_empty(), "{line}");
-        std::fs::write(
-            repo.join("ok.toml"),
-            config.replacen(&line, &format!("ripple = \"{value}\""), 1),
-        )
-        .unwrap();
+    let stop_with = |conversation: &str, active: bool| {
+        let mut input: serde_json::Value =
+            serde_json::from_str(&conversation_input(&repo, conversation, None)).unwrap();
+        input["stop_hook_active"] = active.into();
+        let output = hook(&repo, "stop", &input.to_string());
+        serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::Null)
     };
-    set("report");
+
+    // A stop that is already the answer to a stop hook is never held again.
+    assert!(post("C").contains("pkg/core.py:5"));
+    assert!(stop_with("C", true).get("decision").is_none());
+
     assert!(post("A").contains("pkg/core.py:5"));
-    let reported: serde_json::Value = serde_json::from_str(&stop("A")).unwrap();
-    assert!(reported.get("decision").is_none(), "{reported}");
-    assert!(reported["systemMessage"]
+    let held = stop_with("A", false);
+    assert_eq!(held["decision"], "block", "{held}");
+    let reason = held["reason"].as_str().unwrap();
+    assert!(reason.contains("pkg/core.py:5"), "{reason}");
+    assert!(reason.contains("not held twice"), "{reason}");
+    // The agent stops again without fixing it: told, not held.
+    let again = stop_with("A", false);
+    assert!(again.get("decision").is_none(), "{again}");
+    assert!(again["systemMessage"]
         .as_str()
         .unwrap()
-        .contains("no longer fit"));
+        .contains("1 call site(s)"));
 
-    set("off");
-    assert_eq!(post("B"), "");
-    assert_eq!(stop("B"), "");
+    // A harness that names no conversation is told and never held: nothing can be
+    // remembered for it.
+    let nameless = hook(
+        &repo,
+        "post-tool",
+        &conversation_input(&repo, "", Some("pkg/util.py")),
+    );
+    assert!(nameless.contains("pkg/core.py:5"), "{nameless}");
+    assert!(stop_with("", false).get("decision").is_none());
+
+    // Where the record cannot be written, nothing is held: the same sites would otherwise
+    // hold every stop.
+    let records = repo.join(".ok/gate/ripple");
+    std::fs::remove_dir_all(&records).unwrap();
+    std::fs::write(&records, "not a directory").unwrap();
+    assert!(post("D").contains("pkg/core.py:5"));
+    assert_eq!(stop_with("D", false), serde_json::Value::Null);
+    std::fs::remove_file(&records).unwrap();
+
+    // `observe` holds nothing, session or not.
+    set_gate_mode(&repo, "observe");
+    assert!(post("E").contains("pkg/core.py:5"));
+    assert!(stop_with("E", false).get("decision").is_none());
+    let config = std::fs::read_to_string(repo.join("ok.toml")).unwrap();
+    assert!(config.contains("mode = \"observe\""));
+    std::fs::write(
+        repo.join("ok.toml"),
+        config.replacen("mode = \"observe\"", "mode = \"warn\"", 1),
+    )
+    .unwrap();
+
+    // A value nobody can read as one of the three, and a configuration that does not load,
+    // report and never hold; `off` does not look.
+    set_ripple(&repo, "HOLD");
+    assert!(post("F").contains("pkg/core.py:5"));
+    assert_eq!(
+        stop_with("F", false)["decision"],
+        "block",
+        "the value is read whatever its case"
+    );
+    set_ripple(&repo, "sometimes");
+    assert!(post("G").contains("pkg/core.py:5"));
+    assert!(stop_with("G", false).get("decision").is_none());
+    set_ripple(&repo, "off");
+    assert_eq!(post("H"), "");
+    assert_eq!(stop_with("H", false), serde_json::Value::Null);
+    std::fs::write(repo.join("ok.toml"), "[gate\nripple = \"hold\"\n").unwrap();
+    assert!(post("I").contains("pkg/core.py:5"));
+    assert!(stop_with("I", false).get("decision").is_none());
 }
 
 #[test]
@@ -3010,6 +3068,7 @@ fn ripple_reads_the_whole_working_tree_from_a_project_inside_it() {
         &conversation_input(&project, "A", Some("util.py")),
     );
     assert!(told.contains("services/web/page.py:3"), "{told}");
+    assert!(told.contains("look as if they no longer fit"), "{told}");
     // An edit to a file that declares nothing is not looked at.
     std::fs::write(project.join("NOTES.md"), "x\n").unwrap();
     assert_eq!(

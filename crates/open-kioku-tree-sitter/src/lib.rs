@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use tree_sitter::{Language as TsLanguage, Node, Parser, TreeCursor};
 
 mod csharp;
+pub mod name_uses;
 
 pub struct ParseContext {
     pub scope_stack: Vec<ScopeId>,

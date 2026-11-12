@@ -1,7 +1,15 @@
 /// `ok ripple`: the call sites a change left untouched.
 fn handle_ripple_command(json: bool, repo: &Path, args: RippleArgs) -> anyhow::Result<()> {
     let repo = gate_command_repo(repo)?;
-    let report = ripple_report(&repo, Some(args.base), args.files, !args.no_index)?;
+    // Status 1 is "a site is broken" under `--fail-on-broken`; a run that could not be made
+    // is 2, so a CI step can tell them apart.
+    let report = match ripple_report(&repo, Some(args.base), args.files, !args.no_index) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("ok ripple: {error:#}");
+            std::process::exit(2);
+        }
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

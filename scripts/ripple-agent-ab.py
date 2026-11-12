@@ -8,7 +8,9 @@ its callers are. Two arms, the same prompt and tools:
   plain  - a clone at the parent.
   hooks  - the same clone after `ok gate install claude --apply`, with `ok` on PATH. Every
            default applies: no configuration, no index built beforehand (the gate starts one
-           in the background), nothing in the prompt about Open Kioku.
+           in the background), nothing in the prompt about Open Kioku. With the defaults the
+           hook tells and does not hold; set `[gate] ripple = "hold"` in the checkout to
+           measure the hold.
 
 When the agent stops, `ok ripple` is run on the checkout by the harness, in both arms: the
 number of call sites that no longer fit is the result. No project code is run, by the agent or
@@ -98,8 +100,8 @@ def agent(arm, checkout, prompt, out_dir, ok_dir, max_turns, budget):
         if event.get("type") == "result":
             record = event
         text = json.dumps(event)
-        notices += text.count("elsewhere no longer fit what it changed")
-        holds += text.count("that no longer fit what it changed.")
+        notices += text.count("elsewhere look as if they no longer fit")
+        holds += text.count("look as if they no longer fit what this change")
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         for block in (content if isinstance(content, list) else []):

@@ -99,8 +99,9 @@ measurement ([`benchmarks/gate/`](benchmarks/gate/README.md)); expect that to co
 it is listed above.
 
 `ok ripple`, new in 5.0.0, is experimental with it: its report (`schema_version` 1), its
-attribution rules and the `[gate] ripple` setting may change in a minor release. Its rules were
-changed five times against merged history before this release
+attribution rules and the `[gate] ripple` setting may change in a minor release. It reads syntax,
+not types. Its rules were changed five times against merged history, and its reading of a call
+was rewritten after an independent review, before this release
 ([`benchmarks/ripple/`](benchmarks/ripple/README.md)).
 
 When an experimental feature is promoted to stable, it will be announced in the

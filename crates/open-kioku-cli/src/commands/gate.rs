@@ -1154,14 +1154,17 @@ fn gate_verify(
         verification.as_ref(),
     );
     if !change.changed_files.is_empty() {
-        if let Some(report) = gate_ripple(repo, session.base_rev.as_deref(), Vec::new()) {
+        // The declarations of the change's own files: what was dirty before the session is
+        // not part of the change, here as in the rest of the dossier.
+        let files = change.changed_files.iter().map(PathBuf::from).collect();
+        if let Some(report) = gate_ripple(repo, session.base_rev.as_deref(), files) {
             open_kioku_gate::attach_ripple(&mut dossier, &report);
         }
     }
     Ok(dossier)
 }
 
-/// What `[gate] ripple` asks of the hooks. A value that is none of the three is the default.
+/// What `[gate] ripple` asks of the hooks.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GateRipple {
     Hold,
@@ -1169,27 +1172,32 @@ enum GateRipple {
     Off,
 }
 
-fn gate_ripple_setting(repo: &Path) -> GateRipple {
-    match OkConfig::load_from_repo(repo)
-        .map(|config| config.gate.ripple)
-        .unwrap_or_default()
-        .as_str()
-    {
+/// The setting, and whether the configured mode is `observe`. A configuration that cannot be
+/// read, and a value that is none of the three, are `report`: a stop is never held on the
+/// strength of a setting nobody could read.
+fn gate_ripple_setting(repo: &Path) -> (GateRipple, bool) {
+    let Ok(config) = OkConfig::load_from_repo(repo) else {
+        return (GateRipple::Report, false);
+    };
+    let setting = match config.gate.ripple.trim().to_ascii_lowercase().as_str() {
         "off" => GateRipple::Off,
-        "report" => GateRipple::Report,
-        _ => GateRipple::Hold,
-    }
+        "hold" => GateRipple::Hold,
+        _ => GateRipple::Report,
+    };
+    let observing = GateMode::parse(&config.gate.mode).unwrap_or_default() == GateMode::Observe;
+    (setting, observing)
 }
 
 /// The ripple of the working tree against `base` (`HEAD` when absent, or when `base` is no
-/// longer in the repository). `None` when the check is off or cannot run here: it informs, and
-/// a hook that cannot compute it says nothing rather than fail.
+/// longer in the repository), for the declarations of `only_files`. `None` when the check is
+/// off or cannot run here: it informs, and a hook that cannot compute it says nothing rather
+/// than fail.
 fn gate_ripple(
     repo: &Path,
     base: Option<&str>,
     only_files: Vec<PathBuf>,
 ) -> Option<open_kioku_patch::ripple::RippleReport> {
-    if gate_ripple_setting(repo) == GateRipple::Off {
+    if gate_ripple_setting(repo).0 == GateRipple::Off {
         return None;
     }
     let base = base
@@ -1208,11 +1216,13 @@ fn gate_rev_exists(repo: &Path, rev: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// What the hooks have already told one conversation about its ripple, so the same set of
-/// broken sites is shown after an edit once and holds a stop once.
+/// What the hooks know of one conversation's ripple: the files it edited, whose declarations
+/// are the only ones a stop looks at, and the sets of broken sites it has been shown and held
+/// on, so each is shown once and holds once.
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct GateRippleTold {
-    conversation: String,
+struct GateRippleRecord {
+    #[serde(default)]
+    edited: Vec<String>,
     #[serde(default)]
     shown: Vec<String>,
     #[serde(default)]
@@ -1221,55 +1231,80 @@ struct GateRippleTold {
 
 /// A conversation is held on its ripple at most this many times, whatever changes.
 const GATE_RIPPLE_MAX_HOLDS: usize = 3;
-/// Conversations whose ripple record is kept.
+/// Conversations whose record is kept.
 const GATE_RIPPLE_CONVERSATIONS: usize = 40;
 
-fn gate_ripple_told_path(gate_store: &GateStore) -> PathBuf {
-    gate_store.root().join("ripple-told.json")
+/// The record's file for the hook's conversation: one file per conversation, so two
+/// conversations never write the same one. `None` for a harness that names no conversation:
+/// nothing is remembered for it, and nothing is held.
+fn gate_ripple_record_path(gate_store: &GateStore, input: &HookInput) -> Option<PathBuf> {
+    let id = input
+        .session_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+        .take(96)
+        .collect::<String>();
+    (!id.is_empty()).then(|| gate_store.root().join("ripple").join(format!("{id}.json")))
 }
 
-fn gate_ripple_told(gate_store: &GateStore) -> Vec<GateRippleTold> {
-    fs::read(gate_ripple_told_path(gate_store))
-        .ok()
+fn gate_ripple_record(gate_store: &GateStore, input: &HookInput) -> GateRippleRecord {
+    gate_ripple_record_path(gate_store, input)
+        .and_then(|path| fs::read(path).ok())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
-/// Runs `change` on this conversation's record and saves it. Returns what `change` returns.
-fn gate_ripple_told_update<T>(
+/// Runs `change` on the conversation's record and writes it whole, through a temporary file
+/// and a rename. Returns what `change` returned, or `None` when the record could not be
+/// written: the caller then acts as if nothing was remembered, which never holds.
+fn gate_ripple_record_update<T>(
     gate_store: &GateStore,
     input: &HookInput,
-    change: impl FnOnce(&mut GateRippleTold) -> T,
-) -> T {
-    let mut all = gate_ripple_told(gate_store);
-    let position = match all
-        .iter()
-        .position(|told| told.conversation == input.session_id)
-    {
-        Some(position) => position,
-        None => {
-            all.push(GateRippleTold {
-                conversation: input.session_id.clone(),
-                ..GateRippleTold::default()
-            });
-            all.len() - 1
-        }
+    change: impl FnOnce(&mut GateRippleRecord) -> T,
+) -> Option<T> {
+    let path = gate_ripple_record_path(gate_store, input)?;
+    let mut record = gate_ripple_record(gate_store, input);
+    let out = change(&mut record);
+    gate_store.ensure_ignored().ok()?;
+    let dir = path.parent()?;
+    fs::create_dir_all(dir).ok()?;
+    let temporary = dir.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()?.to_string_lossy(),
+        std::process::id()
+    ));
+    fs::write(&temporary, serde_json::to_vec_pretty(&record).ok()?).ok()?;
+    if fs::rename(&temporary, &path).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return None;
+    }
+    gate_ripple_prune(dir);
+    Some(out)
+}
+
+/// Keeps the newest records and removes the rest.
+fn gate_ripple_prune(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
-    let out = change(&mut all[position]);
-    if all.len() > GATE_RIPPLE_CONVERSATIONS {
-        let excess = all.len() - GATE_RIPPLE_CONVERSATIONS;
-        all.drain(..excess);
+    let mut records = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect::<Vec<_>>();
+    if records.len() <= GATE_RIPPLE_CONVERSATIONS {
+        return;
     }
-    // Best effort: a record that cannot be written costs a repeated notice, nothing else.
-    if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
-        let _ = gate_store.ensure_ignored();
-        let _ = fs::write(gate_ripple_told_path(gate_store), bytes);
+    records.sort();
+    let excess = records.len() - GATE_RIPPLE_CONVERSATIONS;
+    for (_, path) in records.into_iter().take(excess) {
+        let _ = fs::remove_file(path);
     }
-    out
 }
 
 /// After an edit: the sites that no longer fit a declaration in the edited files, unless this
-/// conversation was already shown exactly these.
+/// conversation was already shown exactly these. The edited files are remembered: they are
+/// what a stop looks at.
 fn gate_ripple_after_edit(
     repo: &Path,
     gate_store: &GateStore,
@@ -1284,26 +1319,41 @@ fn gate_ripple_after_edit(
         // An edit to prose or configuration changes no declaration: nothing is read for it.
         .filter(|path| open_kioku_patch::ripple::reads_path(path))
         .collect::<Vec<_>>();
-    if edited.is_empty() {
+    if edited.is_empty() || gate_ripple_setting(repo).0 == GateRipple::Off {
         return None;
     }
+    let remembered = gate_ripple_record_update(gate_store, input, |record| {
+        for path in &edited {
+            let path = path.to_string_lossy().replace('\\', "/");
+            if !record.edited.contains(&path) {
+                record.edited.push(path);
+            }
+        }
+    });
     let base = session.and_then(|session| session.base_rev.as_deref());
     let report = gate_ripple(repo, base, edited)?;
     if report.broken_sites == 0 {
         return None;
     }
     let fingerprint = report.fingerprint();
-    let new = gate_ripple_told_update(gate_store, input, |told| {
-        if told.shown.contains(&fingerprint) {
-            return false;
-        }
-        told.shown.push(fingerprint.clone());
-        true
-    });
+    // Without a record (no conversation id, or a directory that cannot be written) the notice
+    // is shown each time: repeating it costs a line, and nothing is held on it.
+    let new = remembered
+        .and_then(|()| {
+            gate_ripple_record_update(gate_store, input, |record| {
+                if record.shown.contains(&fingerprint) {
+                    return false;
+                }
+                record.shown.push(fingerprint.clone());
+                true
+            })
+        })
+        .unwrap_or(true);
     new.then(|| {
         format!(
-            "Open Kioku: after this edit, {} site(s) elsewhere no longer fit what it changed.\n{}\
-             Update them before you finish.",
+            "Open Kioku: after this edit, {} call site(s) elsewhere look as if they no longer \
+             fit what it changed.\n{}Check each one before you finish: update it, or leave it \
+             if it is right as it stands.",
             report.broken_sites,
             report.to_brief(8)
         )
@@ -1323,34 +1373,53 @@ fn gate_ripple_at_stop(
     session: Option<&GateSession>,
     input: &HookInput,
 ) -> Option<GateRippleAtStop> {
-    let setting = gate_ripple_setting(repo);
+    let (setting, observing_by_config) = gate_ripple_setting(repo);
+    if setting == GateRipple::Off {
+        return None;
+    }
+    // Only the declarations of files this conversation edited are its to answer for: what was
+    // already changed in the working tree before it, or by someone else, is not.
+    let edited = gate_ripple_record(gate_store, input)
+        .edited
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    if edited.is_empty() {
+        return None;
+    }
     let base = session.and_then(|session| session.base_rev.as_deref());
-    let report = gate_ripple(repo, base, Vec::new())?;
+    let report = gate_ripple(repo, base, edited)?;
     if report.broken_sites == 0 {
         return None;
     }
-    let observing = session.is_some_and(|session| session.mode == GateMode::Observe);
+    let observing =
+        observing_by_config || session.is_some_and(|session| session.mode == GateMode::Observe);
     let fingerprint = report.fingerprint();
+    // A hold needs the opt-in, a stop that is not already the answer to a hold, and a record
+    // that was written: without the record the same sites would hold every stop.
     let hold = setting == GateRipple::Hold
         && !observing
-        && gate_ripple_told_update(gate_store, input, |told| {
-            if told.held.contains(&fingerprint) || told.held.len() >= GATE_RIPPLE_MAX_HOLDS {
+        && !input.stop_hook_active
+        && gate_ripple_record_update(gate_store, input, |record| {
+            if record.held.contains(&fingerprint) || record.held.len() >= GATE_RIPPLE_MAX_HOLDS {
                 return false;
             }
-            told.held.push(fingerprint.clone());
+            record.held.push(fingerprint.clone());
             true
-        });
+        })
+        .unwrap_or(false);
     if hold {
         return Some(GateRippleAtStop::Hold(format!(
-            "Open Kioku: this change leaves {} site(s) that no longer fit what it changed.\n{}\
-             Update each one. If a site is right as it stands, say why in your answer and stop \
-             again: the same sites are not held twice.",
+            "Open Kioku: {} call site(s) look as if they no longer fit what this change \
+             altered.\n{}Check each one: update it, or, if it is right as it stands, say why in \
+             your answer. Then stop again: the same sites are not held twice.",
             report.broken_sites,
             report.to_brief(12)
         )));
     }
     Some(GateRippleAtStop::Reported(format!(
-        "{} site(s) no longer fit what the change altered (`ok ripple` lists them)",
+        "{} call site(s) look as if they no longer fit what the change altered (`ok ripple` \
+         lists them)",
         report.broken_sites
     )))
 }
@@ -1831,7 +1900,7 @@ fn gate_summary_line(dossier: &ChangeDossier) -> String {
     }
     if let Some(ripple) = dossier.ripple.as_ref().filter(|ripple| ripple.broken_sites > 0) {
         line.push_str(&format!(
-            ", {} site(s) elsewhere no longer fit what it changed",
+            ", {} call site(s) elsewhere look as if they no longer fit what it changed",
             ripple.broken_sites
         ));
     }

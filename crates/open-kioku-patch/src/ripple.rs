@@ -5,12 +5,13 @@
 //! arguments to a function that now requires three. This module finds those callers.
 //!
 //! It needs no index. The files of the change are parsed as they were at the base revision and
-//! as they are now, and the two sets of declarations are compared. The sites of each changed
-//! declaration are found by its name in the working tree (`git grep`); each file with a hit is
-//! parsed to tell a call from another declaration of the same name; and each call's arguments
-//! are counted against the new parameter list. A call that still fits is not reported, whether
-//! or not the change touched it. An index, when there is one, adds what a name cannot: the call
-//! edges it proved, which settle a name several declarations share.
+//! as they are now, and the two sets of declarations are compared. The lines that hold each
+//! changed declaration's name are found in the working tree (`git grep`), and each file with
+//! one is read through its syntax tree (`open_kioku_tree_sitter::name_uses`): a call is a call
+//! node with its arguments counted from argument nodes, never a line that looks like one. A
+//! call is reported only when it fit the declaration as it was and does not fit it as it is; a
+//! call that fits is not reported, whether or not the change touched it. An index, when there
+//! is one, adds what a name cannot: the call edges it proved.
 
 use open_kioku_core::{
     File, FileId, GitChangeKind, GraphEdgeType, Language, RelationshipAuthority, RepositoryId,
@@ -20,6 +21,9 @@ use open_kioku_errors::{OkError, Result};
 use open_kioku_git::DiffFile;
 use open_kioku_languages::detect_language;
 use open_kioku_storage::OkStore;
+use open_kioku_tree_sitter::name_uses::{
+    name_uses, CallArguments, FileNameUses, NameUse, NameUseKind, Reached,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -34,10 +38,13 @@ const MAX_CONTRACTS: usize = 60;
 const MAX_SITES_LISTED: usize = 12;
 /// A name with more hits than this is too common to attribute by name.
 const MAX_NAME_HITS: usize = 1500;
-/// Files with a hit that are parsed in one run; hits in files past it are `possible`.
+/// Files with a hit that are parsed in one run; hits in files past it are counted as
+/// `possible` and not read.
 const MAX_FILES_PARSED: usize = 400;
-/// How many lines a call's arguments are read across.
-const MAX_CALL_LINES: usize = 40;
+/// A file larger than this is not parsed for sites.
+const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Changed code files whose declarations are compared in one run.
+const MAX_CHANGED_FILES: usize = 300;
 const SITE_TEXT_CHARS: usize = 140;
 /// How long the sites of changed declarations are searched for in one run. A hook waits on
 /// this, and a very large tree can take a second for each name.
@@ -411,7 +418,6 @@ struct Declared {
     kind: SymbolKind,
     signature: Option<String>,
     line: u32,
-    end: u32,
     local: bool,
     /// Declared inside a type: reached through a receiver, not by its bare name.
     member: bool,
@@ -482,7 +488,6 @@ fn declarations(path: &Path, text: &str) -> Option<Vec<Declared>> {
                         .as_deref()
                         .map(|signature| tidy_signature(&file.language, signature)),
                     line: range.start,
-                    end: range.end,
                     local: parent.is_some_and(|parent| is_callable(&parent.kind)),
                     member: symbol.kind == SymbolKind::Method
                         || parent.is_some_and(|parent| !is_callable(&parent.kind)),
@@ -861,71 +866,6 @@ fn is_compatible(before: &Shape, after: &Shape) -> bool {
             .all(|name| after.varkw || after_keyword.contains_key(name))
 }
 
-/// The arguments of one call, as far as its text tells.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct CallArgs {
-    positional: usize,
-    keywords: Vec<String>,
-    /// An argument is unpacked (`*args`, `**kwargs`, `...items`): the count is unknown.
-    spread: bool,
-    /// The only argument is itself a call, which in Go may supply several values.
-    single_call: bool,
-}
-
-/// Reads the arguments of the call to `name` that starts on `line` (1-based).
-fn call_args(language: &Language, lines: &[&str], line: u32, name: &str) -> Option<CallArgs> {
-    let first = lines.get(line as usize - 1)?;
-    let offset = word_offsets(first, name).into_iter().find(|offset| {
-        let after = first[offset + name.len()..].trim_start();
-        after.starts_with('(') || after.starts_with("::<")
-    })?;
-    let mut text = first[offset + name.len()..].to_string();
-    for more in lines.iter().skip(line as usize).take(MAX_CALL_LINES) {
-        if text
-            .find('(')
-            .and_then(|open| balanced(&text, open))
-            .is_some()
-        {
-            break;
-        }
-        text.push('\n');
-        // A line comment would hide the rest of the call from the bracket count.
-        let code = match language {
-            Language::Python => more.split(" #").next().unwrap_or(more),
-            _ => more.split(" //").next().unwrap_or(more),
-        };
-        text.push_str(code);
-    }
-    let open = text.find('(')?;
-    let (inner, _) = balanced(&text, open)?;
-    let mut out = CallArgs::default();
-    let parts = split_top_level(inner);
-    for part in &parts {
-        if (part.starts_with('*') && *language == Language::Python)
-            || part.starts_with("...")
-            || (part.ends_with("...") && *language == Language::Go)
-        {
-            out.spread = true;
-            continue;
-        }
-        let keyword = match language {
-            Language::Python => part.split_once('=').and_then(|(key, value)| {
-                (is_identifier(key.trim()) && !value.starts_with('=')).then(|| key.trim())
-            }),
-            Language::CSharp => part.split_once(':').and_then(|(key, value)| {
-                (is_identifier(key.trim()) && !value.starts_with(':')).then(|| key.trim())
-            }),
-            _ => None,
-        };
-        match keyword {
-            Some(keyword) => out.keywords.push(keyword.to_string()),
-            None => out.positional += 1,
-        }
-    }
-    out.single_call = parts.len() == 1 && parts[0].ends_with(')');
-    Some(out)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Fit {
     Fits,
@@ -935,7 +875,7 @@ enum Fit {
 
 /// Whether `call` fits `shape`. `explicit_receiver` is a call that names the owner type and so
 /// may pass the receiver as its first argument.
-fn fit(language: &Language, shape: &Shape, call: &CallArgs, explicit_receiver: bool) -> Fit {
+fn fit(language: &Language, shape: &Shape, call: &CallArguments, explicit_receiver: bool) -> Fit {
     if call.spread {
         return Fit::Unknown("it unpacks an argument list");
     }
@@ -989,7 +929,11 @@ fn fit(language: &Language, shape: &Shape, call: &CallArgs, explicit_receiver: b
         }
         return Fit::Fits;
     }
-    let receiver_passed = shape.receiver && explicit_receiver && *language == Language::Rust;
+    // A Rust path call (`Type::method(value)`) and a C# extension method called on its class
+    // (`Ext.Trim(value)`) pass the receiver as the first argument.
+    let receiver_passed = shape.receiver
+        && explicit_receiver
+        && matches!(language, Language::Rust | Language::CSharp);
     let passed =
         (call.positional + call.keywords.len()).saturating_sub(usize::from(receiver_passed));
     let required = shape.params.iter().filter(|param| param.required).count();
@@ -1108,16 +1052,6 @@ fn is_comment_line(text: &str) -> bool {
         && !trimmed.starts_with("#include")
 }
 
-fn is_import_line(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    ["use ", "pub use ", "pub(crate) use ", "import ", "from ", "using "]
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
-        // `export { a } from './b'` re-exports; `export const a = f()` is code.
-        || (trimmed.starts_with("export ") && trimmed.contains(" from "))
-        || trimmed.contains("require(")
-}
-
 /// Names a language provides itself: a call of one is not evidence of a use of a declaration
 /// the repository once had under that name.
 const BUILTIN_NAMES: &[&str] = &[
@@ -1127,39 +1061,6 @@ const BUILTIN_NAMES: &[&str] = &[
     "range", "recover", "repr", "round", "set", "sorted", "str", "sum", "tuple", "type", "vars",
     "zip",
 ];
-
-/// Whether `line` (1-based) of a Python file is inside a triple-quoted string that an earlier
-/// line opened.
-fn in_python_docstring(text: &str, line: u32) -> bool {
-    let mut open: Option<&str> = None;
-    for source in text.lines().take(line as usize - 1) {
-        let mut rest = source;
-        loop {
-            match open {
-                Some(quote) => match rest.find(quote) {
-                    Some(at) => {
-                        rest = &rest[at + 3..];
-                        open = None;
-                    }
-                    None => break,
-                },
-                None => {
-                    let double = rest.find("\"\"\"");
-                    let single = rest.find("'''");
-                    let (at, quote) = match (double, single) {
-                        (Some(d), Some(s)) if s < d => (s, "'''"),
-                        (Some(d), _) => (d, "\"\"\""),
-                        (None, Some(s)) => (s, "'''"),
-                        (None, None) => break,
-                    };
-                    rest = &rest[at + 3..];
-                    open = Some(quote);
-                }
-            }
-        }
-    }
-    open.is_some()
-}
 
 /// Byte offsets of `name` as a whole word in `text`.
 fn word_offsets(text: &str, name: &str) -> Vec<usize> {
@@ -1172,41 +1073,6 @@ fn word_offsets(text: &str, name: &str) -> Vec<usize> {
         })
         .map(|(offset, _)| offset)
         .collect()
-}
-
-/// Whether the text that follows `before` on its line is inside a string literal: an odd
-/// number of double quotes (or backticks) stands before it, and it is not inside the braces of
-/// an interpolation (`f"{name(x)}"`, `` `${name(x)}` ``).
-fn in_string_literal(before: &str, single_quotes: bool) -> bool {
-    let quotes: &[char] = if single_quotes {
-        &['"', '`', '\'']
-    } else {
-        &['"', '`']
-    };
-    for quote in quotes.iter().copied() {
-        let mut count = 0usize;
-        let mut last = None;
-        let mut escaped = false;
-        for (offset, ch) in before.char_indices() {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == quote {
-                count += 1;
-                last = Some(offset);
-            }
-        }
-        if count % 2 == 1 {
-            let inside = &before[last.map(|offset| offset + 1).unwrap_or(0)..];
-            let opened = inside.matches('{').count();
-            let closed = inside.matches('}').count();
-            if opened <= closed {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// The names that can stand for the module a file declares in an import path or a qualifier:
@@ -1249,43 +1115,26 @@ fn mentions_any(text: &str, words: &BTreeSet<String>) -> bool {
 /// the declaring module or by a relative path, or brings in everything the declaring module
 /// has; `Some(false)` when one brings it in from somewhere else; `None` when none names it.
 /// A statement that names it decides before one that imports everything.
-fn import_evidence(text: &str, name: &str, modules: &BTreeSet<String>) -> Option<bool> {
+fn import_says(imports: &[String], name: &str, modules: &BTreeSet<String>) -> Option<bool> {
     let mut named: Option<bool> = None;
     let mut everything = false;
-    let lines = text.lines().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < lines.len() {
-        if !is_import_line(lines[index]) {
-            index += 1;
-            continue;
-        }
-        // An import may run over lines: until its brackets close.
-        let mut block = String::new();
-        let mut depth = 0i32;
-        loop {
-            let line = lines[index];
-            block.push_str(line);
-            block.push('\n');
-            depth += line.matches(['(', '{']).count() as i32;
-            depth -= line.matches([')', '}']).count() as i32;
-            index += 1;
-            if depth <= 0 || index >= lines.len() || block.len() > 4000 {
-                break;
-            }
-        }
-        let names_it = !word_offsets(&block, name).is_empty();
-        let glob = block.contains("::*") || block.contains("import *") || block.contains(".*;");
+    for statement in imports {
+        let names_it = !word_offsets(statement, name).is_empty();
+        let glob = statement.contains("::*")
+            || statement.contains("import *")
+            || statement.contains(".*;");
         if !names_it && !glob {
             continue;
         }
-        let relative = block.contains("from .")
-            || block.contains("'./")
-            || block.contains("\"./")
-            || block.contains("'../")
-            || block.contains("\"../")
-            || block.contains("super::")
-            || block.contains("self::");
-        let from_module = mentions_any(&block, modules);
+        let relative = statement.contains("from .")
+            || statement.contains("'./")
+            || statement.contains("\"./")
+            || statement.contains("'../")
+            || statement.contains("\"../")
+            || statement.contains("super::")
+            || statement.contains("self::")
+            || statement.contains("crate::");
+        let from_module = mentions_any(statement, modules);
         if names_it {
             named = Some(named.unwrap_or(false) || relative || from_module);
         } else if from_module {
@@ -1293,137 +1142,6 @@ fn import_evidence(text: &str, name: &str, modules: &BTreeSet<String>) -> Option
         }
     }
     named.or(everything.then_some(true))
-}
-
-/// The line without a comment that trails its code: from `//` (or `#` in Python) that stands
-/// outside a string. A name in such a comment is prose.
-fn without_trailing_comment<'a>(text: &'a str, language: &Language) -> &'a str {
-    let marker = if *language == Language::Python {
-        "#"
-    } else {
-        "//"
-    };
-    let single_quotes = matches!(
-        language,
-        Language::Python | Language::JavaScript | Language::TypeScript
-    );
-    for (offset, _) in text.match_indices(marker) {
-        let before = &text[..offset];
-        // `://` is a URL, and `#` after a name is not a comment.
-        if marker == "//" && before.ends_with(':') {
-            continue;
-        }
-        if marker == "#" && !before.chars().next_back().is_none_or(char::is_whitespace) {
-            continue;
-        }
-        if !in_string_literal(before, single_quotes) {
-            return before;
-        }
-    }
-    text
-}
-
-/// How one line uses a name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct Usage {
-    called: bool,
-    /// Reached through a receiver or a path: `x.name`, `x->name`, `m::name`.
-    on_receiver: bool,
-    /// Reached through a path rather than a value: `Type::name`.
-    by_path: bool,
-    /// The receiver is the instance itself: `self.name`, `this.name`, `Self::name`.
-    by_self: bool,
-    /// The path before it ends with the owner type's name: `Owner.name`, `Owner::name`.
-    by_owner: bool,
-    /// A declaration keyword stands before it: another declaration of the name.
-    declares: bool,
-    /// The qualifier is the crate or the enclosing module: `crate::name`, `super::name`.
-    by_scope: bool,
-}
-
-/// The last segment of the path a line reaches `name` through, if any.
-fn qualifier<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-    word_offsets(text, name).into_iter().find_map(|offset| {
-        let before = text[..offset].trim_end();
-        let path = before
-            .trim_end_matches("::")
-            .trim_end_matches("?.")
-            .trim_end_matches('.')
-            .trim_end_matches("->");
-        if path.len() == before.len() {
-            return None;
-        }
-        path.rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-            .next()
-            .filter(|segment| !segment.is_empty())
-    })
-}
-
-/// The first call of `name` on the line, or failing one its first use outside a string
-/// literal. `None` when every occurrence is quoted.
-///
-/// `single_quotes` is whether the language writes strings in single quotes (Python, JavaScript,
-/// TypeScript), where Rust writes lifetimes and the others characters.
-fn usage(text: &str, name: &str, owner: Option<&str>, single_quotes: bool) -> Option<Usage> {
-    let mut reference = None;
-    for offset in word_offsets(text, name) {
-        let after_raw = &text[offset + name.len()..];
-        let before_raw = &text[..offset];
-        let quoted = |ch: Option<char>| ch.is_some_and(|ch| matches!(ch, '"' | '\'' | '`'));
-        if quoted(before_raw.chars().next_back())
-            || quoted(after_raw.chars().next())
-            || in_string_literal(before_raw, single_quotes)
-        {
-            continue;
-        }
-        let after = after_raw.trim_start();
-        let before = before_raw.trim_end();
-        let path = before
-            .trim_end_matches("::")
-            .trim_end_matches("?.")
-            .trim_end_matches('.')
-            .trim_end_matches("->");
-        let on_receiver = path.len() != before.len();
-        let last = path
-            .rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == ')' || ch == '('))
-            .next()
-            .unwrap_or("");
-        let found = Usage {
-            called: after.starts_with('(') || after.starts_with("::<"),
-            on_receiver,
-            by_path: on_receiver && before.ends_with("::"),
-            by_self: on_receiver
-                && matches!(last, "self" | "Self" | "this" | "cls" | "super()" | "super"),
-            // `Owner.method` names the type only where a type can be called on, and a type is
-            // told from a variable by its capital.
-            by_owner: on_receiver
-                && owner.is_some_and(|owner| {
-                    last == owner && owner.chars().next().is_some_and(char::is_uppercase)
-                }),
-            by_scope: on_receiver && matches!(last, "crate" | "super"),
-            declares: !on_receiver
-                && matches!(
-                    last,
-                    "def"
-                        | "fn"
-                        | "function"
-                        | "func"
-                        | "class"
-                        | "struct"
-                        | "enum"
-                        | "trait"
-                        | "interface"
-                        | "type"
-                        | "const"
-                        | "static"
-                ),
-        };
-        if found.called || found.declares {
-            return Some(found);
-        }
-        reference.get_or_insert(found);
-    }
-    reference
 }
 
 fn clip(text: &str) -> String {
@@ -1499,7 +1217,10 @@ fn proven_sites(
             let Some(lines) = range.line_range.as_ref() else {
                 continue;
             };
-            sites.insert((slashed(range.path.as_path()), lines.start));
+            // A line of 0 names no line.
+            if lines.start > 0 {
+                sites.insert((slashed(range.path.as_path()), lines.start));
+            }
         }
     }
     Ok(Some(sites))
@@ -1542,22 +1263,16 @@ struct Target {
     site_name: String,
     /// A constructor, called through its type's name.
     constructor: bool,
+    /// The parameters as they were, and as they are.
+    before_shape: Option<Shape>,
     shape: Option<Shape>,
     language: Language,
     index_path: PathBuf,
     /// The declaring file is gone.
     file_deleted: bool,
-}
-
-struct SiteSearch<'a> {
-    repo: &'a Path,
-    store: Option<&'a dyn OkStore>,
-    diff: &'a [DiffFile],
-    /// Parsed declarations of files with a hit, kept across the declarations of one run.
-    parsed: BTreeMap<String, Option<Vec<Declared>>>,
-    texts: BTreeMap<String, Option<String>>,
-    /// Whether a dependency manifest names each module asked about.
-    dependencies: BTreeMap<String, bool>,
+    /// The type that declares it names a base: a member it stops declaring may still be
+    /// inherited.
+    owner_has_bases: bool,
 }
 
 /// Whether a dependency manifest of the working tree holds `name` as a word.
@@ -1590,526 +1305,517 @@ fn manifest_names(repo: &Path, name: &str) -> bool {
     .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
-impl SiteSearch<'_> {
-    fn text(&mut self, path: &str) -> Option<&str> {
-        let repo = self.repo;
-        self.texts
-            .entry(path.to_string())
-            .or_insert_with(|| fs::read_to_string(repo.join(path)).ok())
-            .as_deref()
-    }
-
-    fn declared_in(&mut self, path: &str) -> Option<&Vec<Declared>> {
-        if !self.parsed.contains_key(path) {
-            let parsed = if self.parsed.len() >= MAX_FILES_PARSED {
-                None
+/// The Go import path of the package a file is in: the `module` of the nearest `go.mod` above
+/// it and the directories between. `None` without a `go.mod`.
+fn go_import_path(repo: &Path, file: &str) -> Option<String> {
+    let mut dir = Path::new(file).parent()?;
+    loop {
+        if let Ok(text) = fs::read_to_string(repo.join(dir).join("go.mod")) {
+            let module = text
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("module "))?
+                .trim()
+                .trim_matches('"');
+            let below = Path::new(file).parent()?.strip_prefix(dir).ok()?;
+            let below = slashed(below);
+            return Some(if below.is_empty() {
+                module.to_string()
             } else {
-                self.text(path)
-                    .map(str::to_string)
-                    .and_then(|text| declarations(Path::new(path), &text))
-            };
-            self.parsed.insert(path.to_string(), parsed);
+                format!("{module}/{below}")
+            });
         }
-        self.parsed.get(path).and_then(Option::as_ref)
+        dir = dir.parent()?;
+    }
+}
+
+/// The last name of a receiver's text, and its first: `utils` and `click` of `click.utils`,
+/// `super()` of `super()`.
+fn receiver_ends(receiver: &str) -> (&str, &str) {
+    let is_separator = |ch: char| ch == '.' || ch == ':';
+    let first = receiver.split(is_separator).next().unwrap_or(receiver);
+    let last = receiver.rsplit(is_separator).next().unwrap_or(receiver);
+    (first.trim(), last.trim())
+}
+
+fn is_self_receiver(name: &str) -> bool {
+    matches!(name, "self" | "this" | "Self" | "cls")
+}
+
+fn is_parent_receiver(receiver: &str) -> bool {
+    let (first, _) = receiver_ends(receiver);
+    matches!(first, "super" | "super()" | "base") || receiver.starts_with("super(")
+}
+
+/// The facts of the files that hold a hit, read once for every name asked of them.
+struct SiteFiles<'a> {
+    repo: &'a Path,
+    facts: BTreeMap<String, Option<FileNameUses>>,
+    texts: BTreeMap<String, String>,
+    /// Whether a dependency manifest names each module asked about.
+    dependencies: BTreeMap<String, bool>,
+    go_imports: BTreeMap<String, Option<String>>,
+}
+
+impl SiteFiles<'_> {
+    /// Parses each file of `wanted` for the names asked of it, up to the limits.
+    fn read(&mut self, wanted: &BTreeMap<String, BTreeSet<String>>, deadline: std::time::Instant) {
+        for (path, names) in wanted {
+            let allowed = self.facts.values().flatten().count() < MAX_FILES_PARSED
+                && std::time::Instant::now() < deadline
+                && fs::metadata(self.repo.join(path))
+                    .is_ok_and(|meta| meta.len() <= MAX_FILE_BYTES);
+            let facts = allowed
+                .then(|| fs::read_to_string(self.repo.join(path)).ok())
+                .flatten()
+                .and_then(|text| {
+                    let facts = name_uses(&detect_language(Path::new(path)), &text, names);
+                    self.texts.insert(path.clone(), text);
+                    facts
+                });
+            self.facts.insert(path.clone(), facts);
+        }
     }
 
-    /// Whether something in the site's file leads to the declaring module: an import of the
-    /// name from it, a qualifier that names it, or a language rule that needs neither.
+    fn line(&self, path: &str, line: u32) -> String {
+        self.texts
+            .get(path)
+            .and_then(|text| text.lines().nth(line.checked_sub(1)? as usize))
+            .map(clip)
+            .unwrap_or_default()
+    }
+
+    /// How a site that is not through a member's owner reaches the declaring module, if it
+    /// does: an import of the name from it, a qualifier an import binds to it, or a language
+    /// rule that needs neither.
     fn reaches(
         &mut self,
-        hit: &Hit,
-        usage: Usage,
+        path: &str,
+        found: &NameUse,
         name: &str,
         modules: &BTreeSet<String>,
-        language: &Language,
         declaring_path: &str,
     ) -> bool {
-        if usage.on_receiver {
-            return usage.by_scope
-                || qualifier(&hit.text, name).is_some_and(|segment| modules.contains(segment));
-        }
+        let Some(Some(facts)) = self.facts.get(path) else {
+            return false;
+        };
+        let language = detect_language(Path::new(path));
         let directory = |path: &str| path.rsplit_once('/').map(|(dir, _)| dir.to_string());
-        let same_directory = directory(&hit.path) == directory(declaring_path);
-        match language {
-            // A namespace is opened whole; no statement names the declaration.
-            Language::CSharp => true,
-            // A package is a directory: its files see each other, and others must qualify. A
-            // file that imports a package of the name means the package.
-            Language::Go => {
-                same_directory
-                    && self
-                        .text(&hit.path)
-                        .and_then(|text| import_evidence(text, name, modules))
-                        != Some(false)
-            }
-            _ => {
-                let evidence = self
-                    .text(&hit.path)
-                    .and_then(|text| import_evidence(text, name, modules));
-                match evidence {
-                    Some(ours) => ours,
-                    None => *language == Language::Java && same_directory,
+        let same_directory = directory(path) == directory(declaring_path);
+        if found.kind == NameUseKind::Import {
+            // The import statement itself: it is a use of the declaration only when it imports
+            // from the declaring module.
+            return import_says(&facts.imports, name, modules) == Some(true)
+                || (path == declaring_path);
+        }
+        match &found.reached {
+            Reached::Bare => {
+                // The file has a variable, a parameter or a field of the name of its own.
+                if facts.bound.contains(name) {
+                    return false;
                 }
+                if path == declaring_path {
+                    return true;
+                }
+                match language {
+                    // A namespace is opened whole; no statement names the declaration.
+                    Language::CSharp => true,
+                    // A package is a directory: its files see each other, and others must
+                    // qualify. A file that imports a package of the name means the package.
+                    Language::Go => {
+                        same_directory && import_says(&facts.imports, name, modules) != Some(false)
+                    }
+                    _ => match import_says(&facts.imports, name, modules) {
+                        Some(ours) => ours,
+                        None => language == Language::Java && same_directory,
+                    },
+                }
+            }
+            Reached::Member(receiver) => {
+                let (first, last) = receiver_ends(receiver);
+                // The qualifier is a value of this file, or names no module of the declaration.
+                if facts.bound.contains(first) || !modules.contains(last) {
+                    return false;
+                }
+                match language {
+                    Language::Go => {
+                        // Only the import of the declaring package's own path binds the
+                        // qualifier to it: `http` may be `net/http`.
+                        let expected = self
+                            .go_imports
+                            .entry(declaring_path.to_string())
+                            .or_insert_with(|| go_import_path(self.repo, declaring_path))
+                            .clone();
+                        expected.is_some_and(|expected| {
+                            let quoted = format!("\"{expected}\"");
+                            facts.imports.iter().any(|import| {
+                                import.contains(&quoted)
+                                    && import.split_whitespace().next().is_none_or(|alias| {
+                                        alias.starts_with('"') || alias == first
+                                    })
+                            })
+                        })
+                    }
+                    // The qualifier is the type, which its file is named after.
+                    Language::Java | Language::CSharp => true,
+                    // An import has to bind the qualifier.
+                    _ => facts
+                        .imports
+                        .iter()
+                        .any(|import| !word_offsets(import, first).is_empty()),
+                }
+            }
+            Reached::Path(path_text) => {
+                let (first, last) = receiver_ends(path_text);
+                let scope = |segment: &str| matches!(segment, "crate" | "self" | "super");
+                let last_is_ours = modules.contains(last) || scope(last);
+                let first_is_known = scope(first)
+                    || modules.contains(first)
+                    || facts
+                        .imports
+                        .iter()
+                        .any(|import| !word_offsets(import, first).is_empty());
+                last_is_ours && first_is_known && !facts.bound.contains(first)
             }
         }
     }
+}
 
-    fn changed(&self, path: &str) -> Option<&DiffFile> {
-        self.diff.iter().find(|entry| {
+/// Decides, for one changed declaration, which of the uses of its name are broken sites.
+#[allow(clippy::too_many_arguments)]
+fn classify_sites(
+    files: &mut SiteFiles<'_>,
+    diff: &[DiffFile],
+    proven: Option<&BTreeSet<(String, u32)>>,
+    contract: &mut ChangedContract,
+    target: &Target,
+    hits: &[Hit],
+    too_common: bool,
+) {
+    let declared = &target.declared;
+    let name = target.site_name.as_str();
+    let removed = contract.change == ContractChange::Removed;
+    let member = declared.member && !target.constructor;
+    let callable = is_callable(&declared.kind) || target.constructor;
+    let owner = if target.constructor {
+        None
+    } else {
+        declared.owner.as_deref()
+    };
+    let builtin = BUILTIN_NAMES.contains(&name);
+    let mut modules = module_names(&contract.path);
+    if target.file_deleted {
+        // A module that is gone may have given way to a dependency of the same name (a
+        // vendored copy replaced by the package): an import by that name then resolves, and
+        // is no evidence of a use of what was removed.
+        let repo = files.repo;
+        modules.retain(|module| {
+            !*files.dependencies.entry(module.clone()).or_insert_with(|| {
+                manifest_names(repo, module) || manifest_names(repo, &module.replace('_', "-"))
+            })
+        });
+    }
+
+    let mut by_file: BTreeMap<&str, Vec<&Hit>> = BTreeMap::new();
+    for hit in hits {
+        by_file.entry(hit.path.as_str()).or_default().push(hit);
+    }
+    if too_common {
+        contract.possible_omitted = hits
+            .iter()
+            .filter(|hit| is_supported_code(&detect_language(Path::new(&hit.path))))
+            .count();
+        contract.note = Some(format!(
+            "`{name}` appears on more than {MAX_NAME_HITS} lines; its sites were not read"
+        ));
+        return;
+    }
+
+    // Another declaration of the name anywhere means the name does not settle a reference to a
+    // free function or a type. A member is attributed through its owner, whatever else shares
+    // its name.
+    let mut shared = false;
+    let mut shared_in_owner = false;
+    let mut unread = 0usize;
+    let mut candidates: Vec<(String, NameUse)> = Vec::new();
+    for (path, file_hits) in &by_file {
+        if !is_supported_code(&detect_language(Path::new(path))) {
+            if removed {
+                contract.other_mentions += file_hits
+                    .iter()
+                    .filter(|hit| !is_comment_line(&hit.text))
+                    .count();
+            }
+            continue;
+        }
+        if skips_path(path) {
+            continue;
+        }
+        let Some(Some(facts)) = files.facts.get(*path) else {
+            unread += file_hits.len();
+            continue;
+        };
+        let uses = facts.uses.get(name).map(Vec::as_slice).unwrap_or_default();
+        if removed {
+            // A line the search found with no identifier of the name on it: a string or a
+            // comment.
+            contract.other_mentions += file_hits
+                .iter()
+                .filter(|hit| !uses.iter().any(|found| found.line == hit.line))
+                .count();
+        }
+        for found in uses {
+            match found.kind {
+                NameUseKind::Declaration { binding: false } => {
+                    // The changed declaration itself, where it still stands, is not another
+                    // one; nor is the type whose constructor changed.
+                    let is_self = *path == contract.path
+                        && !removed
+                        && (target.constructor || contract.line == Some(found.line));
+                    if !is_self {
+                        shared = true;
+                        shared_in_owner |= owner.is_some() && found.within_type.as_deref() == owner;
+                    }
+                }
+                NameUseKind::Declaration { binding: true } => {
+                    // `export const run = create(...)` in another module: the name a removed
+                    // function had is bound for a whole module again.
+                    if removed
+                        && *path != contract.path
+                        && found.within_callable.is_none()
+                        && found.within_type.is_none()
+                    {
+                        shared = true;
+                    }
+                }
+                NameUseKind::Label => {}
+                _ => candidates.push((path.to_string(), found.clone())),
+            }
+        }
+    }
+    contract.possible_omitted += unread;
+    // With a file that holds the name unread, whether another declaration shares it is not
+    // known. A removed method that its type declares elsewhere has moved (to another file of a
+    // partial class), and a removed type or constant whose name is declared elsewhere may now
+    // mean that one, whatever it was nested in.
+    let moved = removed
+        && if member && callable {
+            shared_in_owner
+        } else {
+            shared
+        };
+    let unsettled = unread > 0 || moved;
+
+    let mut seen = BTreeSet::new();
+    let mut broken = Vec::new();
+    let mut possible = Vec::new();
+    for (path, found) in candidates {
+        let called = matches!(found.kind, NameUseKind::Call(_));
+        let imported = found.kind == NameUseKind::Import;
+        if !removed && !called {
+            // A changed signature leaves an import, and a function passed by name, valid.
+            continue;
+        }
+        if removed && callable && !called && !imported {
+            // The bare name of a removed function is as likely a field or a local variable of
+            // that name as the function passed by value.
+            continue;
+        }
+        if let Reached::Member(receiver) | Reached::Path(receiver) = &found.reached {
+            // `super().get(id)` and `base.Run()` are the parent's member, never this one.
+            if member && is_parent_receiver(receiver) {
+                continue;
+            }
+        }
+        if !seen.insert((path.clone(), found.line)) {
+            continue;
+        }
+        let site_language = detect_language(Path::new(&path));
+        let changed = diff.iter().find(|entry| {
             entry
                 .new_path
                 .as_ref()
                 .is_some_and(|new| slashed(new) == path)
-        })
-    }
-
-    fn fill(&mut self, contract: &mut ChangedContract, target: &Target) -> Result<()> {
-        let declared = &target.declared;
-        let name = target.site_name.as_str();
-        if !is_identifier(name) {
-            contract.note =
-                Some("the name is not an identifier; its sites were not searched".into());
-            return Ok(());
-        }
-        let hits = name_hits(self.repo, name)?;
-        let proven = match self.store {
-            Some(store) if !target.constructor => {
-                proven_sites(store, &target.index_path, declared, contract.change)?
-            }
-            _ => None,
-        };
-        let too_common = hits.len() > MAX_NAME_HITS;
-        let removed = contract.change == ContractChange::Removed;
-        // A member of a type, callable or not, is reached through the type or an instance.
-        let method = declared.member && !target.constructor;
-        let callable = is_callable(&declared.kind);
-        let builtin = BUILTIN_NAMES.contains(&name);
-        let owner = if target.constructor {
-            None
-        } else {
-            declared.owner.as_deref()
-        };
-
-        let mut modules = module_names(&contract.path);
-        if target.file_deleted {
-            // A module that is gone may have given way to a dependency of the same name (a
-            // vendored copy replaced by the package): an import by that name then resolves,
-            // and is no evidence of a use of what was removed.
-            let repo = self.repo;
-            modules.retain(|module| {
-                !*self.dependencies.entry(module.clone()).or_insert_with(|| {
-                    // A package `proc-macro2` is the module `proc_macro2`.
-                    manifest_names(repo, module) || manifest_names(repo, &module.replace('_', "-"))
-                })
-            });
-        }
-        // Another declaration of the name anywhere means the name does not settle a reference.
-        let mut shared = false;
-        let mut candidates = Vec::new();
-        for hit in hits {
-            let language = detect_language(Path::new(&hit.path));
-            if !is_supported_code(&language) {
-                if removed && !is_comment_line(&hit.text) {
-                    contract.other_mentions += 1;
-                }
-                continue;
-            }
-            if skips_path(&hit.path) {
-                continue;
-            }
-            let own_file = hit.path == contract.path;
-            let declarations = if too_common {
-                None
-            } else {
-                self.declared_in(&hit.path).cloned()
-            };
-            let declared_here = declarations.as_ref().and_then(|declarations| {
-                declarations
-                    .iter()
-                    .find(|other| other.name == name && other.line == hit.line && !other.local)
-            });
-            if let Some(other) = declared_here {
-                // The changed declaration itself, where it still stands, is not another one;
-                // nor is the type whose constructor changed.
-                let is_self = own_file
-                    && !removed
-                    && (target.constructor
-                        || (contract.line == Some(hit.line) && other.owner == contract.owner));
-                if !is_self {
-                    shared = true;
-                }
-                continue;
-            }
-            if is_comment_line(&hit.text) {
-                continue;
-            }
-            let single_quotes = matches!(
-                language,
-                Language::Python | Language::JavaScript | Language::TypeScript
-            );
-            let code = without_trailing_comment(&hit.text, &language);
-            if word_offsets(code, name).is_empty() {
-                // Named only in the comment after the code.
-                continue;
-            }
-            let Some(usage) = usage(code, name, owner, single_quotes) else {
-                if removed {
-                    contract.other_mentions += 1;
-                }
-                continue;
-            };
-            if usage.declares {
-                // A declaration the parser did not report (the file did not parse).
-                if !(own_file && contract.line == Some(hit.line)) {
-                    shared = true;
-                }
-                continue;
-            }
-            if !removed && (!usage.called || is_import_line(&hit.text)) {
-                // A changed signature leaves an import, and a function passed by name, valid.
-                continue;
-            }
-            if removed && callable && !usage.called && !is_import_line(&hit.text) {
-                // The bare name of a removed function is as likely a field or a local variable
-                // of that name as the function passed by value.
-                continue;
-            }
-            if language == Language::Python
-                && self
-                    .text(&hit.path)
-                    .is_some_and(|text| in_python_docstring(text, hit.line))
-            {
-                if removed {
-                    contract.other_mentions += 1;
-                }
-                continue;
-            }
-            let within = declarations.as_ref().and_then(|declarations| {
-                declarations
-                    .iter()
-                    .filter(|other| other.line <= hit.line && other.end >= hit.line)
-                    .filter(|other| is_callable(&other.kind) || is_contract_kind(&other.kind))
-                    .max_by_key(|other| other.line)
-                    .map(|other| match &other.owner {
-                        Some(owner) => format!("{owner}.{}", other.name),
-                        None => other.name.clone(),
-                    })
-            });
-            candidates.push((hit, usage, within, language));
-        }
-
-        let owner_imported = match (owner, self.text(&contract.path)) {
-            (Some(owner), Some(text)) => import_evidence(text, owner, &BTreeSet::new()).is_some(),
-            _ => false,
-        };
-        let mut seen = BTreeSet::new();
-        let mut broken = Vec::new();
-        let mut possible = Vec::new();
-        for (hit, usage, within, language) in candidates {
-            if !seen.insert((hit.path.clone(), hit.line)) {
-                continue;
-            }
-            let before_line = line_before(self.changed(&hit.path), hit.line);
-            let proven_here = proven.as_ref().is_some_and(|sites| {
-                sites.contains(&(hit.path.clone(), hit.line))
-                    || sites.contains(&(hit.path.clone(), before_line))
-            });
-            let mut evidence = if proven_here {
-                SiteEvidence::Proven
-            } else if too_common || shared || builtin {
-                SiteEvidence::Possible
-            } else if !method
-                && !usage.on_receiver
-                && self.text(&hit.path).is_some_and(|text| shadows(text, name))
-            {
-                // The file has a variable or a parameter of this name of its own.
-                SiteEvidence::Possible
-            } else if !method
-                && (hit.path != contract.path || usage.on_receiver)
-                && !self.reaches(&hit, usage, name, &modules, &language, &contract.path)
-            {
-                // Nothing leads from this file to the declaring module: no import of the name
-                // from it, no qualifier that names it. Something else of the name is meant.
-                SiteEvidence::Possible
-            } else if method
-                && usage.on_receiver
-                && !(usage.by_owner && language != Language::Go)
-                && !(usage.by_self
-                    && within.as_ref().is_some_and(|within| {
+        });
+        let proven_here = proven.is_some_and(|sites| {
+            sites.contains(&(path.clone(), found.line))
+                || sites.contains(&(path.clone(), line_before(changed, found.line)))
+        });
+        let attributed = if found.in_error || builtin || unsettled {
+            false
+        } else if member {
+            let in_owner = owner.is_some() && found.within_type.as_deref() == owner;
+            // A member the type no longer declares may still be inherited.
+            let inherited = removed && target.owner_has_bases;
+            match &found.reached {
+                Reached::Member(receiver) | Reached::Path(receiver) => {
+                    let (_, last) = receiver_ends(receiver);
+                    if is_self_receiver(last) {
+                        in_owner && !inherited
+                    } else {
+                        // `Owner.method`: a type is told from a variable by its capital, and
+                        // Go has no call on a type.
                         owner.is_some_and(|owner| {
-                            within
-                                .strip_prefix(owner)
-                                .is_some_and(|rest| rest.starts_with('.'))
+                            last == owner
+                                && owner.starts_with(char::is_uppercase)
+                                && site_language != Language::Go
                         })
-                    }))
-            {
-                // A method reached through a receiver is anyone's method of that name, unless
-                // the receiver is the owner type, or the instance inside the owner type.
-                SiteEvidence::Possible
-            } else if method && owner_imported {
-                // The declaring file also brings its owner's name in from elsewhere: which
-                // of the two a site means is not settled by the name.
-                SiteEvidence::Possible
-            } else if method && !usage.on_receiver && language != Language::Rust {
-                // A bare name is a member only inside its own type, which Rust alone writes
-                // without a receiver; elsewhere it may be inherited, or declared in another
-                // part of the type, and the file that lost it says nothing about that.
-                SiteEvidence::Possible
-            } else {
-                SiteEvidence::Name
-            };
-            let problem = if removed {
-                match &contract.renamed_to {
-                    Some(renamed) => format!("still names `{name}`, which is now `{renamed}`"),
-                    None => format!("still names `{name}`, which this change removed"),
-                }
-            } else {
-                let Some(shape) = target.shape.as_ref() else {
-                    continue;
-                };
-                let call = match self.text(&hit.path) {
-                    Some(text) => {
-                        let lines = text.lines().collect::<Vec<_>>();
-                        call_args(&language, &lines, hit.line, name)
-                    }
-                    None => continue,
-                };
-                let explicit_receiver = usage.by_owner || usage.by_path;
-                match call.map(|call| fit(&target.language, shape, &call, explicit_receiver)) {
-                    Some(Fit::Fits) => {
-                        if evidence != SiteEvidence::Possible {
-                            contract.sites_fitting += 1;
-                        }
-                        continue;
-                    }
-                    Some(Fit::Breaks(problem)) => problem,
-                    Some(Fit::Unknown(why)) => {
-                        evidence = SiteEvidence::Possible;
-                        format!("could not be checked: {why}")
-                    }
-                    None => {
-                        evidence = SiteEvidence::Possible;
-                        "could not be checked: its arguments could not be read".to_string()
                     }
                 }
-            };
-            let site = RippleSite {
-                path: hit.path,
-                line: hit.line,
-                within,
-                text: clip(&hit.text),
-                evidence,
-                problem,
-            };
-            if evidence == SiteEvidence::Possible {
-                possible.push(site);
-            } else {
-                broken.push(site);
+                // Java and C# call a member of the same type by its bare name.
+                Reached::Bare => {
+                    in_owner
+                        && !inherited
+                        && matches!(site_language, Language::Java | Language::CSharp)
+                }
             }
-        }
-
-        // A use of a removed declaration that the index proved and the name did not find: made
-        // through an alias.
-        if let (Some(sites), true) = (&proven, removed) {
-            for (path, line) in sites {
-                // The index's line may be from either side of a changed file; without the name
-                // on it there is nothing to anchor the site to.
-                if seen.contains(&(path.clone(), *line))
-                    || skips_path(path)
-                    || self.changed(path).is_some()
-                {
-                    continue;
-                }
-                let Some(source) = self
-                    .text(path)
-                    .and_then(|text| text.lines().nth(*line as usize - 1))
-                    .map(str::to_string)
-                else {
-                    continue;
-                };
-                if !word_offsets(&source, name).is_empty() {
-                    continue;
-                }
-                seen.insert((path.clone(), *line));
-                broken.push(RippleSite {
-                    path: path.clone(),
-                    line: *line,
-                    within: None,
-                    text: clip(&source),
-                    evidence: SiteEvidence::Proven,
-                    problem: format!("the index proved a use of `{name}` here, under another name"),
-                });
-            }
-        }
-
-        let order = |a: &RippleSite, b: &RippleSite| {
-            a.evidence
-                .cmp(&b.evidence)
-                .then_with(|| a.path.cmp(&b.path))
-                .then_with(|| a.line.cmp(&b.line))
+        } else {
+            !shared && files.reaches(&path, &found, name, &modules, &contract.path)
         };
-        broken.sort_by(order);
-        possible.sort_by(order);
-        contract.broken_omitted = broken.len().saturating_sub(MAX_SITES_LISTED);
-        broken.truncate(MAX_SITES_LISTED);
-        contract.possible_omitted = possible.len().saturating_sub(MAX_SITES_LISTED);
-        possible.truncate(MAX_SITES_LISTED);
-        contract.broken = broken;
-        contract.possible = possible;
-        if too_common {
-            contract.note = Some(format!(
-                "`{name}` appears on more than {MAX_NAME_HITS} lines; only sites the index \
-                 proved are counted"
-            ));
-        } else if shared {
-            contract.note = Some(format!(
-                "another declaration is also named `{name}`{}; sites the index did not prove \
-                 are listed as possible",
-                if removed { " (it may have moved)" } else { "" }
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// Whether `text` still declares or binds `name`: `var name =`, `name := ...`,
-/// `const name: T =`, `type name ...`, `func name(`. A declaration the parser reports under
-/// another kind, or does not report, is still a declaration.
-fn binds_name(text: &str, name: &str) -> bool {
-    text.lines().any(|line| binding_of(line, name).is_some())
-}
-
-/// How a line binds `name`, if it does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Binding {
-    /// `type name`, `class name`, `fn name`: a declaration.
-    Declaration,
-    /// `name := ...`, `let name = ...`, `for name in ...`, `name, err := ...`: a variable.
-    Variable,
-}
-
-fn binding_of(line: &str, name: &str) -> Option<Binding> {
-    // An attribute given a value on the instance (`self.name = ...`) binds the name as a
-    // method of that name would.
-    let mut rest = line.trim_start();
-    for instance in ["self.", "this."] {
-        rest = rest.strip_prefix(instance).unwrap_or(rest);
-    }
-    let mut declares = false;
-    let mut introduces = false;
-    loop {
-        let mut stripped = false;
-        for keyword in [
-            "export ",
-            "default ",
-            "pub ",
-            "pub(crate) ",
-            "public ",
-            "private ",
-            "protected ",
-            "static ",
-            "final ",
-            "abstract ",
-            "async ",
-            "unsafe ",
-        ] {
-            if let Some(after) = rest.strip_prefix(keyword) {
-                rest = after.trim_start();
-                stripped = true;
+        let mut evidence = if proven_here {
+            SiteEvidence::Proven
+        } else if attributed {
+            SiteEvidence::Name
+        } else {
+            SiteEvidence::Possible
+        };
+        let problem = if removed {
+            match &contract.renamed_to {
+                Some(renamed) => format!("still names `{name}`, which is now `{renamed}`"),
+                None => format!("still names `{name}`, which this change removed"),
             }
-        }
-        for keyword in [
-            "type ",
-            "class ",
-            "struct ",
-            "enum ",
-            "trait ",
-            "interface ",
-            "def ",
-            "fn ",
-            "func ",
-            "function ",
-        ] {
-            if let Some(after) = rest.strip_prefix(keyword) {
-                rest = after.trim_start();
-                declares = true;
-                stripped = true;
+        } else {
+            let (Some(shape), NameUseKind::Call(call)) = (target.shape.as_ref(), &found.kind)
+            else {
+                continue;
+            };
+            // A Rust path call and a call on the owner type pass the receiver themselves.
+            let explicit_receiver = match &found.reached {
+                Reached::Path(_) => true,
+                Reached::Member(receiver) => {
+                    owner.is_some_and(|owner| receiver_ends(receiver).1 == owner)
+                }
+                Reached::Bare => false,
+            };
+            match fit(&target.language, shape, call, explicit_receiver) {
+                Fit::Fits => {
+                    if evidence != SiteEvidence::Possible {
+                        contract.sites_fitting += 1;
+                    }
+                    continue;
+                }
+                Fit::Unknown(why) => {
+                    evidence = SiteEvidence::Possible;
+                    format!("could not be checked: {why}")
+                }
+                Fit::Breaks(problem) => {
+                    // A call that did not fit the declaration as it was is not one this
+                    // change broke: it is not a call of this declaration, or it is read wrong.
+                    let fit_before = target
+                        .before_shape
+                        .as_ref()
+                        .map(|before| fit(&target.language, before, call, explicit_receiver));
+                    if fit_before != Some(Fit::Fits) {
+                        evidence = SiteEvidence::Possible;
+                        format!(
+                            "{problem}; it did not fit the declaration before this change either"
+                        )
+                    } else {
+                        problem
+                    }
+                }
             }
+        };
+        let site = RippleSite {
+            text: files.line(&path, found.line),
+            path,
+            line: found.line,
+            within: found.within(),
+            evidence,
+            problem,
+        };
+        if evidence == SiteEvidence::Possible {
+            possible.push(site);
+        } else {
+            broken.push(site);
         }
-        for keyword in ["var ", "let ", "const ", "mut ", "for ", "with "] {
-            if let Some(after) = rest.strip_prefix(keyword) {
-                rest = after.trim_start();
-                introduces = true;
-                stripped = true;
+    }
+
+    // A use of a removed declaration that the index proved and the name did not find: made
+    // through an alias.
+    if let (Some(sites), true) = (proven, removed) {
+        for (path, line) in sites {
+            // The index's line may be from either side of a changed file; without the name on
+            // it there is nothing to anchor the site to.
+            let changed = diff.iter().any(|entry| {
+                entry
+                    .new_path
+                    .as_ref()
+                    .is_some_and(|new| &slashed(new) == path)
+            });
+            if seen.contains(&(path.clone(), *line)) || skips_path(path) || changed {
+                continue;
             }
-        }
-        if !stripped {
-            break;
-        }
-    }
-    // `name, err := f()`: the name may stand anywhere in the list being bound.
-    let targets = rest
-        .split_once(":=")
-        .or_else(|| rest.split_once(" = "))
-        .or_else(|| rest.split_once(" in "))
-        .map(|(targets, _)| targets);
-    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$';
-    let starts = rest
-        .strip_prefix(name)
-        .filter(|after| !after.chars().next().is_some_and(is_word));
-    if declares {
-        return starts.map(|_| Binding::Declaration);
-    }
-    if let Some(after) = starts {
-        let after = after.trim_start();
-        let bound = (after.starts_with('=') && !after.starts_with("=="))
-            || after.starts_with(":=")
-            || after.starts_with(',')
-            || (introduces && (after.starts_with(':') || after.starts_with(" in ")))
-            || (after.starts_with(':') && !after.starts_with("::") && introduces);
-        if bound {
-            return Some(Binding::Variable);
+            let Some(source) = line.checked_sub(1).and_then(|index| {
+                fs::read_to_string(files.repo.join(path))
+                    .ok()?
+                    .lines()
+                    .nth(index as usize)
+                    .map(str::to_string)
+            }) else {
+                continue;
+            };
+            if !word_offsets(&source, name).is_empty() {
+                continue;
+            }
+            seen.insert((path.clone(), *line));
+            broken.push(RippleSite {
+                path: path.clone(),
+                line: *line,
+                within: None,
+                text: clip(&source),
+                evidence: SiteEvidence::Proven,
+                problem: format!("the index proved a use of `{name}` here, under another name"),
+            });
         }
     }
-    let listed = targets.is_some_and(|targets| {
-        targets.contains(',')
-            && targets
-                .split(',')
-                .any(|target| target.trim().trim_start_matches("mut ") == name)
-    });
-    (listed || (introduces && starts.is_some())).then_some(Binding::Variable)
-}
 
-/// Whether `text` gives `name` to a variable or a parameter of its own, which a bare use in
-/// the file may then mean.
-fn shadows(text: &str, name: &str) -> bool {
-    text.lines().any(|line| {
-        binding_of(line, name) == Some(Binding::Variable)
-            || (line.contains("def ")
-                || line.contains("fn ")
-                || line.contains("func ")
-                || line.contains("function ")
-                || line.contains("=>"))
-                && parameter_named(line, name)
-    })
-}
-
-/// Whether a function header on `line` has a parameter called `name`.
-fn parameter_named(line: &str, name: &str) -> bool {
-    let Some(open) = line.find('(') else {
-        return false;
+    let order = |a: &RippleSite, b: &RippleSite| {
+        a.evidence
+            .cmp(&b.evidence)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.line.cmp(&b.line))
     };
-    let Some((inner, _)) = balanced(line, open) else {
-        return false;
-    };
-    split_top_level(inner).iter().any(|param| {
-        param
-            .trim_start_matches(['*', '&', '.'])
-            .trim_start_matches("mut ")
-            .split([':', '=', ' ', '?'])
-            .next()
-            == Some(name)
-    })
+    broken.sort_by(order);
+    possible.sort_by(order);
+    contract.broken_omitted = broken.len().saturating_sub(MAX_SITES_LISTED);
+    broken.truncate(MAX_SITES_LISTED);
+    contract.possible_omitted += possible.len().saturating_sub(MAX_SITES_LISTED);
+    possible.truncate(MAX_SITES_LISTED);
+    contract.broken = broken;
+    contract.possible = possible;
+    if moved || (shared && !member) {
+        contract.note = Some(format!(
+            "another declaration is also named `{name}`{}; sites the index did not prove are \
+             listed as possible",
+            if removed { " (it may have moved)" } else { "" }
+        ));
+    } else if unread > 0 {
+        contract.note = Some(format!(
+            "{unread} line(s) that hold `{name}` are in files that were not read (past the \
+             limits of one run); they are counted as possible"
+        ));
+    }
+}
+
+/// Whether line `line` of `text` assigns to `name` through the instance: `self.name = ...`.
+fn assigned_on(text: Option<&str>, line: u32, name: &str) -> bool {
+    text.and_then(|text| text.lines().nth(line.checked_sub(1)? as usize))
+        .is_some_and(|source| {
+            word_offsets(source, name).into_iter().any(|offset| {
+                let after = source[offset + name.len()..].trim_start();
+                after.starts_with('=') && !after.starts_with("==")
+            })
+        })
 }
 
 type DeclaredKey = (Option<String>, String, &'static str);
@@ -2181,6 +1887,9 @@ pub fn ripple(
     let mut files_examined = 0usize;
     let mut found: Vec<(ChangedContract, Target)> = Vec::new();
     let mut unparsed = Vec::new();
+    let started = std::time::Instant::now();
+    let deadline = started + SEARCH_BUDGET;
+    let mut files_skipped = 0usize;
     for entry in &diff {
         if matches!(entry.status, GitChangeKind::Added | GitChangeKind::Copied) || entry.binary {
             continue;
@@ -2198,6 +1907,12 @@ pub fn ripple(
         }
         let language = detect_language(old_path);
         if !is_supported_code(&language) || skips_path(&old) {
+            continue;
+        }
+        // A change of thousands of files is compared up to a limit and a time: a hook waits
+        // on this.
+        if files_examined >= MAX_CHANGED_FILES || std::time::Instant::now() > deadline {
+            files_skipped += 1;
             continue;
         }
         let Some(before_text) = file_at(repo, &base, old_path) else {
@@ -2222,6 +1937,14 @@ pub fn ripple(
         };
         files_examined += 1;
         let current_path = new.clone().unwrap_or_else(|| old.clone());
+        // What the file still binds under each name it declared, and which of its types name a
+        // base: read from the trees, once, when a declaration is gone.
+        let mut after_facts: Option<Option<FileNameUses>> = None;
+        let mut before_facts: Option<Option<FileNameUses>> = None;
+        let declared_names = before
+            .iter()
+            .map(|declared| declared.name.clone())
+            .collect::<BTreeSet<_>>();
         let key = |declared: &Declared| -> DeclaredKey {
             (
                 declared.owner.clone(),
@@ -2267,14 +1990,36 @@ pub fn ripple(
             let (change, after_declared) = match (group.as_slice(), now) {
                 // A removed constructor leaves the default one; nothing names it.
                 (_, []) if special => continue,
-                // Still declared under the name, as another kind of thing (a function that
-                // became a variable holding one): what uses it is not known to be broken.
+                // Still bound under the name: declared as another kind of thing (a function
+                // that became a variable holding one, a method that became an attribute),
+                // imported in its place, or exported under it. What uses the name is then not
+                // known to be broken.
                 (_, [])
                     if after.iter().any(|other| {
                         other.name == declared.name && other.owner == declared.owner
-                    }) || after_text
-                        .as_deref()
-                        .is_some_and(|text| binds_name(text, &declared.name)) =>
+                    }) || after_facts
+                        .get_or_insert_with(|| {
+                            after_text
+                                .as_deref()
+                                .and_then(|text| name_uses(&language, text, &declared_names))
+                        })
+                        .as_ref()
+                        .and_then(|facts| facts.uses.get(&declared.name))
+                        .is_some_and(|uses| {
+                            uses.iter().any(|found| {
+                                matches!(
+                                    found.kind,
+                                    NameUseKind::Declaration { .. } | NameUseKind::Import
+                                ) || (declared.member
+                                    && matches!(&found.reached, Reached::Member(receiver)
+                                        if is_self_receiver(receiver_ends(receiver).1))
+                                    && assigned_on(
+                                        after_text.as_deref(),
+                                        found.line,
+                                        &declared.name,
+                                    ))
+                            })
+                        }) =>
                 {
                     continue
                 }
@@ -2334,6 +2079,16 @@ pub fn ripple(
                 other_mentions: 0,
                 note: None,
             };
+            let owner_has_bases = declared.owner.as_ref().is_some_and(|owner| {
+                before_facts
+                    .get_or_insert_with(|| name_uses(&language, &before_text, &BTreeSet::new()))
+                    .as_ref()
+                    .is_some_and(|facts| facts.types_with_bases.contains(owner))
+            });
+            let (before_shape, after_shape) = match shapes {
+                Some((before, after)) => (Some(before), Some(after)),
+                None => (None, None),
+            };
             let target = Target {
                 site_name: if constructor {
                     declared.owner.clone().unwrap_or_default()
@@ -2341,10 +2096,12 @@ pub fn ripple(
                     declared.name.clone()
                 },
                 constructor,
-                shape: shapes.map(|(_, after)| after),
+                before_shape,
+                shape: after_shape,
                 language: language.clone(),
                 index_path: old_path.clone(),
                 file_deleted: new.is_none(),
+                owner_has_bases,
                 declared: after_declared.unwrap_or(declared).clone(),
             };
             found.push((contract, target));
@@ -2374,40 +2131,106 @@ pub fn ripple(
     let contracts_omitted = found.len().saturating_sub(MAX_CONTRACTS);
     found.truncate(MAX_CONTRACTS);
 
-    let mut search = SiteSearch {
+    if files_skipped > 0 {
+        caveats.push(format!(
+            "{files_skipped} changed file(s) were not compared: one run compares {MAX_CHANGED_FILES} \
+             and stops after {} seconds",
+            SEARCH_BUDGET.as_secs()
+        ));
+    }
+
+    // The lines that hold each breaking declaration's name, then one read of each file that
+    // has any, for every name asked of it.
+    let mut contracts_omitted = contracts_omitted;
+    let mut index_unreadable = None::<String>;
+    let mut searched = Vec::new();
+    let mut wanted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (mut contract, target) in found {
+        if contract.effect != ContractEffect::Breaking {
+            searched.push((contract, target, None));
+            continue;
+        }
+        if std::time::Instant::now() > deadline {
+            contracts_omitted += 1;
+            continue;
+        }
+        if !is_identifier(&target.site_name) {
+            contract.note =
+                Some("the name is not an identifier; its sites were not searched".into());
+            searched.push((contract, target, None));
+            continue;
+        }
+        let hits = name_hits(repo, &target.site_name)?;
+        let too_common = hits.len() > MAX_NAME_HITS;
+        if !too_common {
+            for hit in &hits {
+                if is_supported_code(&detect_language(Path::new(&hit.path)))
+                    && !skips_path(&hit.path)
+                {
+                    wanted
+                        .entry(hit.path.clone())
+                        .or_default()
+                        .insert(target.site_name.clone());
+                }
+            }
+        }
+        // An index that cannot be read (built by an earlier version, locked, damaged) is the
+        // same as no index: the sites are attributed by name, and the report says so.
+        let proven = match store {
+            Some(store) if !target.constructor => {
+                match proven_sites(store, &target.index_path, &target.declared, contract.change) {
+                    Ok(sites) => sites,
+                    Err(error) => {
+                        index_unreadable.get_or_insert_with(|| error.to_string());
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        searched.push((contract, target, Some((hits, too_common, proven))));
+    }
+    let mut files = SiteFiles {
         repo,
-        store,
-        diff: &diff,
-        parsed: BTreeMap::new(),
+        facts: BTreeMap::new(),
         texts: BTreeMap::new(),
         dependencies: BTreeMap::new(),
+        go_imports: BTreeMap::new(),
     };
+    files.read(&wanted, deadline);
     let mut contracts = Vec::new();
-    let mut contracts_omitted = contracts_omitted;
-    let started = std::time::Instant::now();
-    let mut out_of_time = false;
-    for (mut contract, target) in found {
-        if contract.effect == ContractEffect::Breaking {
-            if started.elapsed() > SEARCH_BUDGET {
-                out_of_time = true;
-                contracts_omitted += 1;
-                continue;
-            }
-            search.fill(&mut contract, &target)?;
+    for (mut contract, target, search) in searched {
+        if let Some((hits, too_common, proven)) = search {
+            classify_sites(
+                &mut files,
+                &diff,
+                proven.as_ref(),
+                &mut contract,
+                &target,
+                &hits,
+                too_common,
+            );
         }
         contracts.push(contract);
     }
-    if out_of_time {
+    if std::time::Instant::now() > deadline {
         caveats.push(format!(
-            "the search stopped after {} seconds; the changed declarations it had not reached \
-             are counted and were not searched for",
+            "the search stopped after {} seconds; what it had not reached is counted and was \
+             not read",
             SEARCH_BUDGET.as_secs()
+        ));
+    }
+    if let Some(error) = &index_unreadable {
+        caveats.push(format!(
+            "the index could not be read ({error}); sites are attributed by name, as with no \
+             index"
         ));
     }
     let broken_sites = contracts
         .iter()
         .map(|contract| contract.broken.len() + contract.broken_omitted)
         .sum();
+    let index_used = store.is_some() && index_unreadable.is_none();
     if store.is_none()
         && contracts
             .iter()
@@ -2423,7 +2246,7 @@ pub fn ripple(
         schema_version: RIPPLE_SCHEMA_VERSION,
         base,
         files_examined,
-        index_used: store.is_some(),
+        index_used,
         contracts,
         contracts_omitted,
         broken_sites,
@@ -2684,36 +2507,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quoted_path_an_attribute_before_the_name_and_a_vendored_copy_given_up_are_not_breaks() {
-        // A name inside a single-quoted module path is a string where the language has them.
-        assert!(usage(
-            "const { runCommand } = require('./helpers/run-command.cjs');",
-            "run",
-            None,
-            true
-        )
-        .is_none());
-        assert!(
-            usage("fn f<'a>(x: &'a str) { run(x) }", "run", None, false).is_some_and(|u| u.called)
-        );
-        // The parameter list is the one after the name, not an attribute's.
-        let attributed = shape(
-            &Language::CSharp,
-            "#if NET5 [Requires(\"Finds accessors by name\")] #endif public static object? ConvertToType(string value, Type toType)",
-            true,
-            "ConvertToType",
-        )
-        .unwrap();
-        assert_eq!(attributed.params.len(), 2);
-        let generic = shape(
-            &Language::Java,
-            "<T extends Comparable<T>> T max(List<T> items, T floor)",
-            true,
-            "max",
-        )
-        .unwrap();
-        assert_eq!(generic.params.len(), 2);
-
+    fn a_vendored_copy_given_up_for_a_dependency_of_the_same_name_is_not_a_break() {
         // A vendored crate deleted in favour of the registry crate of the same name: the
         // imports resolve to the dependency, so they are not claimed.
         let temp = changed(
@@ -2754,20 +2548,6 @@ mod tests {
 
     #[test]
     fn a_trailing_comment_a_member_constant_and_an_owner_imported_too_are_not_breaks() {
-        assert_eq!(
-            without_trailing_comment("break // whatever context is reset to", &Language::Go),
-            "break "
-        );
-        assert_eq!(
-            without_trailing_comment("u := \"http://x\" // context", &Language::Go),
-            "u := \"http://x\" "
-        );
-        assert_eq!(
-            without_trailing_comment("x = d['#k']  # context", &Language::Python),
-            "x = d['#k']  "
-        );
-        assert!(is_comment_line("\u{feff}#if !NET5_0_OR_GREATER"));
-
         let temp = changed(
             &[
                 (
@@ -2832,26 +2612,6 @@ mod tests {
             "{}",
             report.to_text()
         );
-        assert_eq!(
-            binding_of("\twatcher, err := fsnotify.NewWatcher()", "watcher"),
-            Some(Binding::Variable)
-        );
-        assert_eq!(
-            binding_of("    let mut engine = build();", "engine"),
-            Some(Binding::Variable)
-        );
-        assert_eq!(
-            binding_of("for item in items:", "item"),
-            Some(Binding::Variable)
-        );
-        assert_eq!(
-            binding_of("type Handle = fs::Handle;", "Handle"),
-            Some(Binding::Declaration)
-        );
-        assert_eq!(binding_of("    x = engine(1)", "engine"), None);
-        assert_eq!(binding_of("if engine == other {", "engine"), None);
-        assert!(parameter_named("def run(self, engine, *rest):", "engine"));
-        assert!(!parameter_named("def run(self, motor):", "engine"));
     }
 
     #[test]
@@ -2960,8 +2720,242 @@ mod tests {
         assert!(clean.headline().contains("no signature changed"));
     }
 
+    fn possible(report: &RippleReport) -> Vec<String> {
+        report
+            .contracts
+            .iter()
+            .flat_map(|contract| contract.possible.iter())
+            .map(|site| format!("{}:{}", site.path, site.line))
+            .collect()
+    }
+
+    /// Calls whose text a line reader miscounts: each is read from its argument nodes.
     #[test]
-    fn shapes_fits_and_usages_read_what_each_language_writes() {
+    fn arguments_with_shifts_quotes_comments_and_strings_are_counted_right() {
+        let temp = changed(
+            &[
+                ("mem/alloc.go", "package mem\n\nfunc Alloc(size int) []byte {\n\treturn make([]byte, size)\n}\n"),
+                ("mem/use.go", "package mem\n\nfunc Use() []byte {\n\treturn Alloc(1<<10)\n}\n"),
+                ("log.py", "def warn(msg, code):\n    print(msg, code)\n\n\ndef emit(text, indent):\n    print(text)\n\n\ndef scale(value):\n    return value\n"),
+                ("app.py", "from log import warn, emit, scale\n\nwarn('bad', 3)\n"),
+            ],
+            &[
+                ("mem/alloc.go", Some("package mem\n\nfunc Alloc(size int, align int) []byte {\n\treturn make([]byte, size+align)\n}\n")),
+                (
+                    "mem/use.go",
+                    Some("package mem\n\nfunc Use() []byte {\n\treturn Alloc(\n\t\t1<<10,\n\t\t// align: eight, as agreed with ops\n\t\t8,\n\t)\n}\n"),
+                ),
+                ("log.py", Some("def warn(msg):\n    print(msg)\n\n\ndef emit(text, indent, width):\n    print(text)\n\n\ndef scale(value, factor):\n    return value * factor\n")),
+                (
+                    "app.py",
+                    Some("from log import warn, emit, scale\n\nwarn(f'bad value {x}, expected {y}')\nwarn('The request could not be completed in time, so it will be retried shortly')\nemit('(', 1, 2)\nemit(')', 1, 2)\nprint(\"scale(3) ->\", scale(3, 2))\n"),
+                ),
+            ],
+        );
+        let report = report(&temp);
+        assert_eq!(report.broken_sites, 0, "{}", report.to_text());
+        assert!(possible(&report).is_empty(), "{}", report.to_text());
+        let fitting = report
+            .contracts
+            .iter()
+            .map(|contract| (contract.name.as_str(), contract.sites_fitting))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            fitting,
+            [("Alloc", 1), ("emit", 2), ("scale", 1), ("warn", 2)]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    /// A call is broken only if it fit the declaration as it was: one that never fit is not a
+    /// call of it (a decorator rewrote the function), or is read wrong.
+    #[test]
+    fn a_call_that_did_not_fit_before_the_change_is_possible_and_not_counted() {
+        let temp = changed(
+            &[(
+                "cli.py",
+                "import click\n\n\n@click.command()\ndef hello(count):\n    pass\n\n\ndef plain(count):\n    pass\n\n\nif __name__ == '__main__':\n    hello()\n    plain(1)\n",
+            )],
+            &[(
+                "cli.py",
+                Some("import click\n\n\n@click.command()\ndef hello(count, name):\n    pass\n\n\ndef plain(count, name):\n    pass\n\n\nif __name__ == '__main__':\n    hello()\n    plain(1)\n"),
+            )],
+        );
+        let report = report(&temp);
+        assert_eq!(
+            broken(&report),
+            vec!["cli.py:15 does not pass `name`, which is required now".to_string()],
+            "{}",
+            report.to_text()
+        );
+        assert_eq!(possible(&report), vec!["cli.py:14"]);
+        let hello = &report
+            .contracts
+            .iter()
+            .find(|c| c.name == "hello")
+            .unwrap()
+            .possible[0];
+        assert!(hello
+            .problem
+            .contains("did not fit the declaration before this change either"));
+    }
+
+    /// A declaration of the same name is not a call, and a name kept alive by an import or an
+    /// export list was not removed.
+    #[test]
+    fn member_declarations_and_rebinding_imports_are_not_broken_sites() {
+        let temp = changed(
+            &[
+                ("api.ts", "export function fetchUser(id: string): string {\n  return id;\n}\n\nexport function fetchAll(): string[] {\n  return [];\n}\n"),
+                ("deps.ts", "import { fetchUser, fetchAll } from './api';\n\ninterface Deps {\n  fetchUser(id: string): string;\n}\n\nexport const all = fetchAll();\n"),
+                ("store/store.go", "package store\n\ntype Store interface {\n\tLookup(key string) string\n}\n\ntype Mem struct{}\n\nfunc (m *Mem) Lookup(key string) string {\n\treturn key\n}\n\nfunc Lookup(key string) string {\n\treturn key\n}\n"),
+                ("net.py", "import time\n\n\ndef retry(times):\n    def wrap(fn):\n        return fn\n    return wrap\n\n\n@retry(3)\ndef fetch(url):\n    return url\n"),
+                ("use.py", "from net import retry\n\n\n@retry(2)\ndef other():\n    pass\n"),
+            ],
+            &[
+                ("api.ts", Some("export function fetchUser(id: string, tenant: string): string {\n  return id + tenant;\n}\n\nfunction fetchEvery(): string[] {\n  return [];\n}\n\nexport { fetchEvery as fetchAll };\n")),
+                ("store/store.go", Some("package store\n\ntype Store interface {\n\tLookup(key string) string\n}\n\ntype Mem struct{}\n\nfunc (m *Mem) Lookup(key string) string {\n\treturn key\n}\n\nfunc Lookup(key string, fallback string) string {\n\treturn key\n}\n")),
+                ("net.py", Some("import time\nfrom tenacity import retry\n\n\n@retry(3)\ndef fetch(url):\n    return url\n")),
+            ],
+        );
+        let report = report(&temp);
+        assert_eq!(report.broken_sites, 0, "{}", report.to_text());
+        // `retry` and `fetchAll` are still bound in their files: neither is a removal.
+        let names = report
+            .contracts
+            .iter()
+            .map(|contract| contract.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["fetchUser", "Lookup"], "{}", report.to_text());
+    }
+
+    /// A qualifier is the declaring module only when an import binds it to it, and a member is
+    /// this type's only through this type.
+    #[test]
+    fn a_receiver_is_not_attributed_by_its_spelling() {
+        let temp = changed(
+            &[
+                ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+                ("internal/http/client.go", "package http\n\nfunc Get(url string) string {\n\treturn url\n}\n"),
+                ("cmd/std.go", "package main\n\nimport \"net/http\"\n\nfunc std() {\n\thttp.Get(\"https://example.com\")\n}\n"),
+                ("cmd/own.go", "package main\n\nimport \"example.com/app/internal/http\"\n\nfunc own() {\n\thttp.Get(\"https://example.com\")\n}\n"),
+                ("store/cache.py", "def lookup(key):\n    return key\n"),
+                ("store/use.py", "import redis\n\ncache = redis.Redis()\ncache.lookup('k')\n"),
+                ("store/real.py", "from store import cache\n\ncache.lookup('k')\n"),
+                (
+                    "repo.py",
+                    "class Repo(Base):\n    def get(self, id):\n        return super().get(id)\n\n    def start(self):\n        pass\n\n    def run(self):\n        self.start()\n        return self.get(1)\n",
+                ),
+                ("Ext.cs", "static class StringExt {\n    public static string Truncate(this string s, int n) {\n        return s;\n    }\n\n    static string Use(string s) {\n        return StringExt.Truncate(s, 5);\n    }\n}\n"),
+            ],
+            &[
+                ("internal/http/client.go", Some("package http\n\nfunc Get(url string, timeout int) string {\n\treturn url\n}\n")),
+                ("store/cache.py", Some("def lookup(key, default):\n    return key\n")),
+                (
+                    "repo.py",
+                    Some("class Repo(Base):\n    def get(self, id, tenant):\n        return super().get(id)\n\n    def run(self):\n        self.start()\n        return self.get(1)\n"),
+                ),
+                ("Ext.cs", Some("static class StringExt {\n    public static string Truncate(this string s, int n, string tail) {\n        return s;\n    }\n\n    static string Use(string s) {\n        return StringExt.Truncate(s, 5, \"...\");\n    }\n}\n")),
+            ],
+        );
+        let report = report(&temp);
+        assert_eq!(
+            broken(&report),
+            vec![
+                // The package the file imports by its own module path.
+                "cmd/own.go:6 passes 1 argument; 2 are required now".to_string(),
+                // `self.get(1)` inside the type that declares it.
+                "repo.py:7 does not pass `tenant`, which is required now".to_string(),
+                // The module the file imports.
+                "store/real.py:3 does not pass `default`, which is required now".to_string(),
+            ],
+            "{}",
+            report.to_text()
+        );
+        // `http` of `net/http`, a variable called `cache`, and `self.start()` in a type with a
+        // base, which may inherit it: listed, never counted. `super().get(id)` is the parent's
+        // and is not listed at all; the extension method called on its class fits.
+        assert_eq!(
+            possible(&report),
+            vec!["cmd/std.go:6", "repo.py:6", "store/use.py:4"],
+            "{}",
+            report.to_text()
+        );
+    }
+
+    /// Alarms the replay raised on complete commits: a method moved to another file of its
+    /// partial class, a nested type whose name another declaration still carries, a
+    /// compilation symbol on a preprocessor line, another package's type of the same name
+    /// (`slog.Logger`), and a function that another module now binds as a constant.
+    #[test]
+    fn a_declaration_that_moved_and_a_directive_symbol_are_not_broken_sites() {
+        let temp = changed(
+            &[
+                (
+                    "Requests.cs",
+                    "static partial class Requests {\n    static void CheckHost(string name) {\n    }\n}\n",
+                ),
+                (
+                    "Requests.Headers.cs",
+                    "static partial class Requests {\n    static void Add(string name) {\n        CheckHost(name);\n    }\n}\n",
+                ),
+                (
+                    "AsyncTests.cs",
+                    "class AsyncTests {\n    class Response {\n    }\n\n    void Run() {\n        var r = Execute<Response>();\n    }\n}\n",
+                ),
+                ("PostTests.cs", "class PostTests {\n    class Response {\n    }\n}\n"),
+                ("Flags.cs", "class Flags {\n    void LEGACY() {\n    }\n}\n"),
+                ("Uses.cs", "class Uses {\n#if LEGACY\n    int a;\n#endif\n}\n"),
+                ("Gone.cs", "class Gone {\n    static void Drop(int a) {\n    }\n\n    void Run() {\n        Drop(1);\n    }\n}\n"),
+                ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+                ("log/logger.go", "package log\n\ntype Logger interface {\n\tInfo(msg string)\n}\n"),
+                ("log/with.go", "package log\n\nimport \"log/slog\"\n\nfunc With(l *slog.Logger) int {\n\treturn 1\n}\n"),
+                ("lib/node.js", "export function runNode(file) {\n  return file;\n}\n"),
+                ("index.js", "export {runNode} from './lib/node.js';\n"),
+                ("index.test.ts", "import {runNode} from './index.js';\n\nrunNode('a');\n"),
+            ],
+            &[
+                ("Requests.cs", Some("static partial class Requests {\n}\n")),
+                (
+                    "Requests.Headers.cs",
+                    Some("static partial class Requests {\n    static void Add(string name) {\n        CheckHost(name);\n    }\n\n    static void CheckHost(string name) {\n    }\n}\n"),
+                ),
+                (
+                    "AsyncTests.cs",
+                    Some("class AsyncTests {\n    void Run() {\n        var r = Execute<Response>();\n    }\n}\n"),
+                ),
+                ("Flags.cs", Some("class Flags {\n}\n")),
+                ("Gone.cs", Some("class Gone {\n    void Run() {\n        Drop(1);\n    }\n}\n")),
+                ("log/logger.go", Some("package log\n")),
+                ("lib/node.js", Some("export const other = 1;\n")),
+                ("index.js", Some("import {create} from './lib/create.js';\n\nexport const runNode = create();\n")),
+            ],
+        );
+        let report = report(&temp);
+        // The one removal nothing else declares is still a broken site.
+        assert_eq!(
+            broken(&report),
+            vec!["Gone.cs:3 still names `Drop`, which this change removed".to_string()],
+            "{}",
+            report.to_text()
+        );
+        assert_eq!(
+            possible(&report),
+            vec![
+                "AsyncTests.cs:3",
+                "Requests.Headers.cs:3",
+                "index.test.ts:1",
+                "index.test.ts:3",
+                "log/with.go:5"
+            ],
+            "{}",
+            report.to_text()
+        );
+    }
+
+    #[test]
+    fn shapes_and_fits_read_what_each_language_writes() {
         let python = shape(
             &Language::Python,
             "def f(self, a, b=1, /, c=2, *args, d, e=3, **kw)",
@@ -3010,50 +3004,57 @@ mod tests {
             vec![true, false]
         );
         assert!(ts.varargs);
-
-        let lines = [
-            "x = f(a, key=lambda p, q: p, *rest)",
-            "g(|a, b| a + b, 3)",
-            "h(",
-            "    1,  # one",
-            "    'a,b',",
-            ")",
-        ];
-        let call = call_args(&Language::Python, &lines, 1, "f").unwrap();
-        assert_eq!(
-            (call.positional, call.keywords.clone(), call.spread),
-            (1, vec!["key".to_string()], true)
-        );
-        assert_eq!(
-            call_args(&Language::Rust, &lines, 2, "g")
-                .unwrap()
-                .positional,
-            2
-        );
-        assert_eq!(
-            call_args(&Language::Python, &lines, 3, "h")
-                .unwrap()
-                .positional,
-            2
-        );
+        // The parameter list is the one after the name, not an attribute's or a bound's.
+        let attributed = shape(
+            &Language::CSharp,
+            "#if NET5 [Requires(\"Finds accessors by name\")] #endif public static object? ConvertToType(string value, Type toType)",
+            true,
+            "ConvertToType",
+        )
+        .unwrap();
+        assert_eq!(attributed.params.len(), 2);
+        let generic = shape(
+            &Language::Java,
+            "<T extends Comparable<T>> T max(List<T> items, T floor)",
+            true,
+            "max",
+        )
+        .unwrap();
+        assert_eq!(generic.params.len(), 2);
 
         let two = Shape {
             params: vec![positional(true), positional(true)],
             ..Shape::default()
         };
-        let one = CallArgs {
+        let one = CallArguments {
             positional: 1,
-            ..CallArgs::default()
+            ..CallArguments::default()
         };
         assert!(matches!(
             fit(&Language::Rust, &two, &one, false),
+            Fit::Breaks(_)
+        ));
+        // A path call passes the receiver itself.
+        let method = Shape {
+            params: vec![positional(true)],
+            receiver: true,
+            ..Shape::default()
+        };
+        let both = CallArguments {
+            positional: 2,
+            ..CallArguments::default()
+        };
+        assert_eq!(fit(&Language::Rust, &method, &both, true), Fit::Fits);
+        assert_eq!(fit(&Language::CSharp, &method, &both, true), Fit::Fits);
+        assert!(matches!(
+            fit(&Language::Rust, &method, &both, false),
             Fit::Breaks(_)
         ));
         assert_eq!(
             fit(
                 &Language::Rust,
                 &two,
-                &CallArgs {
+                &CallArguments {
                     spread: true,
                     ..one.clone()
                 },
@@ -3062,37 +3063,26 @@ mod tests {
             Fit::Unknown("it unpacks an argument list")
         );
 
-        assert!(usage("let s = \"call name(1) here\";", "name", None, false).is_none());
-        assert!(usage("print(f\"{name(1)}\")", "name", None, true).is_some_and(|u| u.called));
-        assert!(usage("fn name(a: u8) {}", "name", None, false).is_some_and(|u| u.declares));
-        let used = usage("Self::name(1)", "name", Some("Owner"), false).unwrap();
-        assert!(used.called && used.by_self && used.by_path);
-        assert_eq!(
-            qualifier("x = headers::Host::new()", "Host"),
-            Some("headers")
-        );
-
         let modules = module_names("crates/axum-extra/src/extract/host.rs");
-        assert!(
-            modules.contains("axum_extra") && modules.contains("host") && !modules.contains("src")
-        );
+        assert!(modules.contains("axum_extra") && modules.contains("host"));
+        assert!(!modules.contains("src"));
+        let imports = |text: &str| vec![text.to_string()];
         assert_eq!(
-            import_evidence("use axum_extra::extract::Host;\n", "Host", &modules),
+            import_says(&imports("use axum_extra::extract::Host;"), "Host", &modules),
             Some(true)
         );
-        assert_eq!(import_evidence("use {\n    same_file::Host,\n    walkdir::WalkDir,\n};\n\nmod tests {\n    use super::*;\n}\n", "Host", &modules), Some(false));
-        assert_eq!(import_evidence("fn f() {}\n", "Host", &modules), None);
         assert_eq!(
-            import_evidence("from axum_extra import *\n", "Host", &modules),
+            import_says(
+                &imports("use {\n    same_file::Host,\n    walkdir::WalkDir,\n};"),
+                "Host",
+                &modules
+            ),
+            Some(false)
+        );
+        assert_eq!(import_says(&[], "Host", &modules), None);
+        assert_eq!(
+            import_says(&imports("from axum_extra import *"), "Host", &modules),
             Some(true)
         );
-        assert!(in_python_docstring(
-            "def f():\n    \"\"\"One\n    two\n    \"\"\"\n    pass\n",
-            3
-        ));
-        assert!(!in_python_docstring(
-            "def f():\n    \"\"\"One\n    two\n    \"\"\"\n    pass\n",
-            5
-        ));
     }
 }

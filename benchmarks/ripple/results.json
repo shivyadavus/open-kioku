@@ -817,8 +817,8 @@
    }
   }
  },
- "shipped_rules": {
-  "what": "every repository again with the rules as shipped; not a held-out measurement, since the rules were changed after looking at these",
+ "before_the_review": {
+  "what": "every repository with the check as it was before the independent review: arguments and uses read from text",
   "sum": {
    "commits": 13699,
    "commits_changing_code": 7711,
@@ -830,6 +830,23 @@
    "half_sites_listed": 714,
    "half_sites_the_commit_then_changed": 702,
    "half_sites_listed_as_possible_only": 22113,
+   "whole_sites_left": 15,
+   "commits_with_a_site_left": 4
+  }
+ },
+ "shipped_rules": {
+  "what": "every repository again with the check as shipped, which reads the syntax tree; not a held-out measurement, since the rules were changed after looking at these",
+  "sum": {
+   "commits": 13699,
+   "commits_changing_code": 7711,
+   "commits_with_breaking_change": 915,
+   "breaking_changes": 2946,
+   "moved_or_shared_name": 407,
+   "in_a_file_the_commit_moved": 51,
+   "half_changes_with_a_listed_site": 268,
+   "half_sites_listed": 913,
+   "half_sites_the_commit_then_changed": 896,
+   "half_sites_listed_as_possible_only": 36751,
    "whole_sites_left": 15,
    "commits_with_a_site_left": 4
   },
@@ -844,7 +861,7 @@
       "commits_changing_code": 165,
       "commits_with_breaking_change": 16,
       "breaking_changes": 34,
-      "moved_or_shared_name": 10,
+      "moved_or_shared_name": 9,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 9,
       "half_sites_listed": 30,
@@ -975,27 +992,14 @@
       "breaking_changes": 9,
       "moved_or_shared_name": 2,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 1,
-      "half_sites_listed": 6,
-      "half_sites_the_commit_then_changed": 6,
-      "half_sites_listed_as_possible_only": 30,
+      "half_changes_with_a_listed_site": 0,
+      "half_sites_listed": 0,
+      "half_sites_the_commit_then_changed": 0,
+      "half_sites_listed_as_possible_only": 36,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
-     "changes_with_a_site": [
-      {
-       "commit": "a419aa7350",
-       "subject": "Revert \"build(deps-dev): bump supertest from 6.3.0 to 7.3.0 (#7494)\" (#7518)",
-       "path": "test/support/utils.js",
-       "name": "getRawPath",
-       "owner": null,
-       "change": "removed",
-       "renamed_to": null,
-       "half_sites_listed": 6,
-       "half_sites_the_commit_then_changed": 6,
-       "whole_sites_left": 0
-      }
-     ]
+     "changes_with_a_site": []
     },
     {
      "repository": "pallets/flask",
@@ -1004,14 +1008,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 120,
-      "commits_with_breaking_change": 14,
-      "breaking_changes": 43,
-      "moved_or_shared_name": 15,
+      "commits_with_breaking_change": 13,
+      "breaking_changes": 41,
+      "moved_or_shared_name": 5,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 1,
-      "half_sites_listed": 5,
-      "half_sites_the_commit_then_changed": 5,
-      "half_sites_listed_as_possible_only": 7,
+      "half_sites_listed": 7,
+      "half_sites_the_commit_then_changed": 7,
+      "half_sites_listed_as_possible_only": 400,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1024,8 +1028,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 5,
-       "half_sites_the_commit_then_changed": 5,
+       "half_sites_listed": 7,
+       "half_sites_the_commit_then_changed": 7,
        "whole_sites_left": 0
       }
      ]
@@ -1039,12 +1043,12 @@
       "commits_changing_code": 182,
       "commits_with_breaking_change": 14,
       "breaking_changes": 23,
-      "moved_or_shared_name": 5,
+      "moved_or_shared_name": 4,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 3,
       "half_sites_listed": 5,
       "half_sites_the_commit_then_changed": 5,
-      "half_sites_listed_as_possible_only": 2,
+      "half_sites_listed_as_possible_only": 7,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1094,14 +1098,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 148,
-      "commits_with_breaking_change": 29,
-      "breaking_changes": 97,
-      "moved_or_shared_name": 42,
+      "commits_with_breaking_change": 28,
+      "breaking_changes": 82,
+      "moved_or_shared_name": 2,
       "in_a_file_the_commit_moved": 2,
-      "half_changes_with_a_listed_site": 3,
-      "half_sites_listed": 13,
-      "half_sites_the_commit_then_changed": 13,
-      "half_sites_listed_as_possible_only": 44,
+      "half_changes_with_a_listed_site": 4,
+      "half_sites_listed": 19,
+      "half_sites_the_commit_then_changed": 19,
+      "half_sites_listed_as_possible_only": 294,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1114,8 +1118,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 3,
-       "half_sites_the_commit_then_changed": 3,
+       "half_sites_listed": 6,
+       "half_sites_the_commit_then_changed": 6,
        "whole_sites_left": 0
       },
       {
@@ -1126,8 +1130,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 4,
-       "half_sites_the_commit_then_changed": 4,
+       "half_sites_listed": 5,
+       "half_sites_the_commit_then_changed": 5,
        "whole_sites_left": 0
       },
       {
@@ -1138,8 +1142,20 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 6,
-       "half_sites_the_commit_then_changed": 6,
+       "half_sites_listed": 7,
+       "half_sites_the_commit_then_changed": 7,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "13be1d104d",
+       "subject": "Fix `GsonBuilder.setDateFormat` ignoring partial DEFAULT; deprecate `setDateFormat(int)` (",
+       "path": "gson/src/main/java/com/google/gson/internal/PreJava9DateFormatProvider.java",
+       "name": "getUsDateFormat",
+       "owner": "PreJava9DateFormatProvider",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
        "whole_sites_left": 0
       }
      ]
@@ -1151,14 +1167,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 235,
-      "commits_with_breaking_change": 20,
-      "breaking_changes": 64,
-      "moved_or_shared_name": 20,
+      "commits_with_breaking_change": 17,
+      "breaking_changes": 56,
+      "moved_or_shared_name": 0,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 1,
-      "half_sites_listed": 4,
-      "half_sites_the_commit_then_changed": 4,
-      "half_sites_listed_as_possible_only": 0,
+      "half_changes_with_a_listed_site": 2,
+      "half_sites_listed": 5,
+      "half_sites_the_commit_then_changed": 5,
+      "half_sites_listed_as_possible_only": 79,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1174,6 +1190,18 @@
        "half_sites_listed": 4,
        "half_sites_the_commit_then_changed": 4,
        "whole_sites_left": 0
+      },
+      {
+       "commit": "e93bc6dc45",
+       "subject": "Fix support with environments that add support for custom `fetch` options (#536)",
+       "path": "source/utils/timeout.ts",
+       "name": "timeout",
+       "owner": null,
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
+       "whole_sites_left": 0
       }
      ]
     },
@@ -1184,14 +1212,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 239,
-      "commits_with_breaking_change": 98,
-      "breaking_changes": 280,
-      "moved_or_shared_name": 38,
+      "commits_with_breaking_change": 97,
+      "breaking_changes": 275,
+      "moved_or_shared_name": 32,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 11,
-      "half_sites_listed": 17,
-      "half_sites_the_commit_then_changed": 17,
-      "half_sites_listed_as_possible_only": 18094,
+      "half_changes_with_a_listed_site": 12,
+      "half_sites_listed": 22,
+      "half_sites_the_commit_then_changed": 22,
+      "half_sites_listed_as_possible_only": 19762,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1233,6 +1261,18 @@
        "whole_sites_left": 0
       },
       {
+       "commit": "0b1e0106b1",
+       "subject": "fix(resolution,ingest): read Rust calls inside a configuration-selected alternative agains",
+       "path": "crates/open-kioku-resolution/src/index.rs",
+       "name": "ConfiguredModule",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 4,
+       "half_sites_the_commit_then_changed": 4,
+       "whole_sites_left": 0
+      },
+      {
        "commit": "b399a2413a",
        "subject": "perf(storage): persist each edge's window rank so SQL orders and limits bounded reads (#57",
        "path": "crates/open-kioku-core/src/relationship.rs",
@@ -1240,8 +1280,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 1,
-       "half_sites_the_commit_then_changed": 1,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
        "whole_sites_left": 0
       },
       {
@@ -1354,14 +1394,14 @@
    "sum": {
     "commits": 2400,
     "commits_changing_code": 1304,
-    "commits_with_breaking_change": 200,
-    "breaking_changes": 555,
-    "moved_or_shared_name": 132,
+    "commits_with_breaking_change": 194,
+    "breaking_changes": 525,
+    "moved_or_shared_name": 54,
     "in_a_file_the_commit_moved": 2,
-    "half_changes_with_a_listed_site": 29,
-    "half_sites_listed": 80,
-    "half_sites_the_commit_then_changed": 80,
-    "half_sites_listed_as_possible_only": 18177,
+    "half_changes_with_a_listed_site": 31,
+    "half_sites_listed": 88,
+    "half_sites_the_commit_then_changed": 88,
+    "half_sites_listed_as_possible_only": 20578,
     "whole_sites_left": 0,
     "commits_with_a_site_left": 0
    }
@@ -1375,9 +1415,9 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 134,
-      "commits_with_breaking_change": 6,
-      "breaking_changes": 9,
-      "moved_or_shared_name": 7,
+      "commits_with_breaking_change": 3,
+      "breaking_changes": 3,
+      "moved_or_shared_name": 1,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 0,
       "half_sites_listed": 0,
@@ -1399,10 +1439,10 @@
       "breaking_changes": 42,
       "moved_or_shared_name": 3,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 5,
-      "half_sites_listed": 18,
-      "half_sites_the_commit_then_changed": 18,
-      "half_sites_listed_as_possible_only": 49,
+      "half_changes_with_a_listed_site": 6,
+      "half_sites_listed": 25,
+      "half_sites_the_commit_then_changed": 25,
+      "half_sites_listed_as_possible_only": 24,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1415,8 +1455,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 3,
-       "half_sites_the_commit_then_changed": 3,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
        "whole_sites_left": 0
       },
       {
@@ -1427,8 +1467,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 5,
-       "half_sites_the_commit_then_changed": 5,
+       "half_sites_listed": 12,
+       "half_sites_the_commit_then_changed": 12,
        "whole_sites_left": 0
       },
       {
@@ -1458,6 +1498,18 @@
       {
        "commit": "e3b32f48b5",
        "subject": "Remove deprecated extractors from axum-extra (#3599)",
+       "path": "axum-extra/src/extract/optional_path.rs",
+       "name": "OptionalPath",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "e3b32f48b5",
+       "subject": "Remove deprecated extractors from axum-extra (#3599)",
        "path": "axum-extra/src/extract/scheme.rs",
        "name": "Scheme",
        "owner": null,
@@ -1476,14 +1528,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 161,
-      "commits_with_breaking_change": 13,
-      "breaking_changes": 71,
-      "moved_or_shared_name": 10,
-      "in_a_file_the_commit_moved": 4,
+      "commits_with_breaking_change": 10,
+      "breaking_changes": 65,
+      "moved_or_shared_name": 9,
+      "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 20,
-      "half_sites_listed": 43,
-      "half_sites_the_commit_then_changed": 43,
-      "half_sites_listed_as_possible_only": 238,
+      "half_sites_listed": 40,
+      "half_sites_the_commit_then_changed": 40,
+      "half_sites_listed_as_possible_only": 18,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1652,8 +1704,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 12,
-       "half_sites_the_commit_then_changed": 12,
+       "half_sites_listed": 9,
+       "half_sites_the_commit_then_changed": 9,
        "whole_sites_left": 0
       },
       {
@@ -1739,12 +1791,12 @@
       "commits_changing_code": 218,
       "commits_with_breaking_change": 11,
       "breaking_changes": 18,
-      "moved_or_shared_name": 3,
+      "moved_or_shared_name": 0,
       "in_a_file_the_commit_moved": 1,
       "half_changes_with_a_listed_site": 1,
       "half_sites_listed": 2,
       "half_sites_the_commit_then_changed": 2,
-      "half_sites_listed_as_possible_only": 619,
+      "half_sites_listed_as_possible_only": 1465,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1774,14 +1826,27 @@
       "breaking_changes": 69,
       "moved_or_shared_name": 16,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 0,
-      "half_sites_listed": 0,
-      "half_sites_the_commit_then_changed": 0,
-      "half_sites_listed_as_possible_only": 15,
+      "half_changes_with_a_listed_site": 1,
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "half_sites_listed_as_possible_only": 3202,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
-     "changes_with_a_site": []
+     "changes_with_a_site": [
+      {
+       "commit": "91a335ce94",
+       "subject": "\ud83d\udc1b Apply each parameter model's `extra` configuration to sibling fields (#16594)",
+       "path": "fastapi/dependencies/utils.py",
+       "name": "_get_request_param_names",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      }
+     ]
     },
     {
      "repository": "JamesNK/Newtonsoft.Json",
@@ -1790,18 +1855,30 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 206,
-      "commits_with_breaking_change": 27,
-      "breaking_changes": 81,
-      "moved_or_shared_name": 20,
+      "commits_with_breaking_change": 25,
+      "breaking_changes": 69,
+      "moved_or_shared_name": 3,
       "in_a_file_the_commit_moved": 1,
-      "half_changes_with_a_listed_site": 6,
-      "half_sites_listed": 14,
-      "half_sites_the_commit_then_changed": 14,
-      "half_sites_listed_as_possible_only": 683,
+      "half_changes_with_a_listed_site": 9,
+      "half_sites_listed": 25,
+      "half_sites_the_commit_then_changed": 25,
+      "half_sites_listed_as_possible_only": 307,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
      "changes_with_a_site": [
+      {
+       "commit": "1c1d5e15a3",
+       "subject": "Fix quadratic JObject duplicate property handling (#3123)",
+       "path": "Src/Newtonsoft.Json/Linq/JContainer.cs",
+       "name": "ReadProperty",
+       "owner": "JContainer",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
+       "whole_sites_left": 0
+      },
       {
        "commit": "d48558b53b",
        "subject": "Add support for NamingStrategy to StringEnumConverter (#1885)",
@@ -1810,8 +1887,8 @@
        "owner": "EnumUtils",
        "change": "signature_changed",
        "renamed_to": null,
-       "half_sites_listed": 3,
-       "half_sites_the_commit_then_changed": 3,
+       "half_sites_listed": 4,
+       "half_sites_the_commit_then_changed": 4,
        "whole_sites_left": 0
       },
       {
@@ -1834,8 +1911,8 @@
        "owner": "BooleanQueryExpression",
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 1,
-       "half_sites_the_commit_then_changed": 1,
+       "half_sites_listed": 5,
+       "half_sites_the_commit_then_changed": 5,
        "whole_sites_left": 0
       },
       {
@@ -1846,8 +1923,8 @@
        "owner": "QueryOperator",
        "change": "removed",
        "renamed_to": "RegexEquals",
-       "half_sites_listed": 5,
-       "half_sites_the_commit_then_changed": 5,
+       "half_sites_listed": 6,
+       "half_sites_the_commit_then_changed": 6,
        "whole_sites_left": 0
       },
       {
@@ -1858,8 +1935,8 @@
        "owner": "EnumUtils",
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 2,
-       "half_sites_the_commit_then_changed": 2,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
        "whole_sites_left": 0
       },
       {
@@ -1873,6 +1950,30 @@
        "half_sites_listed": 1,
        "half_sites_the_commit_then_changed": 1,
        "whole_sites_left": 0
+      },
+      {
+       "commit": "51c9547dbc",
+       "subject": "-Refactor enum parsing",
+       "path": "Src/Newtonsoft.Json/Utilities/EnumUtils.cs",
+       "name": "GetNamesAndValues",
+       "owner": "EnumUtils",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "51c9547dbc",
+       "subject": "-Refactor enum parsing",
+       "path": "Src/Newtonsoft.Json/Utilities/EnumUtils.cs",
+       "name": "GetValues",
+       "owner": "EnumUtils",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
       }
      ]
     },
@@ -1885,12 +1986,12 @@
       "commits_changing_code": 154,
       "commits_with_breaking_change": 10,
       "breaking_changes": 47,
-      "moved_or_shared_name": 14,
+      "moved_or_shared_name": 9,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 3,
-      "half_sites_listed": 9,
-      "half_sites_the_commit_then_changed": 9,
-      "half_sites_listed_as_possible_only": 156,
+      "half_sites_listed": 7,
+      "half_sites_the_commit_then_changed": 7,
+      "half_sites_listed_as_possible_only": 1154,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1915,8 +2016,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 4,
-       "half_sites_the_commit_then_changed": 4,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
        "whole_sites_left": 0
       },
       {
@@ -1927,8 +2028,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": "is_hidden_entry",
-       "half_sites_listed": 1,
-       "half_sites_the_commit_then_changed": 1,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
        "whole_sites_left": 0
       }
      ]
@@ -1941,13 +2042,13 @@
       "commits": 300,
       "commits_changing_code": 223,
       "commits_with_breaking_change": 30,
-      "breaking_changes": 60,
-      "moved_or_shared_name": 28,
+      "breaking_changes": 53,
+      "moved_or_shared_name": 18,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 1,
-      "half_sites_listed": 2,
-      "half_sites_the_commit_then_changed": 2,
-      "half_sites_listed_as_possible_only": 14,
+      "half_changes_with_a_listed_site": 4,
+      "half_sites_listed": 16,
+      "half_sites_the_commit_then_changed": 16,
+      "half_sites_listed_as_possible_only": 133,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -1960,8 +2061,44 @@
        "owner": null,
        "change": "removed",
        "renamed_to": "getRolldownDevRuntime",
-       "half_sites_listed": 2,
-       "half_sites_the_commit_then_changed": 2,
+       "half_sites_listed": 4,
+       "half_sites_the_commit_then_changed": 4,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "0651e2cc0f",
+       "subject": "refactor: remove `optimizeDeps.rollupOptions` (#23760)",
+       "path": "packages/vite/src/node/utils.ts",
+       "name": "setupRollupOptionCompat",
+       "owner": null,
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 8,
+       "half_sites_the_commit_then_changed": 8,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "8069835ac3",
+       "subject": "fix(build): use stable module ids in chunk import map hash signatures (fix #23975) (#23976",
+       "path": "packages/vite/src/node/plugins/importAnalysisBuild.ts",
+       "name": "getChunkImportMapKeySignatures",
+       "owner": null,
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "a2bd6fa897",
+       "subject": "fix(optimizer): preserve excluded optional peer require fallbacks (#23600)",
+       "path": "packages/vite/src/node/optimizer/rolldownDepPlugin.ts",
+       "name": "rolldownCjsExternalPlugin",
+       "owner": null,
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
        "whole_sites_left": 0
       }
      ]
@@ -1970,14 +2107,14 @@
    "sum": {
     "commits": 2400,
     "commits_changing_code": 1345,
-    "commits_with_breaking_change": 121,
-    "breaking_changes": 397,
-    "moved_or_shared_name": 101,
-    "in_a_file_the_commit_moved": 6,
-    "half_changes_with_a_listed_site": 36,
-    "half_sites_listed": 88,
-    "half_sites_the_commit_then_changed": 88,
-    "half_sites_listed_as_possible_only": 1774,
+    "commits_with_breaking_change": 113,
+    "breaking_changes": 366,
+    "moved_or_shared_name": 59,
+    "in_a_file_the_commit_moved": 2,
+    "half_changes_with_a_listed_site": 44,
+    "half_sites_listed": 117,
+    "half_sites_the_commit_then_changed": 117,
+    "half_sites_listed_as_possible_only": 6303,
     "whole_sites_left": 0,
     "commits_with_a_site_left": 0
    }
@@ -1992,13 +2129,13 @@
       "commits": 300,
       "commits_changing_code": 205,
       "commits_with_breaking_change": 29,
-      "breaking_changes": 69,
-      "moved_or_shared_name": 13,
+      "breaking_changes": 68,
+      "moved_or_shared_name": 1,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 4,
       "half_sites_listed": 5,
       "half_sites_the_commit_then_changed": 5,
-      "half_sites_listed_as_possible_only": 29,
+      "half_sites_listed_as_possible_only": 906,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -2060,14 +2197,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 116,
-      "commits_with_breaking_change": 6,
-      "breaking_changes": 7,
-      "moved_or_shared_name": 3,
+      "commits_with_breaking_change": 4,
+      "breaking_changes": 5,
+      "moved_or_shared_name": 0,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 0,
       "half_sites_listed": 0,
       "half_sites_the_commit_then_changed": 0,
-      "half_sites_listed_as_possible_only": 1,
+      "half_sites_listed_as_possible_only": 80,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -2080,14 +2217,14 @@
      "totals": {
       "commits": 298,
       "commits_changing_code": 163,
-      "commits_with_breaking_change": 27,
-      "breaking_changes": 98,
-      "moved_or_shared_name": 41,
+      "commits_with_breaking_change": 26,
+      "breaking_changes": 94,
+      "moved_or_shared_name": 36,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 2,
       "half_sites_listed": 4,
       "half_sites_the_commit_then_changed": 4,
-      "half_sites_listed_as_possible_only": 146,
+      "half_sites_listed_as_possible_only": 165,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -2127,16 +2264,52 @@
       "commits_changing_code": 150,
       "commits_with_breaking_change": 14,
       "breaking_changes": 76,
-      "moved_or_shared_name": 31,
+      "moved_or_shared_name": 18,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 12,
-      "half_sites_listed": 45,
-      "half_sites_the_commit_then_changed": 45,
-      "half_sites_listed_as_possible_only": 71,
+      "half_changes_with_a_listed_site": 27,
+      "half_sites_listed": 101,
+      "half_sites_the_commit_then_changed": 101,
+      "half_sites_listed_as_possible_only": 36,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
      "changes_with_a_site": [
+      {
+       "commit": "7b19cd5f4b",
+       "subject": "Move utility functions from _utils.py to _client.py (#3389)",
+       "path": "httpx/_utils.py",
+       "name": "same_origin",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "7b19cd5f4b",
+       "subject": "Move utility functions from _utils.py to _client.py (#3389)",
+       "path": "httpx/_utils.py",
+       "name": "is_https_redirect",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "1805ee0d22",
+       "subject": "Graceful upgrade path for 0.28. (#3394)",
+       "path": "httpx/_client.py",
+       "name": "__init__",
+       "owner": "Client",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
+       "whole_sites_left": 0
+      },
       {
        "commit": "1805ee0d22",
        "subject": "Graceful upgrade path for 0.28. (#3394)",
@@ -2157,8 +2330,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 12,
-       "half_sites_the_commit_then_changed": 12,
+       "half_sites_listed": 5,
+       "half_sites_the_commit_then_changed": 5,
        "whole_sites_left": 0
       },
       {
@@ -2186,6 +2359,102 @@
        "whole_sites_left": 0
       },
       {
+       "commit": "41597adffa",
+       "subject": "Move remaining utility functions from _utils.py to _models.py  (#3387)",
+       "path": "httpx/_utils.py",
+       "name": "is_known_encoding",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "41597adffa",
+       "subject": "Move remaining utility functions from _utils.py to _models.py  (#3387)",
+       "path": "httpx/_utils.py",
+       "name": "parse_header_links",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "41597adffa",
+       "subject": "Move remaining utility functions from _utils.py to _models.py  (#3387)",
+       "path": "httpx/_utils.py",
+       "name": "parse_content_type_charset",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "41597adffa",
+       "subject": "Move remaining utility functions from _utils.py to _models.py  (#3387)",
+       "path": "httpx/_utils.py",
+       "name": "obfuscate_sensitive_headers",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "6212e8fa3b",
+       "subject": "Move utility functions from _utils.py to _multipart.py (#3388)",
+       "path": "httpx/_utils.py",
+       "name": "format_form_param",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 4,
+       "half_sites_the_commit_then_changed": 4,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "6212e8fa3b",
+       "subject": "Move utility functions from _utils.py to _multipart.py (#3388)",
+       "path": "httpx/_utils.py",
+       "name": "guess_content_type",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "83a85189c7",
+       "subject": "Move normalize header functions from _utils.py to _models.py (#3382)",
+       "path": "httpx/_utils.py",
+       "name": "normalize_header_key",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 5,
+       "half_sites_the_commit_then_changed": 5,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "83a85189c7",
+       "subject": "Move normalize header functions from _utils.py to _models.py (#3382)",
+       "path": "httpx/_utils.py",
+       "name": "normalize_header_value",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
+       "whole_sites_left": 0
+      },
+      {
        "commit": "ba2e51215e",
        "subject": "Review urlescape percent-safe set, and use + behavior for form spaces. (#3373)",
        "path": "httpx/_urlparse.py",
@@ -2205,8 +2474,8 @@
        "owner": "Client",
        "change": "signature_changed",
        "renamed_to": null,
-       "half_sites_listed": 10,
-       "half_sites_the_commit_then_changed": 10,
+       "half_sites_listed": 12,
+       "half_sites_the_commit_then_changed": 12,
        "whole_sites_left": 0
       },
       {
@@ -2265,8 +2534,32 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 2,
-       "half_sites_the_commit_then_changed": 2,
+       "half_sites_listed": 11,
+       "half_sites_the_commit_then_changed": 11,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "8e36f2bc68",
+       "subject": "Introduce new `SSLContext` API & escalate deprecations. (#3319)",
+       "path": "httpx/_utils.py",
+       "name": "Timer",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 5,
+       "half_sites_the_commit_then_changed": 5,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "1d73150c1f",
+       "subject": "Cleanup response.json() method (#2911)",
+       "path": "httpx/_utils.py",
+       "name": "guess_json_utf",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 6,
+       "half_sites_the_commit_then_changed": 6,
        "whole_sites_left": 0
       },
       {
@@ -2277,8 +2570,32 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 3,
-       "half_sites_the_commit_then_changed": 3,
+       "half_sites_listed": 5,
+       "half_sites_the_commit_then_changed": 5,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "f1157dbc41",
+       "subject": "Use standard logging style (#2547)",
+       "path": "tests/utils.py",
+       "name": "override_log_level",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 4,
+       "half_sites_the_commit_then_changed": 4,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "59914c7690",
+       "subject": "Add `NetRCAuth()` class. (#2535)",
+       "path": "httpx/_utils.py",
+       "name": "NetRCInfo",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 6,
+       "half_sites_the_commit_then_changed": 6,
        "whole_sites_left": 0
       }
      ]
@@ -2292,12 +2609,12 @@
       "commits_changing_code": 110,
       "commits_with_breaking_change": 20,
       "breaking_changes": 72,
-      "moved_or_shared_name": 35,
+      "moved_or_shared_name": 0,
       "in_a_file_the_commit_moved": 4,
       "half_changes_with_a_listed_site": 3,
-      "half_sites_listed": 31,
-      "half_sites_the_commit_then_changed": 31,
-      "half_sites_listed_as_possible_only": 39,
+      "half_sites_listed": 36,
+      "half_sites_the_commit_then_changed": 36,
+      "half_sites_listed_as_possible_only": 428,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -2334,8 +2651,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 7,
-       "half_sites_the_commit_then_changed": 7,
+       "half_sites_listed": 12,
+       "half_sites_the_commit_then_changed": 12,
        "whole_sites_left": 0
       }
      ]
@@ -2348,13 +2665,13 @@
       "commits": 300,
       "commits_changing_code": 135,
       "commits_with_breaking_change": 13,
-      "breaking_changes": 27,
-      "moved_or_shared_name": 7,
+      "breaking_changes": 25,
+      "moved_or_shared_name": 2,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 8,
       "half_sites_listed": 8,
       "half_sites_the_commit_then_changed": 8,
-      "half_sites_listed_as_possible_only": 78,
+      "half_sites_listed_as_possible_only": 84,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -2464,9 +2781,9 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 99,
-      "commits_with_breaking_change": 7,
-      "breaking_changes": 9,
-      "moved_or_shared_name": 3,
+      "commits_with_breaking_change": 6,
+      "breaking_changes": 8,
+      "moved_or_shared_name": 2,
       "in_a_file_the_commit_moved": 2,
       "half_changes_with_a_listed_site": 0,
       "half_sites_listed": 0,
@@ -2484,14 +2801,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 254,
-      "commits_with_breaking_change": 39,
-      "breaking_changes": 99,
-      "moved_or_shared_name": 45,
+      "commits_with_breaking_change": 37,
+      "breaking_changes": 96,
+      "moved_or_shared_name": 34,
       "in_a_file_the_commit_moved": 5,
-      "half_changes_with_a_listed_site": 13,
-      "half_sites_listed": 16,
-      "half_sites_the_commit_then_changed": 16,
-      "half_sites_listed_as_possible_only": 108,
+      "half_changes_with_a_listed_site": 15,
+      "half_sites_listed": 19,
+      "half_sites_the_commit_then_changed": 19,
+      "half_sites_listed_as_possible_only": 189,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -2651,6 +2968,30 @@
        "half_sites_listed": 1,
        "half_sites_the_commit_then_changed": 1,
        "whole_sites_left": 0
+      },
+      {
+       "commit": "957996f5fb",
+       "subject": "Make all use of __private go through interpolation",
+       "path": "serde_derive/src/internals/ast.rs",
+       "name": "from_ast",
+       "owner": "Container",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "957996f5fb",
+       "subject": "Make all use of __private go through interpolation",
+       "path": "serde_derive/src/internals/attr.rs",
+       "name": "from_ast",
+       "owner": "Field",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
+       "whole_sites_left": 0
       }
      ]
     },
@@ -2661,14 +3002,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 218,
-      "commits_with_breaking_change": 36,
-      "breaking_changes": 103,
-      "moved_or_shared_name": 12,
+      "commits_with_breaking_change": 35,
+      "breaking_changes": 100,
+      "moved_or_shared_name": 1,
       "in_a_file_the_commit_moved": 10,
       "half_changes_with_a_listed_site": 1,
       "half_sites_listed": 1,
       "half_sites_the_commit_then_changed": 1,
-      "half_sites_listed_as_possible_only": 38,
+      "half_sites_listed_as_possible_only": 109,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -2694,14 +3035,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 103,
-      "commits_with_breaking_change": 26,
-      "breaking_changes": 134,
-      "moved_or_shared_name": 70,
-      "in_a_file_the_commit_moved": 6,
-      "half_changes_with_a_listed_site": 7,
-      "half_sites_listed": 31,
-      "half_sites_the_commit_then_changed": 29,
-      "half_sites_listed_as_possible_only": 140,
+      "commits_with_breaking_change": 23,
+      "breaking_changes": 121,
+      "moved_or_shared_name": 34,
+      "in_a_file_the_commit_moved": 0,
+      "half_changes_with_a_listed_site": 6,
+      "half_sites_listed": 25,
+      "half_sites_the_commit_then_changed": 23,
+      "half_sites_listed_as_possible_only": 342,
       "whole_sites_left": 5,
       "commits_with_a_site_left": 1
      },
@@ -2777,18 +3118,6 @@
        "half_sites_listed": 7,
        "half_sites_the_commit_then_changed": 7,
        "whole_sites_left": 0
-      },
-      {
-       "commit": "cfa8fd9b4f",
-       "subject": "feat: use new finder library",
-       "path": "fs.go",
-       "name": "finder",
-       "owner": null,
-       "change": "removed",
-       "renamed_to": null,
-       "half_sites_listed": 6,
-       "half_sites_the_commit_then_changed": 6,
-       "whole_sites_left": 0
       }
      ]
     }
@@ -2796,14 +3125,14 @@
    "sum": {
     "commits": 2998,
     "commits_changing_code": 1553,
-    "commits_with_breaking_change": 217,
-    "breaking_changes": 694,
-    "moved_or_shared_name": 260,
-    "in_a_file_the_commit_moved": 27,
-    "half_changes_with_a_listed_site": 50,
-    "half_sites_listed": 141,
-    "half_sites_the_commit_then_changed": 139,
-    "half_sites_listed_as_possible_only": 650,
+    "commits_with_breaking_change": 207,
+    "breaking_changes": 665,
+    "moved_or_shared_name": 128,
+    "in_a_file_the_commit_moved": 21,
+    "half_changes_with_a_listed_site": 66,
+    "half_sites_listed": 199,
+    "half_sites_the_commit_then_changed": 197,
+    "half_sites_listed_as_possible_only": 2339,
     "whole_sites_left": 5,
     "commits_with_a_site_left": 1
    }
@@ -2821,14 +3150,62 @@
       "breaking_changes": 28,
       "moved_or_shared_name": 2,
       "in_a_file_the_commit_moved": 9,
-      "half_changes_with_a_listed_site": 1,
-      "half_sites_listed": 2,
-      "half_sites_the_commit_then_changed": 2,
-      "half_sites_listed_as_possible_only": 22,
+      "half_changes_with_a_listed_site": 5,
+      "half_sites_listed": 23,
+      "half_sites_the_commit_then_changed": 23,
+      "half_sites_listed_as_possible_only": 1,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
      "changes_with_a_site": [
+      {
+       "commit": "112dd1d498",
+       "subject": "Expose effective class construction properties (#1454)",
+       "path": "src/attr/_make.py",
+       "name": "_transform_attrs",
+       "owner": null,
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 8,
+       "half_sites_the_commit_then_changed": 8,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "112dd1d498",
+       "subject": "Expose effective class construction properties (#1454)",
+       "path": "src/attr/_make.py",
+       "name": "__init__",
+       "owner": "_ClassBuilder",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "6e3786c599",
+       "subject": "Make `kw_only=True` behavior consistent with dataclasses (#1457)",
+       "path": "src/attr/_make.py",
+       "name": "_transform_attrs",
+       "owner": null,
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 7,
+       "half_sites_the_commit_then_changed": 7,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "6e3786c599",
+       "subject": "Make `kw_only=True` behavior consistent with dataclasses (#1457)",
+       "path": "src/attr/_make.py",
+       "name": "__init__",
+       "owner": "_ClassBuilder",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
+       "whole_sites_left": 0
+      },
       {
        "commit": "74007f67d2",
        "subject": "ClassBuilder: eval only once (#1407)",
@@ -2854,14 +3231,26 @@
       "breaking_changes": 46,
       "moved_or_shared_name": 0,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 5,
-      "half_sites_listed": 14,
-      "half_sites_the_commit_then_changed": 14,
-      "half_sites_listed_as_possible_only": 8,
+      "half_changes_with_a_listed_site": 8,
+      "half_sites_listed": 18,
+      "half_sites_the_commit_then_changed": 18,
+      "half_sites_listed_as_possible_only": 4,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
      "changes_with_a_site": [
+      {
+       "commit": "917ef58f86",
+       "subject": "Simplify how we preserve skipped code and comments (#5617)",
+       "path": "src/black/comments.py",
+       "name": "generate_comments",
+       "owner": null,
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
+       "whole_sites_left": 0
+      },
       {
        "commit": "976bbe4863",
        "subject": "Remove unused code (#5614)",
@@ -2911,6 +3300,18 @@
        "whole_sites_left": 0
       },
       {
+       "commit": "64631f6623",
+       "subject": "Normalize uppercase t-string prefixes in preview mode (#5425)",
+       "path": "src/black/strings.py",
+       "name": "normalize_string_prefix",
+       "owner": null,
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
        "commit": "db2e3e7b31",
        "subject": "Ignore permission errors when reading cache (#5258)",
        "path": "src/blib2to3/pgen2/driver.py",
@@ -2920,6 +3321,18 @@
        "renamed_to": null,
        "half_sites_listed": 2,
        "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "00cd1e4a6b",
+       "subject": "Fix unnecessary parentheses in indexed assignment RHS (#5095)",
+       "path": "src/black/lines.py",
+       "name": "can_omit_invisible_parens",
+       "owner": null,
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
        "whole_sites_left": 0
       }
      ]
@@ -2931,18 +3344,30 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 249,
-      "commits_with_breaking_change": 33,
-      "breaking_changes": 162,
-      "moved_or_shared_name": 77,
-      "in_a_file_the_commit_moved": 1,
-      "half_changes_with_a_listed_site": 9,
-      "half_sites_listed": 32,
-      "half_sites_the_commit_then_changed": 32,
-      "half_sites_listed_as_possible_only": 178,
+      "commits_with_breaking_change": 32,
+      "breaking_changes": 154,
+      "moved_or_shared_name": 29,
+      "in_a_file_the_commit_moved": 0,
+      "half_changes_with_a_listed_site": 12,
+      "half_sites_listed": 74,
+      "half_sites_the_commit_then_changed": 69,
+      "half_sites_listed_as_possible_only": 599,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
      "changes_with_a_site": [
+      {
+       "commit": "3e44f88f5f",
+       "subject": "Bump MSRV to 1.57 (#788)",
+       "path": "src/lib.rs",
+       "name": "offset_from",
+       "owner": null,
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 9,
+       "half_sites_the_commit_then_changed": 9,
+       "whole_sites_left": 0
+      },
       {
        "commit": "3ab876fee6",
        "subject": "Try get methods for Buf trait (#753)",
@@ -2951,8 +3376,8 @@
        "owner": null,
        "change": "signature_changed",
        "renamed_to": null,
-       "half_sites_listed": 1,
-       "half_sites_the_commit_then_changed": 1,
+       "half_sites_listed": 12,
+       "half_sites_the_commit_then_changed": 12,
        "whole_sites_left": 0
       },
       {
@@ -3016,6 +3441,30 @@
        "whole_sites_left": 0
       },
       {
+       "commit": "96268a80d4",
+       "subject": "Move \"extra\" methods to extension traits (#306)",
+       "path": "src/buf/buf_impl.rs",
+       "name": "chain",
+       "owner": "Buf",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "43ac8e5494",
+       "subject": "Refactor Bytes to use an internal vtable (#298)",
+       "path": "src/bytes.rs",
+       "name": "with_capacity",
+       "owner": "Bytes",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 12,
+       "half_sites_the_commit_then_changed": 7,
+       "whole_sites_left": 0
+      },
+      {
        "commit": "b6cb346adf",
        "subject": "Remove IntoBuf/FromBuf (#288)",
        "path": "src/buf/from_buf.rs",
@@ -3035,8 +3484,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 5,
-       "half_sites_the_commit_then_changed": 5,
+       "half_sites_listed": 12,
+       "half_sites_the_commit_then_changed": 12,
        "whole_sites_left": 0
       },
       {
@@ -3047,8 +3496,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 7,
-       "half_sites_the_commit_then_changed": 7,
+       "half_sites_listed": 8,
+       "half_sites_the_commit_then_changed": 8,
        "whole_sites_left": 0
       }
      ]
@@ -3119,16 +3568,41 @@
       "commits_changing_code": 156,
       "commits_with_breaking_change": 18,
       "breaking_changes": 25,
-      "moved_or_shared_name": 5,
+      "moved_or_shared_name": 0,
       "in_a_file_the_commit_moved": 2,
-      "half_changes_with_a_listed_site": 0,
-      "half_sites_listed": 0,
-      "half_sites_the_commit_then_changed": 0,
-      "half_sites_listed_as_possible_only": 194,
+      "half_changes_with_a_listed_site": 2,
+      "half_sites_listed": 7,
+      "half_sites_the_commit_then_changed": 7,
+      "half_sites_listed_as_possible_only": 202,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
-     "changes_with_a_site": []
+     "changes_with_a_site": [
+      {
+       "commit": "5161cc4716",
+       "subject": "Make the call to the \"sun.\" packages optional when cleaning byte buffers (#872)",
+       "path": "src/main/java/org/apache/commons/io/input/ByteBufferCleaner.java",
+       "name": "clean",
+       "owner": "ByteBufferCleaner",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 4,
+       "half_sites_the_commit_then_changed": 4,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "5161cc4716",
+       "subject": "Make the call to the \"sun.\" packages optional when cleaning byte buffers (#872)",
+       "path": "src/main/java/org/apache/commons/io/input/ByteBufferCleaner.java",
+       "name": "isSupported",
+       "owner": "ByteBufferCleaner",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
+       "whole_sites_left": 0
+      }
+     ]
     },
     {
      "repository": "sindresorhus/execa",
@@ -3137,14 +3611,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 228,
-      "commits_with_breaking_change": 9,
-      "breaking_changes": 40,
-      "moved_or_shared_name": 35,
+      "commits_with_breaking_change": 8,
+      "breaking_changes": 36,
+      "moved_or_shared_name": 3,
       "in_a_file_the_commit_moved": 1,
       "half_changes_with_a_listed_site": 0,
       "half_sites_listed": 0,
       "half_sites_the_commit_then_changed": 0,
-      "half_sites_listed_as_possible_only": 0,
+      "half_sites_listed_as_possible_only": 4067,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -3157,55 +3631,18 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 224,
-      "commits_with_breaking_change": 31,
-      "breaking_changes": 91,
-      "moved_or_shared_name": 23,
+      "commits_with_breaking_change": 30,
+      "breaking_changes": 88,
+      "moved_or_shared_name": 17,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 3,
-      "half_sites_listed": 4,
-      "half_sites_the_commit_then_changed": 4,
-      "half_sites_listed_as_possible_only": 86,
+      "half_changes_with_a_listed_site": 0,
+      "half_sites_listed": 0,
+      "half_sites_the_commit_then_changed": 0,
+      "half_sites_listed_as_possible_only": 79,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
-     "changes_with_a_site": [
-      {
-       "commit": "3dd250d153",
-       "subject": "rename Key::from_static_str to from_str_static",
-       "path": "src/kv/key.rs",
-       "name": "from_static_str",
-       "owner": "Key",
-       "change": "removed",
-       "renamed_to": "from_str_static",
-       "half_sites_listed": 1,
-       "half_sites_the_commit_then_changed": 1,
-       "whole_sites_left": 0
-      },
-      {
-       "commit": "3f534d00e4",
-       "subject": "Move private APIs into a single module",
-       "path": "src/lib.rs",
-       "name": "__private_api_log",
-       "owner": null,
-       "change": "removed",
-       "renamed_to": null,
-       "half_sites_listed": 2,
-       "half_sites_the_commit_then_changed": 2,
-       "whole_sites_left": 0
-      },
-      {
-       "commit": "3f534d00e4",
-       "subject": "Move private APIs into a single module",
-       "path": "src/lib.rs",
-       "name": "__private_api_enabled",
-       "owner": null,
-       "change": "removed",
-       "renamed_to": null,
-       "half_sites_listed": 1,
-       "half_sites_the_commit_then_changed": 1,
-       "whole_sites_left": 0
-      }
-     ]
+     "changes_with_a_site": []
     },
     {
      "repository": "App-vNext/Polly",
@@ -3214,9 +3651,9 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 32,
-      "commits_with_breaking_change": 5,
-      "breaking_changes": 5,
-      "moved_or_shared_name": 3,
+      "commits_with_breaking_change": 3,
+      "breaking_changes": 3,
+      "moved_or_shared_name": 0,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 0,
       "half_sites_listed": 0,
@@ -3234,14 +3671,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 240,
-      "commits_with_breaking_change": 21,
-      "breaking_changes": 38,
-      "moved_or_shared_name": 3,
+      "commits_with_breaking_change": 20,
+      "breaking_changes": 37,
+      "moved_or_shared_name": 1,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 2,
       "half_sites_listed": 14,
       "half_sites_the_commit_then_changed": 14,
-      "half_sites_listed_as_possible_only": 10,
+      "half_sites_listed_as_possible_only": 74,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -3279,14 +3716,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 227,
-      "commits_with_breaking_change": 19,
-      "breaking_changes": 41,
-      "moved_or_shared_name": 12,
+      "commits_with_breaking_change": 18,
+      "breaking_changes": 40,
+      "moved_or_shared_name": 10,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 5,
-      "half_sites_listed": 22,
-      "half_sites_the_commit_then_changed": 18,
-      "half_sites_listed_as_possible_only": 13,
+      "half_changes_with_a_listed_site": 4,
+      "half_sites_listed": 20,
+      "half_sites_the_commit_then_changed": 16,
+      "half_sites_listed_as_possible_only": 28,
       "whole_sites_left": 4,
       "commits_with_a_site_left": 1
      },
@@ -3313,18 +3750,6 @@
        "renamed_to": null,
        "half_sites_listed": 4,
        "half_sites_the_commit_then_changed": 4,
-       "whole_sites_left": 0
-      },
-      {
-       "commit": "7e24a24288",
-       "subject": "docs(blog): drop the reading time and put a GitHub link in the navbar",
-       "path": "packages/docs/loaders/source.ts",
-       "name": "readingMinutes",
-       "owner": null,
-       "change": "removed",
-       "renamed_to": null,
-       "half_sites_listed": 2,
-       "half_sites_the_commit_then_changed": 2,
        "whole_sites_left": 0
       },
       {
@@ -3357,14 +3782,14 @@
    "sum": {
     "commits": 3000,
     "commits_changing_code": 1894,
-    "commits_with_breaking_change": 184,
-    "breaking_changes": 506,
-    "moved_or_shared_name": 162,
-    "in_a_file_the_commit_moved": 13,
-    "half_changes_with_a_listed_site": 28,
-    "half_sites_listed": 92,
-    "half_sites_the_commit_then_changed": 88,
-    "half_sites_listed_as_possible_only": 516,
+    "commits_with_breaking_change": 177,
+    "breaking_changes": 487,
+    "moved_or_shared_name": 64,
+    "in_a_file_the_commit_moved": 12,
+    "half_changes_with_a_listed_site": 36,
+    "half_sites_listed": 160,
+    "half_sites_the_commit_then_changed": 151,
+    "half_sites_listed_as_possible_only": 5059,
     "whole_sites_left": 4,
     "commits_with_a_site_left": 1
    }
@@ -3380,12 +3805,12 @@
       "commits_changing_code": 191,
       "commits_with_breaking_change": 7,
       "breaking_changes": 19,
-      "moved_or_shared_name": 4,
+      "moved_or_shared_name": 1,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 0,
       "half_sites_listed": 0,
       "half_sites_the_commit_then_changed": 0,
-      "half_sites_listed_as_possible_only": 8,
+      "half_sites_listed_as_possible_only": 47,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -3398,9 +3823,9 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 135,
-      "commits_with_breaking_change": 10,
-      "breaking_changes": 24,
-      "moved_or_shared_name": 4,
+      "commits_with_breaking_change": 9,
+      "breaking_changes": 21,
+      "moved_or_shared_name": 2,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 1,
       "half_sites_listed": 2,
@@ -3451,14 +3876,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 161,
-      "commits_with_breaking_change": 24,
-      "breaking_changes": 113,
-      "moved_or_shared_name": 17,
+      "commits_with_breaking_change": 22,
+      "breaking_changes": 111,
+      "moved_or_shared_name": 2,
       "in_a_file_the_commit_moved": 0,
-      "half_changes_with_a_listed_site": 2,
-      "half_sites_listed": 7,
-      "half_sites_the_commit_then_changed": 7,
-      "half_sites_listed_as_possible_only": 123,
+      "half_changes_with_a_listed_site": 4,
+      "half_sites_listed": 19,
+      "half_sites_the_commit_then_changed": 19,
+      "half_sites_listed_as_possible_only": 145,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -3476,6 +3901,18 @@
        "whole_sites_left": 0
       },
       {
+       "commit": "d91d90465d",
+       "subject": "reinstate support for `IDataReader` (#1913)",
+       "path": "Dapper/SqlMapper.cs",
+       "name": "GetDbDataReader",
+       "owner": "SqlMapper",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 6,
+       "half_sites_the_commit_then_changed": 6,
+       "whole_sites_left": 0
+      },
+      {
        "commit": "8152f2c718",
        "subject": "WIP: Lib updates and prepare for Microsoft.Data.SqlClient (#1313)",
        "path": "Dapper/TypeExtensions.cs",
@@ -3483,8 +3920,20 @@
        "owner": "TypeExtensions",
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 6,
-       "half_sites_the_commit_then_changed": 6,
+       "half_sites_listed": 10,
+       "half_sites_the_commit_then_changed": 10,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "0b168789fd",
+       "subject": "Benchmarks:  updating libs and overall runner (#1123)",
+       "path": "Dapper.Tests.Performance/Benchmarks.cs",
+       "name": "Iterations",
+       "owner": "BenchmarkBase",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 2,
+       "half_sites_the_commit_then_changed": 2,
        "whole_sites_left": 0
       }
      ]
@@ -3496,14 +3945,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 225,
-      "commits_with_breaking_change": 34,
-      "breaking_changes": 143,
-      "moved_or_shared_name": 21,
+      "commits_with_breaking_change": 33,
+      "breaking_changes": 142,
+      "moved_or_shared_name": 8,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 11,
-      "half_sites_listed": 48,
-      "half_sites_the_commit_then_changed": 48,
-      "half_sites_listed_as_possible_only": 625,
+      "half_sites_listed": 37,
+      "half_sites_the_commit_then_changed": 37,
+      "half_sites_listed_as_possible_only": 1113,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -3559,13 +4008,13 @@
       {
        "commit": "f071367e3c",
        "subject": "V5 changes",
-       "path": "context.go",
-       "name": "context",
+       "path": "binder_generic.go",
+       "name": "FormParam",
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 12,
-       "half_sites_the_commit_then_changed": 12,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
        "whole_sites_left": 0
       },
       {
@@ -3651,12 +4100,12 @@
       "commits_changing_code": 185,
       "commits_with_breaking_change": 24,
       "breaking_changes": 45,
-      "moved_or_shared_name": 6,
+      "moved_or_shared_name": 4,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 14,
       "half_sites_listed": 26,
       "half_sites_the_commit_then_changed": 21,
-      "half_sites_listed_as_possible_only": 19,
+      "half_sites_listed_as_possible_only": 18,
       "whole_sites_left": 5,
       "commits_with_a_site_left": 1
      },
@@ -3838,14 +4287,14 @@
      "totals": {
       "commits": 230,
       "commits_changing_code": 126,
-      "commits_with_breaking_change": 15,
-      "breaking_changes": 65,
-      "moved_or_shared_name": 9,
+      "commits_with_breaking_change": 12,
+      "breaking_changes": 62,
+      "moved_or_shared_name": 6,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 2,
       "half_sites_listed": 7,
       "half_sites_the_commit_then_changed": 6,
-      "half_sites_listed_as_possible_only": 4,
+      "half_sites_listed_as_possible_only": 2,
       "whole_sites_left": 1,
       "commits_with_a_site_left": 1
      },
@@ -3883,9 +4332,9 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 100,
-      "commits_with_breaking_change": 13,
-      "breaking_changes": 44,
-      "moved_or_shared_name": 17,
+      "commits_with_breaking_change": 11,
+      "breaking_changes": 28,
+      "moved_or_shared_name": 0,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 1,
       "half_sites_listed": 1,
@@ -3916,14 +4365,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 152,
-      "commits_with_breaking_change": 43,
-      "breaking_changes": 343,
-      "moved_or_shared_name": 131,
+      "commits_with_breaking_change": 41,
+      "breaking_changes": 333,
+      "moved_or_shared_name": 67,
       "in_a_file_the_commit_moved": 13,
-      "half_changes_with_a_listed_site": 7,
-      "half_sites_listed": 28,
-      "half_sites_the_commit_then_changed": 28,
-      "half_sites_listed_as_possible_only": 187,
+      "half_changes_with_a_listed_site": 12,
+      "half_sites_listed": 40,
+      "half_sites_the_commit_then_changed": 40,
+      "half_sites_listed_as_possible_only": 922,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -3948,8 +4397,8 @@
        "owner": "Ensure",
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 7,
-       "half_sites_the_commit_then_changed": 7,
+       "half_sites_listed": 8,
+       "half_sites_the_commit_then_changed": 8,
        "whole_sites_left": 0
       },
       {
@@ -3960,8 +4409,8 @@
        "owner": "Note",
        "change": "removed",
        "renamed_to": "ConstTitle",
-       "half_sites_listed": 3,
-       "half_sites_the_commit_then_changed": 3,
+       "half_sites_listed": 4,
+       "half_sites_the_commit_then_changed": 4,
        "whole_sites_left": 0
       },
       {
@@ -3972,8 +4421,8 @@
        "owner": "Note",
        "change": "removed",
        "renamed_to": "ConstMessage",
-       "half_sites_listed": 3,
-       "half_sites_the_commit_then_changed": 3,
+       "half_sites_listed": 4,
+       "half_sites_the_commit_then_changed": 4,
        "whole_sites_left": 0
       },
       {
@@ -4001,6 +4450,66 @@
        "whole_sites_left": 0
       },
       {
+       "commit": "d758e4005b",
+       "subject": "Wrapping up interceptors, fixing typos, removing Moq (#2141)",
+       "path": "test/RestSharp.Tests.Shared/Fixtures/Handlers.cs",
+       "name": "EchoValue",
+       "owner": "Handlers",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "507ed87f8b",
+       "subject": "v109 (#1963)",
+       "path": "src/RestSharp/RestClient.Serialization.cs",
+       "name": "UseDefaultSerializers",
+       "owner": "RestClient",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "507ed87f8b",
+       "subject": "v109 (#1963)",
+       "path": "src/RestSharp/RestClient.cs",
+       "name": "AssignAcceptedContentTypes",
+       "owner": "RestClient",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "7be39f5e42",
+       "subject": "Interface, configuration",
+       "path": "src/RestSharp/RestClient.Serialization.cs",
+       "name": "UseDefaultSerializers",
+       "owner": "RestClient",
+       "change": "removed",
+       "renamed_to": null,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
+       "whole_sites_left": 0
+      },
+      {
+       "commit": "7be39f5e42",
+       "subject": "Interface, configuration",
+       "path": "src/RestSharp/RestClient.cs",
+       "name": "AssignAcceptedContentTypes",
+       "owner": "RestClient",
+       "change": "signature_changed",
+       "renamed_to": null,
+       "half_sites_listed": 1,
+       "half_sites_the_commit_then_changed": 1,
+       "whole_sites_left": 0
+      },
+      {
        "commit": "fc27aef830",
        "subject": "Fixes (#1750)",
        "path": "src/RestSharp/Response/RestResponse.cs",
@@ -4021,14 +4530,14 @@
      "totals": {
       "commits": 300,
       "commits_changing_code": 250,
-      "commits_with_breaking_change": 62,
-      "breaking_changes": 142,
-      "moved_or_shared_name": 46,
+      "commits_with_breaking_change": 61,
+      "breaking_changes": 138,
+      "moved_or_shared_name": 12,
       "in_a_file_the_commit_moved": 0,
       "half_changes_with_a_listed_site": 46,
-      "half_sites_listed": 194,
-      "half_sites_the_commit_then_changed": 194,
-      "half_sites_listed_as_possible_only": 29,
+      "half_sites_listed": 217,
+      "half_sites_the_commit_then_changed": 217,
+      "half_sites_listed_as_possible_only": 224,
       "whole_sites_left": 0,
       "commits_with_a_site_left": 0
      },
@@ -4137,8 +4646,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 2,
-       "half_sites_the_commit_then_changed": 2,
+       "half_sites_listed": 4,
+       "half_sites_the_commit_then_changed": 4,
        "whole_sites_left": 0
       },
       {
@@ -4305,8 +4814,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 2,
-       "half_sites_the_commit_then_changed": 2,
+       "half_sites_listed": 3,
+       "half_sites_the_commit_then_changed": 3,
        "whole_sites_left": 0
       },
       {
@@ -4449,8 +4958,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 11,
-       "half_sites_the_commit_then_changed": 11,
+       "half_sites_listed": 12,
+       "half_sites_the_commit_then_changed": 12,
        "whole_sites_left": 0
       },
       {
@@ -4497,8 +5006,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 4,
-       "half_sites_the_commit_then_changed": 4,
+       "half_sites_listed": 9,
+       "half_sites_the_commit_then_changed": 9,
        "whole_sites_left": 0
       },
       {
@@ -4509,8 +5018,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": "_parse_range_header",
-       "half_sites_listed": 5,
-       "half_sites_the_commit_then_changed": 5,
+       "half_sites_listed": 12,
+       "half_sites_the_commit_then_changed": 12,
        "whole_sites_left": 0
       },
       {
@@ -4521,8 +5030,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": "_parse_content_range_header",
-       "half_sites_listed": 2,
-       "half_sites_the_commit_then_changed": 2,
+       "half_sites_listed": 8,
+       "half_sites_the_commit_then_changed": 8,
        "whole_sites_left": 0
       },
       {
@@ -4545,8 +5054,8 @@
        "owner": null,
        "change": "removed",
        "renamed_to": null,
-       "half_sites_listed": 6,
-       "half_sites_the_commit_then_changed": 6,
+       "half_sites_listed": 7,
+       "half_sites_the_commit_then_changed": 7,
        "whole_sites_left": 0
       },
       {
@@ -4591,14 +5100,14 @@
    "sum": {
     "commits": 2901,
     "commits_changing_code": 1615,
-    "commits_with_breaking_change": 236,
-    "breaking_changes": 942,
-    "moved_or_shared_name": 255,
+    "commits_with_breaking_change": 224,
+    "breaking_changes": 903,
+    "moved_or_shared_name": 102,
     "in_a_file_the_commit_moved": 14,
-    "half_changes_with_a_listed_site": 84,
-    "half_sites_listed": 313,
-    "half_sites_the_commit_then_changed": 307,
-    "half_sites_listed_as_possible_only": 996,
+    "half_changes_with_a_listed_site": 91,
+    "half_sites_listed": 349,
+    "half_sites_the_commit_then_changed": 343,
+    "half_sites_listed_as_possible_only": 2472,
     "whole_sites_left": 6,
     "commits_with_a_site_left": 2
    }
