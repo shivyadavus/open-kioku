@@ -1,0 +1,47 @@
+[
+ {
+  "id": "black-get_cache_file",
+  "repo": "black",
+  "sha": "1ed66a8b3385a000508a03158ac3dc2a8a75a209",
+  "path": "src/black/cache.py",
+  "name": "get_cache_file",
+  "before": "def get_cache_file(mode: Mode)",
+  "after": "def get_cache_file(mode: Mode, cache_dir: Path)"
+ },
+ {
+  "id": "black-load_packaged_grammar",
+  "repo": "black",
+  "sha": "db2e3e7b317b40685ba4618235a8388c7c6ea5e2",
+  "path": "src/blib2to3/pgen2/driver.py",
+  "name": "load_packaged_grammar",
+  "before": "def load_packaged_grammar(package: str, grammar_source: str, cache_dir: Path | None = None)",
+  "after": "def load_packaged_grammar(grammar_source: str, cache_dir: Path | None = None)"
+ },
+ {
+  "id": "cli-buildCompletionCommand",
+  "repo": "cli",
+  "sha": "c212c5ca4b62a9330a3b83bea35c233e7d2d4d57",
+  "path": "completion.go",
+  "name": "buildCompletionCommand",
+  "before": "func buildCompletionCommand(appName string)",
+  "after": "func buildCompletionCommand(appName, name string)"
+ },
+ {
+  "id": "testify-truncatingFormat",
+  "repo": "testify",
+  "sha": "1eb5fc0b40b46c0bddf911802faea2dd0831985f",
+  "path": "assert/assertions.go",
+  "name": "truncatingFormat",
+  "before": "func truncatingFormat(data interface{})",
+  "after": "func truncatingFormat(format string, data interface{})"
+ },
+ {
+  "id": "zod-properties",
+  "repo": "zod",
+  "sha": "413cce9a8c893bab2dccbe4200c84a7635bbe22f",
+  "path": "packages/zod/src/v4/core/api.ts",
+  "name": "_properties",
+  "before": "_properties(Class: util.SchemaClass<schemas.$ZodProperties>, shape: Shape, params?: string | $ZodPropertiesParams)",
+  "after": "_properties(shape: Shape, params?: string | $ZodCheckPropertiesParams)"
+ }
+]

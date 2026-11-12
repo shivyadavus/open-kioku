@@ -98,7 +98,7 @@ ok gate install claude --apply     # once per repository; the Claude Code plugin
 
 That is the whole setup. The first prompt of a conversation plans an edit boundary in the background; later prompts widen it; every Edit, Write and shell write is judged against it; every stop that follows a change verifies the real change (files created with no hook included) and writes a **Change Dossier**: what was declared, what the harness reported, what was denied, what actually changed, what verification found, and what is still uncertain.
 
-A session started from a prompt is **advisory**: it tells the agent which edits fall outside the boundary and records them, denies secret-like and generated paths, and holds nothing, because a plan built from a prompt cannot tell a task from a remark (measured: `"fix it"` plans with the same confidence as a real commit subject). The boundary is binding where someone declared it: `ok gate start "<task>"`, `mode = "enforce"` in `ok.toml`, or `--mode enforce` in CI. There a `FAIL` holds the agent, or fails the check, with the violations and the one remedy, `ok gate expand <path> --reason "<why>"`.
+A session started from a prompt is **advisory**: it tells the agent which edits fall outside the boundary and records them, denies secret-like and generated paths, and its boundary holds nothing, because a plan built from a prompt cannot tell a task from a remark (measured: `"fix it"` plans with the same confidence as a real commit subject). The boundary is binding where someone declared it: `ok gate start "<task>"`, `mode = "enforce"` in `ok.toml`, or `--mode enforce` in CI. There a `FAIL` holds the agent, or fails the check, with the violations and the one remedy, `ok gate expand <path> --reason "<why>"`.
 
 ```sh
 ok gate ci --base origin/main --task "$PR_TITLE" --write dossier.md   # a dossier for any pull request, no hooks; fails on forbidden paths
@@ -106,6 +106,28 @@ ok gate install git --apply        # any agent, any person: a pre-commit hook th
 ```
 
 Measured on commit-derived sessions and three live Claude Code sessions; method, numbers and caveats in [`benchmarks/gate/`](benchmarks/gate/README.md). [`docs/gate.md`](docs/gate.md)
+
+### Ripple: what the diff does not show
+
+```console
+$ ok ripple
+Ripple: 2 site(s) no longer fit 1 changed declaration(s).
+
+src/click/utils.py:62  function `_make_default_short_help`: signature changed
+  - def _make_default_short_help(help: str, max_length: int = 45)
+  + def _make_default_short_help(help: str, max_length: int, strict: bool)
+  broken: 2 site(s)
+    src/click/core.py:1275 (in Command.get_short_help_str)  text = _make_default_short_help(self.help, limit)
+        does not pass `strict`, which is required now [by name]
+    tests/test_utils/test_make_default_short_help.py:62 (in test_make_default_short_help)  out = click.utils._make_default_short_help(value, max_length)
+        does not pass `strict`, which is required now [by name]
+```
+
+A change that alters a function's parameters, or removes or renames a declaration, breaks code the diff never shows. `ok ripple` finds the calls that no longer fit and the code that still names what is gone, in Rust, Python, TypeScript, JavaScript, Go, Java and C#, **with no index and nothing to set up**. The same hooks tell a coding agent right after the edit that caused it, and tell you at the stop what it left; `ok gate ci` puts the list in the pull request's dossier. It reads syntax, not types: a call is claimed only when it fit the old signature and does not fit the new one, and only when an import or a qualifier leads from it to the declaration.
+
+Replayed with no index over the last 300 commits of 46 open-source repositories in seven languages (7,711 commits that change code): given only the file that declares each change, it named 913 broken sites; the real commit went on to change 896 of them, 12 of the other 17 were code the commit really left broken, and 5 were tests it commented out instead. On the complete merged commits it named 15 sites in 4 commits, all four real: commits on the main branch of a widely used library that still named something they had removed, one of them still in place. Those repositories are the ones its rules were written and corrected against, an independent review found 18 faults in its first form, and on five small tasks a frontier model, asked to update the callers, left nothing broken with or without the hook. So the hooks tell and do not hold unless you ask them to (`[gate] ripple = "hold"`).
+
+[`docs/ripple.md`](docs/ripple.md) · [`benchmarks/ripple/`](benchmarks/ripple/README.md)
 
 Underneath: exact definitions, references, and dependency paths from source (and optional SCIP) are authoritative. Lexical, semantic, history, test, and runtime signals can reorder retrieval; they cannot overwrite repository truth.
 
@@ -229,6 +251,7 @@ ok --repo . search "token expiration handler"
 ok --repo . symbol definition PolicyGate
 ok --repo . symbol refs PolicyGate
 ok --repo . impact --file src/auth.rs
+ok --repo . ripple --base origin/main
 ok --repo . tests --changed src/auth.rs
 ok --repo . context "change token expiration" --format markdown
 ok --repo . plan "change token expiration" --format markdown
@@ -238,9 +261,9 @@ ok prove . --task "change token expiration"
 ```
 
 <details>
-<summary>All 38 top-level commands</summary>
+<summary>All 40 top-level commands</summary>
 
-Current top-level commands (39): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `preflight`, `verify-boundary`, `verify`, `gate`, `contract`, `bench`, `workflow-bench`, `retrieval-bench`, `relationship-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
+Current top-level commands (40): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `ripple`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `preflight`, `verify-boundary`, `verify`, `gate`, `contract`, `bench`, `workflow-bench`, `retrieval-bench`, `relationship-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
 
 </details>
 

@@ -1,0 +1,286 @@
+[
+ {
+  "id": "black-get_cache_file",
+  "repo": "black",
+  "sha": "1ed66a8b3385a000508a03158ac3dc2a8a75a209",
+  "path": "src/black/cache.py",
+  "name": "get_cache_file",
+  "before": "def get_cache_file(mode: Mode)",
+  "after": "def get_cache_file(mode: Mode, cache_dir: Path)",
+  "subject": "Add --cache-dir command-line option (#5433)",
+  "sites_the_commit_changed_elsewhere": 6,
+  "arms": {
+   "plain": {
+    "broken_sites_left": 0,
+    "calls_fitting": 7,
+    "signature_now": "def get_cache_file(mode: Mode, cache_dir: Path)",
+    "files_changed": [
+     "src/black/cache.py",
+     "tests/test_black.py"
+    ],
+    "files_of_the_commit_also_changed": "2 of 11",
+    "turns": 13,
+    "cost_usd": 0.9248,
+    "duration_s": 35.4,
+    "tools": {
+     "Grep": 2,
+     "Read": 1,
+     "Bash": 3,
+     "Edit": 6
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": false,
+    "stops_held": 0
+   },
+   "hooks": {
+    "broken_sites_left": 0,
+    "calls_fitting": 7,
+    "signature_now": "def get_cache_file(mode: Mode, cache_dir: Path)",
+    "files_changed": [
+     "src/black/cache.py",
+     "tests/test_black.py"
+    ],
+    "files_of_the_commit_also_changed": "2 of 11",
+    "turns": 10,
+    "cost_usd": 0.831,
+    "duration_s": 23.7,
+    "tools": {
+     "Grep": 2,
+     "Read": 1,
+     "Bash": 2,
+     "Edit": 4
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": true,
+    "stops_held": 0
+   }
+  }
+ },
+ {
+  "id": "black-load_packaged_grammar",
+  "repo": "black",
+  "sha": "db2e3e7b317b40685ba4618235a8388c7c6ea5e2",
+  "path": "src/blib2to3/pgen2/driver.py",
+  "name": "load_packaged_grammar",
+  "before": "def load_packaged_grammar(package: str, grammar_source: str, cache_dir: Path | None = None)",
+  "after": "def load_packaged_grammar(grammar_source: str, cache_dir: Path | None = None)",
+  "subject": "Ignore permission errors when reading cache (#5258)",
+  "sites_the_commit_changed_elsewhere": 2,
+  "arms": {
+   "hooks": {
+    "broken_sites_left": 0,
+    "calls_fitting": 2,
+    "signature_now": "def load_packaged_grammar(grammar_source: str, cache_dir: Path | None = None)",
+    "files_changed": [
+     "src/blib2to3/pgen2/driver.py",
+     "src/blib2to3/pygram.py"
+    ],
+    "files_of_the_commit_also_changed": "2 of 5",
+    "turns": 10,
+    "cost_usd": 0.3368,
+    "duration_s": 24.0,
+    "tools": {
+     "Grep": 2,
+     "Read": 3,
+     "Edit": 4
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": true,
+    "stops_held": 0
+   },
+   "plain": {
+    "broken_sites_left": 0,
+    "calls_fitting": 2,
+    "signature_now": "def load_packaged_grammar(grammar_source: str, cache_dir: Path | None = None)",
+    "files_changed": [
+     "src/blib2to3/pgen2/driver.py",
+     "src/blib2to3/pygram.py"
+    ],
+    "files_of_the_commit_also_changed": "2 of 5",
+    "turns": 9,
+    "cost_usd": 0.3079,
+    "duration_s": 20.9,
+    "tools": {
+     "Grep": 2,
+     "Read": 2,
+     "Edit": 4
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": false,
+    "stops_held": 0
+   }
+  }
+ },
+ {
+  "id": "cli-buildCompletionCommand",
+  "repo": "cli",
+  "sha": "c212c5ca4b62a9330a3b83bea35c233e7d2d4d57",
+  "path": "completion.go",
+  "name": "buildCompletionCommand",
+  "before": "func buildCompletionCommand(appName string)",
+  "after": "func buildCompletionCommand(appName, name string)",
+  "subject": "fix: use the configured completion command name in its help",
+  "sites_the_commit_changed_elsewhere": 2,
+  "arms": {
+   "plain": {
+    "broken_sites_left": 0,
+    "calls_fitting": 2,
+    "signature_now": "func buildCompletionCommand(appName, name string)",
+    "files_changed": [
+     "command_setup.go",
+     "command_test.go",
+     "completion.go",
+     "completion_test.go"
+    ],
+    "files_of_the_commit_also_changed": "3 of 3",
+    "turns": 11,
+    "cost_usd": 0.3393,
+    "duration_s": 23.4,
+    "tools": {
+     "Grep": 2,
+     "Read": 4,
+     "Edit": 4
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": false,
+    "stops_held": 0
+   },
+   "hooks": {
+    "broken_sites_left": 0,
+    "calls_fitting": 2,
+    "signature_now": "func buildCompletionCommand(appName, name string)",
+    "files_changed": [
+     "command_setup.go",
+     "command_test.go",
+     "completion.go",
+     "completion_test.go"
+    ],
+    "files_of_the_commit_also_changed": "3 of 3",
+    "turns": 9,
+    "cost_usd": 0.3542,
+    "duration_s": 23.8,
+    "tools": {
+     "Grep": 2,
+     "Read": 2,
+     "Edit": 4
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": true,
+    "stops_held": 0
+   }
+  }
+ },
+ {
+  "id": "testify-truncatingFormat",
+  "repo": "testify",
+  "sha": "1eb5fc0b40b46c0bddf911802faea2dd0831985f",
+  "path": "assert/assertions.go",
+  "name": "truncatingFormat",
+  "before": "func truncatingFormat(data interface{})",
+  "after": "func truncatingFormat(format string, data interface{})",
+  "subject": "Truncate very long objects in test failure messages",
+  "sites_the_commit_changed_elsewhere": 2,
+  "arms": {
+   "hooks": {
+    "broken_sites_left": 0,
+    "calls_fitting": 5,
+    "signature_now": "func truncatingFormat(format string, data interface{})",
+    "files_changed": [
+     "assert/assertions.go",
+     "assert/assertions_test.go"
+    ],
+    "files_of_the_commit_also_changed": "2 of 2",
+    "turns": 7,
+    "cost_usd": 0.2293,
+    "duration_s": 15.3,
+    "tools": {
+     "Grep": 1,
+     "Edit": 5
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": true,
+    "stops_held": 0
+   },
+   "plain": {
+    "broken_sites_left": 0,
+    "calls_fitting": 5,
+    "signature_now": "func truncatingFormat(format string, data interface{})",
+    "files_changed": [
+     "assert/assertions.go",
+     "assert/assertions_test.go"
+    ],
+    "files_of_the_commit_also_changed": "2 of 2",
+    "turns": 9,
+    "cost_usd": 0.2866,
+    "duration_s": 21.0,
+    "tools": {
+     "Grep": 1,
+     "Bash": 2,
+     "Edit": 5
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": false,
+    "stops_held": 0
+   }
+  }
+ },
+ {
+  "id": "zod-properties",
+  "repo": "zod",
+  "sha": "413cce9a8c893bab2dccbe4200c84a7635bbe22f",
+  "path": "packages/zod/src/v4/core/api.ts",
+  "name": "_properties",
+  "before": "_properties(Class: util.SchemaClass<schemas.$ZodProperties>, shape: Shape, params?: string | $ZodPropertiesParams)",
+  "after": "_properties(shape: Shape, params?: string | $ZodCheckPropertiesParams)",
+  "subject": "fix(v4): make z.properties() a check again (#6594)",
+  "sites_the_commit_changed_elsewhere": 2,
+  "arms": {
+   "plain": {
+    "broken_sites_left": 0,
+    "calls_fitting": 0,
+    "signature_now": "_properties(shape: Shape, params?: string | $ZodCheckPropertiesParams)",
+    "files_changed": [
+     "packages/zod/src/v4/classic/schemas.ts",
+     "packages/zod/src/v4/core/api.ts",
+     "packages/zod/src/v4/mini/schemas.ts"
+    ],
+    "files_of_the_commit_also_changed": "3 of 19",
+    "turns": 15,
+    "cost_usd": 0.8253,
+    "duration_s": 46.5,
+    "tools": {
+     "Grep": 4,
+     "Read": 4,
+     "Bash": 1,
+     "Edit": 5
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": false,
+    "stops_held": 0
+   },
+   "hooks": {
+    "broken_sites_left": 0,
+    "calls_fitting": 0,
+    "signature_now": "_properties(shape: Shape, params?: string | $ZodCheckPropertiesParams)",
+    "files_changed": [
+     "packages/zod/src/v4/classic/schemas.ts",
+     "packages/zod/src/v4/core/api.ts",
+     "packages/zod/src/v4/mini/schemas.ts"
+    ],
+    "files_of_the_commit_also_changed": "3 of 19",
+    "turns": 16,
+    "cost_usd": 0.726,
+    "duration_s": 48.3,
+    "tools": {
+     "Grep": 4,
+     "Read": 4,
+     "Bash": 2,
+     "Edit": 5
+    },
+    "is_error": false,
+    "hook_told_the_agent_its_ripple": true,
+    "stops_held": 0
+   }
+  }
+ }
+]

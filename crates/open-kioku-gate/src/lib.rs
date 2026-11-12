@@ -1658,7 +1658,89 @@ pub struct ChangeDossier {
     pub change: DossierChange,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<DossierVerification>,
+    /// What the change breaks outside itself: calls that no longer fit a function it altered,
+    /// code that still names what it removed. Absent when the check was off or could not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ripple: Option<DossierRipple>,
     pub caveats: Vec<String>,
+}
+
+/// The ripple of the change, without source text: where each broken site is and why.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DossierRipple {
+    /// Functions whose signature changed and declarations that were removed.
+    pub changed_declarations: usize,
+    /// Of those, the ones a call written for the old declaration could break on.
+    pub breaking: usize,
+    /// Sites that no longer fit, attributed by proof or by an unshared name.
+    pub broken_sites: usize,
+    /// Calls that were checked and fit.
+    pub sites_fitting: usize,
+    /// Sites the name alone does not settle. Not counted as broken.
+    pub possible_sites: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sites: Vec<DossierRippleSite>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub index_used: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DossierRippleSite {
+    /// The changed declaration, as `path: name`.
+    pub declaration: String,
+    pub path: String,
+    pub line: u32,
+    pub problem: String,
+    pub evidence: String,
+}
+
+/// Sites listed in a dossier; `ok ripple` lists the rest.
+const DOSSIER_RIPPLE_SITES: usize = 20;
+
+/// Records `report` in the dossier. A broken site turns a passing verdict into a warning: the
+/// change verified against its boundary and leaves something outside itself that does not fit.
+pub fn attach_ripple(dossier: &mut ChangeDossier, report: &open_kioku_patch::ripple::RippleReport) {
+    use open_kioku_patch::ripple::{ContractEffect, SiteEvidence};
+    let mut sites = Vec::new();
+    for contract in report.open_contracts() {
+        for site in &contract.broken {
+            if sites.len() >= DOSSIER_RIPPLE_SITES {
+                break;
+            }
+            sites.push(DossierRippleSite {
+                declaration: format!("{}: {}", contract.path, contract.display_name()),
+                path: site.path.clone(),
+                line: site.line,
+                problem: site.problem.clone(),
+                evidence: match site.evidence {
+                    SiteEvidence::Proven => "proven",
+                    SiteEvidence::Name => "by name",
+                    SiteEvidence::Possible => "possible",
+                }
+                .to_string(),
+            });
+        }
+    }
+    dossier.ripple = Some(DossierRipple {
+        changed_declarations: report.contracts.len(),
+        breaking: report
+            .contracts
+            .iter()
+            .filter(|contract| contract.effect == ContractEffect::Breaking)
+            .count(),
+        broken_sites: report.broken_sites,
+        sites_fitting: report.contracts.iter().map(|c| c.sites_fitting).sum(),
+        possible_sites: report
+            .contracts
+            .iter()
+            .map(|c| c.possible.len() + c.possible_omitted)
+            .sum(),
+        sites,
+        index_used: report.index_used,
+    });
+    if report.broken_sites > 0 && dossier.verdict == DossierVerdict::Pass {
+        dossier.verdict = DossierVerdict::Warn;
+    }
 }
 
 /// What the finishing step knows about the actual change.
@@ -1897,6 +1979,7 @@ pub fn build_dossier(
             source: change.source.clone(),
         },
         verification: verification_summary,
+        ripple: None,
         caveats,
     }
 }
@@ -2029,6 +2112,49 @@ pub fn render_markdown(dossier: &ChangeDossier) -> String {
         ));
     }
     out.push('\n');
+
+    if let Some(ripple) = &dossier.ripple {
+        out.push_str("### Ripple\n\n");
+        if ripple.changed_declarations == 0 {
+            out.push_str("- No signature changed and no declaration was removed.\n");
+        } else if ripple.broken_sites == 0 {
+            out.push_str(&format!(
+                "- {} changed declaration(s), {} a call could break on; no broken site found \
+                 ({} call(s) checked and fit).\n",
+                ripple.changed_declarations, ripple.breaking, ripple.sites_fitting
+            ));
+        } else {
+            out.push_str(&format!(
+                "- **{} site(s) no longer fit what this change altered** ({} changed \
+                 declaration(s); {} other call(s) fit).\n",
+                ripple.broken_sites, ripple.changed_declarations, ripple.sites_fitting
+            ));
+            for site in &ripple.sites {
+                out.push_str(&format!(
+                    "  - `{}:{}` {} — `{}` [{}]\n",
+                    markdown_text(&site.path, 200),
+                    site.line,
+                    markdown_text(&site.problem, 200),
+                    markdown_text(&site.declaration, 200),
+                    site.evidence
+                ));
+            }
+            if ripple.broken_sites > ripple.sites.len() {
+                out.push_str(&format!(
+                    "  - ... {} more; `ok ripple` lists them\n",
+                    ripple.broken_sites - ripple.sites.len()
+                ));
+            }
+        }
+        if ripple.possible_sites > 0 {
+            out.push_str(&format!(
+                "- {} more site(s) use a changed name that the name alone does not settle; \
+                 they are not counted.\n",
+                ripple.possible_sites
+            ));
+        }
+        out.push('\n');
+    }
 
     out.push_str("### Verification\n\n");
     match &dossier.verification {

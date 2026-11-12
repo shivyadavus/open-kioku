@@ -21,9 +21,11 @@ open-kioku-core = { version = "5.0.0", path = "../open-kioku-core" }
 open-kioku-errors = { version = "5.0.0", path = "../open-kioku-errors" }
 open-kioku-git = { version = "5.0.0", path = "../open-kioku-git" }
 open-kioku-impact = { version = "5.0.0", path = "../open-kioku-impact" }
+open-kioku-languages = { version = "5.0.0", path = "../open-kioku-languages" }
 open-kioku-plan = { version = "5.0.0", path = "../open-kioku-plan" }
 open-kioku-storage = { version = "5.0.0", path = "../open-kioku-storage" }
 open-kioku-tests = { version = "5.0.0", path = "../open-kioku-tests" }
+open-kioku-tree-sitter = { version = "5.0.0", path = "../open-kioku-tree-sitter" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

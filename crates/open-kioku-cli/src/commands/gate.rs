@@ -1144,7 +1144,7 @@ fn gate_verify(
     } else {
         session.repo_name.clone()
     };
-    Ok(build_dossier(
+    let mut dossier = build_dossier(
         &repo_name,
         session,
         &plan,
@@ -1152,7 +1152,276 @@ fn gate_verify(
         malformed,
         &change,
         verification.as_ref(),
-    ))
+    );
+    if !change.changed_files.is_empty() {
+        // The declarations of the change's own files: what was dirty before the session is
+        // not part of the change, here as in the rest of the dossier.
+        let files = change.changed_files.iter().map(PathBuf::from).collect();
+        if let Some(report) = gate_ripple(repo, session.base_rev.as_deref(), files) {
+            open_kioku_gate::attach_ripple(&mut dossier, &report);
+        }
+    }
+    Ok(dossier)
+}
+
+/// What `[gate] ripple` asks of the hooks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GateRipple {
+    Hold,
+    Report,
+    Off,
+}
+
+/// The setting, and whether the configured mode is `observe`. A configuration that cannot be
+/// read, and a value that is none of the three, are `report`: a stop is never held on the
+/// strength of a setting nobody could read.
+fn gate_ripple_setting(repo: &Path) -> (GateRipple, bool) {
+    let Ok(config) = OkConfig::load_from_repo(repo) else {
+        return (GateRipple::Report, false);
+    };
+    let setting = match config.gate.ripple.trim().to_ascii_lowercase().as_str() {
+        "off" => GateRipple::Off,
+        "hold" => GateRipple::Hold,
+        _ => GateRipple::Report,
+    };
+    let observing = GateMode::parse(&config.gate.mode).unwrap_or_default() == GateMode::Observe;
+    (setting, observing)
+}
+
+/// The ripple of the working tree against `base` (`HEAD` when absent, or when `base` is no
+/// longer in the repository), for the declarations of `only_files`. `None` when the check is
+/// off or cannot run here: it informs, and a hook that cannot compute it says nothing rather
+/// than fail.
+fn gate_ripple(
+    repo: &Path,
+    base: Option<&str>,
+    only_files: Vec<PathBuf>,
+) -> Option<open_kioku_patch::ripple::RippleReport> {
+    if gate_ripple_setting(repo).0 == GateRipple::Off {
+        return None;
+    }
+    let base = base
+        .filter(|base| gate_rev_exists(repo, base))
+        .map(str::to_string);
+    ripple_report(repo, base, only_files, true).ok()
+}
+
+fn gate_rev_exists(repo: &Path, rev: &str) -> bool {
+    ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "-e"])
+        .arg(format!("{rev}^{{commit}}"))
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// What the hooks know of one conversation's ripple: the files it edited, whose declarations
+/// are the only ones a stop looks at, and the sets of broken sites it has been shown and held
+/// on, so each is shown once and holds once.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct GateRippleRecord {
+    #[serde(default)]
+    edited: Vec<String>,
+    #[serde(default)]
+    shown: Vec<String>,
+    #[serde(default)]
+    held: Vec<String>,
+}
+
+/// A conversation is held on its ripple at most this many times, whatever changes.
+const GATE_RIPPLE_MAX_HOLDS: usize = 3;
+/// Conversations whose record is kept.
+const GATE_RIPPLE_CONVERSATIONS: usize = 40;
+
+/// The record's file for the hook's conversation: one file per conversation, so two
+/// conversations never write the same one. `None` for a harness that names no conversation:
+/// nothing is remembered for it, and nothing is held.
+fn gate_ripple_record_path(gate_store: &GateStore, input: &HookInput) -> Option<PathBuf> {
+    let id = input
+        .session_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+        .take(96)
+        .collect::<String>();
+    (!id.is_empty()).then(|| gate_store.root().join("ripple").join(format!("{id}.json")))
+}
+
+fn gate_ripple_record(gate_store: &GateStore, input: &HookInput) -> GateRippleRecord {
+    gate_ripple_record_path(gate_store, input)
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Runs `change` on the conversation's record and writes it whole, through a temporary file
+/// and a rename. Returns what `change` returned, or `None` when the record could not be
+/// written: the caller then acts as if nothing was remembered, which never holds.
+fn gate_ripple_record_update<T>(
+    gate_store: &GateStore,
+    input: &HookInput,
+    change: impl FnOnce(&mut GateRippleRecord) -> T,
+) -> Option<T> {
+    let path = gate_ripple_record_path(gate_store, input)?;
+    let mut record = gate_ripple_record(gate_store, input);
+    let out = change(&mut record);
+    gate_store.ensure_ignored().ok()?;
+    let dir = path.parent()?;
+    fs::create_dir_all(dir).ok()?;
+    let temporary = dir.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()?.to_string_lossy(),
+        std::process::id()
+    ));
+    fs::write(&temporary, serde_json::to_vec_pretty(&record).ok()?).ok()?;
+    if fs::rename(&temporary, &path).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return None;
+    }
+    gate_ripple_prune(dir);
+    Some(out)
+}
+
+/// Keeps the newest records and removes the rest.
+fn gate_ripple_prune(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut records = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect::<Vec<_>>();
+    if records.len() <= GATE_RIPPLE_CONVERSATIONS {
+        return;
+    }
+    records.sort();
+    let excess = records.len() - GATE_RIPPLE_CONVERSATIONS;
+    for (_, path) in records.into_iter().take(excess) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// After an edit: the sites that no longer fit a declaration in the edited files, unless this
+/// conversation was already shown exactly these. The edited files are remembered: they are
+/// what a stop looks at.
+fn gate_ripple_after_edit(
+    repo: &Path,
+    gate_store: &GateStore,
+    session: Option<&GateSession>,
+    input: &HookInput,
+) -> Option<String> {
+    let edited = input
+        .edited_paths()
+        .iter()
+        .filter_map(|path| gate_relative(repo, path))
+        .map(PathBuf::from)
+        // An edit to prose or configuration changes no declaration: nothing is read for it.
+        .filter(|path| open_kioku_patch::ripple::reads_path(path))
+        .collect::<Vec<_>>();
+    if edited.is_empty() || gate_ripple_setting(repo).0 == GateRipple::Off {
+        return None;
+    }
+    let remembered = gate_ripple_record_update(gate_store, input, |record| {
+        for path in &edited {
+            let path = path.to_string_lossy().replace('\\', "/");
+            if !record.edited.contains(&path) {
+                record.edited.push(path);
+            }
+        }
+    });
+    let base = session.and_then(|session| session.base_rev.as_deref());
+    let report = gate_ripple(repo, base, edited)?;
+    if report.broken_sites == 0 {
+        return None;
+    }
+    let fingerprint = report.fingerprint();
+    // Without a record (no conversation id, or a directory that cannot be written) the notice
+    // is shown each time: repeating it costs a line, and nothing is held on it.
+    let new = remembered
+        .and_then(|()| {
+            gate_ripple_record_update(gate_store, input, |record| {
+                if record.shown.contains(&fingerprint) {
+                    return false;
+                }
+                record.shown.push(fingerprint.clone());
+                true
+            })
+        })
+        .unwrap_or(true);
+    new.then(|| {
+        format!(
+            "Open Kioku: after this edit, {} call site(s) elsewhere look as if they no longer \
+             fit what it changed.\n{}Check each one before you finish: update it, or leave it \
+             if it is right as it stands.",
+            report.broken_sites,
+            report.to_brief(8)
+        )
+    })
+}
+
+/// At a stop: the reason to hold the agent on its ripple, or a line to add to what the user is
+/// told when the sites were reported before or the setting only reports.
+enum GateRippleAtStop {
+    Hold(String),
+    Reported(String),
+}
+
+fn gate_ripple_at_stop(
+    repo: &Path,
+    gate_store: &GateStore,
+    session: Option<&GateSession>,
+    input: &HookInput,
+) -> Option<GateRippleAtStop> {
+    let (setting, observing_by_config) = gate_ripple_setting(repo);
+    if setting == GateRipple::Off {
+        return None;
+    }
+    // Only the declarations of files this conversation edited are its to answer for: what was
+    // already changed in the working tree before it, or by someone else, is not.
+    let edited = gate_ripple_record(gate_store, input)
+        .edited
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    if edited.is_empty() {
+        return None;
+    }
+    let base = session.and_then(|session| session.base_rev.as_deref());
+    let report = gate_ripple(repo, base, edited)?;
+    if report.broken_sites == 0 {
+        return None;
+    }
+    let observing =
+        observing_by_config || session.is_some_and(|session| session.mode == GateMode::Observe);
+    let fingerprint = report.fingerprint();
+    // A hold needs the opt-in, a stop that is not already the answer to a hold, and a record
+    // that was written: without the record the same sites would hold every stop.
+    let hold = setting == GateRipple::Hold
+        && !observing
+        && !input.stop_hook_active
+        && gate_ripple_record_update(gate_store, input, |record| {
+            if record.held.contains(&fingerprint) || record.held.len() >= GATE_RIPPLE_MAX_HOLDS {
+                return false;
+            }
+            record.held.push(fingerprint.clone());
+            true
+        })
+        .unwrap_or(false);
+    if hold {
+        return Some(GateRippleAtStop::Hold(format!(
+            "Open Kioku: {} call site(s) look as if they no longer fit what this change \
+             altered.\n{}Check each one: update it, or, if it is right as it stands, say why in \
+             your answer. Then stop again: the same sites are not held twice.",
+            report.broken_sites,
+            report.to_brief(12)
+        )));
+    }
+    Some(GateRippleAtStop::Reported(format!(
+        "{} call site(s) look as if they no longer fit what the change altered (`ok ripple` \
+         lists them)",
+        report.broken_sites
+    )))
 }
 
 /// `ok gate ci`: a session that never had hooks, judged once against the diff from `base`.
@@ -1627,6 +1896,12 @@ fn gate_summary_line(dossier: &ChangeDossier) -> String {
         line.push_str(&format!(
             ", {} outside the planned boundary (advisory)",
             dossier.change.outside_boundary.len()
+        ));
+    }
+    if let Some(ripple) = dossier.ripple.as_ref().filter(|ripple| ripple.broken_sites > 0) {
+        line.push_str(&format!(
+            ", {} call site(s) elsewhere look as if they no longer fit what it changed",
+            ripple.broken_sites
         ));
     }
     line
@@ -2137,8 +2412,20 @@ fn gate_hook_post_tool(
     session: Option<GateSession>,
     input: &HookInput,
 ) -> anyhow::Result<()> {
+    // The ripple of an edit needs no session: it is read from the edit itself.
+    let ripple = if input.is_edit_tool() {
+        gate_ripple_after_edit(repo, gate_store, session.as_ref(), input)
+    } else {
+        None
+    };
     let Some(session) = session else {
-        return Ok(());
+        return match ripple {
+            Some(text) => gate_emit(HookResponse::Context {
+                event: "PostToolUse".into(),
+                text,
+            }),
+            None => Ok(()),
+        };
     };
     if input.is_edit_tool() {
         let decisions = gate_hook_decisions(repo, &session, input);
@@ -2154,12 +2441,17 @@ fn gate_hook_post_tool(
             .filter(|d| d.action == HookAction::Warn)
             .map(|d| d.reason)
             .collect::<Vec<_>>();
-        if warned.is_empty() {
+        let mut notices = Vec::new();
+        if !warned.is_empty() {
+            notices.push(format!("Open Kioku gate: {}", warned.join(" ")));
+        }
+        notices.extend(ripple);
+        if notices.is_empty() {
             return Ok(());
         }
         return gate_emit(HookResponse::Context {
             event: "PostToolUse".into(),
-            text: format!("Open Kioku gate: {}", warned.join(" ")),
+            text: notices.join("\n"),
         });
     }
     if !input.is_shell_tool() {
@@ -2267,10 +2559,18 @@ fn gate_hook_stop(
     session: Option<GateSession>,
     input: &HookInput,
 ) -> anyhow::Result<()> {
+    // The ripple of the change needs no session and no plan: it is read from the change.
+    let ripple = gate_ripple_at_stop(repo, gate_store, session.as_ref(), input);
     let Some(session) = session else {
         // No session of this conversation. A planner still running is left to finish (the
         // caller waited for it already); another conversation's is none of this stop's.
-        return Ok(());
+        return match ripple {
+            Some(GateRippleAtStop::Hold(reason)) => gate_emit(HookResponse::Block { reason }),
+            Some(GateRippleAtStop::Reported(line)) => gate_emit(HookResponse::SystemMessage {
+                text: format!("Open Kioku: {line}."),
+            }),
+            None => Ok(()),
+        };
     };
     if session.auto {
         // Nothing edited and nothing changed: the conversation has not touched the
@@ -2329,6 +2629,13 @@ fn gate_hook_stop(
         );
         reason.push_str(&last.dossier_markdown.display().to_string());
         reason.push('.');
+        if let Some(GateRippleAtStop::Hold(ripple)) = &ripple {
+            reason.push_str("\n\n");
+            reason.push_str(ripple);
+        }
+        return gate_emit(HookResponse::Block { reason });
+    }
+    if let Some(GateRippleAtStop::Hold(reason)) = ripple {
         return gate_emit(HookResponse::Block { reason });
     }
     // Informational only: a message the user sees, which neither blocks nor continues the

@@ -2662,3 +2662,421 @@ fn gate_ci_reads_the_change_from_the_merge_base_and_ignores_its_own_dossier_file
         "outside\n"
     );
 }
+
+/// A small Python repository with one function and one caller, committed, with no index.
+fn ripple_repo() -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("app");
+    std::fs::create_dir_all(repo.join("pkg")).unwrap();
+    std::fs::write(
+        repo.join("pkg/util.py"),
+        "def shorten(text, limit=45):\n    return text[:limit]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("pkg/core.py"),
+        "from .util import shorten\n\n\ndef title(text):\n    return shorten(text, 10)\n",
+    )
+    .unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "init"]);
+    (temp, repo)
+}
+
+fn break_the_caller(repo: &Path) {
+    std::fs::write(
+        repo.join("pkg/util.py"),
+        "def shorten(text, limit, strict):\n    return text[:limit]\n",
+    )
+    .unwrap();
+}
+
+fn conversation_input(repo: &Path, conversation: &str, relative: Option<&str>) -> String {
+    let mut value = serde_json::json!({"session_id": conversation, "cwd": repo});
+    if let Some(relative) = relative {
+        value["tool_name"] = "Edit".into();
+        value["tool_input"] = serde_json::json!({"file_path": repo.join(relative)});
+    }
+    value.to_string()
+}
+
+#[test]
+fn ripple_lists_the_calls_a_change_broke_with_no_index() {
+    let (_temp, repo) = ripple_repo();
+    let ripple = |extra: &[&str]| {
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("ripple").args(extra);
+        command
+    };
+    assert!(run(ripple(&[])).contains("no signature changed"));
+    break_the_caller(&repo);
+    let text = run(ripple(&[]));
+    assert!(text.contains("1 site(s) no longer fit"), "{text}");
+    assert!(text.contains("pkg/core.py:5 (in title)"), "{text}");
+    assert!(
+        text.contains("does not pass `strict`, which is required now"),
+        "{text}"
+    );
+    assert!(!repo.join(".ok").exists(), "ripple writes nothing");
+    let json: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command.arg("--json").arg("--repo").arg(&repo).arg("ripple");
+        command
+    }))
+    .unwrap();
+    assert_eq!(json["broken_sites"], 1, "{json}");
+    assert_eq!(json["index_used"], false);
+    assert_eq!(json["contracts"][0]["effect"], "breaking");
+    assert_eq!(json["contracts"][0]["broken"][0]["path"], "pkg/core.py");
+    // `--fail-on-broken` is the exit status a CI step reads.
+    let (stdout, _) = run_failure(ripple(&["--fail-on-broken"]));
+    assert!(stdout.contains("pkg/core.py:5"), "{stdout}");
+    // Against a base the change is committed on top of, the same answer.
+    git(&repo, &["commit", "-qam", "change"]);
+    assert!(run(ripple(&[])).contains("no signature changed"));
+    assert!(run(ripple(&["--base", "HEAD~1"])).contains("pkg/core.py:5"));
+}
+
+/// Sets `[gate] ripple` in the configuration `ok init` wrote.
+fn set_ripple(repo: &Path, value: &str) {
+    if !repo.join("ok.toml").exists() {
+        run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("init");
+            command
+        });
+    }
+    let config = std::fs::read_to_string(repo.join("ok.toml")).unwrap();
+    let line = config
+        .lines()
+        .find(|line| line.starts_with("ripple = "))
+        .expect("the configuration names the setting")
+        .to_string();
+    std::fs::write(
+        repo.join("ok.toml"),
+        config.replacen(&line, &format!("ripple = \"{value}\""), 1),
+    )
+    .unwrap();
+}
+
+#[test]
+fn gate_hooks_tell_the_agent_its_ripple_after_the_edit_and_report_it_at_the_stop() {
+    let (_temp, repo) = ripple_repo();
+    // No session, no index, no configuration: the hooks alone, and every default.
+    let post = |conversation: &str| {
+        hook(
+            &repo,
+            "post-tool",
+            &conversation_input(&repo, conversation, Some("pkg/util.py")),
+        )
+    };
+    let stop = |conversation: &str| {
+        hook(
+            &repo,
+            "stop",
+            &conversation_input(&repo, conversation, None),
+        )
+    };
+    assert_eq!(post("A"), "", "an edit that breaks nothing says nothing");
+    assert_eq!(stop("A"), "");
+    break_the_caller(&repo);
+
+    // A conversation that edited nothing is told nothing about a tree someone else changed.
+    assert_eq!(stop("B"), "");
+
+    let told: serde_json::Value = serde_json::from_str(&post("A")).unwrap();
+    let context = told["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert_eq!(told["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert!(context.contains("1 call site(s) elsewhere"), "{context}");
+    assert!(context.contains("pkg/core.py:5"), "{context}");
+    assert!(
+        context.contains("does not pass `strict`, which is required now"),
+        "{context}"
+    );
+    assert_eq!(post("A"), "", "the same sites are shown once");
+
+    // By default a stop is told, never held.
+    let reported: serde_json::Value = serde_json::from_str(&stop("A")).unwrap();
+    assert!(reported.get("decision").is_none(), "{reported}");
+    assert!(
+        reported["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("1 call site(s)"),
+        "{reported}"
+    );
+    assert_eq!(stop("B"), "", "still not the other conversation's");
+    // The hooks' own state stays out of version control.
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout).trim(),
+        "M pkg/util.py"
+    );
+
+    // Fixed: nothing more is said.
+    std::fs::write(
+        repo.join("pkg/core.py"),
+        "from .util import shorten\n\n\ndef title(text):\n    return shorten(text, 10, False)\n",
+    )
+    .unwrap();
+    assert_eq!(stop("A"), "");
+    assert_eq!(post("A"), "");
+}
+
+#[test]
+fn gate_ripple_holds_a_stop_only_where_asked_and_only_once() {
+    let (_temp, repo) = ripple_repo();
+    set_ripple(&repo, "hold");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "configure"]);
+    break_the_caller(&repo);
+    let post = |conversation: &str| {
+        hook(
+            &repo,
+            "post-tool",
+            &conversation_input(&repo, conversation, Some("pkg/util.py")),
+        )
+    };
+    let stop_with = |conversation: &str, active: bool| {
+        let mut input: serde_json::Value =
+            serde_json::from_str(&conversation_input(&repo, conversation, None)).unwrap();
+        input["stop_hook_active"] = active.into();
+        let output = hook(&repo, "stop", &input.to_string());
+        serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::Null)
+    };
+
+    // A stop that is already the answer to a stop hook is never held again.
+    assert!(post("C").contains("pkg/core.py:5"));
+    assert!(stop_with("C", true).get("decision").is_none());
+
+    assert!(post("A").contains("pkg/core.py:5"));
+    let held = stop_with("A", false);
+    assert_eq!(held["decision"], "block", "{held}");
+    let reason = held["reason"].as_str().unwrap();
+    assert!(reason.contains("pkg/core.py:5"), "{reason}");
+    assert!(reason.contains("not held twice"), "{reason}");
+    // The agent stops again without fixing it: told, not held.
+    let again = stop_with("A", false);
+    assert!(again.get("decision").is_none(), "{again}");
+    assert!(again["systemMessage"]
+        .as_str()
+        .unwrap()
+        .contains("1 call site(s)"));
+
+    // A harness that names no conversation is told and never held: nothing can be
+    // remembered for it.
+    let nameless = hook(
+        &repo,
+        "post-tool",
+        &conversation_input(&repo, "", Some("pkg/util.py")),
+    );
+    assert!(nameless.contains("pkg/core.py:5"), "{nameless}");
+    assert!(stop_with("", false).get("decision").is_none());
+
+    // Where the record cannot be written, nothing is held: the same sites would otherwise
+    // hold every stop.
+    let records = repo.join(".ok/gate/ripple");
+    std::fs::remove_dir_all(&records).unwrap();
+    std::fs::write(&records, "not a directory").unwrap();
+    assert!(post("D").contains("pkg/core.py:5"));
+    assert_eq!(stop_with("D", false), serde_json::Value::Null);
+    std::fs::remove_file(&records).unwrap();
+
+    // `observe` holds nothing, session or not.
+    set_gate_mode(&repo, "observe");
+    assert!(post("E").contains("pkg/core.py:5"));
+    assert!(stop_with("E", false).get("decision").is_none());
+    let config = std::fs::read_to_string(repo.join("ok.toml")).unwrap();
+    assert!(config.contains("mode = \"observe\""));
+    std::fs::write(
+        repo.join("ok.toml"),
+        config.replacen("mode = \"observe\"", "mode = \"warn\"", 1),
+    )
+    .unwrap();
+
+    // A value nobody can read as one of the three, and a configuration that does not load,
+    // report and never hold; `off` does not look.
+    set_ripple(&repo, "HOLD");
+    assert!(post("F").contains("pkg/core.py:5"));
+    assert_eq!(
+        stop_with("F", false)["decision"],
+        "block",
+        "the value is read whatever its case"
+    );
+    set_ripple(&repo, "sometimes");
+    assert!(post("G").contains("pkg/core.py:5"));
+    assert!(stop_with("G", false).get("decision").is_none());
+    set_ripple(&repo, "off");
+    assert_eq!(post("H"), "");
+    assert_eq!(stop_with("H", false), serde_json::Value::Null);
+    std::fs::write(repo.join("ok.toml"), "[gate\nripple = \"hold\"\n").unwrap();
+    assert!(post("I").contains("pkg/core.py:5"));
+    assert!(stop_with("I", false).get("decision").is_none());
+}
+
+#[test]
+fn gate_ci_dossier_carries_the_ripple_of_the_change() {
+    let (_temp, repo) = demo_repo();
+    // A caller of `issue_token` in another file, then a change that adds a parameter to it
+    // and leaves the caller as it was.
+    let auth = std::fs::read_to_string(repo.join("src/auth.rs")).unwrap();
+    let signature = auth
+        .lines()
+        .find(|line| line.contains("fn issue_token("))
+        .expect("the demo declares issue_token")
+        .to_string();
+    let arguments = signature
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(inside, _)| {
+            inside
+                .split(',')
+                .filter(|part| !part.trim().is_empty())
+                .count()
+        })
+        .unwrap();
+    let call = format!(
+        "pub fn relay() {{\n    let _ = crate::auth::issue_token({});\n}}\n",
+        vec!["Default::default()"; arguments].join(", ")
+    );
+    std::fs::write(repo.join("src/relay.rs"), call).unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "add a caller"]);
+    let widened = signature.replacen(
+        "fn issue_token(",
+        if arguments == 0 {
+            "fn issue_token(audience: &str"
+        } else {
+            "fn issue_token(audience: &str, "
+        },
+        1,
+    );
+    std::fs::write(
+        repo.join("src/auth.rs"),
+        auth.replacen(&signature, &widened, 1),
+    )
+    .unwrap();
+    git(&repo, &["commit", "-qam", "issue tokens for an audience"]);
+    run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).args(["index", "."]);
+        command
+    });
+    let output: serde_json::Value = serde_json::from_str(&run({
+        let mut command = ok();
+        command.arg("--json").arg("--repo").arg(&repo).args([
+            "gate",
+            "ci",
+            "--base",
+            "HEAD~1",
+            "--task",
+            "issue tokens for an audience in the auth flow",
+        ]);
+        command
+    }))
+    .unwrap();
+    let dossier = &output["dossier"];
+    // The demo's own callers of `issue_token` and the one added here; none was updated.
+    let sites = dossier["ripple"]["sites"].as_array().unwrap();
+    assert_eq!(dossier["ripple"]["broken_sites"], sites.len(), "{dossier}");
+    let relay = sites
+        .iter()
+        .find(|site| site["path"] == "src/relay.rs")
+        .unwrap_or_else(|| panic!("{dossier}"));
+    assert_eq!(relay["line"], 2);
+    assert!(relay["problem"].as_str().unwrap().contains("required now"));
+    assert!(
+        sites.iter().any(|site| site["evidence"] == "proven"),
+        "with an index, a call it proved says so: {dossier}"
+    );
+    assert_eq!(dossier["ripple"]["index_used"], true);
+    assert_eq!(dossier["verdict"], "warn");
+    assert!(
+        relay.get("text").is_none(),
+        "a dossier holds no source text"
+    );
+    let written = _temp.path().join("dossier.md");
+    let summary = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).args([
+            "gate",
+            "ci",
+            "--base",
+            "HEAD~1",
+            "--task",
+            "issue tokens for an audience in the auth flow",
+            "--format",
+            "text",
+            "--write",
+        ]);
+        command.arg(&written);
+        command
+    });
+    assert!(
+        summary.contains("no longer fit what it changed"),
+        "{summary}"
+    );
+    let markdown = std::fs::read_to_string(&written).unwrap();
+    assert!(markdown.contains("### Ripple"), "{markdown}");
+    assert!(markdown.contains("`src/relay.rs:2`"), "{markdown}");
+}
+
+#[test]
+fn ripple_reads_the_whole_working_tree_from_a_project_inside_it() {
+    // A monorepo: the agent's project is `services/api`, and the caller its edit breaks is in
+    // a sibling project.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let top = temp.path().join("mono");
+    let project = top.join("services/api");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(top.join("services/web")).unwrap();
+    std::fs::write(
+        project.join("util.py"),
+        "def shorten(text, limit=45):\n    return text\n",
+    )
+    .unwrap();
+    std::fs::write(
+        top.join("services/web/page.py"),
+        "from api.util import shorten\n\nTITLE = shorten('x', 10)\n",
+    )
+    .unwrap();
+    git(&top, &["init", "-q"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "init"]);
+    std::fs::write(
+        project.join("util.py"),
+        "def shorten(text, limit, strict):\n    return text\n",
+    )
+    .unwrap();
+    let text = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&project).arg("ripple");
+        command
+    });
+    assert!(text.contains("services/web/page.py:3"), "{text}");
+    let told = hook(
+        &project,
+        "post-tool",
+        &conversation_input(&project, "A", Some("util.py")),
+    );
+    assert!(told.contains("services/web/page.py:3"), "{told}");
+    assert!(told.contains("look as if they no longer fit"), "{told}");
+    // An edit to a file that declares nothing is not looked at.
+    std::fs::write(project.join("NOTES.md"), "x\n").unwrap();
+    assert_eq!(
+        hook(
+            &project,
+            "post-tool",
+            &conversation_input(&project, "B", Some("NOTES.md")),
+        ),
+        ""
+    );
+}
