@@ -154,6 +154,10 @@ enum Command {
     },
     /// Analyze the blast radius of changing a file, a symbol, or a Git range.
     Impact(ImpactArgs),
+    /// [experimental] List what a change breaks outside itself: the calls that no longer fit a
+    /// function whose parameters it changed, and the code that still names a declaration it
+    /// removed or renamed. Needs no index.
+    Ripple(RippleArgs),
     /// Trace the shortest dependency path between two files or symbols in the persisted graph.
     Path {
         /// Starting file path or symbol name.
@@ -1139,6 +1143,32 @@ struct ImpactArgs {
     /// Git revision or range whose changed files are analyzed.
     #[arg(long, value_name = "REV")]
     since: Option<String>,
+}
+
+#[derive(Args)]
+/// List what a change breaks outside itself: the calls that no longer fit a function whose
+/// parameters it changed, and the code that still names a declaration it removed or renamed.
+/// Compares the working tree with a git revision; needs no index, and reads one for proven
+/// call edges when it is there.
+#[command(after_help = "Examples:
+  ok ripple
+  ok ripple --base origin/main
+  ok ripple --file src/auth.rs --json
+  ok ripple --base origin/main --fail-on-broken")]
+struct RippleArgs {
+    /// Revision the working tree is compared with.
+    #[arg(long, value_name = "REV", default_value = "HEAD")]
+    base: String,
+    /// Only examine declarations in these repository-relative files. Call sites are looked for
+    /// everywhere either way.
+    #[arg(long = "file", value_name = "PATH")]
+    files: Vec<PathBuf>,
+    /// Exit with status 1 when a site no longer fits a changed declaration.
+    #[arg(long)]
+    fail_on_broken: bool,
+    /// Do not read the index, even when one exists.
+    #[arg(long)]
+    no_index: bool,
 }
 
 #[derive(Subcommand)]

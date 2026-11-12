@@ -443,6 +443,12 @@ pub struct GateConfig {
     /// `benchmarks/gate/`.
     #[serde(default)]
     pub sibling_caution: bool,
+    /// What the hooks do with a call that no longer fits a function the change altered, or
+    /// code that still names something it removed (`ok ripple`): `hold` keeps the agent from
+    /// finishing once per set of such sites and tells it after each edit; `report` only tells
+    /// it and writes them in the dossier; `off` does not look.
+    #[serde(default = "default_gate_ripple")]
+    pub ripple: String,
 }
 
 impl Default for GateConfig {
@@ -452,8 +458,13 @@ impl Default for GateConfig {
             require_plan: false,
             auto: true,
             sibling_caution: false,
+            ripple: default_gate_ripple(),
         }
     }
+}
+
+fn default_gate_ripple() -> String {
+    "hold".into()
 }
 
 fn default_gate_mode() -> String {

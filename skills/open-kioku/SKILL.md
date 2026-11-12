@@ -95,6 +95,11 @@ tells you when one is active.
    is held, the message lists the paths to revert or to widen with a reason.
 4. `ok gate start "<task>"` declares a task by hand and makes its boundary
    binding; `ok gate finish` verifies it and ends the session.
+5. When you change a function's parameters, or remove or rename a declaration,
+   a hook may answer the edit with the call sites elsewhere that no longer fit,
+   each with its path, line and reason. Update them in the same change. Before
+   you finish a change like that, `ok ripple` lists what is still broken (it
+   needs no index); a stop with a site still broken is held once.
 
 ## Rules
 

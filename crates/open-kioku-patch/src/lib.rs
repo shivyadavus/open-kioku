@@ -30,6 +30,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod ripple;
+
 const HIGH_RUNTIME_ERROR_RATE: f32 = 0.20;
 
 pub struct PatchPlanner<'a> {

@@ -107,6 +107,28 @@ ok gate install git --apply        # any agent, any person: a pre-commit hook th
 
 Measured on commit-derived sessions and three live Claude Code sessions; method, numbers and caveats in [`benchmarks/gate/`](benchmarks/gate/README.md). [`docs/gate.md`](docs/gate.md)
 
+### Ripple: what the diff does not show
+
+```console
+$ ok ripple
+Ripple: 2 site(s) no longer fit 1 changed declaration(s).
+
+src/click/utils.py:62  function `_make_default_short_help`: signature changed
+  - def _make_default_short_help(help: str, max_length: int = 45)
+  + def _make_default_short_help(help: str, max_length: int, strict: bool)
+  broken: 2 site(s)
+    src/click/core.py:1275 (in Command.get_short_help_str)  text = _make_default_short_help(self.help, limit)
+        does not pass `strict`, which is required now [by name]
+    tests/test_utils/test_make_default_short_help.py:62 (in test_make_default_short_help)  out = click.utils._make_default_short_help(value, max_length)
+        does not pass `strict`, which is required now [by name]
+```
+
+A change that alters a function's parameters, or removes or renames a declaration, breaks code the diff never shows. `ok ripple` finds the calls that no longer fit and the code that still names what is gone, in Rust, Python, TypeScript, JavaScript, Go, Java and C#, **with no index and nothing to set up**. The same hooks tell a coding agent right after the edit that caused it and hold it once when it tries to finish with a site still broken; `ok gate ci` puts the list in the pull request's dossier.
+
+RIPPLE_MEASURED
+
+[`docs/ripple.md`](docs/ripple.md) · [`benchmarks/ripple/`](benchmarks/ripple/README.md)
+
 Underneath: exact definitions, references, and dependency paths from source (and optional SCIP) are authoritative. Lexical, semantic, history, test, and runtime signals can reorder retrieval; they cannot overwrite repository truth.
 
 ## What Changed in 5.0.0
@@ -229,6 +251,7 @@ ok --repo . search "token expiration handler"
 ok --repo . symbol definition PolicyGate
 ok --repo . symbol refs PolicyGate
 ok --repo . impact --file src/auth.rs
+ok --repo . ripple --base origin/main
 ok --repo . tests --changed src/auth.rs
 ok --repo . context "change token expiration" --format markdown
 ok --repo . plan "change token expiration" --format markdown
@@ -238,9 +261,9 @@ ok prove . --task "change token expiration"
 ```
 
 <details>
-<summary>All 38 top-level commands</summary>
+<summary>All 40 top-level commands</summary>
 
-Current top-level commands (39): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `preflight`, `verify-boundary`, `verify`, `gate`, `contract`, `bench`, `workflow-bench`, `retrieval-bench`, `relationship-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
+Current top-level commands (40): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `ripple`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `preflight`, `verify-boundary`, `verify`, `gate`, `contract`, `bench`, `workflow-bench`, `retrieval-bench`, `relationship-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
 
 </details>
 

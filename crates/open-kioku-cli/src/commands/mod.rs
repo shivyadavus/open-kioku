@@ -1263,6 +1263,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
         Command::Contract { command } => {
             handle_contract_command(cli.json, &repo, command)?;
         }
+        Command::Ripple(args) => {
+            handle_ripple_command(cli.json, &repo, args)?;
+        }
         Command::Gate { command } => {
             handle_gate_command(cli.json, &repo, command)?;
         }
