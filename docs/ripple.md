@@ -74,8 +74,9 @@ grep`, tracked and untracked, not ignored) is read:
 - Code that still names a removed declaration (a call, an import, a use of a removed type) is
   `broken`. The bare name of a removed function with no call is not counted: it is as likely a
   field or a variable of that name.
-- Comments, string literals, Python docstrings, prose and configuration that name a removed
-  declaration are counted as *mentions* and listed apart.
+- Comments (a comment that trails a line of code included), string literals, Python
+  docstrings, prose and configuration that name a removed declaration are counted as *mentions*
+  and listed apart.
 
 What "fits" means per language:
 
@@ -102,9 +103,14 @@ declaring module, and is `possible` (listed, not counted, never held on) otherwi
   the declaring module has; the name is qualified by the declaring module (`utils.shorten`,
   `clearing::owed`, `crate::`, `super::`); the file is in the same Go package or Java package
   directory; the language is C#, where a namespace is opened whole.
-- A **method** is attributed when it is called on its own type (`Owner.method`, `Owner::method`,
-  for a type written with a capital, outside Go) or on the instance inside that type
-  (`self.method`, `this.method`). On any other receiver the type is unknown: `possible`.
+- A **member of a type** (a method, or a constant declared inside it) is attributed when it is
+  reached through its own type (`Owner.method`, `Owner::method`, for a type written with a
+  capital, outside Go) or on the instance inside that type (`self.method`, `this.method`). On
+  any other receiver the type is unknown, and a bare name outside Rust may be inherited or
+  declared in another part of the type: `possible`. So is every site when the declaring file
+  also imports its owner's name from elsewhere.
+- A module that was deleted and whose name a dependency manifest declares (a vendored copy
+  given up for the package) is not evidence: an import by that name resolves to the dependency.
 - A constructor (`__init__`, `constructor`) is checked at the calls of its type's name.
 
 ## What it does not do
@@ -127,8 +133,26 @@ a build is run, in the languages that have no compiler, and for whoever reads th
 
 ## Measured
 
-Replayed over the last 300 commits of 36 open-source repositories in seven languages, with no
+Replayed over the last 300 commits of 46 open-source repositories in seven languages, with no
 index, in two ways: on each **complete merged commit**, where anything it reports is a false
 alarm or a real leftover; and on each commit **with only the declaring file applied**, where what
-it reports can be checked against what the real commit went on to change. Method, every number
-and the limits are in [`benchmarks/ripple/`](../benchmarks/ripple/README.md).
+it reports can be checked against what the real commit went on to change. The rules were run on
+new repositories in five rounds and changed after each.
+
+- In the last round (10 repositories it had not been run on, 1,615 commits that change code):
+  from the declaring file alone it named 341 sites, of which the commit then changed 333 and 6
+  more were real leftovers; the complete commits raised an alarm in 6, 2 real and 4 false. In
+  the round before (1,894 commits): 88 of 92, and 4 commits, 1 real and 3 false.
+- Each false alarm became a rule above, with a test. With the rules as shipped, all 46
+  repositories again (7,711 commits that change code): 714 sites named, 702 then changed, and
+  the other 12 belong to the four commits that really left something broken. That figure is not
+  held out: the rules were changed after looking at these repositories.
+- Four commits on the main branch of a widely used library still named something they had
+  removed; one was still in place when its repository was cloned.
+- **Recall is not measured**: nothing here says how many broken sites it did not name.
+- On five real signature changes, a frontier model asked to update the callers left nothing
+  broken with or without the hook, so the hook's effect on that outcome is not shown. It was
+  delivered in all five sessions and cost no time.
+
+Method, every number, the false alarms by cause and the limits are in
+[`benchmarks/ripple/`](../benchmarks/ripple/README.md).

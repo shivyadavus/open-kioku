@@ -1098,7 +1098,8 @@ fn name_hits(repo: &Path, name: &str) -> Result<Vec<Hit>> {
 }
 
 fn is_comment_line(text: &str) -> bool {
-    let trimmed = text.trim_start();
+    // A byte-order mark may stand before the first line's `#if` or `//`.
+    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
     ["//", "#", "*", "/*", "--", "<!--", "\"\"\"", "'''"]
         .iter()
         .any(|prefix| trimmed.starts_with(prefix))
@@ -1292,6 +1293,34 @@ fn import_evidence(text: &str, name: &str, modules: &BTreeSet<String>) -> Option
         }
     }
     named.or(everything.then_some(true))
+}
+
+/// The line without a comment that trails its code: from `//` (or `#` in Python) that stands
+/// outside a string. A name in such a comment is prose.
+fn without_trailing_comment<'a>(text: &'a str, language: &Language) -> &'a str {
+    let marker = if *language == Language::Python {
+        "#"
+    } else {
+        "//"
+    };
+    let single_quotes = matches!(
+        language,
+        Language::Python | Language::JavaScript | Language::TypeScript
+    );
+    for (offset, _) in text.match_indices(marker) {
+        let before = &text[..offset];
+        // `://` is a URL, and `#` after a name is not a comment.
+        if marker == "//" && before.ends_with(':') {
+            continue;
+        }
+        if marker == "#" && !before.chars().next_back().is_none_or(char::is_whitespace) {
+            continue;
+        }
+        if !in_string_literal(before, single_quotes) {
+            return before;
+        }
+    }
+    text
 }
 
 /// How one line uses a name.
@@ -1651,7 +1680,8 @@ impl SiteSearch<'_> {
         };
         let too_common = hits.len() > MAX_NAME_HITS;
         let removed = contract.change == ContractChange::Removed;
-        let method = declared.member && is_callable(&declared.kind) && !target.constructor;
+        // A member of a type, callable or not, is reached through the type or an instance.
+        let method = declared.member && !target.constructor;
         let callable = is_callable(&declared.kind);
         let builtin = BUILTIN_NAMES.contains(&name);
         let owner = if target.constructor {
@@ -1717,7 +1747,12 @@ impl SiteSearch<'_> {
                 language,
                 Language::Python | Language::JavaScript | Language::TypeScript
             );
-            let Some(usage) = usage(&hit.text, name, owner, single_quotes) else {
+            let code = without_trailing_comment(&hit.text, &language);
+            if word_offsets(code, name).is_empty() {
+                // Named only in the comment after the code.
+                continue;
+            }
+            let Some(usage) = usage(code, name, owner, single_quotes) else {
                 if removed {
                     contract.other_mentions += 1;
                 }
@@ -1763,6 +1798,10 @@ impl SiteSearch<'_> {
             candidates.push((hit, usage, within, language));
         }
 
+        let owner_imported = match (owner, self.text(&contract.path)) {
+            (Some(owner), Some(text)) => import_evidence(text, owner, &BTreeSet::new()).is_some(),
+            _ => false,
+        };
         let mut seen = BTreeSet::new();
         let mut broken = Vec::new();
         let mut possible = Vec::new();
@@ -1807,9 +1846,14 @@ impl SiteSearch<'_> {
                 // A method reached through a receiver is anyone's method of that name, unless
                 // the receiver is the owner type, or the instance inside the owner type.
                 SiteEvidence::Possible
+            } else if method && owner_imported {
+                // The declaring file also brings its owner's name in from elsewhere: which
+                // of the two a site means is not settled by the name.
+                SiteEvidence::Possible
             } else if method && !usage.on_receiver && language != Language::Rust {
-                // A bare name is a method only inside its own type, which Rust alone writes
-                // without a receiver.
+                // A bare name is a member only inside its own type, which Rust alone writes
+                // without a receiver; elsewhere it may be inherited, or declared in another
+                // part of the type, and the file that lost it says nothing about that.
                 SiteEvidence::Possible
             } else {
                 SiteEvidence::Name
@@ -2706,6 +2750,60 @@ mod tests {
             "{}",
             report.to_text()
         );
+    }
+
+    #[test]
+    fn a_trailing_comment_a_member_constant_and_an_owner_imported_too_are_not_breaks() {
+        assert_eq!(
+            without_trailing_comment("break // whatever context is reset to", &Language::Go),
+            "break "
+        );
+        assert_eq!(
+            without_trailing_comment("u := \"http://x\" // context", &Language::Go),
+            "u := \"http://x\" "
+        );
+        assert_eq!(
+            without_trailing_comment("x = d['#k']  # context", &Language::Python),
+            "x = d['#k']  "
+        );
+        assert!(is_comment_line("\u{feff}#if !NET5_0_OR_GREATER"));
+
+        let temp = changed(
+            &[
+                (
+                    "src/Tests.cs",
+                    "class IntegratedTests {\n    const int Port = 5001;\n\n    int Url() {\n        return Port;\n    }\n}\n",
+                ),
+                (
+                    "src/Tools.cs",
+                    "class Tools {\n    bool Basic(Uri url) {\n        return url is { Scheme: \"http\", Port: 80 };\n    }\n}\n",
+                ),
+                (
+                    "src/backtrace.rs",
+                    "pub(crate) use std::backtrace::Backtrace;\n\nstruct Local;\n\nimpl Backtrace {\n    fn capture() -> u8 {\n        1\n    }\n}\n\nfn make() -> u8 {\n    crate::backtrace::Backtrace::capture()\n}\n",
+                ),
+                (
+                    "route.go",
+                    "package mux\n\ntype context struct{}\n\nfunc match() int {\n\treturn 0 // fresh context is empty\n}\n",
+                ),
+            ],
+            &[
+                (
+                    "src/Tests.cs",
+                    Some("class IntegratedTests {\n    int Url() {\n        return 5001;\n    }\n}\n"),
+                ),
+                (
+                    "src/backtrace.rs",
+                    Some("pub(crate) use std::backtrace::Backtrace;\n\nstruct Local;\n\nfn make() -> u8 {\n    crate::backtrace::Backtrace::capture()\n}\n"),
+                ),
+                (
+                    "route.go",
+                    Some("package mux\n\nfunc match() int {\n\treturn 0 // fresh context is empty\n}\n"),
+                ),
+            ],
+        );
+        let report = report(&temp);
+        assert_eq!(report.broken_sites, 0, "{}", report.to_text());
     }
 
     #[test]

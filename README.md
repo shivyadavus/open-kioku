@@ -98,7 +98,7 @@ ok gate install claude --apply     # once per repository; the Claude Code plugin
 
 That is the whole setup. The first prompt of a conversation plans an edit boundary in the background; later prompts widen it; every Edit, Write and shell write is judged against it; every stop that follows a change verifies the real change (files created with no hook included) and writes a **Change Dossier**: what was declared, what the harness reported, what was denied, what actually changed, what verification found, and what is still uncertain.
 
-A session started from a prompt is **advisory**: it tells the agent which edits fall outside the boundary and records them, denies secret-like and generated paths, and holds nothing, because a plan built from a prompt cannot tell a task from a remark (measured: `"fix it"` plans with the same confidence as a real commit subject). The boundary is binding where someone declared it: `ok gate start "<task>"`, `mode = "enforce"` in `ok.toml`, or `--mode enforce` in CI. There a `FAIL` holds the agent, or fails the check, with the violations and the one remedy, `ok gate expand <path> --reason "<why>"`.
+A session started from a prompt is **advisory**: it tells the agent which edits fall outside the boundary and records them, denies secret-like and generated paths, and its boundary holds nothing, because a plan built from a prompt cannot tell a task from a remark (measured: `"fix it"` plans with the same confidence as a real commit subject). The boundary is binding where someone declared it: `ok gate start "<task>"`, `mode = "enforce"` in `ok.toml`, or `--mode enforce` in CI. There a `FAIL` holds the agent, or fails the check, with the violations and the one remedy, `ok gate expand <path> --reason "<why>"`.
 
 ```sh
 ok gate ci --base origin/main --task "$PR_TITLE" --write dossier.md   # a dossier for any pull request, no hooks; fails on forbidden paths
@@ -125,7 +125,7 @@ src/click/utils.py:62  function `_make_default_short_help`: signature changed
 
 A change that alters a function's parameters, or removes or renames a declaration, breaks code the diff never shows. `ok ripple` finds the calls that no longer fit and the code that still names what is gone, in Rust, Python, TypeScript, JavaScript, Go, Java and C#, **with no index and nothing to set up**. The same hooks tell a coding agent right after the edit that caused it and hold it once when it tries to finish with a site still broken; `ok gate ci` puts the list in the pull request's dossier.
 
-RIPPLE_MEASURED
+Replayed with no index over the last 300 commits of 46 open-source repositories in seven languages, in rounds on repositories its rules had not been run on. In the last round (10 repositories, 1,615 commits that change code), given only the file that declares each change, it named 341 broken sites; the real commit went on to change 333 of them, and 6 of the other 8 were code the commit really left broken. On the complete merged commits it raised an alarm in 6: 2 real, 4 false. Across the rounds it found four commits on the main branch of a widely used library that still named something they had removed, one of them still in place. What it does not show: on five small tasks a frontier model, asked to update the callers, left nothing broken with or without the hook.
 
 [`docs/ripple.md`](docs/ripple.md) · [`benchmarks/ripple/`](benchmarks/ripple/README.md)
 
