@@ -1,3 +1,4 @@
+use crate::csharp_semantics::CSharpSemantics;
 use crate::go::GoSemantics;
 use crate::java::JavaSemantics;
 use crate::python::PythonSemantics;
@@ -12,6 +13,7 @@ static JAVASCRIPT_SEMANTICS: JavaScriptSemantics = JavaScriptSemantics;
 static PYTHON_SEMANTICS: PythonSemantics = PythonSemantics;
 static GO_SEMANTICS: GoSemantics = GoSemantics;
 static RUST_SEMANTICS: RustSemantics = RustSemantics;
+static CSHARP_SEMANTICS: CSharpSemantics = CSharpSemantics;
 
 pub fn semantics_for(language: &Language) -> Option<&'static dyn LanguageSemantics> {
     match language {
@@ -21,6 +23,7 @@ pub fn semantics_for(language: &Language) -> Option<&'static dyn LanguageSemanti
         Language::Python => Some(&PYTHON_SEMANTICS),
         Language::Go => Some(&GO_SEMANTICS),
         Language::Rust => Some(&RUST_SEMANTICS),
+        Language::CSharp => Some(&CSHARP_SEMANTICS),
         _ => None,
     }
 }

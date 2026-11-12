@@ -288,13 +288,26 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// local function in a field initializer's lambda is a symbol; a C# type the pattern fallback
 /// names is read from the first `#if` branch only. A v21 index records none of these. v22 is
 /// taken by an open change.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v23";
+/// v24: a C# file records its calls (`M()`, `x.M()`, `this.M()`, `base.M()`, `new T()`), the
+/// names its locals, fields, parameters and properties bind with their types, its `using`
+/// directives and its base lists; a v23 index holds none of them, so resolves no C#
+/// relationship.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v24";
 
-const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
+/// Languages with a relationship adapter. C# joined with parser semantics v24.
+const TIER1_LANGUAGES: [&str; 7] = [
+    "csharp",
+    "go",
+    "java",
+    "javascript",
+    "python",
+    "rust",
+    "typescript",
+];
 
 /// Languages parsed into symbols that have no relationship adapter yet: they carry parser
 /// semantics but no language adapter version, since no relationship is resolved for them.
-const PARSED_ONLY_LANGUAGES: [&str; 1] = ["csharp"];
+const PARSED_ONLY_LANGUAGES: [&str; 0] = [];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AnalysisSemanticsDescriptor {

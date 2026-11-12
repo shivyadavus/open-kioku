@@ -7,6 +7,7 @@
         "exact_index_ingestion_version": "exact-occurrence-v1",
         "graph_emission_version": "ri3-graph-emission-v5",
         "language_adapter_versions": {
+          "csharp": "ri3-language-semantics-v1",
           "go": "ri3-language-semantics-v1",
           "java": "ri3-language-semantics-v1",
           "javascript": "ri3-language-semantics-v1",
@@ -15,13 +16,13 @@
           "typescript": "ri3-language-semantics-v1"
         },
         "parser_semantics": {
-          "csharp": "tier1-parser-semantics-v23",
-          "go": "tier1-parser-semantics-v23",
-          "java": "tier1-parser-semantics-v23",
-          "javascript": "tier1-parser-semantics-v23",
-          "python": "tier1-parser-semantics-v23",
-          "rust": "tier1-parser-semantics-v23",
-          "typescript": "tier1-parser-semantics-v23"
+          "csharp": "tier1-parser-semantics-v24",
+          "go": "tier1-parser-semantics-v24",
+          "java": "tier1-parser-semantics-v24",
+          "javascript": "tier1-parser-semantics-v24",
+          "python": "tier1-parser-semantics-v24",
+          "rust": "tier1-parser-semantics-v24",
+          "typescript": "tier1-parser-semantics-v24"
         },
         "project_resolver_version": "project-resolver-v6",
         "proof_policy_version": "ri3-proof-policy-v1",
@@ -29,16 +30,16 @@
         "stable_identity_version": "stable-identity-v2",
         "version": 1
       },
-      "fingerprint": "cc2f13cfe162277273574df251d327700b39a3d1c4f4ba587df106f80e3576b5"
+      "fingerprint": "2d566777dfcb94756b9c06854c469c9db859020a3e8315ae66089f1d300f0fc4"
     },
     "analysis_semantics_status": {
       "affected_components": [],
       "affected_languages": [],
-      "current_fingerprint": "cc2f13cfe162277273574df251d327700b39a3d1c4f4ba587df106f80e3576b5",
+      "current_fingerprint": "2d566777dfcb94756b9c06854c469c9db859020a3e8315ae66089f1d300f0fc4",
       "reasons": [],
       "recommended_action": "none",
       "status": "compatible",
-      "stored_fingerprint": "cc2f13cfe162277273574df251d327700b39a3d1c4f4ba587df106f80e3576b5"
+      "stored_fingerprint": "2d566777dfcb94756b9c06854c469c9db859020a3e8315ae66089f1d300f0fc4"
     },
     "chunk_count": 1,
     "coverage": {

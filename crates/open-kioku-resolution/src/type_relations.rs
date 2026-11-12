@@ -58,6 +58,37 @@ fn collect_parent_type_candidate_set(
         entry.bindings.insert(binding);
     };
 
+    if child.language == Language::CSharp {
+        // A C# base is named through namespaces: see `csharp_types_named`. A base list is
+        // written outside its type's body, so the lookup starts at the type's container.
+        let within = child
+            .qualified_name
+            .rsplit_once("::")
+            .map(|(container, _)| container)
+            .unwrap_or_default();
+        for (target, via_using) in crate::context::csharp_types_named(
+            repository,
+            symbols,
+            &child.file_id,
+            within,
+            parent_name,
+        ) {
+            // A type is not its own base: `class Entry : Entry<int>` names the generic one.
+            if target == child.id {
+                continue;
+            }
+            add(
+                target,
+                if via_using {
+                    ParentBindingKind::Import
+                } else {
+                    ParentBindingKind::QualifiedName
+                },
+            );
+        }
+        return (candidates.into_values().collect(), None);
+    }
+
     if let Some(file_symbols) = symbols.by_file.get(&child.file_id) {
         for id in file_symbols {
             if symbols

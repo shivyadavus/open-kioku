@@ -1,4 +1,5 @@
 pub mod csharp;
+mod csharp_semantics;
 pub mod go;
 pub mod java;
 pub mod python;
@@ -298,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn csharp_source_is_detected_and_has_no_relationship_adapter_yet() {
+    fn csharp_source_is_detected_and_has_a_relationship_adapter() {
         assert_eq!(
             detect_language(Path::new("src/Ledger/Entry.cs")),
             Language::CSharp
@@ -311,9 +312,15 @@ mod tests {
             detect_language(Path::new("tools/build.csx")),
             Language::Unknown
         );
-        // Calls and type relationships are resolved only through a registered adapter; C# has
-        // none, so it records symbols and no relationship.
-        assert!(semantics_for(&Language::CSharp).is_none());
+        // Calls and type relationships are resolved only through a registered adapter.
+        let semantics = semantics_for(&Language::CSharp).expect("C# has an adapter");
+        assert_eq!(semantics.classify_receiver("this"), ReceiverKind::Self_);
+        assert_eq!(semantics.classify_receiver("base"), ReceiverKind::Super);
+        // A capitalised name may be a property or a field as well as a type: the name alone
+        // does not say, so it is never classified as a type here.
+        assert_eq!(semantics.classify_receiver("Client"), ReceiverKind::Value);
+        assert_eq!(semantics.classify_receiver("client"), ReceiverKind::Value);
+        assert!(semantics.implicit_self_dispatch());
     }
 
     #[test]
