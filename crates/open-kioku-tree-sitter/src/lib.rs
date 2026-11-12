@@ -1535,6 +1535,7 @@ fn extract_call(
         }
         Language::Python => kind == "call",
         Language::Go => kind == "call_expression",
+        Language::CSharp => kind == "invocation_expression" || kind == "object_creation_expression",
         _ => false,
     };
 
@@ -1554,6 +1555,19 @@ fn extract_call(
     let source_bytes = content.as_bytes();
 
     match file.language {
+        Language::CSharp => {
+            if let Some((name, receiver, constructor)) = csharp::call(node, source_bytes) {
+                callee_name = name;
+                if let Some(receiver) = receiver {
+                    receiver_kind = if constructor {
+                        ReceiverKind::Type
+                    } else {
+                        classify_receiver_string(&file.language, &receiver)
+                    };
+                    receiver_text = Some(receiver);
+                }
+            }
+        }
         Language::Java => {
             if kind == "method_invocation" {
                 if let Some(name_node) = node.child_by_field_name("name") {
@@ -1769,6 +1783,7 @@ fn extract_binding(
     let mut extracted: Vec<(String, Option<String>, Option<String>)> = Vec::new();
 
     match file.language {
+        Language::CSharp => extracted = csharp::bindings(node, source_bytes),
         Language::Java => {
             if kind == "local_variable_declaration" || kind == "field_declaration" {
                 let declared_type = node
@@ -2184,6 +2199,7 @@ fn extract_import(
         Language::JavaScript | Language::TypeScript => kind == "import_statement",
         Language::Python => kind == "import_statement" || kind == "import_from_statement",
         Language::Go => kind == "import_spec",
+        Language::CSharp => kind == "using_directive",
         _ => false,
     };
 
@@ -2201,6 +2217,25 @@ fn extract_import(
     let mut is_glob = false;
 
     match file.language {
+        Language::CSharp => {
+            // `using Acme.Ledger;` opens every type of the namespace, as a Java `import pkg.*`
+            // does; `using Net = System.Net.Http;` binds one name to it.
+            let Some((target, alias)) = csharp::using(node, source_bytes) else {
+                return;
+            };
+            module_source = target;
+            match alias {
+                Some(alias) => bindings.push(ImportedName {
+                    imported: module_source
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(&module_source)
+                        .to_string(),
+                    local: alias,
+                }),
+                None => is_glob = true,
+            }
+        }
         Language::Java => {
             if let Ok(text) = node.utf8_text(source_bytes) {
                 let text = text
@@ -2694,6 +2729,30 @@ fn extract_inheritance(
     let source_bytes = content.as_bytes();
 
     match file.language {
+        Language::CSharp if kind == "base_list" => {
+            if let Some(child_symbol_id) = ctx.current_type().or_else(|| ctx.current_symbol()) {
+                for (order, parent_name) in
+                    csharp::bases(node, source_bytes).into_iter().enumerate()
+                {
+                    // The syntax does not say which base is the class: by the convention the
+                    // whole ecosystem keeps, an interface is `I` and a capital.
+                    let mut letters = parent_name.chars();
+                    let interface = letters.next() == Some('I')
+                        && letters.next().is_some_and(char::is_uppercase);
+                    out.inheritance.push(InheritanceSite {
+                        child_symbol_id: child_symbol_id.clone(),
+                        parent_name,
+                        kind: if interface {
+                            InheritanceKind::Implements
+                        } else {
+                            InheritanceKind::Extends
+                        },
+                        order: u16::try_from(order).unwrap_or(u16::MAX),
+                        range: node_source_range(node),
+                    });
+                }
+            }
+        }
         Language::Java | Language::JavaScript | Language::TypeScript
             if kind == "extends_clause" || kind == "implements_clause" =>
         {

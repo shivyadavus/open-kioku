@@ -90,7 +90,7 @@ A path is skipped as `secret_policy`, never read, and never named when any of it
 | `id_rsa/loader.py`, `src/.env.rs` | blocked (a matching component anywhere in the path) |
 | `config/server.key`, `certs/tls.PEM`, `certs/client.p12`, `certs/client.pfx`, `android/release.jks`, `android/release.keystore` | blocked |
 | `keys/id_rsa.pem.ts`, `keys/x.key.js`, `certs/client.p12.py`, `keys/id_rsa.key.cs`, `src/Ledger/Ledger.snk.md` | blocked (a key extension before the last) |
-| `loaders/id_rsa_loader.py`, `src/id_rsa.rs`, `pkg/id_ed25519_signer.go`, `web/id_rsa_parser.ts`, `lib/id_dsa.js`, `codec/id_rsa_codec.java`, `src/id_rsa_loader.cs` (once C# is indexed) | indexed, any private-key PEM body replaced |
+| `loaders/id_rsa_loader.py`, `src/id_rsa.rs`, `pkg/id_ed25519_signer.go`, `web/id_rsa_parser.ts`, `lib/id_dsa.js`, `codec/id_rsa_codec.java`, `src/id_rsa_loader.cs` | indexed, any private-key PEM body replaced |
 | `secrets.yaml`, `credentials.json`, `docs/SECRETS.md`, `secret_key.txt` | indexed, secret-like values redacted |
 | `internal/secrets.go`, `src/CredentialsProvider.java` | indexed as written |
 | `.envrc`, `config/.environment.yaml`, `src/keyboard.rs`, `docs/key.md` | not matched (a hidden file still needs `allow_hidden_files`) |

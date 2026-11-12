@@ -157,6 +157,26 @@ pub fn semantic_capabilities_for(language: &Language) -> Option<LanguageSemantic
             (InheritanceImplements, Unsupported),
             (SourceRangesCallSite, Authoritative),
         ],
+        // C# calls are proven inside a type (a bare or `this.` call to a member of the same
+        // declaration), through a receiver whose declared or constructed type resolves, and to
+        // a constructor. A type's name is resolved through the enclosing types and namespaces
+        // and the file's `using` directives. A call through a bare type name (`Tools.Run()`) is
+        // not read as static, since a property may carry the name; an extension method, a
+        // `using static` member, a `global using` and a project file's implicit usings are not
+        // resolved, nor is `base.M()` through a base declared in another file.
+        Language::CSharp => &[
+            (CallsLocalFunction, Authoritative),
+            (CallsImportedFunction, Unsupported),
+            (CallsInstanceMember, Authoritative),
+            (CallsStaticMember, Unsupported),
+            (CallsDynamicDispatch, Unsupported),
+            (ReferencesImportBinding, Corroborating),
+            (TypesAnnotation, Authoritative),
+            (TypesConstructor, Corroborating),
+            (InheritanceExtends, Corroborating),
+            (InheritanceImplements, Corroborating),
+            (SourceRangesCallSite, Authoritative),
+        ],
         _ => return None,
     };
 
@@ -180,6 +200,7 @@ mod tests {
             Language::Python,
             Language::Java,
             Language::Go,
+            Language::CSharp,
         ];
 
         for language in languages {

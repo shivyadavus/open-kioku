@@ -6,11 +6,10 @@
 //! member declared in any of them, shares the type's qualified name while each declaration keeps
 //! its own symbol id and line range.
 //!
-//! Only declarations are read here; nothing in this module emits a relationship. `using`
-//! directives belong in `extract_import`, calls in `extract_call`, base lists in
-//! `extract_inheritance` and locals in `extract_binding`, all of which skip C# today. Resolution
-//! reads those facts only for a language with a `LanguageSemantics` adapter in
-//! `open-kioku-languages`, and C# has none yet.
+//! The facts relationships are resolved from are read here too and recorded by the shared
+//! extractors: calls (`call`), the names a declaration binds with their types (`bindings`),
+//! `using` directives (`using`) and base lists (`bases`). Each reduces a type to its simple
+//! name: resolution, which knows the namespaces in scope, decides what it refers to.
 
 use open_kioku_core::{LineRange, ScopeKind, SymbolKind, Visibility};
 use tree_sitter::Node;
@@ -735,6 +734,139 @@ fn squeeze(text: &str) -> String {
     text.split_whitespace().collect()
 }
 
+/// The last simple name of a type or member reference, without type arguments or a qualifier:
+/// `Entry` of `Acme.Ledger.Entry<int>`.
+fn simple_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let name = match node.kind() {
+        "identifier" => node,
+        "generic_name" => node.named_child(0)?,
+        "qualified_name" | "alias_qualified_name" => {
+            return simple_name(node.child_by_field_name("name")?, source);
+        }
+        "nullable_type" => return simple_name(node.named_child(0)?, source),
+        _ => return None,
+    };
+    name.utf8_text(source).ok().map(str::to_string)
+}
+
+/// What a call expression calls: the member's name, the text it is reached through (`this`,
+/// `base`, a name or a dotted path), and whether it is a constructor call, whose name is the
+/// type's.
+///
+/// A call through `?.`, a delegate invocation (`handler(x)` reads the same as a method call and
+/// is recorded as one, for resolution to find no method of that name), an indexer or a
+/// parenthesised expression is not read.
+pub(crate) fn call(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>, bool)> {
+    match node.kind() {
+        "invocation_expression" => {
+            let function = node.child_by_field_name("function")?;
+            match function.kind() {
+                "identifier" | "generic_name" => {
+                    Some((simple_name(function, source)?, None, false))
+                }
+                "member_access_expression" => {
+                    let name = simple_name(function.child_by_field_name("name")?, source)?;
+                    // `this` and `base` are anonymous nodes: the first child either way.
+                    let receiver = function
+                        .child_by_field_name("expression")
+                        .or_else(|| function.child(0))?;
+                    let receiver = compact(receiver.utf8_text(source).ok()?);
+                    (!receiver.is_empty()).then_some((name, Some(receiver), false))
+                }
+                _ => None,
+            }
+        }
+        "object_creation_expression" => {
+            let name = simple_name(node.child_by_field_name("type")?, source)?;
+            Some((name.clone(), Some(name), true))
+        }
+        _ => None,
+    }
+}
+
+/// The names a declaration binds, each with the type it declares (`None` for `var`) and the
+/// type its initializer constructs: a local or a field (`Entry e = new Entry()`), a parameter,
+/// and a property, which is read through like a field.
+pub(crate) fn bindings(
+    node: Node<'_>,
+    source: &[u8],
+) -> Vec<(String, Option<String>, Option<String>)> {
+    let type_text = |node: Node<'_>| {
+        (node.kind() != "implicit_type")
+            .then(|| simple_name(node, source))
+            .flatten()
+    };
+    let text = |node: Node<'_>| node.utf8_text(source).ok().map(str::to_string);
+    match node.kind() {
+        "variable_declaration" => {
+            let declared = node.child_by_field_name("type").and_then(type_text);
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .filter(|child| child.kind() == "variable_declarator")
+                .filter_map(|declarator| {
+                    let name = text(declarator.child_by_field_name("name")?)?;
+                    let constructed = (1..declarator.named_child_count())
+                        .filter_map(|index| declarator.named_child(index))
+                        .find(|value| value.kind() == "object_creation_expression")
+                        .and_then(|value| value.child_by_field_name("type"))
+                        .and_then(|ty| simple_name(ty, source));
+                    Some((name, declared.clone(), constructed))
+                })
+                .collect()
+        }
+        "parameter" | "property_declaration" => {
+            let name = node.child_by_field_name("name").and_then(text);
+            let declared = node.child_by_field_name("type").and_then(type_text);
+            match (name, declared) {
+                (Some(name), Some(declared)) => vec![(name, Some(declared), None)],
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// A `using` directive: the namespace (or, for `using static`, the type) it opens, and the
+/// alias it is given when it has one. `global using` reads the same.
+pub(crate) fn using(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
+    if node.kind() != "using_directive" {
+        return None;
+    }
+    let alias = node
+        .child_by_field_name("name")
+        .and_then(|name| name.utf8_text(source).ok())
+        .map(str::to_string);
+    let mut cursor = node.walk();
+    let target = node
+        .named_children(&mut cursor)
+        .filter(|child| Some(*child) != node.child_by_field_name("name"))
+        .find(|child| {
+            matches!(
+                child.kind(),
+                "qualified_name" | "identifier" | "generic_name"
+            )
+        })?;
+    let target = compact(target.utf8_text(source).ok()?);
+    (!target.is_empty()).then_some((target, alias))
+}
+
+/// The types a declaration's base list names, in order, by simple name.
+pub(crate) fn bases(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    if node.kind() != "base_list" {
+        return Vec::new();
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter_map(|child| match child.kind() {
+            "primary_constructor_base_type" => simple_name(
+                child.child_by_field_name("type").or(child.named_child(0))?,
+                source,
+            ),
+            _ => simple_name(child, source),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::parse_file;
@@ -759,6 +891,102 @@ mod tests {
 
     fn parse(path: &str, source: &str) -> SyntaxFacts {
         parse_file(&file(path), source).expect("C# source parses")
+    }
+
+    /// The facts relationships are resolved from: every call with what it is reached through,
+    /// each binding with its type, each `using` and each base, in source order.
+    #[test]
+    fn calls_bindings_usings_and_bases_are_recorded_for_resolution() {
+        use open_kioku_core::{InheritanceKind, ReceiverKind};
+        let facts = parse(
+            "src/Client.cs",
+            "using System.Linq;\nusing static Acme.Tools;\nusing Net = System.Net.Http;\nnamespace Acme;\npublic class Client : Base, IClient<int> {\n    readonly ILogger _log = new Logger();\n    public IClient Inner { get; set; }\n    void Run(Options options, int n = 1) {\n        var a = new Acme.Model.Entry<int>(1);\n        Entry b = Entry.Create(2);\n        Post(a);\n        this.Post(b);\n        base.Run(options);\n        Inner.Send<int>(3);\n        a?.Close();\n        Tools.Help.Go();\n    }\n    void Post(Entry entry) {}\n}\n",
+        );
+        let calls = facts
+            .calls
+            .iter()
+            .map(|call| {
+                (
+                    call.callee_name.as_str(),
+                    call.receiver.as_deref(),
+                    call.receiver_kind,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![
+                // A constructor call is named after its type, whatever qualifies it.
+                ("Logger", Some("Logger"), ReceiverKind::Type),
+                ("Entry", Some("Entry"), ReceiverKind::Type),
+                // A capitalised receiver may be a property: it is a value until resolved.
+                ("Create", Some("Entry"), ReceiverKind::Value),
+                ("Post", None, ReceiverKind::None),
+                ("Post", Some("this"), ReceiverKind::Self_),
+                ("Run", Some("base"), ReceiverKind::Super),
+                ("Send", Some("Inner"), ReceiverKind::Value),
+                // `a?.Close()` is not read.
+                ("Go", Some("Tools.Help"), ReceiverKind::Value),
+            ]
+        );
+        let bindings = facts
+            .bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.name.as_str(),
+                    binding.declared_type.as_deref(),
+                    binding.inferred_type.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bindings,
+            vec![
+                ("_log", Some("ILogger"), Some("Logger")),
+                ("Inner", Some("IClient"), None),
+                ("options", Some("Options"), None),
+                // A predefined type names no declaration.
+                ("a", None, Some("Entry")),
+                ("b", Some("Entry"), None),
+                ("entry", Some("Entry"), None),
+            ]
+        );
+        let usings = facts
+            .imports
+            .iter()
+            .map(|import| {
+                (
+                    import.source.as_str(),
+                    import.is_glob,
+                    import
+                        .bindings
+                        .iter()
+                        .map(|name| name.local.as_str())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            usings,
+            vec![
+                ("System.Linq", true, vec![]),
+                ("Acme.Tools", true, vec![]),
+                ("System.Net.Http", false, vec!["Net"]),
+            ]
+        );
+        let bases = facts
+            .inheritance
+            .iter()
+            .map(|site| (site.parent_name.as_str(), site.kind, site.order))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bases,
+            vec![
+                ("Base", InheritanceKind::Extends, 0),
+                ("IClient", InheritanceKind::Implements, 1),
+            ]
+        );
     }
 
     fn find<'a>(facts: &'a SyntaxFacts, qualified: &str) -> &'a Symbol {
@@ -902,11 +1130,9 @@ namespace Acme.Ledger
             .symbols
             .iter()
             .all(|symbol| symbol.confidence == Confidence::High));
-        // Nothing here is a relationship: calls, base lists and `using` belong to resolution.
-        assert!(facts.calls.is_empty());
-        assert!(facts.imports.is_empty());
-        assert!(facts.inheritance.is_empty());
-        assert!(facts.bindings.is_empty());
+        // The facts relationships are resolved from are recorded beside the symbols; what they
+        // hold is the subject of `calls_bindings_usings_and_bases_are_recorded_for_resolution`.
+        assert!(!facts.bindings.is_empty());
     }
 
     #[test]

@@ -676,6 +676,113 @@ fn enclosing_module_scope<'s>(scopes: &'s ScopeIndex, scope_id: &ScopeId) -> Opt
     None
 }
 
+/// The C# types a simple name reaches from inside the declaration `within` (a qualified name,
+/// `Acme::Ledger::Reconciler::Reconcile`), each with whether a `using` directive reached it.
+///
+/// C# looks a name up outward: the enclosing types, whose nested types it may be, then the
+/// enclosing namespaces, innermost first, each of which every file may add types to; the first
+/// level that has the name decides. Only when none has it do the namespaces the file opens with
+/// `using` supply it. A `using` alias of the name is the type it names and nothing else. More
+/// than one type is returned when a level has several of the name (the parts of a `partial`
+/// type share one qualified name, as `Entry` and `Entry<T>` do) or when two opened namespaces
+/// each have one, which C# rejects as ambiguous.
+///
+/// What this cannot see is left out, never guessed: a `global using` in another file, the
+/// implicit usings of a project file, a type nested in a base type, and a type of the name in an
+/// assembly the repository does not hold. The last can stand in the way only where C# itself
+/// would call the name ambiguous, or in a `using` written inside a namespace block, which binds
+/// tighter than the namespaces around it and is read here as if it stood at the top of the file.
+pub(crate) fn csharp_types_named(
+    repository: &SemanticRepository,
+    symbols: &SymbolIndex,
+    file_id: &FileId,
+    within: &str,
+    name: &str,
+) -> Vec<(SymbolId, bool)> {
+    let is_type = |id: &SymbolId| {
+        symbols.get(id).is_some_and(|symbol| {
+            symbol.language == Language::CSharp
+                && matches!(
+                    symbol.kind,
+                    SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait
+                )
+        })
+    };
+    let types_at = |qualified: &str| {
+        symbols
+            .by_qualified
+            .get(qualified)
+            .into_iter()
+            .flatten()
+            .filter(|id| is_type(id))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let qualified = |namespace: &str| namespace.replace('.', "::");
+
+    // `using Net = System.Net.Http;` then `Net`, or `using Entry = Acme.Ledger.Entry;`.
+    let aliases = file_imports(repository, file_id, name)
+        .iter()
+        .filter(|binding| !binding.is_glob)
+        .collect::<Vec<_>>();
+    if !aliases.is_empty() {
+        return aliases
+            .iter()
+            .flat_map(|binding| types_at(&qualified(&binding.source_module)))
+            .map(|id| (id, true))
+            .collect();
+    }
+
+    let mut levels = within.split("::").collect::<Vec<_>>();
+    loop {
+        let found = if levels.is_empty() {
+            types_at(name)
+        } else {
+            types_at(&format!("{}::{name}", levels.join("::")))
+        };
+        if !found.is_empty() {
+            return found.into_iter().map(|id| (id, false)).collect();
+        }
+        if levels.pop().is_none() {
+            break;
+        }
+    }
+
+    let mut found = Vec::new();
+    for binding in file_imports(repository, file_id, GLOB_IMPORT_LOCAL_NAME) {
+        for id in types_at(&format!("{}::{name}", qualified(&binding.source_module))) {
+            if !found.iter().any(|(known, _)| *known == id) {
+                found.push((id, true));
+            }
+        }
+    }
+    found
+}
+
+/// The qualified name of the declaration a scope is in: the nearest enclosing scope a symbol
+/// owns. Empty at the top of a file outside every namespace.
+pub(crate) fn enclosing_qualified_name(
+    scopes: &ScopeIndex,
+    symbols: &SymbolIndex,
+    scope_id: &ScopeId,
+) -> String {
+    let mut current = scopes.scopes.get(scope_id);
+    while let Some(scope) = current {
+        if let Some(symbol) = scope
+            .owner_symbol_id
+            .as_ref()
+            .and_then(|owner| symbols.get(owner))
+        {
+            return symbol.qualified_name.clone();
+        }
+        current = scope
+            .parent_id
+            .as_ref()
+            .and_then(|parent| scopes.scopes.get(parent));
+    }
+    String::new()
+}
+
 fn file_imports<'r>(
     repository: &'r SemanticRepository,
     file_id: &FileId,

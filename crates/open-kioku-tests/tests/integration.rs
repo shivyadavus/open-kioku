@@ -199,6 +199,124 @@ fn mcp_call(repo: &std::path::Path, tool: &str, arguments: serde_json::Value) ->
     response["result"]["structuredContent"].clone()
 }
 
+/// C# relationships are resolved through what C# resolves them through: the type a call is in,
+/// the declared type of what it is called on, and a type's name looked up through the enclosing
+/// namespaces and the file's `using` directives.
+#[test]
+fn csharp_calls_and_type_relationships_are_resolved_through_namespaces_and_usings() {
+    let temp = std::env::temp_dir().join(format!("kioku-test-csharp-rel-{}", uuid::Uuid::new_v4()));
+    let write = |path: &str, text: &str| {
+        let target = temp.join(path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, text).unwrap();
+    };
+    write(
+        "Ledger/Reconciler.cs",
+        "namespace Acme.Ledger;\n\npublic class Reconciler\n{\n    public Reconciler()\n    {\n    }\n\n    public bool Reconcile(Statement statement) => Within(statement);\n\n    bool Within(Statement statement) => statement != null;\n}\n",
+    );
+    write(
+        "Ledger/Statement.cs",
+        "namespace Acme.Ledger\n{\n    public class Statement\n    {\n    }\n}\n",
+    );
+    write(
+        "Reports/Summary.cs",
+        "using Acme.Ledger;\n\nnamespace Acme.Reports;\n\npublic class Summary : ReportBase, IReport\n{\n    private readonly Reconciler reconciler = new Reconciler();\n\n    public bool Check(Statement statement)\n    {\n        return reconciler.Reconcile(statement) && this.Ready() && base.Stamp();\n    }\n\n    bool Ready() => true;\n\n    Reconciler Fresh()\n    {\n        return new Reconciler();\n    }\n}\n",
+    );
+    write(
+        "Reports/ReportBase.cs",
+        "namespace Acme.Reports;\n\npublic abstract class ReportBase\n{\n    protected bool Stamp() => true;\n}\n\npublic interface IReport\n{\n    bool Check(Acme.Ledger.Statement statement);\n}\n\npublic static class SummaryExtensions\n{\n    public static bool Check(this Summary summary, int depth) => depth > 0;\n}\n\npublic class Runner\n{\n    public bool Run(Summary summary, Acme.Ledger.Statement statement) => summary.Check(statement);\n}\n",
+    );
+    // A type of the same name in a namespace `Summary.cs` does not open, and a use of the name
+    // from a namespace that opens neither.
+    write(
+        "Other/Shadow.cs",
+        "namespace Other\n{\n    public class Reconciler\n    {\n        public bool Reconcile(object statement) => false;\n    }\n}\n\nnamespace Elsewhere\n{\n    public class Loose\n    {\n        public bool Go(Reconciler reconciler) => reconciler.Reconcile(null);\n    }\n}\n",
+    );
+    for args in [["init", "."], ["index", "."]] {
+        Command::cargo_bin("ok")
+            .unwrap()
+            .current_dir(&temp)
+            .args(args)
+            .assert()
+            .success();
+    }
+    // The proven dependents of a file: (dependent file, dependent, what it depends on, edge).
+    let proven = |file: &str| {
+        let output = Command::cargo_bin("ok")
+            .unwrap()
+            .current_dir(&temp)
+            .args(["--json", "impact", "--file", file])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let report: serde_json::Value = serde_json::from_slice(&output).expect("impact is JSON");
+        // The list is left out of a report that has no proven dependent.
+        let mut edges = report["proven_impact"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|edge| {
+                let last = |value: &serde_json::Value, count: usize| {
+                    let parts = value
+                        .as_str()
+                        .unwrap_or_default()
+                        .split("::")
+                        .collect::<Vec<_>>();
+                    parts[parts.len().saturating_sub(count)..].join("::")
+                };
+                format!(
+                    "{} {} -> {} {}",
+                    edge["path"].as_str().unwrap(),
+                    last(&edge["symbol"], 2),
+                    last(&edge["source"], 2),
+                    edge["edge_type"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges
+    };
+
+    assert_eq!(
+        proven("Ledger/Reconciler.cs"),
+        vec![
+            // A bare call to a member of the same type.
+            "Ledger/Reconciler.cs Reconciler::Reconcile -> Reconciler::Within CALLS",
+            // A field's type, named through `using Acme.Ledger;`, and a call through it. The
+            // `Reconciler` of namespace `Other` is not a candidate, and `Elsewhere.Loose`, which
+            // opens neither namespace, is a dependent of neither.
+            "Reports/Summary.cs Reports::Summary -> Ledger::Reconciler USES_TYPE",
+            "Reports/Summary.cs Summary::Check -> Reconciler::Reconcile CALLS",
+            // `new Reconciler()` in a method body is a call of the constructor the type
+            // declares; the one in the field's initializer has no member to be a call from.
+            "Reports/Summary.cs Summary::Fresh -> Reconciler::Reconciler CALLS",
+        ]
+    );
+    assert_eq!(
+        proven("Reports/Summary.cs"),
+        vec![
+            // `summary.Check(statement)` in `Runner` may bind the extension method of the
+            // name, so the call proves neither; the parameter's type is still a proven use.
+            "Reports/ReportBase.cs Runner::Run -> Reports::Summary USES_TYPE",
+            "Reports/ReportBase.cs SummaryExtensions::Check -> Reports::Summary USES_TYPE",
+            "Reports/Summary.cs Summary::Check -> Summary::Ready CALLS",
+        ]
+    );
+    assert_eq!(
+        proven("Reports/ReportBase.cs"),
+        vec![
+            "Reports/Summary.cs Reports::Summary -> Reports::IReport IMPLEMENTS",
+            "Reports/Summary.cs Reports::Summary -> Reports::ReportBase EXTENDS",
+            // `base.Stamp()` is not resolved yet: a member reached through a base declared in
+            // another file is left unproven.
+        ]
+    );
+    assert_eq!(proven("Other/Shadow.cs"), Vec::<String>::new());
+}
+
 /// C# symbols reach every surface an agent reads them through: lexical search, `ok symbol
 /// find`, and MCP `search_symbols` and `get_definition`, qualified by namespace and type, with
 /// both parts of a partial type under one qualified name.

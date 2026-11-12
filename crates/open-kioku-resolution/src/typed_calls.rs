@@ -1646,6 +1646,13 @@ fn type_member_outcome(
     for type_id in &type_candidates {
         direct_targets.extend(find_members_by_name(ctx, type_id, &call.callee_name));
     }
+    if ctx.language == Language::CSharp && !direct_targets.is_empty() {
+        // `request.AddParameter("a", "b")` binds an extension method when no instance method
+        // of the name takes those arguments, and a call site records no argument: where the
+        // repository declares an extension method of the name, it is a candidate beside the
+        // member, and the call proves neither.
+        direct_targets.extend(csharp_extension_methods(ctx, &call.callee_name));
+    }
     normalize_symbol_ids(&mut direct_targets);
     // A type imported through a module whose file configuration selects is the type of each file
     // that may hold it, and a method call on it proves none of their methods (#625).
@@ -1695,6 +1702,28 @@ fn type_member_outcome(
     }
     normalize_symbol_ids(&mut inherited_targets);
     evaluate_inherited_targets(call, ctx, inherited_targets)
+}
+
+/// The C# extension methods called `name`: static methods whose first parameter is `this`.
+fn csharp_extension_methods(ctx: &ResolutionContext<'_>, name: &str) -> Vec<SymbolId> {
+    ctx.symbols
+        .by_name
+        .get(name)
+        .into_iter()
+        .flatten()
+        .filter(|id| {
+            ctx.symbols.get(id).is_some_and(|symbol| {
+                symbol.language == Language::CSharp
+                    && matches!(symbol.kind, SymbolKind::Method | SymbolKind::Function)
+                    && symbol.signature.as_deref().is_some_and(|signature| {
+                        signature.split_once('(').is_some_and(|(_, parameters)| {
+                            parameters.trim_start().starts_with("this ")
+                        })
+                    })
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn imported_receiver_outcome(
@@ -2013,6 +2042,21 @@ pub(crate) fn collect_type_candidate_set(
     };
     let mut configured = None::<RustModuleFiles>;
 
+    if ctx.language == Language::CSharp {
+        // A C# name is looked up through namespaces, which no file path or import binding
+        // stands for: see `csharp_types_named`.
+        let within = crate::context::enclosing_qualified_name(ctx.scopes, ctx.symbols, scope_id);
+        return TypeCandidates {
+            targets: crate::context::csharp_types_named(
+                ctx.repository,
+                ctx.symbols,
+                ctx.file_id,
+                &within,
+                type_name,
+            ),
+            configured: None,
+        };
+    }
     if ctx.language == Language::Rust {
         if let Some(found) = rust_path_type_candidates(ctx, scope_id, type_name) {
             return found;
