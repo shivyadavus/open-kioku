@@ -1,6 +1,7 @@
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::path::PathBuf;
+
+mod common;
 
 fn fixture_dir(name: &str) -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -79,7 +80,7 @@ fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
     cleanup_ok_dir(fixture);
 
     // 1. Init
-    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let mut cmd = common::ok_command();
     cmd.current_dir(fixture_dir(fixture))
         .arg("init")
         .arg(".")
@@ -90,7 +91,7 @@ fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
     assert!(fixture_dir(fixture).join("ok.toml").exists());
 
     // 2. Index
-    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let mut cmd = common::ok_command();
     cmd.current_dir(fixture_dir(fixture))
         .arg("index")
         .arg(".")
@@ -101,7 +102,7 @@ fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
     assert_test_targets_are_callables(fixture);
 
     // 3. Status
-    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let mut cmd = common::ok_command();
     cmd.current_dir(fixture_dir(fixture))
         .arg("status")
         .arg(".")
@@ -110,7 +111,7 @@ fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
         .stdout(predicate::str::contains("Healthy index"));
 
     // 4. Search
-    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let mut cmd = common::ok_command();
     cmd.current_dir(fixture_dir(fixture))
         .arg("search")
         .arg(search_term)
@@ -120,7 +121,7 @@ fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
 
     // 5. Quality benchmark
     let quality_case = format!("{search_term}={expected_path}");
-    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let mut cmd = common::ok_command();
     cmd.current_dir(fixture_dir(fixture))
         .args([
             "bench",
@@ -180,8 +181,7 @@ fn mcp_call(repo: &std::path::Path, tool: &str, arguments: serde_json::Value) ->
         "method": "tools/call",
         "params": { "name": tool, "arguments": arguments },
     });
-    let output = Command::cargo_bin("ok")
-        .unwrap()
+    let output = common::ok_command()
         .current_dir(repo)
         .args(["mcp", "serve", "--repo", "."])
         .write_stdin(request.to_string())
@@ -233,8 +233,7 @@ fn csharp_calls_and_type_relationships_are_resolved_through_namespaces_and_using
         "namespace Other\n{\n    public class Reconciler\n    {\n        public bool Reconcile(object statement) => false;\n    }\n}\n\nnamespace Elsewhere\n{\n    public class Loose\n    {\n        public bool Go(Reconciler reconciler) => reconciler.Reconcile(null);\n    }\n}\n",
     );
     for args in [["init", "."], ["index", "."]] {
-        Command::cargo_bin("ok")
-            .unwrap()
+        common::ok_command()
             .current_dir(&temp)
             .args(args)
             .assert()
@@ -242,8 +241,7 @@ fn csharp_calls_and_type_relationships_are_resolved_through_namespaces_and_using
     }
     // The proven dependents of a file: (dependent file, dependent, what it depends on, edge).
     let proven = |file: &str| {
-        let output = Command::cargo_bin("ok")
-            .unwrap()
+        let output = common::ok_command()
             .current_dir(&temp)
             .args(["--json", "impact", "--file", file])
             .assert()
@@ -325,8 +323,7 @@ fn csharp_symbols_are_found_through_search_cli_and_mcp() {
     let temp = std::env::temp_dir().join(format!("kioku-test-csharp-{}", uuid::Uuid::new_v4()));
     copy_dir_recursive(&fixture_dir("csharp-fixture"), &temp);
     for args in [["init", "."], ["index", "."]] {
-        Command::cargo_bin("ok")
-            .unwrap()
+        common::ok_command()
             .current_dir(&temp)
             .args(args)
             .assert()
@@ -334,8 +331,7 @@ fn csharp_symbols_are_found_through_search_cli_and_mcp() {
     }
 
     // Lexical search reaches the documentation the chunk carries with its symbol.
-    Command::cargo_bin("ok")
-        .unwrap()
+    common::ok_command()
         .current_dir(&temp)
         .args(["search", "bank statement"])
         .assert()
@@ -343,8 +339,7 @@ fn csharp_symbols_are_found_through_search_cli_and_mcp() {
         .stdout(predicate::str::contains("src/Ledger/Reconciler.cs"));
 
     // `ok symbol find` lists both declarations of the partial `Ledger`.
-    let found = Command::cargo_bin("ok")
-        .unwrap()
+    let found = common::ok_command()
         .current_dir(&temp)
         .args(["--json", "symbol", "find", "Ledger"])
         .assert()
@@ -419,8 +414,7 @@ fn csharp_symbols_are_found_through_search_cli_and_mcp() {
             .is_some_and(|caveat| caveat.contains("1 of them under the same qualified name")),
         "{partial:#}"
     );
-    let cli = Command::cargo_bin("ok")
-        .unwrap()
+    let cli = common::ok_command()
         .current_dir(&temp)
         .args(["--json", "symbol", "definition", "Acme::Ledger::Ledger"])
         .assert()
@@ -440,14 +434,12 @@ fn test_mcp_tools_list_snapshot() {
     std::fs::create_dir_all(&temp).unwrap();
 
     // Init & Index
-    Command::cargo_bin("ok")
-        .unwrap()
+    common::ok_command()
         .current_dir(&temp)
         .args(["init", "."])
         .assert()
         .success();
-    Command::cargo_bin("ok")
-        .unwrap()
+    common::ok_command()
         .current_dir(&temp)
         .args(["index", "."])
         .assert()
@@ -455,7 +447,7 @@ fn test_mcp_tools_list_snapshot() {
 
     // MCP tools/list
     let mcp_req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
-    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let mut cmd = common::ok_command();
     let assert = cmd
         .current_dir(&temp)
         .args(["mcp", "serve", "--repo", "."])
@@ -607,14 +599,12 @@ fn test_mcp_plan_change_snapshot() {
     copy_dir_recursive(&fixture_dir("rust-fixture"), &temp);
 
     // Init & Index a deterministic fixture repo.
-    Command::cargo_bin("ok")
-        .unwrap()
+    common::ok_command()
         .current_dir(&temp)
         .args(["init", "."])
         .assert()
         .success();
-    Command::cargo_bin("ok")
-        .unwrap()
+    common::ok_command()
         .current_dir(&temp)
         .args(["index", "."])
         .assert()
@@ -622,8 +612,7 @@ fn test_mcp_plan_change_snapshot() {
 
     // The context pack for the same task: each selected unit's refs, like each primary
     // result's, pair with the unit's lines, and a retrieval ref names its own line's record.
-    let context_output = Command::cargo_bin("ok")
-        .unwrap()
+    let context_output = common::ok_command()
         .current_dir(&temp)
         .args(["--json", "context", "add a subtract function next to add"])
         .assert()
@@ -637,7 +626,7 @@ fn test_mcp_plan_change_snapshot() {
 
     // MCP tools/call plan_change with a fixed task against the fixture.
     let mcp_req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan_change","arguments":{"task":"add a subtract function next to add","limit":5,"format":"json"}}}"#;
-    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let mut cmd = common::ok_command();
     let assert = cmd
         .current_dir(&temp)
         .args(["mcp", "serve", "--repo", "."])
@@ -777,16 +766,14 @@ fn cli_plan_boundary_allows_symbols_declared_in_allowed_files() {
     let temp = std::env::temp_dir().join(format!("kioku-test-plan-{}", uuid::Uuid::new_v4()));
     copy_dir_recursive(&fixture_dir("rust-fixture"), &temp);
     for args in [["init", "."], ["index", "."]] {
-        Command::cargo_bin("ok")
-            .unwrap()
+        common::ok_command()
             .current_dir(&temp)
             .args(args)
             .assert()
             .success();
     }
 
-    let output = Command::cargo_bin("ok")
-        .unwrap()
+    let output = common::ok_command()
         .current_dir(&temp)
         .args(["--json", "plan", "add a subtract function next to add"])
         .assert()
@@ -834,7 +821,7 @@ fn cli_plan_boundary_allows_symbols_declared_in_allowed_files() {
 
 #[test]
 fn test_cli_graph_schema_markdown() {
-    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let mut cmd = common::ok_command();
     cmd.args(["graph", "schema", "--format", "markdown"])
         .assert()
         .success()
@@ -858,7 +845,7 @@ fn test_cli_graph_schema_markdown() {
 
 #[test]
 fn test_cli_graph_schema_json() {
-    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let mut cmd = common::ok_command();
     cmd.args(["graph", "schema", "--format", "json"])
         .assert()
         .success()
