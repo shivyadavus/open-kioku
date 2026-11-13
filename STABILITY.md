@@ -100,8 +100,9 @@ it is listed above.
 
 `ok ripple`, new in 5.0.0, is experimental with it: its report (`schema_version` 1), its
 attribution rules and the `[gate] ripple` setting may change in a minor release. It reads syntax,
-not types. Its rules were changed five times against merged history, and its reading of a call
-was rewritten after an independent review, before this release
+not types. Its rules were changed five times against merged history, its reading of a call was
+rewritten after an independent review, and it was taught to follow a receiver's declared type
+after a comparison with type checkers showed how much it missed, all before this release
 ([`benchmarks/ripple/`](benchmarks/ripple/README.md)).
 
 When an experimental feature is promoted to stable, it will be announced in the

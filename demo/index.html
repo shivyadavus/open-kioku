@@ -128,11 +128,12 @@ src/click/utils.py:62  function `_make_default_short_help`
     </div>
     <div>
       <ul class="facts" style="margin-top:0">
-        <li><b>249 of 250</b><span>sites it named from half-made changes were then changed by the same commit, on 14 repositories it had never been run on (2,543 commits that change code).</span></li>
-        <li><b>1</b><span>false alarm on those repositories' complete, merged commits. It became a rule with a test.</span></li>
-<!-- compiler-comparison -->
+        <li><b>249 of 250</b><span>sites it named from half-made changes were then changed by the same commit, on 14 repositories it had never been run on (2,543 commits that change code). One false alarm on their complete commits, now a rule with a test.</span></li>
+        <li><b>5</b><span>commits on the main branches of widely used libraries that left code naming something they had removed, found across 60 repositories. No false alarm is left on those repositories.</span></li>
+        <li><b>53%</b><span>of the sites a type checker reports are counted, and 93% are counted or listed, on 835 signature changes checked by Go's type checker, pyright and <code>tsc</code>. Go 78%, TypeScript 34%, Python 37%.</span></li>
+        <li><b>18%</b><span>is what the first version counted. The comparison is why it now follows a call through the type its receiver is declared with.</span></li>
       </ul>
-      <p class="note">What this does not show: that an agent finishes a task better with it. In the one live comparison so far, a frontier model fixed every caller with or without the notice.</p>
+      <p class="note">What this does not show: that an agent finishes a task better with it. In 40 live sessions on five small tasks, current models fixed every caller or said which they left, with or without the notice.</p>
     </div>
   </div>
 </section>

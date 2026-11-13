@@ -200,29 +200,48 @@ a build is run, in the languages that have no compiler, and for whoever reads th
 
 ## Measured
 
-Replayed over the last 300 commits of 46 open-source repositories in seven languages, with no
-index, in two ways: on each **complete merged commit**, where anything it reports is a false
-alarm or a real leftover; and on each commit **with only the declaring file applied**, where what
-it reports can be checked against what the real commit went on to change.
+Four ways, each of which changed it. Method, every number, the false alarms by cause and the
+limits are in [`benchmarks/ripple/`](../benchmarks/ripple/README.md).
 
-- The first form of the check was run on new repositories in five rounds and changed after
-  each. In the last round (10 repositories it had not been run on, 1,615 commits that change
-  code) it named 341 sites from the declaring file alone, of which the commit then changed 333
-  and 6 more were real leftovers; the complete commits raised an alarm in 6, 2 real and 4 false.
-- An independent review then found 18 faults in it, most of them from reading a call as text,
-  and judged it not safe to hold a stop on by default. The reading was rewritten on the syntax
-  tree, and its first replay raised six more false alarms, each now a rule above with a test.
-- As shipped, on all 46 repositories (7,711 commits that change code): 913 sites named from the
-  declaring file, 896 then changed by the commit, 12 of the other 17 real leftovers and 5 in
-  tests the commit commented out instead; on the complete commits, 15 sites in 4 commits, all
-  four real. **That figure is not held out**: the rules were changed after looking at these
-  repositories, which is why the hooks report and do not hold unless asked to.
-- The four real ones are commits on the main branch of a widely used library that still named
-  something they had removed; one was still in place when its repository was cloned.
-- **Recall is not measured**: nothing here says how many broken sites it did not name.
-- On five real signature changes, a frontier model asked to update the callers left nothing
-  broken with or without the hook, so the hook's effect on that outcome is not shown. It was
-  delivered in all five sessions and cost no time.
+**On merged history**, with no index: the last 300 commits of 46 open-source repositories in
+seven languages, on each **complete commit**, where anything it reports is a false alarm or a
+real leftover, and on each commit **with only the declaring file applied**, where what it
+reports can be checked against what the commit went on to change.
 
-Method, every number, the review, the false alarms by cause and the limits are in
-[`benchmarks/ripple/`](../benchmarks/ripple/README.md).
+- As shipped, on those 46 (7,711 commits that change code): 1,411 sites named from the
+  declaring file, 1,398 then changed by the commit, 12 of the other 13 real leftovers; on the
+  complete commits, 15 sites in 4 commits, all four real. **Not held out**: the rules were
+  changed after looking at these repositories.
+- On 14 repositories it had never been run on, the check as first merged named 250 sites, 249
+  of which the commit then changed, with one false alarm on a complete commit. As shipped it
+  names 275 of 275, and one real leftover.
+- Five commits on the main branch of a widely used library still named something they had
+  removed; one was still in place when its repository was cloned.
+
+**By an independent review**, which found 18 faults in its first form, most from reading a
+call as text, and judged it not safe to hold a stop on by default. The default reports.
+
+**Against type checkers**, which is the only one of these that says what it misses: on
+835 signature changes in 15 repositories, with Go's type checker, pyright
+and `tsc` saying what each one broke:
+
+| | Sites the checker reports | Counted, as first merged | Counted, as shipped | Counted or listed as possible |
+|---|---|---|---|---|
+| Go | 1,621 | 21% | 78% | 98% |
+| Python | 774 | 28% | 37% | 81% |
+| TypeScript | 1,504 | 8% | 34% | 93% |
+| **All** | 3,899 | 18% | 53% | 93% |
+
+- The gap between the last two columns is what it sees and will not claim: a method on a
+  receiver whose type the function around it does not say. In Python that is most calls,
+  because most parameters and results carry no type.
+- Of the 2,355 sites it counted, the checker reported 2,066 itself; 282
+  more are uses in a file where the checker reported the name once and then fell silent, or in
+  code the checker does not read; the remaining 7 were read by hand
+  ([which](../benchmarks/ripple/README.md#against-type-checkers-what-it-missed)).
+- Only added parameters and renames were tried, in three languages.
+
+**With a coding agent**: on five real signature changes, with and without being asked to
+update the callers, a frontier model left nothing broken with or without the hooks, and a
+smaller model that left callers broken said so in its answer either way. The notice was
+delivered and was right; its effect on the outcome is not shown.

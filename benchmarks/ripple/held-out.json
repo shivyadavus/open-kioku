@@ -1,0 +1,1289 @@
+{
+ "generated": "2026-11-13",
+ "commits_replayed_per_repository": 300,
+ "index": "none",
+ "first_look": {
+  "what": "the check as it was merged first, on repositories it had never been run on",
+  "repositories": [
+   {
+    "repository": "AutoMapper/AutoMapper",
+    "language": "C#",
+    "head": "d14380da2e",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 171,
+     "commits_with_breaking_change": 25,
+     "breaking_changes": 86,
+     "moved_or_shared_name": 1,
+     "half_changes_with_a_listed_site": 0,
+     "half_sites_listed": 0,
+     "half_sites_the_commit_then_changed": 0,
+     "half_sites_listed_as_possible_only": 2047,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "apache/commons-collections",
+    "language": "Java",
+    "head": "ba6ea29fb4",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 188,
+     "commits_with_breaking_change": 5,
+     "breaking_changes": 10,
+     "moved_or_shared_name": 0,
+     "half_changes_with_a_listed_site": 1,
+     "half_sites_listed": 1,
+     "half_sites_the_commit_then_changed": 0,
+     "half_sites_listed_as_possible_only": 36,
+     "whole_sites_left": 2,
+     "commits_with_a_site_left": 1
+    }
+   },
+   {
+    "repository": "apache/commons-text",
+    "language": "Java",
+    "head": "d244ba7594",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 128,
+     "commits_with_breaking_change": 6,
+     "breaking_changes": 11,
+     "moved_or_shared_name": 2,
+     "half_changes_with_a_listed_site": 0,
+     "half_sites_listed": 0,
+     "half_sites_the_commit_then_changed": 0,
+     "half_sites_listed_as_possible_only": 2,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "fastify/fastify",
+    "language": "JavaScript",
+    "head": "0b076ca595",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 151,
+     "commits_with_breaking_change": 6,
+     "breaking_changes": 11,
+     "moved_or_shared_name": 1,
+     "half_changes_with_a_listed_site": 2,
+     "half_sites_listed": 4,
+     "half_sites_the_commit_then_changed": 4,
+     "half_sites_listed_as_possible_only": 9,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "gofiber/fiber",
+    "language": "Go",
+    "head": "2696a098d6",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 254,
+     "commits_with_breaking_change": 69,
+     "breaking_changes": 476,
+     "moved_or_shared_name": 22,
+     "half_changes_with_a_listed_site": 30,
+     "half_sites_listed": 92,
+     "half_sites_the_commit_then_changed": 92,
+     "half_sites_listed_as_possible_only": 8759,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "FluentValidation/FluentValidation",
+    "language": "C#",
+    "head": "a8ca6ac3e7",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 163,
+     "commits_with_breaking_change": 24,
+     "breaking_changes": 77,
+     "moved_or_shared_name": 0,
+     "half_changes_with_a_listed_site": 4,
+     "half_sites_listed": 20,
+     "half_sites_the_commit_then_changed": 20,
+     "half_sites_listed_as_possible_only": 4156,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "sindresorhus/got",
+    "language": "TypeScript",
+    "head": "6b5aafc1cd",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 241,
+     "commits_with_breaking_change": 21,
+     "breaking_changes": 44,
+     "moved_or_shared_name": 0,
+     "half_changes_with_a_listed_site": 5,
+     "half_sites_listed": 46,
+     "half_sites_the_commit_then_changed": 46,
+     "half_sites_listed_as_possible_only": 3099,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "honojs/hono",
+    "language": "TypeScript",
+    "head": "f6fbaf0299",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 222,
+     "commits_with_breaking_change": 9,
+     "breaking_changes": 13,
+     "moved_or_shared_name": 1,
+     "half_changes_with_a_listed_site": 0,
+     "half_sites_listed": 0,
+     "half_sites_the_commit_then_changed": 0,
+     "half_sites_listed_as_possible_only": 126,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "koajs/koa",
+    "language": "JavaScript",
+    "head": "b7ead6f7a2",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 109,
+     "commits_with_breaking_change": 5,
+     "breaking_changes": 7,
+     "moved_or_shared_name": 1,
+     "half_changes_with_a_listed_site": 0,
+     "half_sites_listed": 0,
+     "half_sites_the_commit_then_changed": 0,
+     "half_sites_listed_as_possible_only": 0,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "rust-lang/regex",
+    "language": "Rust",
+    "head": "3d79fe9266",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 147,
+     "commits_with_breaking_change": 11,
+     "breaking_changes": 19,
+     "moved_or_shared_name": 8,
+     "half_changes_with_a_listed_site": 3,
+     "half_sites_listed": 17,
+     "half_sites_the_commit_then_changed": 17,
+     "half_sites_listed_as_possible_only": 72,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "Textualize/rich",
+    "language": "Python",
+    "head": "3a109ccdff",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 191,
+     "commits_with_breaking_change": 11,
+     "breaking_changes": 27,
+     "moved_or_shared_name": 13,
+     "half_changes_with_a_listed_site": 1,
+     "half_sites_listed": 2,
+     "half_sites_the_commit_then_changed": 2,
+     "half_sites_listed_as_possible_only": 5,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "encode/starlette",
+    "language": "Python",
+    "head": "271c277da0",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 172,
+     "commits_with_breaking_change": 17,
+     "breaking_changes": 43,
+     "moved_or_shared_name": 1,
+     "half_changes_with_a_listed_site": 4,
+     "half_sites_listed": 15,
+     "half_sites_the_commit_then_changed": 15,
+     "half_sites_listed_as_possible_only": 663,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "tokio-rs/tracing",
+    "language": "Rust",
+    "head": "8d4d4d6cea",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 220,
+     "commits_with_breaking_change": 23,
+     "breaking_changes": 144,
+     "moved_or_shared_name": 17,
+     "half_changes_with_a_listed_site": 7,
+     "half_sites_listed": 45,
+     "half_sites_the_commit_then_changed": 45,
+     "half_sites_listed_as_possible_only": 7517,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   },
+   {
+    "repository": "go-playground/validator",
+    "language": "Go",
+    "head": "19397f2388",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 186,
+     "commits_with_breaking_change": 11,
+     "breaking_changes": 13,
+     "moved_or_shared_name": 3,
+     "half_changes_with_a_listed_site": 2,
+     "half_sites_listed": 8,
+     "half_sites_the_commit_then_changed": 8,
+     "half_sites_listed_as_possible_only": 0,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    }
+   }
+  ],
+  "sum": {
+   "commits": 4200,
+   "commits_changing_code": 2543,
+   "commits_with_breaking_change": 243,
+   "breaking_changes": 981,
+   "moved_or_shared_name": 70,
+   "half_changes_with_a_listed_site": 59,
+   "half_sites_listed": 250,
+   "half_sites_the_commit_then_changed": 249,
+   "half_sites_listed_as_possible_only": 26491,
+   "whole_sites_left": 2,
+   "commits_with_a_site_left": 1
+  }
+ },
+ "as_shipped": {
+  "what": "the same repositories with the check as shipped; no longer held out: four of its rules were written after reading this replay",
+  "repositories": [
+   {
+    "repository": "AutoMapper/AutoMapper",
+    "language": "C#",
+    "head": "d14380da2e",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 171,
+     "commits_with_breaking_change": 26,
+     "breaking_changes": 91,
+     "moved_or_shared_name": 3,
+     "half_changes_with_a_listed_site": 0,
+     "half_sites_listed": 0,
+     "half_sites_the_commit_then_changed": 0,
+     "half_sites_listed_as_possible_only": 4020,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": []
+   },
+   {
+    "repository": "apache/commons-collections",
+    "language": "Java",
+    "head": "ba6ea29fb4",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 188,
+     "commits_with_breaking_change": 5,
+     "breaking_changes": 10,
+     "moved_or_shared_name": 0,
+     "half_changes_with_a_listed_site": 0,
+     "half_sites_listed": 0,
+     "half_sites_the_commit_then_changed": 0,
+     "half_sites_listed_as_possible_only": 37,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": []
+   },
+   {
+    "repository": "apache/commons-text",
+    "language": "Java",
+    "head": "d244ba7594",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 128,
+     "commits_with_breaking_change": 6,
+     "breaking_changes": 11,
+     "moved_or_shared_name": 2,
+     "half_changes_with_a_listed_site": 0,
+     "half_sites_listed": 0,
+     "half_sites_the_commit_then_changed": 0,
+     "half_sites_listed_as_possible_only": 2,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": []
+   },
+   {
+    "repository": "fastify/fastify",
+    "language": "JavaScript",
+    "head": "0b076ca595",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 151,
+     "commits_with_breaking_change": 16,
+     "breaking_changes": 36,
+     "moved_or_shared_name": 5,
+     "half_changes_with_a_listed_site": 2,
+     "half_sites_listed": 4,
+     "half_sites_the_commit_then_changed": 4,
+     "half_sites_listed_as_possible_only": 2359,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "5c83a9dcfd",
+      "subject": "refactor(types)!: remove deprecated FastifyRequestContext and FastifyReplyContext types (#",
+      "path": "types/context.d.ts",
+      "name": "FastifyRequestContext",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "5c83a9dcfd",
+      "subject": "refactor(types)!: remove deprecated FastifyRequestContext and FastifyReplyContext types (#",
+      "path": "types/context.d.ts",
+      "name": "FastifyReplyContext",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     }
+    ]
+   },
+   {
+    "repository": "gofiber/fiber",
+    "language": "Go",
+    "head": "2696a098d6",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 254,
+     "commits_with_breaking_change": 69,
+     "breaking_changes": 475,
+     "moved_or_shared_name": 21,
+     "half_changes_with_a_listed_site": 33,
+     "half_sites_listed": 101,
+     "half_sites_the_commit_then_changed": 101,
+     "half_sites_listed_as_possible_only": 7948,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "4db01bca4e",
+      "subject": "perf: use utils.ParseInt in the int constraints",
+      "path": "constraint.go",
+      "name": "paramAtoi",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "febc7982fc",
+      "subject": "\ud83e\ude79 fix: refuse hostauthorization entries no request could match",
+      "path": "middleware/hostauthorization/hostauthorization.go",
+      "name": "normalizeHost",
+      "change": "removed",
+      "half_sites_listed": 6,
+      "half_sites_the_commit_then_changed": 6,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "ec2d47a06c",
+      "subject": "\ud83d\udc1b bug: keep the session comparison from looping on data that refers to itself",
+      "path": "middleware/session/equal.go",
+      "name": "sameValue",
+      "change": "signature_changed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "5858d45fb5",
+      "subject": "\ud83d\udc1b bug: hold a streamed upstream response to the proxy's body bound",
+      "path": "middleware/proxy/response.go",
+      "name": "adoptUpstreamResponse",
+      "change": "signature_changed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "316df4461b",
+      "subject": "\ud83d\udc1b bug: do not store a response varying on a header changed behind the cache",
+      "path": "internal/fieldname/fieldname.go",
+      "name": "CountLines",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "316df4461b",
+      "subject": "\ud83d\udc1b bug: do not store a response varying on a header changed behind the cache",
+      "path": "middleware/cache/utils.go",
+      "name": "cookieAdded",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "316df4461b",
+      "subject": "\ud83d\udc1b bug: do not store a response varying on a header changed behind the cache",
+      "path": "middleware/cache/vary.go",
+      "name": "varyLinesAdded",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "abf74e82d8",
+      "subject": "\ud83d\udc1b bug: read every custom balancing client's response into one of the proxy's own",
+      "path": "middleware/proxy/response.go",
+      "name": "streamsResponses",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "7577a8211c",
+      "subject": "\ud83d\udc1b bug: do not store a response varying on a cookie added behind the cache",
+      "path": "middleware/cache/utils.go",
+      "name": "countFieldLines",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "85b6e1c0b4",
+      "subject": "\ud83e\uddf9 chore: share host splitting and IDNA folding",
+      "path": "helpers.go",
+      "name": "parseAddr",
+      "change": "removed",
+      "half_sites_listed": 3,
+      "half_sites_the_commit_then_changed": 3,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "85b6e1c0b4",
+      "subject": "\ud83e\uddf9 chore: share host splitting and IDNA folding",
+      "path": "middleware/proxy/domain.go",
+      "name": "hostWithoutPort",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "a4bb0e6f19",
+      "subject": "\ud83d\udc1b bug: fix header, body, routing and session handling defects",
+      "path": "app_test.go",
+      "name": "rawFieldLines",
+      "change": "removed",
+      "half_sites_listed": 4,
+      "half_sites_the_commit_then_changed": 4,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "a4bb0e6f19",
+      "subject": "\ud83d\udc1b bug: fix header, body, routing and session handling defects",
+      "path": "client/transport.go",
+      "name": "dropRequestBody",
+      "change": "removed",
+      "half_sites_listed": 3,
+      "half_sites_the_commit_then_changed": 3,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "e5ea6ab2bc",
+      "subject": "\ud83e\uddf9 chore: name the two rule compilers after their pattern syntax",
+      "path": "internal/rulematch/pattern.go",
+      "name": "Syntax",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "e5ea6ab2bc",
+      "subject": "\ud83e\uddf9 chore: name the two rule compilers after their pattern syntax",
+      "path": "internal/rulematch/pattern.go",
+      "name": "MustCompile",
+      "change": "removed",
+      "half_sites_listed": 6,
+      "half_sites_the_commit_then_changed": 6,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "6ff18c3c92",
+      "subject": "refactor: make NextQuoted own the quoted-list scanner",
+      "path": "internal/headerlist/headerlist.go",
+      "name": "ScanQuoted",
+      "change": "removed",
+      "half_sites_listed": 3,
+      "half_sites_the_commit_then_changed": 3,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "d396588d54",
+      "subject": "\u26a1 perf: build the encryptcookie AEAD once per middleware instead of per cookie",
+      "path": "middleware/encryptcookie/utils.go",
+      "name": "validateKey",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "a1d49cf414",
+      "subject": "\ud83e\uddf9 chore: share origin allow-list parsing between CORS and CSRF",
+      "path": "middleware/csrf/csrf.go",
+      "name": "trustedOrigins",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "5c2a94c5bb",
+      "subject": "\ud83e\uddf9 chore: deduplicate the cache middleware tests",
+      "path": "middleware/cache/cache_test.go",
+      "name": "failingCacheStorage",
+      "change": "removed",
+      "half_sites_listed": 8,
+      "half_sites_the_commit_then_changed": 8,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "5c2a94c5bb",
+      "subject": "\ud83e\uddf9 chore: deduplicate the cache middleware tests",
+      "path": "middleware/cache/cache_test.go",
+      "name": "newFailingCacheStorage",
+      "change": "removed",
+      "half_sites_listed": 12,
+      "half_sites_the_commit_then_changed": 12,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "3e77001ec9",
+      "subject": "\ud83e\uddf9 chore: deduplicate the tests of the fiber package",
+      "path": "app_test.go",
+      "name": "testErrorResponse",
+      "change": "removed",
+      "half_sites_listed": 5,
+      "half_sites_the_commit_then_changed": 5,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "d2bff9a09d",
+      "subject": "\ud83d\udc1b bug: let a prefix's parameter end where its trailing text ends a segment",
+      "path": "path.go",
+      "name": "markGreedyTail",
+      "change": "removed",
+      "half_sites_listed": 4,
+      "half_sites_the_commit_then_changed": 4,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "694dcd5f6a",
+      "subject": "\ud83d\udc1b bug: keep repeated header lines in received order behind the adaptor",
+      "path": "internal/fieldname/fieldname.go",
+      "name": "ReceivedLines",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "694dcd5f6a",
+      "subject": "\ud83d\udc1b bug: keep repeated header lines in received order behind the adaptor",
+      "path": "internal/fieldname/fieldname.go",
+      "name": "LinesInReceivedOrder",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "694dcd5f6a",
+      "subject": "\ud83d\udc1b bug: keep repeated header lines in received order behind the adaptor",
+      "path": "internal/fieldname/fieldname.go",
+      "name": "KeepReceivedOrder",
+      "change": "signature_changed",
+      "half_sites_listed": 8,
+      "half_sites_the_commit_then_changed": 8,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "9c5278b57e",
+      "subject": "\ud83d\udc1b bug: keep forwarding lines in received order after the last header edit",
+      "path": "helpers.go",
+      "name": "joinedInReceivedOrder",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "9c5278b57e",
+      "subject": "\ud83d\udc1b bug: keep forwarding lines in received order after the last header edit",
+      "path": "internal/fieldname/fieldname.go",
+      "name": "KeepReceivedOrder",
+      "change": "signature_changed",
+      "half_sites_listed": 4,
+      "half_sites_the_commit_then_changed": 4,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "b3d993799e",
+      "subject": "\ud83d\udc1b bug: forward repeated forwarding header lines in the order received",
+      "path": "helpers.go",
+      "name": "receivedRequestLines",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "ab14c0295a",
+      "subject": "\ud83d\udc1b bug: let Use middleware cover its prefix without the trailing slash",
+      "path": "path.go",
+      "name": "normalizeRoutePattern",
+      "change": "signature_changed",
+      "half_sites_listed": 4,
+      "half_sites_the_commit_then_changed": 4,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "dfe7991cdb",
+      "subject": "\ud83d\udc1b bug: budget nested bind indexes in bytes, cached keys per type",
+      "path": "binder/mapping.go",
+      "name": "nestedElements",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "dfe7991cdb",
+      "subject": "\ud83d\udc1b bug: budget nested bind indexes in bytes, cached keys per type",
+      "path": "binder/mapping.go",
+      "name": "fansOut",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "75526d7b24",
+      "subject": "\ud83d\udc1b bug: drop a Vary manifest once no cached entry stored under it is left",
+      "path": "middleware/cache/heap.go",
+      "name": "put",
+      "change": "signature_changed",
+      "half_sites_listed": 6,
+      "half_sites_the_commit_then_changed": 6,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "75526d7b24",
+      "subject": "\ud83d\udc1b bug: drop a Vary manifest once no cached entry stored under it is left",
+      "path": "middleware/cache/heap.go",
+      "name": "putWithGeneration",
+      "change": "signature_changed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     }
+    ]
+   },
+   {
+    "repository": "FluentValidation/FluentValidation",
+    "language": "C#",
+    "head": "a8ca6ac3e7",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 163,
+     "commits_with_breaking_change": 24,
+     "breaking_changes": 79,
+     "moved_or_shared_name": 0,
+     "half_changes_with_a_listed_site": 3,
+     "half_sites_listed": 16,
+     "half_sites_the_commit_then_changed": 16,
+     "half_sites_listed_as_possible_only": 4186,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "77efb3b837",
+      "subject": "Remove deprecated DI extensions and deprecated cascade mode options",
+      "path": "src/FluentValidation/Enums.cs",
+      "name": "StopOnFirstFailure",
+      "change": "removed",
+      "half_sites_listed": 12,
+      "half_sites_the_commit_then_changed": 12,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "39432482c9",
+      "subject": "Initial Test Helper cleanup",
+      "path": "src/FluentValidation/TestHelper/ValidatorTestExtensions.cs",
+      "name": "ShouldHaveValidationError",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "39432482c9",
+      "subject": "Initial Test Helper cleanup",
+      "path": "src/FluentValidation/TestHelper/ValidatorTestExtensions.cs",
+      "name": "ShouldNotHaveValidationError",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     }
+    ]
+   },
+   {
+    "repository": "sindresorhus/got",
+    "language": "TypeScript",
+    "head": "6b5aafc1cd",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 241,
+     "commits_with_breaking_change": 35,
+     "breaking_changes": 88,
+     "moved_or_shared_name": 10,
+     "half_changes_with_a_listed_site": 7,
+     "half_sites_listed": 51,
+     "half_sites_the_commit_then_changed": 51,
+     "half_sites_listed_as_possible_only": 3259,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "50c4ac6140",
+      "subject": "Simplify",
+      "path": "source/core/utils/defer-to-connect.ts",
+      "name": "deferToConnect",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "66d0623ae0",
+      "subject": "Update dependencies",
+      "path": "test/helpers/invalid-url.ts",
+      "name": "invalidUrl",
+      "change": "signature_changed",
+      "half_sites_listed": 6,
+      "half_sites_the_commit_then_changed": 6,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "fb22e02e4c",
+      "subject": "Delete the orphaned `optionsToUrl` helper",
+      "path": "source/core/utils/options-to-url.ts",
+      "name": "optionsToUrl",
+      "change": "removed",
+      "half_sites_listed": 12,
+      "half_sites_the_commit_then_changed": 12,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "df33cdb510",
+      "subject": "Replace the request timeout budget arithmetic with one per-request timer",
+      "path": "source/core/options.ts",
+      "name": "resolveWithRequestTimeout",
+      "change": "removed",
+      "half_sites_listed": 3,
+      "half_sites_the_commit_then_changed": 3,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "fb909e904b",
+      "subject": "Tweaks",
+      "path": "source/core/utils/url-to-options.ts",
+      "name": "urlToOptions",
+      "change": "removed",
+      "half_sites_listed": 12,
+      "half_sites_the_commit_then_changed": 12,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "a06ac6c0a2",
+      "subject": "Remove promise cancel API in favor of `AbortSignal`",
+      "path": "source/as-promise/types.ts",
+      "name": "CancelError",
+      "change": "removed",
+      "half_sites_listed": 11,
+      "half_sites_the_commit_then_changed": 11,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "670b2289dd",
+      "subject": "Use native `FormData` global instead of `form-data-encoder`",
+      "path": "source/core/utils/is-form-data.ts",
+      "name": "isFormData",
+      "change": "removed",
+      "half_sites_listed": 5,
+      "half_sites_the_commit_then_changed": 5,
+      "whole_sites_left": 0
+     }
+    ]
+   },
+   {
+    "repository": "honojs/hono",
+    "language": "TypeScript",
+    "head": "f6fbaf0299",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 222,
+     "commits_with_breaking_change": 19,
+     "breaking_changes": 47,
+     "moved_or_shared_name": 6,
+     "half_changes_with_a_listed_site": 2,
+     "half_sites_listed": 13,
+     "half_sites_the_commit_then_changed": 13,
+     "half_sites_listed_as_possible_only": 22795,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "b982c0292e",
+      "subject": "Merge commit from fork",
+      "path": "src/utils/url.ts",
+      "name": "stripPathPrefix",
+      "change": "removed",
+      "half_sites_listed": 12,
+      "half_sites_the_commit_then_changed": 12,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "8a0b18fd9b",
+      "subject": "feat(reg-exp-router): throw UnsupportedPathError during route registration (#5171)",
+      "path": "src/router/reg-exp-router/trie.ts",
+      "name": "insert",
+      "change": "signature_changed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     }
+    ]
+   },
+   {
+    "repository": "koajs/koa",
+    "language": "JavaScript",
+    "head": "b7ead6f7a2",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 109,
+     "commits_with_breaking_change": 8,
+     "breaking_changes": 14,
+     "moved_or_shared_name": 4,
+     "half_changes_with_a_listed_site": 0,
+     "half_sites_listed": 0,
+     "half_sites_the_commit_then_changed": 0,
+     "half_sites_listed_as_possible_only": 1,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": []
+   },
+   {
+    "repository": "rust-lang/regex",
+    "language": "Rust",
+    "head": "3d79fe9266",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 147,
+     "commits_with_breaking_change": 13,
+     "breaking_changes": 24,
+     "moved_or_shared_name": 9,
+     "half_changes_with_a_listed_site": 1,
+     "half_sites_listed": 12,
+     "half_sites_the_commit_then_changed": 12,
+     "half_sites_listed_as_possible_only": 6990,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "17d9c1c6c4",
+      "subject": "syntax: unbox Ast and remove AstKind",
+      "path": "regex-syntax/src/ast/mod.rs",
+      "name": "AstKind",
+      "change": "removed",
+      "half_sites_listed": 12,
+      "half_sites_the_commit_then_changed": 12,
+      "whole_sites_left": 0
+     }
+    ]
+   },
+   {
+    "repository": "Textualize/rich",
+    "language": "Python",
+    "head": "3a109ccdff",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 191,
+     "commits_with_breaking_change": 11,
+     "breaking_changes": 27,
+     "moved_or_shared_name": 13,
+     "half_changes_with_a_listed_site": 2,
+     "half_sites_listed": 3,
+     "half_sites_the_commit_then_changed": 3,
+     "half_sites_listed_as_possible_only": 4,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "30392288b2",
+      "subject": "revert iteration speed column",
+      "path": "rich/progress.py",
+      "name": "IterationSpeedColumn",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "63b27f7afe",
+      "subject": "style before",
+      "path": "rich/syntax.py",
+      "name": "stylize_range",
+      "change": "signature_changed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     }
+    ]
+   },
+   {
+    "repository": "encode/starlette",
+    "language": "Python",
+    "head": "271c277da0",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 172,
+     "commits_with_breaking_change": 20,
+     "breaking_changes": 49,
+     "moved_or_shared_name": 1,
+     "half_changes_with_a_listed_site": 9,
+     "half_sites_listed": 20,
+     "half_sites_the_commit_then_changed": 20,
+     "half_sites_listed_as_possible_only": 824,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "e6f7ad1ab8",
+      "subject": "avoid collapsing exception groups from user code (#2830)",
+      "path": "starlette/_utils.py",
+      "name": "collapse_excgroups",
+      "change": "removed",
+      "half_sites_listed": 6,
+      "half_sites_the_commit_then_changed": 6,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "2c614b910b",
+      "subject": "Drop deprecated `method` parameter from `FileResponse` (#3147)",
+      "path": "starlette/responses.py",
+      "name": "__init__",
+      "change": "signature_changed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "f99e11f1f5",
+      "subject": "Drop main deprecation warnings around applications/routing (#3117)",
+      "path": "starlette/applications.py",
+      "name": "__init__",
+      "change": "signature_changed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "f99e11f1f5",
+      "subject": "Drop main deprecation warnings around applications/routing (#3117)",
+      "path": "starlette/applications.py",
+      "name": "on_event",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "f99e11f1f5",
+      "subject": "Drop main deprecation warnings around applications/routing (#3117)",
+      "path": "starlette/applications.py",
+      "name": "exception_handler",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "f99e11f1f5",
+      "subject": "Drop main deprecation warnings around applications/routing (#3117)",
+      "path": "starlette/applications.py",
+      "name": "websocket_route",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "f99e11f1f5",
+      "subject": "Drop main deprecation warnings around applications/routing (#3117)",
+      "path": "starlette/routing.py",
+      "name": "__init__",
+      "change": "signature_changed",
+      "half_sites_listed": 6,
+      "half_sites_the_commit_then_changed": 6,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "f99e11f1f5",
+      "subject": "Drop main deprecation warnings around applications/routing (#3117)",
+      "path": "starlette/routing.py",
+      "name": "websocket_route",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "f99e11f1f5",
+      "subject": "Drop main deprecation warnings around applications/routing (#3117)",
+      "path": "starlette/routing.py",
+      "name": "on_event",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     }
+    ]
+   },
+   {
+    "repository": "tokio-rs/tracing",
+    "language": "Rust",
+    "head": "8d4d4d6cea",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 220,
+     "commits_with_breaking_change": 28,
+     "breaking_changes": 152,
+     "moved_or_shared_name": 20,
+     "half_changes_with_a_listed_site": 10,
+     "half_sites_listed": 47,
+     "half_sites_the_commit_then_changed": 47,
+     "half_sites_listed_as_possible_only": 7809,
+     "whole_sites_left": 0,
+     "commits_with_a_site_left": 0
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "37558d5f26",
+      "subject": "subscriber: allow ansi sanitization to be disabled (#3484)",
+      "path": "tracing-subscriber/src/fmt/format/escape.rs",
+      "name": "Escape",
+      "change": "removed",
+      "half_sites_listed": 2,
+      "half_sites_the_commit_then_changed": 2,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "96c0e297f1",
+      "subject": "mock: complete API documentation including expect module  (#2494)",
+      "path": "tracing-mock/src/expect.rs",
+      "name": "message",
+      "change": "removed",
+      "half_sites_listed": 3,
+      "half_sites_the_commit_then_changed": 3,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "760a2123dd",
+      "subject": "mock: match parent span on `ExpectedSpan` (#3098)",
+      "path": "tracing-mock/src/ancestry.rs",
+      "name": "Ancestry",
+      "change": "removed",
+      "half_sites_listed": 12,
+      "half_sites_the_commit_then_changed": 12,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "760a2123dd",
+      "subject": "mock: match parent span on `ExpectedSpan` (#3098)",
+      "path": "tracing-mock/src/subscriber.rs",
+      "name": "metadata",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "1c802c7763",
+      "subject": "log: remove deprecated `env_logger` and `trace_logger` APIs  (#2771)",
+      "path": "tracing-log/src/trace_logger.rs",
+      "name": "TraceLogger",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "48b8266f49",
+      "subject": "mock: differentiate between mocks and expectations (#2373)",
+      "path": "tracing-mock/src/event.rs",
+      "name": "MockEvent",
+      "change": "removed",
+      "half_sites_listed": 6,
+      "half_sites_the_commit_then_changed": 6,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "48b8266f49",
+      "subject": "mock: differentiate between mocks and expectations (#2373)",
+      "path": "tracing-mock/src/span.rs",
+      "name": "MockSpan",
+      "change": "removed",
+      "half_sites_listed": 12,
+      "half_sites_the_commit_then_changed": 12,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "b4a0cae4d7",
+      "subject": "chore: move tracing-opentelemetry to its own repo (#2523)",
+      "path": "tracing-opentelemetry/src/span_ext.rs",
+      "name": "OpenTelemetrySpanExt",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "b4a0cae4d7",
+      "subject": "chore: move tracing-opentelemetry to its own repo (#2523)",
+      "path": "tracing-opentelemetry/src/tracer.rs",
+      "name": "PreSampledTracer",
+      "change": "removed",
+      "half_sites_listed": 8,
+      "half_sites_the_commit_then_changed": 8,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "5ff8a410e1",
+      "subject": "appender: allow worker thread name to be configured (#2365)",
+      "path": "tracing-appender/src/worker.rs",
+      "name": "worker_thread",
+      "change": "signature_changed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     }
+    ]
+   },
+   {
+    "repository": "go-playground/validator",
+    "language": "Go",
+    "head": "19397f2388",
+    "totals": {
+     "commits": 300,
+     "commits_changing_code": 186,
+     "commits_with_breaking_change": 11,
+     "breaking_changes": 13,
+     "moved_or_shared_name": 3,
+     "half_changes_with_a_listed_site": 2,
+     "half_sites_listed": 8,
+     "half_sites_the_commit_then_changed": 8,
+     "half_sites_listed_as_possible_only": 0,
+     "whole_sites_left": 1,
+     "commits_with_a_site_left": 1
+    },
+    "changes_with_a_site": [
+     {
+      "commit": "9b7c4de75b",
+      "subject": "Struct experiment (#1150)",
+      "path": "util.go",
+      "name": "isNestedStructOrStructPtr",
+      "change": "removed",
+      "half_sites_listed": 1,
+      "half_sites_the_commit_then_changed": 1,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "3094d596c8",
+      "subject": "fix float cast precicion in a few validations (#1146)",
+      "path": "util.go",
+      "name": "asFloat",
+      "change": "removed",
+      "half_sites_listed": 7,
+      "half_sites_the_commit_then_changed": 7,
+      "whole_sites_left": 0
+     },
+     {
+      "commit": "3ce20afbd4",
+      "subject": "Adding Support for SkipUnless validator and testing the same",
+      "path": "baked_in.go",
+      "name": "skipUnless",
+      "change": "removed",
+      "half_sites_listed": 0,
+      "half_sites_the_commit_then_changed": 0,
+      "whole_sites_left": 1
+     }
+    ]
+   }
+  ],
+  "sum": {
+   "commits": 4200,
+   "commits_changing_code": 2543,
+   "commits_with_breaking_change": 291,
+   "breaking_changes": 1116,
+   "moved_or_shared_name": 97,
+   "half_changes_with_a_listed_site": 71,
+   "half_sites_listed": 275,
+   "half_sites_the_commit_then_changed": 275,
+   "half_sites_listed_as_possible_only": 60234,
+   "whole_sites_left": 1,
+   "commits_with_a_site_left": 1
+  }
+ }
+}

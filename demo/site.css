@@ -567,6 +567,13 @@ section + section {
   text-wrap: pretty;
 }
 
+.card p code,
+.steps p code,
+td.wrap-cell code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .card .step {
   color: var(--accent);
   font: 500 12.5px/1 var(--mono);
