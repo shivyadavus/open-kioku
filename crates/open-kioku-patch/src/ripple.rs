@@ -2446,13 +2446,14 @@ fn classify_sites(
         // A member the type no longer declares may still be inherited from a base. A Go type's
         // bases are the types it embeds, which the repository declares: with no other
         // declaration of the name anywhere, none of them has it.
-        // And a call that no longer fits a changed member of such a type may be a call of an
-        // overload a base declares, when anything else declares the name.
+        // And where methods are overloaded (Java, C#), a call that no longer fits a changed
+        // member of such a type may be a call of an overload a base declares, when anything
+        // else declares the name. Elsewhere the type's own member is the one called.
         let inherited = target.owner_has_bases
             && if removed {
                 site_language != Language::Go || shared
             } else {
-                shared
+                shared && matches!(site_language, Language::Java | Language::CSharp)
             };
         let builtin = builtin
             || (matches!(site_language, Language::JavaScript | Language::TypeScript)
