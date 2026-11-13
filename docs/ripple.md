@@ -30,7 +30,7 @@ names is a site to check, not a verdict.
 
 | Where | What happens |
 |---|---|
-| `ok ripple` | Compares the working tree with `HEAD`, or with `--base <rev>` (a branch, a merge base). `--json` for the report, `--file <path>` to examine one file's declarations, `--no-index` to ignore an index. `--fail-on-broken` exits 1 when a site is broken; a run that could not be made exits 2. Writes nothing. |
+| `ok ripple` | Compares the working tree with `HEAD`, or with `--base <rev>` (a branch, a merge base). `--json` for the report, `--file <path>` to examine one file's declarations, `--no-index` to ignore an index, `--sites <n>` to list more than twelve sites per declaration. `--fail-on-broken` exits 1 when a site is broken; a run that could not be made exits 2. Writes nothing. |
 | The Claude Code hooks | After an `Edit` or `Write`, the agent is told which sites that edit broke, with each one's path, line and reason, once per set of sites. When it stops, the declarations of the files **this conversation edited** are checked again and the user is told what is still broken. No session, plan, index or configuration is involved: `ok gate install claude --apply`, or the plugin, is the setup. |
 | `ok gate ci` | The Change Dossier of a pull request carries a *Ripple* section: the broken sites by path and line with the reason, and no source text. A broken site makes a passing verdict `WARN`. |
 
@@ -70,11 +70,15 @@ declaration is reported when its signature changed or it is gone:
 | `compatible` | Only parameters with a default were added, at the end or keyword-only. Every existing call still fits. | not searched |
 | `types_only` | Same parameters in number and order (and name, where calls can name them); only types or the return type changed. | not searched: what a call passes cannot be read from its text |
 
+A JavaScript or TypeScript `const` that holds a function (`const run = (a, b) => ...`,
+`const run = function (a) {}`, a class's `run = (a) => ...`) is a function with those
+parameters, and a module's other `const` is a constant whose removal is reported.
+
 A name the file still binds is not a removal: a function that became a variable of the same
 name, a method that became an instance attribute, a declaration replaced by an import of the
 same name (`from tenacity import retry`) or kept alive by an export list
 (`export { fetchEvery as fetchAll }`), and a declaration the file still makes as another kind of
-thing. A member of a type that is itself gone is reported once, as the type.
+thing at the same level (a field of some type does not keep a function's name bound). A member of a type that is itself gone is reported once, as the type.
 
 **Sites.** The lines of the working tree that hold the declaration's name are found with `git
 grep` (tracked and untracked, not ignored), and each file with one is read through its syntax
@@ -89,8 +93,9 @@ declaration is never a call:
   it. A call that did not fit before either is `possible`: it is not a call of this declaration
   (a decorator such as `@click.command()` rewrote it), or it could not be read.
 - Code that still names a removed declaration (a call, an import, a use of a removed type) is
-  `broken`. The bare name of a removed function with no call is not counted: it is as likely a
-  field or a variable of that name.
+  `broken`. The bare name of a removed function with no call (`map(pick)`, `Args: OnlyValidArgs`)
+  is counted only where it is attributed, and otherwise left out: it is as likely a field or a
+  variable of that name.
 - Lines the search found with no identifier of the name on them, and prose and configuration
   that name a removed declaration, are counted as *mentions* and listed apart.
 
@@ -100,11 +105,11 @@ What "fits" means per language:
 |---|---|
 | Python | positional count, keyword names, required parameters, keyword-only and positional-only markers; `*args`/`**kwargs` in the declaration accept the rest |
 | TypeScript | the number of required and of accepted parameters (`?`, defaults and rest parameters read) |
-| Rust, Go, Java, C# | the parameter count (variadics and C# defaults read). A Rust path call (`Type::method(value)`) and a C# extension method called on its class (`Ext.Trim(value)`) pass the receiver as the first argument |
+| Rust, Go, Java, C# | the parameter count (variadics and C# defaults read). A Rust path call (`Type::method(value)`) and a C# extension method called on its class (`Ext.Trim(value)`) pass the receiver as the first argument. Go's `f(a, rest...)` unpacks into the variadic parameter itself, so the arguments before it are held to the parameters before it |
 | JavaScript | nothing: a missing argument is `undefined` and a surplus one is dropped, so only removals and renames are reported |
 
-A call that unpacks an argument list (`*args`, `...items`), or that sits in a part of the file
-the parser could not read, is `possible` and not counted.
+A call that unpacks an argument list (`*args`, `...items`; not Go's), or that sits in a part of
+the file the parser could not read, is `possible` and not counted.
 
 ## How a site is attributed
 
@@ -127,13 +132,34 @@ declaring module, and is `possible` (listed, not counted, never held on) otherwi
     (`cache = redis.Redis()`) leads nowhere;
   - the file is in the same Go package or Java package directory; or the language is C#, where
     a namespace is opened whole.
+- **`by receiver type`**, for a member of a type: the member is reached through something the
+  enclosing function says is of the owner's type, and that type's name leads to the declaring
+  module as a free name would have to:
+  - a parameter or a local with a written type (`cmd: Command`, `Command cmd`, `var c Command`),
+    including a Go method's own receiver (`func (c *Command) Run() { c.Out() }`);
+  - a local initialised by a constructor or a typed literal (`new Command()`, `Command{}`,
+    `&Command{}`, `new(Command)`, `Command()` in Python, `Command::new()`);
+  - in Go and Rust, the result of a function or method whose declaration says what it returns,
+    through a name or directly, to six steps: `r := NewRouter()`, `r, err := Open(path)`,
+    `NewRouter().Get(..)`, `r.NewRoute().Path(..)`, `Route::parse(text)`. The declaration is
+    found by name in the working tree; where several of the name return different types, or
+    the one the site reaches returns none this reads, nothing is settled.
+
+  A name is what the nearest function around the use that binds it says it is: a closure sees
+  the names of the function around it, and its own parameter of the same name hides them only
+  inside it. Two bindings of a name in one function that disagree settle nothing. In a language
+  with static types, assigning to a name does not change its type.
 - **`by name`, for a member of a type** (a method, or a constant declared inside it): the site
   reaches it through its own type (`Owner.method`, `Owner::method`, for a type written with a
   capital, outside Go), on the instance inside that type (`self.method`, `this.method`), or, in
   Java and C#, by its bare name inside that type. A call through `super` or `base` is the
   parent's and is not listed. A member the type no longer declares may still be inherited, so
-  where the type names a base its `self.` sites are `possible`. On any other receiver the type
-  is unknown: `possible`.
+  where the type names a base its sites are `possible`; a Go type's bases are the types it
+  embeds, which the repository declares, so there it applies only when something else declares
+  the name. On any other receiver the type is unknown: `possible`.
+- A JavaScript or TypeScript module's default export is named by its importers as they like:
+  when a default-exported declaration is renamed and the module still has a default export, a
+  file that imports the default under the old name is not naming the declaration.
 - A removed declaration whose name is declared again elsewhere may have moved there, so its
   sites are `possible`: a method that another file of the same (partial) type now declares, a
   type or a constant that anything else declares, a function that another module now binds at
@@ -149,8 +175,13 @@ declaring module, and is `possible` (listed, not counted, never held on) otherwi
 
 - It does not type-check. A changed parameter type, a changed return type, a struct field, and a
   behaviour change with the same signature are outside it.
-- It does not follow a call through a receiver of unknown type, a function passed as a value, an
-  alias (without an index), reflection or a string. Those are `possible` or not seen.
+- It does not follow a call through a receiver whose type the function around it does not say:
+  a struct field (`c.parent.Run()`), an untyped parameter, a loop variable, the result of a
+  function with no written return type, a type that only embeds or extends the owner. Nor a
+  function passed as a value under another name, an alias (without an index), reflection or a
+  string. Those are `possible` or not seen.
+- A member removed from a class that has a base is `possible` everywhere outside Go: the base
+  may be a framework's, and may declare it.
 - A name several declarations share is not attributed without an index.
 - A move to another file is not a rename: the old name's sites are listed as `possible` with a
   note that it may have moved.

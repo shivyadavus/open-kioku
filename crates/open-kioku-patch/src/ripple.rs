@@ -22,7 +22,7 @@ use open_kioku_git::DiffFile;
 use open_kioku_languages::detect_language;
 use open_kioku_storage::OkStore;
 use open_kioku_tree_sitter::name_uses::{
-    name_uses, CallArguments, FileNameUses, NameUse, NameUseKind, Reached,
+    name_uses, CallArguments, FileNameUses, NameUse, NameUseKind, Reached, Receiver,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,6 +57,9 @@ pub struct RippleInput {
     /// Only declarations in these repository-relative files are examined. Every changed file
     /// when empty. Sites are looked for everywhere either way.
     pub only_files: Vec<PathBuf>,
+    /// How many broken and how many possible sites are listed for one declaration; the rest
+    /// are counted. Twelve when absent.
+    pub sites_listed: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +109,9 @@ pub enum SiteEvidence {
     /// The index holds a call or use edge from this site to the declaration, proven
     /// structurally (an import binding, an exact call site, a receiver type).
     Proven,
+    /// The member is called on a name that the enclosing function declares with the owner's
+    /// type, and that type's name leads to the declaring module.
+    Type,
     /// The site names the declaration and no other declaration in the repository has the name.
     Name,
     /// The site uses the name, and the name alone does not settle what it refers to: another
@@ -395,6 +401,7 @@ impl RippleSite {
     fn line_text(&self) -> String {
         let evidence = match self.evidence {
             SiteEvidence::Proven => "proven",
+            SiteEvidence::Type => "by receiver type",
             SiteEvidence::Name => "by name",
             SiteEvidence::Possible => "possible",
         };
@@ -421,6 +428,8 @@ struct Declared {
     local: bool,
     /// Declared inside a type: reached through a receiver, not by its bare name.
     member: bool,
+    /// The module's default export (JavaScript, TypeScript): importers name it as they like.
+    default_export: bool,
 }
 
 /// The languages whose declarations and calls this module reads. Prose and configuration that
@@ -463,6 +472,7 @@ fn declarations(path: &Path, text: &str) -> Option<Vec<Declared>> {
         return None;
     }
     let symbols = open_kioku_tree_sitter::parse_symbols(&file, text).ok()?;
+    let lines = text.lines().collect::<Vec<_>>();
     let by_id = symbols
         .iter()
         .map(|symbol| (symbol.id.clone(), symbol))
@@ -477,24 +487,281 @@ fn declarations(path: &Path, text: &str) -> Option<Vec<Declared>> {
                     .as_ref()
                     .and_then(|id| by_id.get(id))
                     .copied();
+                let script = matches!(file.language, Language::JavaScript | Language::TypeScript);
+                let line_text = lines
+                    .get(range.start.saturating_sub(1) as usize)
+                    .copied()
+                    .unwrap_or_default();
+                // `const run = (a, b) => ...` declares a function, and a module's `const` a
+                // constant; the parser records both as variables with no signature.
+                let binding = (script
+                    && symbol.signature.is_none()
+                    && matches!(symbol.kind, SymbolKind::Variable | SymbolKind::Method))
+                .then(|| {
+                    let from = range.start.saturating_sub(1) as usize;
+                    let until = (from + 40).min(lines.len());
+                    script_binding(&lines[from..until].join("\n"), &symbol.name)
+                })
+                .flatten();
+                let (kind, bound_signature) = match (&symbol.kind, binding) {
+                    (SymbolKind::Variable, Some(ScriptBinding::Function(signature)))
+                        if parent.is_none() =>
+                    {
+                        (SymbolKind::Function, Some(signature))
+                    }
+                    (SymbolKind::Method, Some(ScriptBinding::Function(signature))) => {
+                        (SymbolKind::Method, Some(signature))
+                    }
+                    (SymbolKind::Variable, Some(ScriptBinding::Constant))
+                        if parent.is_none() && !line_text.starts_with(char::is_whitespace) =>
+                    {
+                        (SymbolKind::Constant, None)
+                    }
+                    (kind, _) => (kind.clone(), None),
+                };
+                let default_export = script && {
+                    let name = &symbol.name;
+                    line_text.trim_start().starts_with("export default ")
+                        || text.contains(&format!("export default {name};"))
+                        || text.contains(&format!("export default {name}\n"))
+                        || text.contains(&format!("{name} as default"))
+                };
                 Some(Declared {
                     name: symbol.name.clone(),
-                    owner: parent
-                        .map(|parent| parent.name.clone())
+                    // A Go method's owner is its receiver's type, wherever the parser hangs
+                    // the method.
+                    owner: (file.language == Language::Go && symbol.kind == SymbolKind::Method)
+                        .then(|| go_receiver(lines.get(range.start.checked_sub(1)? as usize)?))
+                        .flatten()
+                        .or_else(|| parent.map(|parent| parent.name.clone()))
                         .or_else(|| owner_from_qualified_name(symbol)),
-                    kind: symbol.kind.clone(),
+                    kind,
                     signature: symbol
                         .signature
                         .as_deref()
+                        .or(bound_signature.as_deref())
                         .map(|signature| tidy_signature(&file.language, signature)),
                     line: range.start,
                     local: parent.is_some_and(|parent| is_callable(&parent.kind)),
                     member: symbol.kind == SymbolKind::Method
                         || parent.is_some_and(|parent| !is_callable(&parent.kind)),
+                    default_export,
                 })
             })
             .collect(),
     )
+}
+
+/// What a JavaScript or TypeScript binding holds.
+#[derive(Debug, PartialEq, Eq)]
+enum ScriptBinding {
+    /// A function, with the signature a `function` declaration of it would have.
+    Function(String),
+    /// A `const` that is not a function.
+    Constant,
+}
+
+/// Reads `const name = (a, b) => ...`, `const name = function (a) {}` and a class's
+/// `name = (a) => ...` from the declaration's text. `None` for anything that is not a `const`
+/// or a function-valued binding.
+fn script_binding(text: &str, name: &str) -> Option<ScriptBinding> {
+    let mut rest = text.trim_start();
+    let mut constant = false;
+    loop {
+        let before = rest;
+        for word in [
+            "export",
+            "default",
+            "declare",
+            "public",
+            "private",
+            "protected",
+            "static",
+            "readonly",
+            "override",
+        ] {
+            if let Some(after) = rest.strip_prefix(word) {
+                if after.starts_with(char::is_whitespace) {
+                    rest = after.trim_start();
+                }
+            }
+        }
+        for word in ["const", "let", "var"] {
+            if let Some(after) = rest.strip_prefix(word) {
+                if after.starts_with(char::is_whitespace) {
+                    constant |= word == "const";
+                    rest = after.trim_start();
+                }
+            }
+        }
+        if rest == before {
+            break;
+        }
+    }
+    let rest = rest.strip_prefix(name)?;
+    if rest.starts_with(|ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$') {
+        return None;
+    }
+    // The `=` of the binding: past a type annotation, whose own `=>` is not it.
+    let bytes = rest.as_bytes();
+    let mut depth = 0i32;
+    let mut at = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b';' | b',' if depth <= 0 => break,
+            b'=' if depth == 0 => {
+                if bytes.get(index + 1) == Some(&b'>') {
+                    index += 1;
+                } else {
+                    at = Some(index + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let at = at?;
+    let value = rest.get(at..)?.trim_start();
+    let other = constant.then_some(ScriptBinding::Constant);
+    // `fetch: (request: Request, env?: Env) => Response = (request, env) => ...`: which
+    // parameters may be left out is written in the annotation, not in the value. A function
+    // type there is the signature; any other annotation leaves it unknown.
+    let annotation = rest[..at - 1]
+        .trim()
+        .trim_start_matches(['?', '!'])
+        .trim_start();
+    if let Some(annotated) = annotation.strip_prefix(':') {
+        let annotated = annotated.trim_start();
+        let parameters = annotated
+            .starts_with('(')
+            .then(|| past_closing(annotated))
+            .flatten()
+            .filter(|close| annotated[*close..].trim_start().starts_with("=>"))
+            .map(|close| &annotated[1..close - 1]);
+        return match parameters {
+            Some(parameters) => Some(ScriptBinding::Function(format!(
+                "{name}({})",
+                parameters.split_whitespace().collect::<Vec<_>>().join(" ")
+            ))),
+            None => other,
+        };
+    }
+    let word = |text: &'_ str, word: &str| -> Option<usize> {
+        let after = text.strip_prefix(word)?;
+        (!after.starts_with(|ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$'))
+            .then(|| text.len() - after.trim_start().len())
+    };
+    let mut value = value;
+    if let Some(skip) = word(value, "async") {
+        value = &value[skip..];
+    }
+    let mut expression = false;
+    if let Some(skip) = word(value, "function") {
+        expression = true;
+        value = value[skip..].trim_start_matches('*').trim_start();
+        let named = value
+            .find(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+            .unwrap_or(value.len());
+        value = value[named..].trim_start();
+    }
+    if value.starts_with('<') {
+        // Type parameters: to the `>` that closes them.
+        let mut angles = 0i32;
+        let mut end = None;
+        let chars = value.as_bytes();
+        for (index, byte) in chars.iter().enumerate() {
+            match byte {
+                b'<' => angles += 1,
+                b'>' if index > 0 && chars[index - 1] == b'=' => {}
+                b'>' => {
+                    angles -= 1;
+                    if angles == 0 {
+                        end = Some(index + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        value = value.get(end?..)?.trim_start();
+    }
+    let tidy = |parameters: &str| parameters.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(inner) = value.strip_prefix('(') {
+        let mut depth = 1i32;
+        let mut close = None;
+        for (index, byte) in inner.bytes().enumerate() {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            return other;
+        };
+        let parameters = &inner[..close];
+        let after = inner[close + 1..].trim_start();
+        // An arrow follows its parameters, past a return type; `(a + b) * c` has none.
+        let arrow = expression || after.starts_with("=>") || {
+            after.starts_with(':') && {
+                let mut depth = 0i32;
+                let bytes = after.as_bytes();
+                let mut found = false;
+                for index in 0..bytes.len().min(400) {
+                    match bytes[index] {
+                        b'(' | b'[' | b'{' => depth += 1,
+                        b')' | b']' | b'}' => depth -= 1,
+                        b';' if depth <= 0 => break,
+                        b'=' if depth == 0 && bytes.get(index + 1) == Some(&b'>') => {
+                            found = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                found
+            }
+        };
+        return if arrow {
+            Some(ScriptBinding::Function(format!(
+                "{name}({})",
+                tidy(parameters)
+            )))
+        } else {
+            other
+        };
+    }
+    // `const double = x => x * 2`.
+    let named = value
+        .find(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+        .unwrap_or(value.len());
+    if named > 0 && value[named..].trim_start().starts_with("=>") {
+        return Some(ScriptBinding::Function(format!(
+            "{name}({})",
+            &value[..named]
+        )));
+    }
+    other
+}
+
+/// The type a Go method is declared on, read from its declaration line: `Command` of
+/// `func (c *Command) Run()`. The parser's signature of a method leaves the receiver out.
+fn go_receiver(declaration: &str) -> Option<String> {
+    let rest = declaration.trim_start().strip_prefix("func")?.trim_start();
+    let inner = rest.strip_prefix('(')?.split(')').next()?;
+    let ty = inner.split_whitespace().last()?.trim_start_matches('*');
+    let ty = ty.split('[').next().unwrap_or(ty);
+    (!ty.is_empty()).then(|| ty.to_string())
 }
 
 /// A Rust method's parent is its `impl` owner, which the parser may leave unresolved in one
@@ -877,6 +1144,21 @@ enum Fit {
 /// may pass the receiver as its first argument.
 fn fit(language: &Language, shape: &Shape, call: &CallArguments, explicit_receiver: bool) -> Fit {
     if call.spread {
+        // Go's `f(a, rest...)`: the unpacked slice is the variadic parameter itself, and each
+        // argument before it is one parameter.
+        if *language == Language::Go {
+            let before = call.positional;
+            let fixed = shape.params.len();
+            return if shape.varargs && before == fixed {
+                Fit::Fits
+            } else {
+                Fit::Breaks(format!(
+                    "passes {before} argument{} before the one it unpacks; {fixed} {} taken now",
+                    if before == 1 { "" } else { "s" },
+                    if fixed == 1 { "is" } else { "are" }
+                ))
+            };
+        }
         return Fit::Unknown("it unpacks an argument list");
     }
     if shape.receiver && explicit_receiver && *language == Language::Python {
@@ -1273,6 +1555,9 @@ struct Target {
     /// The type that declares it names a base: a member it stops declaring may still be
     /// inherited.
     owner_has_bases: bool,
+    /// It was its module's default export and the module still has one: a file that imports
+    /// the default under this name is not naming the declaration.
+    default_export_kept: bool,
 }
 
 /// Whether a dependency manifest of the working tree holds `name` as a word.
@@ -1354,6 +1639,195 @@ struct SiteFiles<'a> {
     /// Whether a dependency manifest names each module asked about.
     dependencies: BTreeMap<String, bool>,
     go_imports: BTreeMap<String, Option<String>>,
+    /// How many sites of each kind one declaration lists.
+    listed: usize,
+    /// What each function and method returns, by language and by name: read from the
+    /// declaration lines of the whole working tree, once.
+    returns: BTreeMap<&'static str, BTreeMap<String, Vec<Returned>>>,
+}
+
+/// What one declaration returns, read from its declaration line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Returned {
+    path: String,
+    /// The type a Go method is declared on. A Rust method's `impl` is not on its line.
+    owner: Option<String>,
+    results: Vec<String>,
+}
+
+/// Where the name of a receiver's type was written: in the file of the site, or in a
+/// declaration of this directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Home {
+    Site,
+    Directory(Option<String>),
+}
+
+fn directory(path: &str) -> Option<String> {
+    path.rsplit_once('/').map(|(dir, _)| dir.to_string())
+}
+
+/// The index just past the bracket that closes the one `text` opens with.
+fn past_closing(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A result type as a receiver can have it: one named type, without pointer or type
+/// arguments. A slice, a map, a function, a channel and a wrapper name no one type.
+fn named_result(text: &str) -> Option<String> {
+    let mut rest = text.trim();
+    loop {
+        let before = rest;
+        for prefix in ["*", "&", "mut "] {
+            rest = rest.strip_prefix(prefix).unwrap_or(rest).trim_start();
+        }
+        if let Some(after) = rest.strip_prefix('\'') {
+            rest = after
+                .split_once(' ')
+                .map(|(_, ty)| ty)
+                .unwrap_or("")
+                .trim_start();
+        }
+        if rest == before {
+            break;
+        }
+    }
+    let head = rest.split(['<', '[']).next().unwrap_or(rest).trim();
+    let wrapper = matches!(
+        head,
+        "Result"
+            | "Option"
+            | "Box"
+            | "Vec"
+            | "Arc"
+            | "Rc"
+            | "impl"
+            | "dyn"
+            | "func"
+            | "map"
+            | "chan"
+    );
+    let named = !head.is_empty()
+        && !wrapper
+        && head.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+        && head
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | ':'));
+    named.then(|| head.to_string())
+}
+
+/// `func (r *Router) Name(params) (*Route, error) {`: the receiver's type, the name, and the
+/// results in order.
+fn go_returns(line: &str) -> Option<(Option<String>, String, Vec<String>)> {
+    let mut rest = line.strip_prefix("func")?.trim_start();
+    let owner = rest.starts_with('(').then(|| go_receiver(line)).flatten();
+    if rest.starts_with('(') {
+        rest = rest.get(past_closing(rest)?..)?.trim_start();
+    }
+    let end = rest.find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))?;
+    let name = rest[..end].to_string();
+    rest = &rest[end..];
+    if rest.starts_with('[') {
+        rest = rest.get(past_closing(rest)?..)?;
+    }
+    if name.is_empty() || !rest.starts_with('(') {
+        return None;
+    }
+    let results = rest
+        .get(past_closing(rest)?..)?
+        .trim()
+        .trim_end_matches('{')
+        .trim();
+    let results = if let Some(inner) = results.strip_prefix('(') {
+        let inner = inner.strip_suffix(')').unwrap_or(inner);
+        let mut parts = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0;
+        for (index, byte) in inner.bytes().enumerate() {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b',' if depth == 0 => {
+                    parts.push(&inner[start..index]);
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&inner[start..]);
+        parts
+            .into_iter()
+            .map(|part| {
+                // `(n int, err error)` names its results: the type is the last word.
+                let part = part.trim();
+                let plain = !part.contains(['(', '[']) && part.split_whitespace().count() == 2;
+                if plain {
+                    part.split_whitespace().last().unwrap_or(part).to_string()
+                } else {
+                    part.to_string()
+                }
+            })
+            .collect()
+    } else if results.is_empty() {
+        Vec::new()
+    } else {
+        vec![results.to_string()]
+    };
+    Some((owner, name, results))
+}
+
+/// `pub fn name<T>(params) -> Route {`: the name and what follows the arrow.
+fn rust_returns(line: &str) -> Option<(String, Vec<String>)> {
+    let rest = line.split_once("fn ")?.1;
+    let end = rest.find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))?;
+    let name = rest[..end].to_string();
+    let mut rest = &rest[end..];
+    if rest.starts_with('<') {
+        // Type parameters: to the `>` that closes them, past any `->` inside.
+        let bytes = rest.as_bytes();
+        let mut depth = 0i32;
+        let mut close = None;
+        for (index, byte) in bytes.iter().enumerate() {
+            match byte {
+                b'<' => depth += 1,
+                b'>' if index > 0 && bytes[index - 1] == b'-' => {}
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(index + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = rest.get(close?..)?;
+    }
+    if name.is_empty() || !rest.starts_with('(') {
+        return None;
+    }
+    let after = rest.get(past_closing(rest)?..)?.trim();
+    let results = match after.strip_prefix("->") {
+        Some(ty) => {
+            let ty = ty.split(" where ").next().unwrap_or(ty);
+            vec![ty.trim().trim_end_matches(['{', ';']).trim().to_string()]
+        }
+        None => Vec::new(),
+    };
+    Some((name, results))
 }
 
 impl SiteFiles<'_> {
@@ -1382,6 +1856,269 @@ impl SiteFiles<'_> {
             .and_then(|text| text.lines().nth(line.checked_sub(1)? as usize))
             .map(clip)
             .unwrap_or_default()
+    }
+
+    /// What the functions and methods called `name` return, in the language of `site`.
+    fn returned(&mut self, site: &str, name: &str) -> Vec<Returned> {
+        let (key, pattern, glob) = match detect_language(Path::new(site)) {
+            Language::Go => ("go", "^func ", "*.go"),
+            Language::Rust => (
+                "rust",
+                "^[[:space:]]*(pub(\\([^)]*\\))?[[:space:]]+)?((default|const|async|unsafe)[[:space:]]+)*fn[[:space:]]+[A-Za-z_]",
+                "*.rs",
+            ),
+            _ => return Vec::new(),
+        };
+        let repo = self.repo;
+        let table = self.returns.entry(key).or_insert_with(|| {
+            let mut table: BTreeMap<String, Vec<Returned>> = BTreeMap::new();
+            let output = git(repo, &["grep", "-n", "-I", "-E", pattern, "--", glob]);
+            let text = output
+                .ok()
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default();
+            for row in text.lines() {
+                let mut parts = row.splitn(3, ':');
+                let (Some(path), Some(_line), Some(line)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                if skips_path(path) {
+                    continue;
+                }
+                let read = if key == "go" {
+                    go_returns(line)
+                } else {
+                    rust_returns(line).map(|(name, results)| (None, name, results))
+                };
+                if let Some((owner, name, results)) = read {
+                    table.entry(name).or_default().push(Returned {
+                        path: path.to_string(),
+                        owner,
+                        results,
+                    });
+                }
+            }
+            table
+        });
+        table.get(name).cloned().unwrap_or_default()
+    }
+
+    /// The type a receiver has, as the name it was written with, and where that name was
+    /// written. `None` when the functions it comes from do not settle one type.
+    fn receiver_home(
+        &mut self,
+        site: &str,
+        receiver: &Receiver,
+        depth: usize,
+    ) -> Option<(String, Home)> {
+        let (function, on, result) = match receiver {
+            Receiver::Typed(written) => return Some((written.clone(), Home::Site)),
+            Receiver::Call { .. } if depth > 4 => return None,
+            Receiver::Call {
+                function,
+                on,
+                result,
+            } => (function, on, *result),
+        };
+        let language = detect_language(Path::new(site));
+        let rust = language == Language::Rust;
+        let separator = if rust { "::" } else { "." };
+        let (qualifier, simple) = match function.rsplit_once(separator) {
+            Some((qualifier, simple)) => (Some(qualifier), simple),
+            None => (None, function.as_str()),
+        };
+        // One type that every declaration in `found` returns at `result`.
+        let agreed = |found: &[&Returned]| -> Option<String> {
+            let mut types = found
+                .iter()
+                .map(|returned| returned.results.get(result).cloned());
+            let first = types.next()??;
+            types
+                .all(|other| other.as_deref() == Some(first.as_str()))
+                .then_some(first)
+        };
+        let one_directory = |found: &[&Returned]| -> Option<Option<String>> {
+            let mut directories = found.iter().map(|returned| directory(&returned.path));
+            let first = directories.next()?;
+            directories.all(|other| other == first).then_some(first)
+        };
+        let Some(on) = on else {
+            let declared = self.returned(site, simple);
+            if rust {
+                if let Some(qualifier) = qualifier {
+                    // `Route::parse(..)`: a `Route` when every `parse` returns `Self` or it.
+                    let ty = qualifier.rsplit("::").next().unwrap_or(qualifier);
+                    let ours = !declared.is_empty()
+                        && declared.iter().all(|returned| {
+                            returned.results.get(result).is_some_and(|written| {
+                                let named = named_result(written);
+                                named.as_deref() == Some("Self") || named.as_deref() == Some(ty)
+                            })
+                        });
+                    return ours.then(|| (qualifier.to_string(), Home::Site));
+                }
+            }
+            // The declarations the site's own name or qualifier leads to.
+            let mut reached = Vec::new();
+            for returned in &declared {
+                if returned.owner.is_some() {
+                    continue;
+                }
+                let name_use = NameUse {
+                    line: 0,
+                    kind: NameUseKind::Reference,
+                    reached: match qualifier {
+                        Some(qualifier) if rust => Reached::Path(qualifier.to_string()),
+                        Some(qualifier) => Reached::Member(qualifier.to_string()),
+                        None => Reached::Bare,
+                    },
+                    within_callable: None,
+                    within_type: None,
+                    in_error: false,
+                    receiver: None,
+                };
+                let modules = module_names(&returned.path);
+                if self.reaches(site, &name_use, simple, &modules, &returned.path) {
+                    reached.push(returned);
+                }
+            }
+            let ty = named_result(&agreed(&reached)?)?;
+            if ty.contains(['.', ':']) || ty == "Self" {
+                return None;
+            }
+            return Some((ty, Home::Directory(one_directory(&reached)?)));
+        };
+        let (inner, home) = self.receiver_home(site, on, depth + 1)?;
+        let inner_name = inner
+            .rsplit(['.', ':'])
+            .next()
+            .unwrap_or(&inner)
+            .to_string();
+        let declared = self.returned(site, simple);
+        let found = declared
+            .iter()
+            .filter(|returned| rust || returned.owner.as_deref() == Some(inner_name.as_str()))
+            .filter(|returned| match &home {
+                Home::Directory(directory_of_type) => {
+                    rust || directory(&returned.path) == *directory_of_type
+                }
+                Home::Site => true,
+            })
+            .collect::<Vec<_>>();
+        let ty = named_result(&agreed(&found)?)?;
+        if ty == "Self" {
+            return Some((inner, home));
+        }
+        if ty.contains(['.', ':']) {
+            return None;
+        }
+        Some((ty, Home::Directory(one_directory(&found)?)))
+    }
+
+    /// The module a JavaScript or TypeScript file imports `name` from, when that module is not
+    /// the declaring one and itself names `name` in an import or an export list: the site
+    /// then depends on that re-export, which is the place the change broke.
+    fn through_a_reexport(&self, site: &str, name: &str, declaring: &str) -> Option<String> {
+        let facts = self.facts.get(site)?.as_ref()?;
+        let base = directory(site).unwrap_or_default();
+        for statement in &facts.imports {
+            if word_offsets(statement, name).is_empty() {
+                continue;
+            }
+            let Some(source) = statement
+                .rsplit_once("from")
+                .map(|(_, source)| source.trim().trim_end_matches(';').trim())
+                .map(|source| source.trim_matches(['\'', '"', '`']))
+                .filter(|source| source.starts_with('.'))
+            else {
+                continue;
+            };
+            // `../source/index.js` from `test/headers.ts` is `source/index`.
+            let mut parts = base
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            for part in source.split('/') {
+                match part {
+                    "." | "" => {}
+                    ".." => {
+                        parts.pop();
+                    }
+                    part => parts.push(part),
+                }
+            }
+            let joined = parts.join("/");
+            let stem = [".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"]
+                .iter()
+                .find_map(|extension| joined.strip_suffix(extension))
+                .unwrap_or(&joined);
+            let resolved = [
+                ".ts",
+                ".tsx",
+                ".js",
+                ".jsx",
+                ".mjs",
+                ".cjs",
+                "/index.ts",
+                "/index.js",
+            ]
+            .iter()
+            .map(|extension| format!("{stem}{extension}"))
+            .find(|candidate| self.facts.contains_key(candidate));
+            let Some(resolved) = resolved else {
+                continue;
+            };
+            if resolved == declaring || resolved == site {
+                return None;
+            }
+            let reexports = self
+                .facts
+                .get(&resolved)
+                .and_then(Option::as_ref)
+                .and_then(|facts| facts.uses.get(name))
+                .is_some_and(|uses| uses.iter().any(|found| found.kind == NameUseKind::Import));
+            if reexports {
+                return Some(resolved);
+            }
+        }
+        None
+    }
+
+    /// Whether the C# file at `site` sees the namespace the file at `declaring` declares into:
+    /// it declares into that namespace or one inside it, or opens it with `using`.
+    fn same_csharp_namespace(&mut self, site: &str, declaring: &str) -> bool {
+        let namespace = |text: &str| {
+            text.lines().find_map(|line| {
+                let rest = line.trim_start().strip_prefix("namespace ")?;
+                let name = rest.trim().trim_end_matches(['{', ';']).trim().to_string();
+                (!name.is_empty()).then_some(name)
+            })
+        };
+        let read = |files: &Self, path: &str| {
+            files
+                .texts
+                .get(path)
+                .cloned()
+                .or_else(|| fs::read_to_string(files.repo.join(path)).ok())
+        };
+        let Some(declared) = read(self, declaring).as_deref().and_then(namespace) else {
+            // The global namespace, or a file that is gone: nothing to hold the site to.
+            return true;
+        };
+        let Some(text) = read(self, site) else {
+            return false;
+        };
+        let inside = namespace(&text)
+            .is_some_and(|own| own == declared || own.starts_with(&format!("{declared}.")));
+        inside
+            || text.lines().any(|line| {
+                line.trim()
+                    .trim_start_matches("global ")
+                    .strip_prefix("using ")
+                    .is_some_and(|rest| rest.trim().trim_end_matches(';').trim() == declared)
+            })
     }
 
     /// How a site that is not through a member's owner reaches the declaring module, if it
@@ -1554,6 +2291,24 @@ fn classify_sites(
             unread += file_hits.len();
             continue;
         };
+        // `import run from './run.js'` binds the module's default export, whatever the
+        // declaration behind it is called.
+        if target.default_export_kept
+            && *path != contract.path
+            && facts.imports.iter().any(|import| {
+                let import = import
+                    .trim_start()
+                    .trim_start_matches("import")
+                    .trim_start();
+                let import = import.strip_prefix("type ").unwrap_or(import).trim_start();
+                import.strip_prefix(name).is_some_and(|after| {
+                    let after = after.trim_start();
+                    after.starts_with("from") || after.starts_with(',')
+                })
+            })
+        {
+            continue;
+        }
         let uses = facts.uses.get(name).map(Vec::as_slice).unwrap_or_default();
         if removed {
             // A line the search found with no identifier of the name on it: a string or a
@@ -1615,11 +2370,9 @@ fn classify_sites(
             // A changed signature leaves an import, and a function passed by name, valid.
             continue;
         }
-        if removed && callable && !called && !imported {
-            // The bare name of a removed function is as likely a field or a local variable of
-            // that name as the function passed by value.
-            continue;
-        }
+        // The bare name of a removed function is as likely a field or a local variable of
+        // that name as the function passed by value: it is a site only where it is attributed.
+        let only_if_attributed = removed && callable && !called && !imported;
         if let Reached::Member(receiver) | Reached::Path(receiver) = &found.reached {
             // `super().get(id)` and `base.Run()` are the parent's member, never this one.
             if member && is_parent_receiver(receiver) {
@@ -1640,12 +2393,61 @@ fn classify_sites(
             sites.contains(&(path.clone(), found.line))
                 || sites.contains(&(path.clone(), line_before(changed, found.line)))
         });
+        // The receiver is a name this function declares with the owner's type, and the type's
+        // name leads to the declaring module as a free name would have to.
+        // A member the type no longer declares may still be inherited from a base. A Go type's
+        // bases are the types it embeds, which the repository declares: with no other
+        // declaration of the name anywhere, none of them has it.
+        let inherited =
+            removed && target.owner_has_bases && (site_language != Language::Go || shared);
+        let typed = !found.in_error
+            && !builtin
+            && !unsettled
+            && member
+            && !inherited
+            && owner.is_some_and(|owner| {
+                found.receiver.as_ref().is_some_and(|receiver| {
+                    let Some((written, home)) = files.receiver_home(&path, receiver, 0) else {
+                        return false;
+                    };
+                    let (qualifier, ty) = match written.rsplit_once("::") {
+                        Some((path, ty)) => (Reached::Path(path.to_string()), ty),
+                        None => match written.rsplit_once('.') {
+                            Some((qualifier, ty)) => (Reached::Member(qualifier.to_string()), ty),
+                            None => (Reached::Bare, written.as_str()),
+                        },
+                    };
+                    if ty != owner {
+                        return false;
+                    }
+                    match home {
+                        // The type's name stands in this file: it has to lead to the
+                        // declaring module as a free name would.
+                        Home::Site => {
+                            let type_use = NameUse {
+                                kind: NameUseKind::Reference,
+                                reached: qualifier,
+                                receiver: None,
+                                ..found.clone()
+                            };
+                            files.reaches(&path, &type_use, owner, &modules, &contract.path)
+                                && (site_language != Language::CSharp
+                                    || files.same_csharp_namespace(&path, &contract.path))
+                        }
+                        // It stands in the declaration of the function the receiver came
+                        // from: that names this type when it is declared beside it.
+                        Home::Directory(beside) => {
+                            qualifier == Reached::Bare && beside == directory(&contract.path)
+                        }
+                    }
+                })
+            });
         let attributed = if found.in_error || builtin || unsettled {
             false
+        } else if typed {
+            true
         } else if member {
             let in_owner = owner.is_some() && found.within_type.as_deref() == owner;
-            // A member the type no longer declares may still be inherited.
-            let inherited = removed && target.owner_has_bases;
             match &found.reached {
                 Reached::Member(receiver) | Reached::Path(receiver) => {
                     let (_, last) = receiver_ends(receiver);
@@ -1653,12 +2455,14 @@ fn classify_sites(
                         in_owner && !inherited
                     } else {
                         // `Owner.method`: a type is told from a variable by its capital, and
-                        // Go has no call on a type.
-                        owner.is_some_and(|owner| {
-                            last == owner
-                                && owner.starts_with(char::is_uppercase)
-                                && site_language != Language::Go
-                        })
+                        // Go has no call on a type. A static member the type no longer
+                        // declares is still reached through its name when a base declares it.
+                        !inherited
+                            && owner.is_some_and(|owner| {
+                                last == owner
+                                    && owner.starts_with(char::is_uppercase)
+                                    && site_language != Language::Go
+                            })
                     }
                 }
                 // Java and C# call a member of the same type by its bare name.
@@ -1673,11 +2477,30 @@ fn classify_sites(
         };
         let mut evidence = if proven_here {
             SiteEvidence::Proven
+        } else if typed {
+            SiteEvidence::Type
         } else if attributed {
             SiteEvidence::Name
         } else {
             SiteEvidence::Possible
         };
+        // Through a receiver (`result.output`) it is at least a use of a member of that name.
+        if only_if_attributed
+            && evidence == SiteEvidence::Possible
+            && found.reached == Reached::Bare
+        {
+            continue;
+        }
+        // A file that takes the name from a module that re-exports it depends on that
+        // re-export, which is itself a site: the file is broken only if that is not mended.
+        let through = (evidence == SiteEvidence::Name
+            && !member
+            && matches!(site_language, Language::JavaScript | Language::TypeScript))
+        .then(|| files.through_a_reexport(&path, name, &contract.path))
+        .flatten();
+        if through.is_some() {
+            evidence = SiteEvidence::Possible;
+        }
         let problem = if removed {
             match &contract.renamed_to {
                 Some(renamed) => format!("still names `{name}`, which is now `{renamed}`"),
@@ -1787,10 +2610,10 @@ fn classify_sites(
     };
     broken.sort_by(order);
     possible.sort_by(order);
-    contract.broken_omitted = broken.len().saturating_sub(MAX_SITES_LISTED);
-    broken.truncate(MAX_SITES_LISTED);
-    contract.possible_omitted += possible.len().saturating_sub(MAX_SITES_LISTED);
-    possible.truncate(MAX_SITES_LISTED);
+    contract.broken_omitted = broken.len().saturating_sub(files.listed);
+    broken.truncate(files.listed);
+    contract.possible_omitted += possible.len().saturating_sub(files.listed);
+    possible.truncate(files.listed);
     contract.broken = broken;
     contract.possible = possible;
     if moved || (shared && !member) {
@@ -1968,7 +2791,10 @@ pub fn ripple(
         }
         for (key, group) in &before_by_key {
             let declared = group[0];
-            let special = matches!(declared.name.as_str(), "__init__" | "constructor");
+            // A constructor: `__init__`, `constructor`, or (Java, C#) a member named as its
+            // type. Its name outside a call is the type's.
+            let special = matches!(declared.name.as_str(), "__init__" | "constructor")
+                || (declared.member && declared.owner.as_deref() == Some(declared.name.as_str()));
             if !is_contract_kind(&declared.kind)
                 || declared.local
                 || declared.name.starts_with("test_")
@@ -2007,17 +2833,24 @@ pub fn ripple(
                         .and_then(|facts| facts.uses.get(&declared.name))
                         .is_some_and(|uses| {
                             uses.iter().any(|found| {
-                                matches!(
-                                    found.kind,
-                                    NameUseKind::Declaration { .. } | NameUseKind::Import
-                                ) || (declared.member
-                                    && matches!(&found.reached, Reached::Member(receiver)
+                                // A declaration at the level this one stood at: a field of
+                                // some type does not keep a function's name bound.
+                                let same_level = if declared.member {
+                                    found.within_type == declared.owner
+                                } else {
+                                    found.within_type.is_none() && found.within_callable.is_none()
+                                };
+                                found.kind == NameUseKind::Import
+                                    || (matches!(found.kind, NameUseKind::Declaration { .. })
+                                        && same_level)
+                                    || (declared.member
+                                        && matches!(&found.reached, Reached::Member(receiver)
                                         if is_self_receiver(receiver_ends(receiver).1))
-                                    && assigned_on(
-                                        after_text.as_deref(),
-                                        found.line,
-                                        &declared.name,
-                                    ))
+                                        && assigned_on(
+                                            after_text.as_deref(),
+                                            found.line,
+                                            &declared.name,
+                                        ))
                             })
                         }) =>
                 {
@@ -2102,6 +2935,11 @@ pub fn ripple(
                 index_path: old_path.clone(),
                 file_deleted: new.is_none(),
                 owner_has_bases,
+                default_export_kept: change == ContractChange::Removed
+                    && declared.default_export
+                    && after_text.as_deref().is_some_and(|text| {
+                        text.contains("export default ") || text.contains(" as default")
+                    }),
                 declared: after_declared.unwrap_or(declared).clone(),
             };
             found.push((contract, target));
@@ -2196,6 +3034,8 @@ pub fn ripple(
         texts: BTreeMap::new(),
         dependencies: BTreeMap::new(),
         go_imports: BTreeMap::new(),
+        listed: input.sites_listed.unwrap_or(MAX_SITES_LISTED),
+        returns: BTreeMap::new(),
     };
     files.read(&wanted, deadline);
     let mut contracts = Vec::new();
@@ -2707,6 +3547,7 @@ mod tests {
             &RippleInput {
                 base: None,
                 only_files: vec![PathBuf::from("a.py")],
+                sites_listed: None,
             },
         )
         .unwrap();
@@ -2887,7 +3728,9 @@ mod tests {
     /// Alarms the replay raised on complete commits: a method moved to another file of its
     /// partial class, a nested type whose name another declaration still carries, a
     /// compilation symbol on a preprocessor line, another package's type of the same name
-    /// (`slog.Logger`), and a function that another module now binds as a constant.
+    /// (`slog.Logger`), a function that another module now binds as a constant, and (from the
+    /// held-out replay) a static method moved to the superclass and still called through the
+    /// subclass's name.
     #[test]
     fn a_declaration_that_moved_and_a_directive_symbol_are_not_broken_sites() {
         let temp = changed(
@@ -2911,6 +3754,18 @@ mod tests {
                 ("go.mod", "module example.com/app\n\ngo 1.22\n"),
                 ("log/logger.go", "package log\n\ntype Logger interface {\n\tInfo(msg string)\n}\n"),
                 ("log/with.go", "package log\n\nimport \"log/slog\"\n\nfunc With(l *slog.Logger) int {\n\treturn 1\n}\n"),
+                (
+                    "Base.java",
+                    "class Base {\n}\n",
+                ),
+                (
+                    "Mid.java",
+                    "class Mid extends Base {\n    static int copy(int a) {\n        return a;\n    }\n}\n",
+                ),
+                (
+                    "Use.java",
+                    "class Use {\n    int run() {\n        return Mid.copy(1);\n    }\n}\n",
+                ),
                 ("lib/node.js", "export function runNode(file) {\n  return file;\n}\n"),
                 ("index.js", "export {runNode} from './lib/node.js';\n"),
                 ("index.test.ts", "import {runNode} from './index.js';\n\nrunNode('a');\n"),
@@ -2928,6 +3783,11 @@ mod tests {
                 ("Flags.cs", Some("class Flags {\n}\n")),
                 ("Gone.cs", Some("class Gone {\n    void Run() {\n        Drop(1);\n    }\n}\n")),
                 ("log/logger.go", Some("package log\n")),
+                (
+                    "Base.java",
+                    Some("class Base {\n    static int copy(int a) {\n        return a;\n    }\n}\n"),
+                ),
+                ("Mid.java", Some("class Mid extends Base {\n}\n")),
                 ("lib/node.js", Some("export const other = 1;\n")),
                 ("index.js", Some("import {create} from './lib/create.js';\n\nexport const runNode = create();\n")),
             ],
@@ -2944,6 +3804,7 @@ mod tests {
             possible(&report),
             vec![
                 "AsyncTests.cs:3",
+                "Use.java:3",
                 "Requests.Headers.cs:3",
                 "index.test.ts:1",
                 "index.test.ts:3",
@@ -2952,6 +3813,325 @@ mod tests {
             "{}",
             report.to_text()
         );
+    }
+
+    /// What a compiler comparison showed was missed: a method called on a name the function
+    /// declares with the owner's type, a function held by a `const`, and a renamed function
+    /// that is passed by name.
+    #[test]
+    fn a_receivers_declared_type_and_a_function_constant_are_followed() {
+        let temp = changed(
+            &[
+                ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+                (
+                    "runner/command.go",
+                    "package runner\n\ntype Command struct{}\n\nfunc (c *Command) Out() int {\n\treturn 1\n}\n\nfunc (c *Command) Help() int {\n\treturn c.Out()\n}\n",
+                ),
+                (
+                    "runner/command_test.go",
+                    "package runner\n\nfunc run(o Other) int {\n\tx := &Command{}\n\ty := find()\n\ta := x.Out()\n\tb := y.Out()\n\treturn a + b + o.Out()\n}\n",
+                ),
+                (
+                    "main.go",
+                    "package main\n\nimport \"example.com/app/runner\"\n\nfunc main() {\n\tvar c runner.Command\n\tc.Out()\n}\n",
+                ),
+                ("store/repo.py", "class Repo:\n    def get(self, key):\n        return key\n"),
+                (
+                    "store/use.py",
+                    "from store.repo import Repo\n\n\ndef load(repo: Repo, other):\n    made = Repo()\n    a = repo.get(1)\n    b = made.get(2)\n    return a, b, other.get(3)\n",
+                ),
+                (
+                    "store/elsewhere.py",
+                    "from vendor.models import Repo\n\n\ndef load(repo: Repo):\n    return repo.get(1)\n",
+                ),
+                (
+                    "web/norm.ts",
+                    "export const norm = (input: string): string => input;\n\nexport const limit = 3;\n\nexport const pick = (a: number) => a;\n",
+                ),
+                (
+                    "web/use.ts",
+                    "import {norm, limit, pick} from './norm.js';\n\nexport const a = norm('a');\nexport const b = limit;\nexport const c = [1].map(pick);\n",
+                ),
+            ],
+            &[
+                (
+                    "runner/command.go",
+                    Some("package runner\n\ntype Command struct{}\n\nfunc (c *Command) Out(n int) int {\n\treturn n\n}\n\nfunc (c *Command) Help() int {\n\treturn c.Out()\n}\n"),
+                ),
+                (
+                    "store/repo.py",
+                    Some("class Repo:\n    def get(self, key, default):\n        return key\n"),
+                ),
+                (
+                    "web/norm.ts",
+                    Some("export const norm = (input: string, form: string): string => input;\n\nexport const ceiling = 3;\n\nexport const choose = (a: number) => a;\n"),
+                ),
+            ],
+        );
+        let report = report(&temp);
+        assert_eq!(
+            broken(&report),
+            vec![
+                // The method's own receiver, a literal's type, and the package's type by its
+                // import path.
+                "main.go:7 passes 0 arguments; 1 is required now".to_string(),
+                "runner/command.go:10 passes 0 arguments; 1 is required now".to_string(),
+                "runner/command_test.go:6 passes 0 arguments; 1 is required now".to_string(),
+                // A parameter annotated with the class the file imports, and a value built
+                // from it.
+                "store/use.py:6 does not pass `default`, which is required now".to_string(),
+                "store/use.py:7 does not pass `default`, which is required now".to_string(),
+                // A function held by a `const`: its call is held to its parameters.
+                "web/use.ts:3 passes 1 argument; 2 are required now".to_string(),
+                // A `const` that is gone, by import and by use.
+                "web/use.ts:1 still names `limit`, which this change removed".to_string(),
+                "web/use.ts:4 still names `limit`, which this change removed".to_string(),
+                // A renamed function is broken where it is imported and where it is passed.
+                "web/use.ts:1 still names `pick`, which is now `choose`".to_string(),
+                "web/use.ts:5 still names `pick`, which is now `choose`".to_string(),
+            ],
+            "{}",
+            report.to_text()
+        );
+        // `y := find()`, a parameter of another type, an untyped parameter, and a class of the
+        // same name imported from another module: listed, never counted.
+        assert_eq!(
+            possible(&report),
+            vec![
+                "runner/command_test.go:7",
+                "runner/command_test.go:8",
+                "store/elsewhere.py:5",
+                "store/use.py:8"
+            ],
+            "{}",
+            report.to_text()
+        );
+        let contract = report
+            .contracts
+            .iter()
+            .find(|contract| contract.name == "Out")
+            .unwrap();
+        assert_eq!(contract.owner.as_deref(), Some("Command"));
+        assert_eq!(contract.broken[0].evidence, SiteEvidence::Type);
+    }
+
+    /// A receiver that is the result of a call has the type its function is declared to
+    /// return: through a name, directly, through the package, and through a method.
+    #[test]
+    fn a_receiver_that_a_call_returns_has_the_type_the_function_declares() {
+        let temp = changed(
+            &[
+                ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+                (
+                    "route/route.go",
+                    "package route\n\ntype Route struct{}\n\ntype Router struct{}\n\nfunc NewRouter() *Router {\n\treturn &Router{}\n}\n\nfunc Open(name string) (*Router, error) {\n\treturn nil, nil\n}\n\nfunc (r *Router) NewRoute() *Route {\n\treturn &Route{}\n}\n\nfunc (r *Route) Path(tpl string) *Route {\n\treturn r\n}\n\nfunc (r *Router) Use(names ...string) {\n}\n\nfunc Other() Unknown {\n\treturn nil\n}\n",
+                ),
+                (
+                    "route/route_test.go",
+                    "package route\n\nfunc run(names []string) {\n\tr := NewRouter()\n\tr.NewRoute().Path(\"/a\")\n\to, err := Open(\"x\")\n\t_ = err\n\to.NewRoute().Path(\"/b\").Path(\"/c\")\n\tOther().Path(\"/d\")\n\tr.Use(names...)\n\tr.Use(\"a\", names...)\n}\n",
+                ),
+                (
+                    "main.go",
+                    "package main\n\nimport \"example.com/app/route\"\n\nfunc main() {\n\troute.NewRouter().NewRoute().Path(\"/e\")\n}\n",
+                ),
+                (
+                    "src/route.rs",
+                    "pub struct Route;\n\nimpl Route {\n    pub fn parse(text: &str) -> Self {\n        Route\n    }\n\n    pub fn path(&self, tpl: &str) -> &Route {\n        self\n    }\n}\n\npub fn open() -> Route {\n    Route\n}\n\nfn run() {\n    let a = Route::parse(\"x\");\n    a.path(\"/a\");\n    let b = open();\n    b.path(\"/b\");\n    make().path(\"/c\");\n}\n",
+                ),
+            ],
+            &[
+                (
+                    "route/route.go",
+                    Some("package route\n\ntype Route struct{}\n\ntype Router struct{}\n\nfunc NewRouter() *Router {\n\treturn &Router{}\n}\n\nfunc Open(name string) (*Router, error) {\n\treturn nil, nil\n}\n\nfunc (r *Router) NewRoute() *Route {\n\treturn &Route{}\n}\n\nfunc (r *Route) Path(tpl string, strict bool) *Route {\n\treturn r\n}\n\nfunc (r *Router) Use(first string, names ...string) {\n}\n\nfunc Other() Unknown {\n\treturn nil\n}\n"),
+                ),
+                (
+                    "src/route.rs",
+                    Some("pub struct Route;\n\nimpl Route {\n    pub fn parse(text: &str) -> Self {\n        Route\n    }\n\n    pub fn path(&self, tpl: &str, strict: bool) -> &Route {\n        self\n    }\n}\n\npub fn open() -> Route {\n    Route\n}\n\nfn run() {\n    let a = Route::parse(\"x\");\n    a.path(\"/a\");\n    let b = open();\n    b.path(\"/b\");\n    make().path(\"/c\");\n}\n"),
+                ),
+            ],
+        );
+        let report = report(&temp);
+        assert_eq!(
+            broken(&report),
+            vec![
+                "main.go:6 passes 1 argument; 2 are required now".to_string(),
+                "route/route_test.go:5 passes 1 argument; 2 are required now".to_string(),
+                "route/route_test.go:8 passes 1 argument; 2 are required now".to_string(),
+                // `r.Use(names...)` unpacks into the variadic parameter and leaves the new
+                // first one unpassed; `r.Use("a", names...)` passes it.
+                "route/route_test.go:10 passes 0 arguments before the one it unpacks; 1 is taken now"
+                    .to_string(),
+                "src/route.rs:19 passes 1 argument; 2 are required now".to_string(),
+                "src/route.rs:21 passes 1 argument; 2 are required now".to_string(),
+            ],
+            "{}",
+            report.to_text()
+        );
+        // A function that returns something else, and one declared nowhere.
+        assert_eq!(
+            possible(&report),
+            vec!["route/route_test.go:9", "src/route.rs:22"],
+            "{}",
+            report.to_text()
+        );
+    }
+
+    /// False alarms the held-out replay raised once more sites were followed: a C# primary
+    /// constructor in place of a written one, an object key and a struct field that carry a
+    /// removed function's name, an arrow property whose optional parameters stand in its type
+    /// annotation, and the uses behind a module that re-exports a renamed name.
+    #[test]
+    fn what_only_looks_like_a_use_of_a_removed_declaration_is_not_counted() {
+        let temp = changed(
+            &[
+                (
+                    "Map.cs",
+                    "class TypeMap {\n    public TypeMap(int a) {\n    }\n\n    TypeMap Reverse(TypeMap other) {\n        return other;\n    }\n}\n",
+                ),
+                (
+                    "links.test.js",
+                    "function authorization(url, options) {\n  return url;\n}\n\nconst headers = {authorization: 'token'};\nauthorization('a', {});\n",
+                ),
+                ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+                (
+                    "run/run.go",
+                    "package run\n\ntype Command struct {\n\tArgs func() int\n}\n\nfunc Args() int {\n\treturn 1\n}\n\nvar c = Command{Args: nil}\n",
+                ),
+                (
+                    "web/base.ts",
+                    "class Hono {\n  fetch: (request: Request, env?: Env, ctx?: Ctx) => Response = (request, ...rest) => {\n    return go(request, rest);\n  }\n}\n\nfunction serve(app: Hono, req: Request) {\n  return app.fetch(req, {});\n}\n",
+                ),
+                ("web/lib/merge.ts", "export const replaceOption = (a: number) => a;\n"),
+                ("web/index.ts", "export {replaceOption} from './lib/merge.js';\n"),
+                (
+                    "web/test.ts",
+                    "import {replaceOption} from './index.js';\n\nreplaceOption(1);\n",
+                ),
+            ],
+            &[
+                (
+                    "Map.cs",
+                    Some("class TypeMap(int a) {\n    TypeMap Reverse(TypeMap other) {\n        return other;\n    }\n}\n"),
+                ),
+                (
+                    "links.test.js",
+                    Some("const headers = {authorization: 'token'};\nauthorization('a', {});\n"),
+                ),
+                (
+                    "run/run.go",
+                    Some("package run\n\ntype Command struct {\n\tArgs func() int\n}\n\nvar c = Command{Args: nil}\n"),
+                ),
+                (
+                    "web/base.ts",
+                    Some("class Hono {\n  fetch: (request: Request, env?: Env, ctx?: Ctx) => Response = (request, env, ctx) => {\n    return go(request, env, ctx);\n  }\n}\n\nfunction serve(app: Hono, req: Request) {\n  return app.fetch(req, {});\n}\n"),
+                ),
+                ("web/lib/merge.ts", Some("export const replaceWith = (a: number) => a;\n")),
+            ],
+        );
+        let report = report(&temp);
+        assert_eq!(
+            broken(&report),
+            vec![
+                // The call of the removed function, not the object key of its name.
+                "links.test.js:2 still names `authorization`, which this change removed"
+                    .to_string(),
+                // The re-export is where the rename broke.
+                "web/index.ts:1 still names `replaceOption`, which is now `replaceWith`"
+                    .to_string(),
+            ],
+            "{}",
+            report.to_text()
+        );
+        // What takes the name from the re-exporting module is broken only if that is not
+        // mended.
+        assert_eq!(
+            possible(&report),
+            vec!["web/test.ts:1", "web/test.ts:3"],
+            "{}",
+            report.to_text()
+        );
+    }
+
+    /// A renamed default export does not break the files that import the default.
+    #[test]
+    fn a_renamed_default_export_leaves_its_default_importers_alone() {
+        let temp = changed(
+            &[
+                (
+                    "lib/is-raw.ts",
+                    "export default function isRaw(error: unknown): boolean {\n  return other(error);\n}\n\nfunction other(error: unknown): boolean {\n  return isRaw(error);\n}\n",
+                ),
+                ("lib/use.ts", "import isRaw from './is-raw.js';\n\nexport const seen = isRaw(1);\n"),
+            ],
+            &[(
+                "lib/is-raw.ts",
+                Some("export default function isRawError(error: unknown): boolean {\n  return other(error);\n}\n\nfunction other(error: unknown): boolean {\n  return isRaw(error);\n}\n"),
+            )],
+        );
+        let report = report(&temp);
+        assert_eq!(
+            broken(&report),
+            vec!["lib/is-raw.ts:6 still names `isRaw`, which is now `isRawError`".to_string()],
+            "{}",
+            report.to_text()
+        );
+    }
+
+    #[test]
+    fn a_script_binding_is_read_as_the_function_or_constant_it_holds() {
+        let function = |signature: &str| Some(ScriptBinding::Function(signature.to_string()));
+        assert_eq!(
+            script_binding(
+                "export const norm = (input: string, n = 1): string => input;",
+                "norm"
+            ),
+            function("norm(input: string, n = 1)")
+        );
+        assert_eq!(
+            script_binding("const later = async function* gen(a: number) { }", "later"),
+            function("later(a: number)")
+        );
+        assert_eq!(
+            script_binding("const typed: (a: number) => void = (a) => {};", "typed"),
+            function("typed(a: number)")
+        );
+        assert_eq!(
+            script_binding(
+                "const generic = <T,>(\n  a: T,\n  b: Map<string, T>,\n): T => a;",
+                "generic"
+            ),
+            function("generic(a: T, b: Map<string, T>,)")
+        );
+        assert_eq!(
+            script_binding("const double = x => x * 2;", "double"),
+            function("double(x)")
+        );
+        assert_eq!(
+            script_binding("  private run = (a: number) => a;", "run"),
+            function("run(a: number)")
+        );
+        assert_eq!(
+            script_binding("const total = (a + b) * c;", "total"),
+            Some(ScriptBinding::Constant)
+        );
+        assert_eq!(
+            script_binding("export const limit = 3;", "limit"),
+            Some(ScriptBinding::Constant)
+        );
+        // Which parameters may be left out stands in the annotation.
+        assert_eq!(
+            script_binding(
+                "  fetch: (request: Request, env?: Env) => Response = (request, env) => {",
+                "fetch"
+            ),
+            function("fetch(request: Request, env?: Env)")
+        );
+        assert_eq!(
+            script_binding("const handle: Handler = (a, b) => {};", "handle"),
+            Some(ScriptBinding::Constant)
+        );
+        assert_eq!(script_binding("let count = 3;", "count"), None);
+        assert_eq!(script_binding("const limits = 3;", "limit"), None);
     }
 
     #[test]
