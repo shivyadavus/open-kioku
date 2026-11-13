@@ -1,211 +1,128 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>How to Set Up Open Kioku MCP Server for Claude Code | openkioku.com</title>
-    <meta name="description" content="Set up the Open Kioku MCP server for Claude Code in 4 steps. Give Claude Code local code intelligence—search, symbol resolution, impact analysis, and evidence-backed edit plans—without uploading your source code.">
-    <meta name="keywords" content="Claude Code MCP server, Claude Code code intelligence, MCP server for Claude Code, Claude Code local code search, Open Kioku Claude Code, Claude Code setup guide">
-    <meta name="theme-color" content="#07090b">
-    <link rel="canonical" href="https://www.openkioku.com/claude-code-setup.html">
-
-    <meta property="og:title" content="How to Set Up Open Kioku MCP Server for Claude Code">
-    <meta property="og:description" content="Claude Code shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
-    <meta property="og:type" content="article">
-    <meta property="og:url" content="https://www.openkioku.com/claude-code-setup.html">
-    <meta property="og:image" content="https://www.openkioku.com/og-image.png">
-    <meta property="og:site_name" content="Open Kioku">
-
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="How to Set Up Open Kioku MCP Server for Claude Code">
-    <meta name="twitter:description" content="Claude Code shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
-    <meta name="twitter:image" content="https://www.openkioku.com/og-image.png">
-
-    <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap">
-    <link rel="stylesheet" href="site.css">
-    <script>document.documentElement.classList.add('js')</script>
-
-    <script type="application/ld+json">
-    {
-      "@context": "https://schema.org",
-      "@type": "HowTo",
-      "name": "How to Set Up Open Kioku MCP Server for Claude Code",
-      "description": "Connect Open Kioku's local code intelligence MCP server to Claude Code in 4 steps. Get search, symbol resolution, impact analysis, and evidence-backed edit plans without uploading source code.",
-      "image": "https://www.openkioku.com/og-image.png",
-      "totalTime": "PT2M",
-      "tool": [
-        {
-          "@type": "HowToTool",
-          "name": "Node.js / npm"
-        },
-        {
-          "@type": "HowToTool",
-          "name": "Claude Code CLI"
-        }
-      ],
-      "step": [
-        {
-          "@type": "HowToStep",
-          "position": 1,
-          "name": "Install Open Kioku",
-          "text": "Install the Open Kioku CLI globally via npm.",
-          "itemListElement": {
-            "@type": "HowToDirection",
-            "text": "Run: npm install -g open-kioku"
-          }
-        },
-        {
-          "@type": "HowToStep",
-          "position": 2,
-          "name": "Index your repository",
-          "text": "Index your codebase to build a local SQLite and Tantivy search index.",
-          "itemListElement": {
-            "@type": "HowToDirection",
-            "text": "Run: ok index ."
-          }
-        },
-        {
-          "@type": "HowToStep",
-          "position": 3,
-          "name": "Connect MCP to Claude Code",
-          "text": "Generate the MCP server configuration for Claude Code and paste it into your Claude Code MCP settings.",
-          "itemListElement": {
-            "@type": "HowToDirection",
-            "text": "Run: ok mcp install claude --repo ."
-          }
-        },
-        {
-          "@type": "HowToStep",
-          "position": 4,
-          "name": "Paste the golden agent prompt",
-          "text": "Add the recommended agent prompt so Claude Code uses Open Kioku tools before every edit.",
-          "itemListElement": {
-            "@type": "HowToDirection",
-            "text": "Paste into your CLAUDE.md or system prompt: Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change."
-          }
-        }
-      ]
-    }
-    </script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Connect Open Kioku to Claude Code as a local MCP server: evidence before edits, the calls a change broke right after it, and the diff verified against the plan. Nothing leaves your machine." />
+<meta name="theme-color" content="#0b0d0c" />
+<link rel="canonical" href="https://www.openkioku.com/claude-code-setup.html" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Open Kioku" />
+<meta property="og:title" content="How to Set Up Open Kioku MCP Server for Claude Code | openkioku.com" />
+<meta property="og:description" content="Connect Open Kioku to Claude Code as a local MCP server: evidence before edits, the calls a change broke right after it, and the diff verified against the plan. Nothing leaves your machine." />
+<meta property="og:url" content="https://www.openkioku.com/claude-code-setup.html" />
+<meta property="og:image" content="https://www.openkioku.com/og-image.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<title>How to Set Up Open Kioku MCP Server for Claude Code | openkioku.com</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+<link rel="stylesheet" href="site.css" />
 </head>
-<body>
+<body id="top" class="inner">
 <a class="skip" href="#main">Skip to content</a>
-<div class="field" aria-hidden="true"></div>
-<header class="nav-wrap"><div class="wrap"><nav aria-label="Primary navigation">
-<a href="https://www.openkioku.com/" class="brand" aria-label="Open Kioku home">
-<svg viewBox="0 0 64 64" aria-hidden="true"><ellipse cx="32" cy="32" rx="26" ry="15.5" fill="none" stroke="currentColor" stroke-width="3.4"/><path d="M25.5 24.5 18 32l7.5 7.5M38.5 24.5 46 32l-7.5 7.5" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="3.1" fill="currentColor"/></svg>
-<span>Open Kioku</span></a>
-<button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav"><span class="sr-only">Open navigation</span><span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span></button>
-<div class="nav-links" id="primary-nav">
-<details class="nav-menu"><summary>Setup Guides <span class="chev" aria-hidden="true">▾</span></summary><div class="nav-menu-list">
-<a href="https://www.openkioku.com/claude-code-setup.html" aria-current="page">Claude Code <span class="guide-badge">Current</span></a>
-<a href="https://www.openkioku.com/cursor-setup.html">Cursor</a>
-<a href="https://www.openkioku.com/codex-setup.html">Codex</a>
-<a href="https://www.openkioku.com/gemini-cli-setup.html">Gemini CLI</a>
-</div></details>
-<a class="nav-cta" href="https://github.com/shivyadavus/open-kioku">GitHub</a>
+
+<header class="top">
+  <div class="wrap">
+    <a href="index.html" class="brand" aria-label="Open Kioku home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><ellipse cx="32" cy="32" rx="26" ry="15.5" fill="none" stroke="currentColor" stroke-width="3.4"/><path d="M25.5 24.5 18 32l7.5 7.5M38.5 24.5 46 32l-7.5 7.5" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="3.1" fill="currentColor"/></svg>
+      <span>Open Kioku</span>
+    </a>
+    <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="nav"><span></span></button>
+    <nav class="nav" id="nav" aria-label="Primary">
+      <a href="index.html#how">How it works</a>
+      <a href="index.html#ripple">Ripple</a>
+      <a href="index.html#measured">Measured</a>
+      <a href="docs.html">Docs</a>
+      <a class="nav-cta" href="https://github.com/shivyadavus/open-kioku">View source ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<div class="page-head">
+  <div class="wrap">
+    <p class="crumbs"><a href="index.html">Home</a> › <a href="docs.html">Docs</a> › Claude Code</p>
+    <span class="eyebrow">Claude Code + Open Kioku</span>
+    <h1>Give Claude Code something to read before it edits.</h1>
+    <p class="lede">Open Kioku runs as a local MCP server. Claude Code asks it what a task touches, plans inside a declared boundary, and has the finished diff checked against that plan. Nothing leaves your machine.</p>
+  </div>
 </div>
-</nav></div></header>
 
-<main id="main" class="guide"><div class="wrap">
-<nav class="crumbs" aria-label="Breadcrumb"><a href="https://www.openkioku.com/">Home</a><span aria-hidden="true">›</span><span>Claude Code Setup</span></nav>
-
-<section class="guide-hero" aria-label="Page introduction">
-<div class="pill"><span class="dot"></span> Claude Code + Open Kioku MCP</div>
-<h1>Give Claude Code an <span class="accent-text">evidence layer</span> before it edits your codebase</h1>
-<p class="lead">Connect Open Kioku as a local MCP server so Claude Code shows its evidence before it edits — files, streams, confidence, caveats — declares an edit boundary in a plan, and has its diff verified against that plan. Nothing leaves your machine.</p>
-<div class="actions">
-<a class="btn btn-primary" href="#step-1"><span>Start setup</span><span aria-hidden="true">→</span></a>
-<a class="btn btn-secondary" href="https://github.com/shivyadavus/open-kioku"><span>View on GitHub</span><span aria-hidden="true">↗</span></a>
-</div>
-</section>
-
-<section id="step-1" aria-label="Setup steps">
-<div class="section-head">
-<div class="kicker">Setup Guide</div>
-<h2 class="section-title">4 steps to code intelligence in Claude Code.</h2>
-<p class="section-copy">Install, index, connect, prompt. Indexing time depends on repo size; Open Kioku commands run locally on your machine.</p>
-</div>
-<ol class="steps">
-<li class="step" id="install"><div class="step-n">1</div><div class="step-body">
-<h3>Install Open Kioku</h3>
-<p>Install the CLI globally. The npm wrapper pulls the native binary for macOS, Linux, or Windows automatically.</p>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal</span><button class="copy" type="button" data-copy="npm install -g open-kioku" aria-label="Copy install command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span> npm install -g open-kioku</pre></figure>
-<p>Other channels: <code>cargo install open-kioku-cli</code> or <code>cargo binstall open-kioku-cli</code> from crates.io; binaries with checksums, an SBOM, and provenance on <a href="https://github.com/shivyadavus/open-kioku/releases">GitHub releases</a>.</p>
-</div></li>
-
-<li class="step" id="index"><div class="step-n">2</div><div class="step-body">
-<h3>Index your repository</h3>
-<p>Navigate to your project directory and run the indexer. Open Kioku scans files, extracts symbols, builds a dependency graph, and creates local SQLite + Tantivy search indexes under <code>.ok/</code>.</p>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal</span><button class="copy" type="button" data-copy="ok index ." aria-label="Copy index command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span> ok index .</pre></figure>
-</div></li>
-
-<li class="step" id="connect"><div class="step-n">3</div><div class="step-body">
-<h3>Connect MCP to Claude Code</h3>
-<p>Shortcut: one command indexes the repository, writes a repository-scoped <code>.mcp.json</code> plus managed guidance, and checks that the local server answers an MCP initialize request (run without <code>--apply</code> to preview; nothing is written).</p>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal</span><button class="copy" type="button" data-copy="ok setup agent claude --repo . --apply" aria-label="Copy setup command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span> ok setup agent claude --repo . --apply</pre></figure>
-<p>Or generate the MCP server entry for Claude Code manually and paste it into your Claude Code MCP settings:</p>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal</span><button class="copy" type="button" data-copy="ok mcp install claude --repo ." aria-label="Copy MCP install command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span> ok mcp install claude --repo .</pre></figure>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">MCP config output — paste into Claude Code settings</span><button class="copy" type="button" data-copy='{"mcpServers":{"open-kioku":{"command":"ok","args":["mcp","serve","--repo","/absolute/path/to/repo","--read-only"]}}}' aria-label="Copy MCP JSON config">Copy</button></figcaption><pre class="term-body"><code>{
-  <span class="json-key">"mcpServers"</span>: {
-    <span class="json-key">"open-kioku"</span>: {
-      <span class="json-key">"command"</span>: <span class="json-string">"ok"</span>,
-      <span class="json-key">"args"</span>: [
-        <span class="json-string">"mcp"</span>,
-        <span class="json-string">"serve"</span>,
-        <span class="json-string">"--repo"</span>,
-        <span class="json-string">"/absolute/path/to/repo"</span>,
-        <span class="json-string">"--read-only"</span>
-      ]
+<section>
+  <div class="wrap split">
+    <div class="head">
+      <span class="eyebrow">Setup</span>
+      <h2>Install, connect, ask for a plan.</h2>
+      <p>Indexing time depends on the size of the repository; a few thousand files take seconds. Everything is stored under the repository's own <code>.ok/</code> directory.</p>
+      <ul class="ticks">
+        <li><code>cargo install open-kioku-cli</code>, or <code>cargo binstall</code> for the prebuilt binary.</li>
+        <li>Binaries with checksums, an SBOM and provenance on <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/release-trust.md">GitHub releases ↗</a>.</li>
+        <li>The server is read-only by default: source edits remain in Claude Code's own workflow.</li>
+      </ul>
+    </div>
+    <ol class="steps">
+      <li><div class="body"><h3>Install Open Kioku</h3><p>The npm package pulls the native binary for macOS, Linux or Windows.</p><div class="code"><pre>npm install -g open-kioku</pre><button type="button" data-copy="npm install -g open-kioku">Copy</button></div></div></li>
+      <li><div class="body"><h3>Connect Claude Code</h3><p>One command indexes the repository, writes a repository-scoped <code>.mcp.json</code> and managed guidance, and checks that the local server answers. Run it without <code>--apply</code> to preview; nothing is written.</p><div class="code"><pre>ok setup agent claude --repo . --apply</pre><button type="button" data-copy="ok setup agent claude --repo . --apply">Copy</button></div><p class="small muted">Or print the server entry and paste it into your Claude Code MCP settings:</p><div class="code"><pre>ok mcp install claude --repo .</pre><button type="button" data-copy="ok mcp install claude --repo .">Copy</button></div><div class="code"><span class="label">.mcp.json</span><pre>{
+  &quot;mcpServers&quot;: {
+    &quot;open-kioku&quot;: {
+      &quot;command&quot;: &quot;ok&quot;,
+      &quot;args&quot;: [&quot;mcp&quot;, &quot;serve&quot;, &quot;--repo&quot;, &quot;/absolute/path/to/repo&quot;, &quot;--read-only&quot;]
     }
   }
-}</code></pre></figure>
-</div></li>
-
-<li class="step" id="prompt"><div class="step-n">4</div><div class="step-body">
-<h3>Paste the golden agent prompt</h3>
-<p>Add this prompt to your <code>CLAUDE.md</code> file or system instructions. It tells Claude Code to gather evidence from Open Kioku before every edit and verify changes afterward.</p>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">CLAUDE.md — golden prompt</span><button class="copy" type="button" data-copy="Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change." aria-label="Copy golden agent prompt">Copy</button></figcaption><pre class="term-body"><code>Use Open Kioku before editing. Check repo_status, search_code, get_definition,
-get_references, impact_analysis, and find_tests_for_change. Build a plan with
-plan_change first, then edit, and verify after the edit with verify_change.</code></pre></figure>
-</div></li>
-</ol>
+}</pre><button type="button" data-copy="{
+  &quot;mcpServers&quot;: {
+    &quot;open-kioku&quot;: {
+      &quot;command&quot;: &quot;ok&quot;,
+      &quot;args&quot;: [&quot;mcp&quot;, &quot;serve&quot;, &quot;--repo&quot;, &quot;/absolute/path/to/repo&quot;, &quot;--read-only&quot;]
+    }
+  }
+}">Copy</button></div></div></li>
+      <li><div class="body"><h3>Tell the agent to use it</h3><p>Add this to <code>CLAUDE.md</code>. The setup command writes managed guidance of its own; this is the short form.</p><div class="code prose"><span class="label">CLAUDE.md</span><pre>Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change.</pre><button type="button" data-copy="Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change.">Copy</button></div></div></li>
+      <li><div class="body"><h3>Turn on the hooks</h3><p>With the hooks, a boundary is planned from each prompt, a secret-like path is refused, and after an edit the agent is told which calls elsewhere no longer fit what it changed. The Claude Code plugin installs them for you.</p><div class="code"><pre>ok gate install claude --apply</pre><button type="button" data-copy="ok gate install claude --apply">Copy</button></div></div></li>
+    </ol>
+  </div>
 </section>
 
-<section aria-label="Available MCP tools">
-<div class="section-head">
-<div class="kicker">What You Get</div>
-<h2 class="section-title">MCP tools Claude Code can call after setup.</h2>
-<p class="section-copy">Every Open Kioku tool runs locally against your indexed repo. No hosted index or embeddings service required, read-only by default.</p>
-<p class="section-copy">What to expect: on a Java repository of about ten thousand files the right file is in the top five about half the time and in the context pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack nearly nine in ten and in the top five about four in five. That is the retrieval floor before exact lookups and the plan → verify loop; it is re-measured nightly against frozen baselines. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Numbers and method</a>.</p>
-</div>
-<div class="tools">
-<article class="tool tool-accent"><h3>plan_change</h3><p>Build an evidence-backed edit plan with primary context, impact candidates, validation targets, and boundary policies — before touching a single file.</p></article>
-<article class="tool tool-accent"><h3>verify_change</h3><p>After editing, verify the change stayed within the plan's boundaries and didn't break expected contracts.</p></article>
-<article class="tool"><h3>search_code</h3><p>BM25-ranked code search returning snippets with file paths, line ranges, and confidence scores.</p></article>
-<article class="tool"><h3>get_definition</h3><p>Jump to the definition of any symbol — functions, classes, types — from the local symbol index.</p></article>
-<article class="tool"><h3>get_references</h3><p>Find every reference to a symbol across the codebase using indexed graph edges, not text matching.</p></article>
-<article class="tool"><h3>impact_analysis</h3><p>Trace which modules, callers, and dependents a proposed change would affect before it happens.</p></article>
-<article class="tool"><h3>find_tests_for_change</h3><p>Identify which tests cover the files and symbols you're about to change, so the agent runs the right ones.</p></article>
-<article class="tool"><h3>repo_status</h3><p>Check index health, file counts, symbol totals, and last-indexed timestamps at a glance.</p></article>
-<article class="tool"><h3>build_context_pack</h3><p>Assemble a focused context window of relevant files, symbols, and tests for a specific task.</p></article>
-</div>
+<section>
+  <div class="wrap">
+    <div class="head">
+      <span class="eyebrow">What Claude Code can ask</span>
+      <h2>Sixteen tools, each answering one question.</h2>
+      <p>These are the ones an edit usually needs. Every tool runs against the local index and says what it could not find.</p>
+    </div>
+    <div class="table"><table><thead><tr><th>Tool</th><th>What it answers</th></tr></thead><tbody><tr><td><code>plan_change</code></td><td class="wrap-cell">An edit plan with primary context, impact candidates, validation targets and the edit boundary.</td></tr><tr><td><code>verify_change</code></td><td class="wrap-cell">The finished change checked against the plan&#x27;s boundary.</td></tr><tr><td><code>build_context_pack</code></td><td class="wrap-cell">The files, symbols and tests for one task, with confidence and caveats.</td></tr><tr><td><code>search_code</code></td><td class="wrap-cell">Ranked code search with paths, line ranges and confidence.</td></tr><tr><td><code>get_definition</code></td><td class="wrap-cell">Where a symbol is defined, from the local symbol index.</td></tr><tr><td><code>get_references</code></td><td class="wrap-cell">Where a symbol is used, from indexed relationship edges.</td></tr><tr><td><code>impact_analysis</code></td><td class="wrap-cell">What a change to a file or symbol reaches, proven edges apart from possible ones.</td></tr><tr><td><code>find_tests_for_change</code></td><td class="wrap-cell">The tests that cover what is about to change.</td></tr><tr><td><code>repo_status</code></td><td class="wrap-cell">Index health, coverage by language, and what was skipped and why.</td></tr></tbody></table></div>
+    <p class="note">What to expect: on a Java repository of about ten thousand files the right file is in the top five about half the time; on a TypeScript repository of about nine hundred files, about four times in five. That is the floor the agent starts from, re-measured nightly. <a href="index.html#measured">The numbers ↗</a> · <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/mcp-tools.md">All sixteen tools ↗</a></p>
+  </div>
 </section>
 
-<p class="back-row"><a class="back-link" href="https://www.openkioku.com/"><span aria-hidden="true">←</span><span>Back to openkioku.com</span></a></p>
-</div></main>
+<section>
+  <div class="wrap">
+    <div class="head">
+      <span class="eyebrow">Other agents</span>
+      <h2>The same server, a different client.</h2>
+    </div>
+    <div class="grid cols-3"><a class="card" href="cursor-setup.html"><h3>Cursor</h3><span class="go">Guide →</span></a><a class="card" href="codex-setup.html"><h3>Codex</h3><span class="go">Guide →</span></a><a class="card" href="gemini-cli-setup.html"><h3>Gemini CLI</h3><span class="go">Guide →</span></a></div>
+  </div>
+</section>
 
-<footer><div class="wrap foot"><div>Open Kioku — Plan before edit. Verify after edit.</div><div class="foot-links">
-<a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
-<a href="https://www.npmjs.com/package/open-kioku">npm</a>
-<a href="https://github.com/shivyadavus/open-kioku/releases">Releases</a>
-<a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/license-faq.md">License (ELv2)</a>
-<a href="https://github.com/shivyadavus/open-kioku/blob/main/CONTRIBUTING.md">Contribute</a>
-<a href="https://github.com/shivyadavus/open-kioku/blob/main/SECURITY.md">Security</a>
-</div></div></footer>
-<script src="site.js"></script>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Open Kioku · local repository evidence for coding agents</span>
+    <nav aria-label="Footer">
+      <a href="index.html">Home</a>
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/shivyadavus/open-kioku">Source</a>
+      <a href="https://github.com/shivyadavus/open-kioku/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/security-model.md">Security model</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="site.js" defer></script>
 </body>
 </html>

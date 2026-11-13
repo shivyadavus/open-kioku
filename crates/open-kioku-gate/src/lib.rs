@@ -1714,6 +1714,7 @@ pub fn attach_ripple(dossier: &mut ChangeDossier, report: &open_kioku_patch::rip
                 problem: site.problem.clone(),
                 evidence: match site.evidence {
                     SiteEvidence::Proven => "proven",
+                    SiteEvidence::Type => "by receiver type",
                     SiteEvidence::Name => "by name",
                     SiteEvidence::Possible => "possible",
                 }

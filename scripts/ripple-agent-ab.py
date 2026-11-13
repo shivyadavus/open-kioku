@@ -6,6 +6,8 @@ is the commit's parent. The prompt states the signature change and nothing else 
 its callers are. Two arms, the same prompt and tools:
 
   plain  - a clone at the parent.
+  hold   - the hooks arm with `[gate] ripple = "hold"`: a stop with a site still broken is
+           held once.
   hooks  - the same clone after `ok gate install claude --apply`, with `ok` on PATH. Every
            default applies: no configuration, no index built beforehand (the gate starts one
            in the background), nothing in the prompt about Open Kioku. With the defaults the
@@ -34,8 +36,9 @@ PROMPT = """In `{path}`, change `{name}` so that its signature is
 
     {after}
 
-It is `{before}` now. Update whatever else in this repository has to change with it. \
+It is `{before}` now. {told}\
 You cannot run code here: do not run tests or builds, and stop when the change is complete."""
+TOLD = "Update whatever else in this repository has to change with it. "
 
 
 def run(args, cwd=None, check=True, env=None):
@@ -63,22 +66,33 @@ def prepare(source, work, task, arm, ok_bin):
         raise RuntimeError(f"{dest} still holds {sha}")
     exclude = dest / ".git" / "info" / "exclude"
     exclude.write_text(exclude.read_text() + "\n.ok/\n.claude/\n")
-    if arm == "hooks":
+    if arm in ("hooks", "hold"):
         run([ok_bin, "gate", "install", "claude", "--apply"], cwd=str(dest))
+    if arm == "hold":
+        # The same hooks, set to hold a stop once on the sites still broken.
+        run([ok_bin, "init"], cwd=str(dest))
+        config = dest / "ok.toml"
+        text = config.read_text()
+        if 'ripple = "report"' not in text:
+            raise RuntimeError(f"{config} has no `ripple` setting to change")
+        config.write_text(text.replace('ripple = "report"', 'ripple = "hold"'))
+        exclude.write_text(exclude.read_text() + "ok.toml\n")
     return dest
 
 
-def agent(arm, checkout, prompt, out_dir, ok_dir, max_turns, budget):
+def agent(arm, checkout, prompt, out_dir, ok_dir, max_turns, budget, model=None):
     env = dict(os.environ)
     env["RUST_BACKTRACE"] = "0"
     tools = list(TOOLS)
-    if arm == "hooks":
+    if arm in ("hooks", "hold"):
         env["PATH"] = f"{ok_dir}:{env['PATH']}"
         tools += HOOK_TOOLS
     args = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
             "--max-turns", str(max_turns), "--max-budget-usd", str(budget),
             "--permission-mode", "acceptEdits", "--strict-mcp-config",
             "--disallowedTools", *DENY, "--allowedTools", *tools]
+    if model:
+        args += ["--model", model]
     started = time.time()
     transcript = out_dir / f"{arm}.transcript.jsonl"
     if transcript.exists() and transcript.stat().st_size > 0:
@@ -150,6 +164,10 @@ def main():
     ap.add_argument("--tasks", required=True,
                     help="JSON: [{id, repo, sha, path, name, before, after}]")
     ap.add_argument("--arms", nargs="+", default=["plain", "hooks"])
+    ap.add_argument("--model", help="the model the sessions run on; the CLI's default when absent")
+    ap.add_argument("--not-told", action="store_true",
+                    help="leave out the sentence that asks for the rest of the repository to be "
+                         "updated: the agent is given the signature change and nothing else")
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument("--budget", type=float, default=2.0)
     args = ap.parse_args()
@@ -160,7 +178,7 @@ def main():
     rows = []
     for index, task in enumerate(json.loads(Path(args.tasks).read_text())):
         source = str(Path(args.repos) / task["repo"])
-        prompt = PROMPT.format(**task)
+        prompt = PROMPT.format(**task, told="" if args.not_told else TOLD)
         row = {**task, "arms": {}}
         arms = args.arms if index % 2 == 0 else list(reversed(args.arms))
         for arm in arms:
@@ -172,7 +190,7 @@ def main():
                 continue
             checkout = prepare(source, work, task, arm, ok_bin)
             record = agent(arm, checkout, prompt, task_out, str(Path(ok_bin).parent),
-                           args.max_turns, args.budget)
+                           args.max_turns, args.budget, args.model)
             record.update(judge(source, checkout, task, ok_bin))
             done.write_text(json.dumps(record, indent=2))
             row["arms"][arm] = record

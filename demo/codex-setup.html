@@ -1,197 +1,122 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>How to Set Up Open Kioku MCP Server for Codex | openkioku.com</title>
-    <meta name="description" content="Step-by-step guide to connect Open Kioku as an MCP plugin for Codex. Give Codex local code intelligence with search, impact analysis, and edit verification — no cloud required.">
-    <meta name="keywords" content="Codex MCP plugin, Codex code intelligence, Codex MCP server setup, Codex local code search, Open Kioku Codex, MCP server Codex, Codex plugin marketplace">
-    <link rel="canonical" href="https://www.openkioku.com/codex-setup.html">
-
-    <!-- OpenGraph -->
-    <meta property="og:title" content="How to Set Up Open Kioku MCP Server for Codex">
-    <meta property="og:description" content="Codex shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
-    <meta property="og:type" content="article">
-    <meta property="og:url" content="https://www.openkioku.com/codex-setup.html">
-    <meta property="og:image" content="https://www.openkioku.com/og-image.png">
-    <meta property="og:site_name" content="Open Kioku">
-
-    <!-- Twitter Card -->
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="How to Set Up Open Kioku MCP Server for Codex">
-    <meta name="twitter:description" content="Give Codex local code intelligence with search, impact analysis, and edit verification — no cloud required.">
-    <meta name="twitter:image" content="https://www.openkioku.com/og-image.png">
-
-    <meta name="theme-color" content="#07090b">
-    <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap">
-    <link rel="stylesheet" href="site.css">
-    <script>document.documentElement.classList.add('js')</script>
-
-    <!-- JSON-LD HowTo Schema -->
-    <script type="application/ld+json">
-    {
-      "@context": "https://schema.org",
-      "@type": "HowTo",
-      "name": "How to Set Up Open Kioku MCP Server for Codex",
-      "description": "Step-by-step guide to connect Open Kioku as an MCP plugin for Codex. Give Codex local code intelligence with search, symbols, impact analysis, and edit verification.",
-      "url": "https://www.openkioku.com/codex-setup.html",
-      "image": "https://www.openkioku.com/og-image.png",
-      "totalTime": "PT2M",
-      "tool": [
-        { "@type": "HowToTool", "name": "Node.js (v18+)" },
-        { "@type": "HowToTool", "name": "npm" },
-        { "@type": "HowToTool", "name": "Codex CLI" }
-      ],
-      "step": [
-        {
-          "@type": "HowToStep",
-          "position": 1,
-          "name": "Install Open Kioku",
-          "text": "Install Open Kioku globally via npm. The wrapper pulls the native binary for your OS.",
-          "url": "https://www.openkioku.com/codex-setup.html#step-1"
-        },
-        {
-          "@type": "HowToStep",
-          "position": 2,
-          "name": "Index your repository",
-          "text": "Run ok index . from the root of your repository to build local SQLite and Tantivy indexes.",
-          "url": "https://www.openkioku.com/codex-setup.html#step-2"
-        },
-        {
-          "@type": "HowToStep",
-          "position": 3,
-          "name": "Connect Codex to Open Kioku",
-          "text": "Use the Codex plugin marketplace to install the Open Kioku plugin, or configure a manual MCP server connection.",
-          "url": "https://www.openkioku.com/codex-setup.html#step-3"
-        },
-        {
-          "@type": "HowToStep",
-          "position": 4,
-          "name": "Paste the golden agent prompt",
-          "text": "Add the recommended system prompt so Codex checks evidence before editing code.",
-          "url": "https://www.openkioku.com/codex-setup.html#step-4"
-        }
-      ]
-    }
-    </script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Connect Open Kioku to Codex as a local MCP server: evidence before edits and the diff verified against the plan. No hosted index; nothing leaves your machine." />
+<meta name="theme-color" content="#0b0d0c" />
+<link rel="canonical" href="https://www.openkioku.com/codex-setup.html" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Open Kioku" />
+<meta property="og:title" content="How to Set Up Open Kioku MCP Server for Codex | openkioku.com" />
+<meta property="og:description" content="Connect Open Kioku to Codex as a local MCP server: evidence before edits and the diff verified against the plan. No hosted index; nothing leaves your machine." />
+<meta property="og:url" content="https://www.openkioku.com/codex-setup.html" />
+<meta property="og:image" content="https://www.openkioku.com/og-image.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<title>How to Set Up Open Kioku MCP Server for Codex | openkioku.com</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+<link rel="stylesheet" href="site.css" />
 </head>
-<body>
+<body id="top" class="inner">
 <a class="skip" href="#main">Skip to content</a>
-<div class="field" aria-hidden="true"></div>
-<header class="nav-wrap"><div class="wrap"><nav aria-label="Primary navigation">
-<a href="https://www.openkioku.com/" class="brand" aria-label="Open Kioku home">
-<svg viewBox="0 0 64 64" aria-hidden="true"><ellipse cx="32" cy="32" rx="26" ry="15.5" fill="none" stroke="currentColor" stroke-width="3.4"/><path d="M25.5 24.5 18 32l7.5 7.5M38.5 24.5 46 32l-7.5 7.5" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="3.1" fill="currentColor"/></svg>
-<span>Open Kioku</span></a>
-<button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav"><span class="sr-only">Open navigation</span><span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span></button>
-<div class="nav-links" id="primary-nav">
-<details class="nav-menu"><summary>Setup Guides <span class="chev" aria-hidden="true">▾</span></summary><div class="nav-menu-list">
-<a href="https://www.openkioku.com/claude-code-setup.html">Claude Code</a>
-<a href="https://www.openkioku.com/cursor-setup.html">Cursor</a>
-<a href="https://www.openkioku.com/codex-setup.html" aria-current="page">Codex <span class="guide-badge">Current</span></a>
-<a href="https://www.openkioku.com/gemini-cli-setup.html">Gemini CLI</a>
-</div></details>
-<a class="nav-cta" href="https://github.com/shivyadavus/open-kioku">GitHub</a>
+
+<header class="top">
+  <div class="wrap">
+    <a href="index.html" class="brand" aria-label="Open Kioku home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><ellipse cx="32" cy="32" rx="26" ry="15.5" fill="none" stroke="currentColor" stroke-width="3.4"/><path d="M25.5 24.5 18 32l7.5 7.5M38.5 24.5 46 32l-7.5 7.5" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="3.1" fill="currentColor"/></svg>
+      <span>Open Kioku</span>
+    </a>
+    <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="nav"><span></span></button>
+    <nav class="nav" id="nav" aria-label="Primary">
+      <a href="index.html#how">How it works</a>
+      <a href="index.html#ripple">Ripple</a>
+      <a href="index.html#measured">Measured</a>
+      <a href="docs.html">Docs</a>
+      <a class="nav-cta" href="https://github.com/shivyadavus/open-kioku">View source ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<div class="page-head">
+  <div class="wrap">
+    <p class="crumbs"><a href="index.html">Home</a> › <a href="docs.html">Docs</a> › Codex</p>
+    <span class="eyebrow">Codex + Open Kioku</span>
+    <h1>Give Codex something to read before it edits.</h1>
+    <p class="lede">Open Kioku runs as a local MCP server. Codex asks it what a task touches, plans inside a declared boundary, and has the finished diff checked against that plan. Nothing leaves your machine.</p>
+  </div>
 </div>
-</nav></div></header>
-<main id="main" class="guide"><div class="wrap">
-<section class="guide-hero" id="top">
-<div class="pill"><span class="dot"></span> Codex + Open Kioku Setup Guide</div>
-<h1>Give Codex an <span class="accent-text">evidence&nbsp;layer</span> before it edits your codebase</h1>
-<p class="lead">Open Kioku is a local MCP server Codex reads before it edits: it shows its evidence — files, streams, confidence, caveats — declares an edit boundary in a plan, and has its diff verified against that plan. Open Kioku does not upload source.</p>
-<div class="actions">
-<a class="btn btn-primary" href="#step-1" aria-label="Jump to step 1 of the setup guide"><span>Start setup</span> <span aria-hidden="true">↓</span></a>
-<a class="btn btn-secondary" href="https://github.com/shivyadavus/open-kioku" target="_blank" rel="noopener noreferrer"><span>View on GitHub</span> <span aria-hidden="true">→</span></a>
-</div>
+
+<section>
+  <div class="wrap split">
+    <div class="head">
+      <span class="eyebrow">Setup</span>
+      <h2>Install, connect, ask for a plan.</h2>
+      <p>Indexing time depends on the size of the repository; a few thousand files take seconds. Everything is stored under the repository's own <code>.ok/</code> directory.</p>
+      <ul class="ticks">
+        <li><code>cargo install open-kioku-cli</code>, or <code>cargo binstall</code> for the prebuilt binary.</li>
+        <li>Binaries with checksums, an SBOM and provenance on <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/release-trust.md">GitHub releases ↗</a>.</li>
+        <li>The server is read-only by default: source edits remain in Codex's own workflow.</li>
+      </ul>
+    </div>
+    <ol class="steps">
+      <li><div class="body"><h3>Install Open Kioku</h3><p>The npm package pulls the native binary for macOS, Linux or Windows.</p><div class="code"><pre>npm install -g open-kioku</pre><button type="button" data-copy="npm install -g open-kioku">Copy</button></div></div></li>
+      <li><div class="body"><h3>Connect Codex</h3><p>Index the repository, then print the server entry for it. <code>ok setup agent --apply</code> is wired for Claude Code and Cursor; for Codex the entry below is the supported path.</p><div class="code"><pre>ok index .
+ok mcp install codex --repo .</pre><button type="button" data-copy="ok index .
+ok mcp install codex --repo .">Copy</button></div><p class="small muted">Paste what it prints into <code>~/.codex/config.toml</code>, or a trusted project's <code>.codex/config.toml</code>:</p><div class="code"><span class="label">config.toml</span><pre>[mcp_servers.open-kioku]
+command = &quot;ok&quot;
+args = [&quot;mcp&quot;, &quot;serve&quot;, &quot;--repo&quot;, &quot;/absolute/path/to/repo&quot;, &quot;--read-only&quot;]
+enabled = true</pre><button type="button" data-copy="[mcp_servers.open-kioku]
+command = &quot;ok&quot;
+args = [&quot;mcp&quot;, &quot;serve&quot;, &quot;--repo&quot;, &quot;/absolute/path/to/repo&quot;, &quot;--read-only&quot;]
+enabled = true">Copy</button></div></div></li>
+      <li><div class="body"><h3>Tell the agent to use it</h3><p>Add this to your Codex instructions, or paste it at the start of a session.</p><div class="code prose"><span class="label">Instructions</span><pre>Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change.</pre><button type="button" data-copy="Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change.">Copy</button></div></div></li>
+      
+    </ol>
+  </div>
 </section>
 
-<section id="step-1" aria-label="Step 1: Install">
-<div class="section-head"><div class="kicker">Step 1</div><h2 class="section-title">Install Open Kioku</h2><p class="section-copy">Install the CLI globally. The npm wrapper automatically downloads the correct native binary (Rust) for macOS, Linux, or Windows.</p></div>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal</span><button class="copy" type="button" data-copy="npm install -g open-kioku" aria-label="Copy install command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span> npm install -g open-kioku</pre></figure>
-<p class="section-copy">Requires Node.js v18 or later. The native binary handles indexing and search.</p>
-<p class="section-copy">Other channels: <code>cargo install open-kioku-cli</code> or <code>cargo binstall open-kioku-cli</code> from crates.io; binaries with checksums, an SBOM, and provenance on <a href="https://github.com/shivyadavus/open-kioku/releases">GitHub releases</a>.</p>
+<section>
+  <div class="wrap">
+    <div class="head">
+      <span class="eyebrow">What Codex can ask</span>
+      <h2>Sixteen tools, each answering one question.</h2>
+      <p>These are the ones an edit usually needs. Every tool runs against the local index and says what it could not find.</p>
+    </div>
+    <div class="table"><table><thead><tr><th>Tool</th><th>What it answers</th></tr></thead><tbody><tr><td><code>plan_change</code></td><td class="wrap-cell">An edit plan with primary context, impact candidates, validation targets and the edit boundary.</td></tr><tr><td><code>verify_change</code></td><td class="wrap-cell">The finished change checked against the plan&#x27;s boundary.</td></tr><tr><td><code>build_context_pack</code></td><td class="wrap-cell">The files, symbols and tests for one task, with confidence and caveats.</td></tr><tr><td><code>search_code</code></td><td class="wrap-cell">Ranked code search with paths, line ranges and confidence.</td></tr><tr><td><code>get_definition</code></td><td class="wrap-cell">Where a symbol is defined, from the local symbol index.</td></tr><tr><td><code>get_references</code></td><td class="wrap-cell">Where a symbol is used, from indexed relationship edges.</td></tr><tr><td><code>impact_analysis</code></td><td class="wrap-cell">What a change to a file or symbol reaches, proven edges apart from possible ones.</td></tr><tr><td><code>find_tests_for_change</code></td><td class="wrap-cell">The tests that cover what is about to change.</td></tr><tr><td><code>repo_status</code></td><td class="wrap-cell">Index health, coverage by language, and what was skipped and why.</td></tr></tbody></table></div>
+    <p class="note">What to expect: on a Java repository of about ten thousand files the right file is in the top five about half the time; on a TypeScript repository of about nine hundred files, about four times in five. That is the floor the agent starts from, re-measured nightly. <a href="index.html#measured">The numbers ↗</a> · <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/mcp-tools.md">All sixteen tools ↗</a></p>
+  </div>
 </section>
 
-<section id="step-2" aria-label="Step 2: Index">
-<div class="section-head"><div class="kicker">Step 2</div><h2 class="section-title">Index your repository</h2><p class="section-copy">Navigate to your repo root and run the index command. Open Kioku scans files, extracts symbols, builds a dependency graph, and creates local search indexes.</p></div>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal — your repo root</span><button class="copy" type="button" data-copy="ok index ." aria-label="Copy index command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span> ok index .</pre></figure>
-<p class="section-copy">Indexes are stored locally under <code>.ok/</code> in your repo. Open Kioku does not upload source.</p>
+<section>
+  <div class="wrap">
+    <div class="head">
+      <span class="eyebrow">Other agents</span>
+      <h2>The same server, a different client.</h2>
+    </div>
+    <div class="grid cols-3"><a class="card" href="claude-code-setup.html"><h3>Claude Code</h3><span class="go">Guide →</span></a><a class="card" href="cursor-setup.html"><h3>Cursor</h3><span class="go">Guide →</span></a><a class="card" href="gemini-cli-setup.html"><h3>Gemini CLI</h3><span class="go">Guide →</span></a></div>
+  </div>
 </section>
 
-<section id="step-3" aria-label="Step 3: Connect Codex">
-<div class="section-head"><div class="kicker">Step 3</div><h2 class="section-title">Connect Codex to Open Kioku</h2><p class="section-copy">Use the verified manual MCP config path. Plugin metadata is included in the repository for Codex installations that support Git-scoped plugin manifests.</p></div>
-<ol class="steps">
-<li class="step"><div class="step-n">3a</div><div class="step-body">
-<h3>Manual MCP server (Verified)</h3>
-<p>Configure the MCP stdio transport directly with a repo path pinned to the index you built in Step 2.</p>
-<div class="step-head"><span class="recommended">Verified</span></div>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">manual MCP</span><button class="copy" type="button" data-copy="ok mcp install codex --repo ." aria-label="Copy manual MCP command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span> ok mcp install codex --repo .</pre></figure>
-<p>This prints the Codex TOML config for the current repository. <code>ok setup agent --apply</code> is wired for Claude Code and Cursor today; for Codex the manual entry below is the supported path.</p>
-</div></li>
-</ol>
-<div class="divider"><span>then</span></div>
-<ol class="steps">
-<li class="step"><div class="step-n alt">3b</div><div class="step-body">
-<h3>Paste the generated TOML</h3>
-<p>The command above prints this shape. Replace the repo path with the absolute path to the repository you indexed.</p>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">codex MCP config</span><button class="copy" type="button" data-copy='[mcp_servers.open-kioku]
-command = "ok"
-args = ["mcp", "serve", "--repo", "/absolute/path/to/repo", "--read-only"]
-enabled = true' aria-label="Copy MCP TOML config">Copy</button></figcaption><pre class="term-body"><code>[mcp_servers.open-kioku]
-command = "ok"
-args = ["mcp", "serve", "--repo", "/absolute/path/to/repo", "--read-only"]
-enabled = true</code></pre></figure>
-</div></li>
-</ol>
-</section>
+</main>
 
-<section id="step-4" aria-label="Step 4: Prompt">
-<div class="section-head"><div class="kicker">Step 4</div><h2 class="section-title">Paste the golden prompt</h2><p class="section-copy">Add this system prompt to your Codex configuration or paste it at the start of a session. It tells Codex to always gather evidence before making edits.</p></div>
-<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">Golden Agent Prompt</span><button class="copy" type="button" data-copy="Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change." aria-label="Copy golden agent prompt">Copy</button></figcaption><pre class="term-body"><code>Use Open Kioku before editing. Check repo_status, search_code, get_definition,
-get_references, impact_analysis, and find_tests_for_change. Build a plan with
-plan_change first, then edit, and verify after the edit with verify_change.</code></pre></figure>
-</section>
+<footer>
+  <div class="wrap">
+    <span>Open Kioku · local repository evidence for coding agents</span>
+    <nav aria-label="Footer">
+      <a href="index.html">Home</a>
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/shivyadavus/open-kioku">Source</a>
+      <a href="https://github.com/shivyadavus/open-kioku/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/security-model.md">Security model</a>
+    </nav>
+  </div>
+</footer>
 
-<section id="tools" aria-label="Available tools">
-<div class="section-head"><div class="kicker">What You Get</div><h2 class="section-title">Tools Codex can call after setup</h2><p class="section-copy">Once connected, these MCP tools are available to Codex in every session. All tools are read-only by default and operate on local indexes.</p>
-<p class="section-copy">What to expect: on a Java repository of about ten thousand files the right file is in the top five about half the time and in the context pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack nearly nine in ten and in the top five about four in five. That is the retrieval floor before exact lookups and the plan → verify loop; it is re-measured nightly against frozen baselines. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Numbers and method</a>.</p></div>
-<div class="tools">
-<article class="tool"><h4>plan_change</h4><p>Build an evidence-backed edit plan with affected files, impact candidates, and validation targets before any code is touched.</p></article>
-<article class="tool"><h4>verify_change</h4><p>After editing, verify that changes stayed within the planned boundary and flag unexpected side effects.</p></article>
-<article class="tool"><h4>search_code</h4><p>BM25-ranked code search with file ranges, confidence scores, and snippet context. No embeddings API needed.</p></article>
-<article class="tool"><h4>impact_analysis</h4><p>Trace which files and symbols are affected by a proposed change using the local dependency graph.</p></article>
-<article class="tool"><h4>get_definition</h4><p>Jump to the exact definition of a symbol — function, class, type, or variable — across the indexed repo.</p></article>
-<article class="tool"><h4>get_references</h4><p>Find every usage and call site of a symbol using persisted graph edges, not text matching.</p></article>
-<article class="tool"><h4>find_tests_for_change</h4><p>Identify which test files and functions are relevant to a set of changed files before running the suite.</p></article>
-<article class="tool"><h4>repo_status</h4><p>Check index health, file counts, symbol coverage, and whether the repo is ready for MCP queries.</p></article>
-<article class="tool"><h4>build_context_pack</h4><p>Assemble a focused context bundle of code, symbols, and tests for a specific task or file set.</p></article>
-</div>
-</section>
-
-<section aria-label="Security guarantees">
-<div class="section-head"><div class="kicker">Security</div><h2 class="section-title">Your code stays local</h2><p class="section-copy">Open Kioku is designed for codebases people cannot upload to a hosted index. No hosted search service or embeddings API is required.</p></div>
-<ul class="trust-strip">
-<li><span class="check">✓</span><span>Local SQLite + Tantivy indexes</span></li>
-<li><span class="check">✓</span><span>MCP stdio transport only</span></li>
-<li><span class="check">✓</span><span>No source upload by Open Kioku</span></li>
-<li><span class="check">✓</span><span>Read-only by default</span></li>
-<li><span class="check">✓</span><span>Source edits stay in your normal editor</span></li>
-<li><span class="check">✓</span><span>No embeddings API required</span></li>
-</ul>
-</section>
-
-<p class="back-row"><a class="back-link" href="https://www.openkioku.com/"><span aria-hidden="true">←</span> Back to openkioku.com</a></p>
-</div></main>
-<footer><div class="wrap foot"><div>Open Kioku — Plan before edit. Verify after edit.</div><div class="foot-links">
-<a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
-<a href="https://www.npmjs.com/package/open-kioku">npm</a>
-<a href="https://github.com/shivyadavus/open-kioku/releases">Releases</a>
-<a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/license-faq.md">License (ELv2)</a>
-<a href="https://github.com/shivyadavus/open-kioku/blob/main/CONTRIBUTING.md">Contribute</a>
-<a href="https://github.com/shivyadavus/open-kioku/blob/main/SECURITY.md">Security</a>
-</div></div></footer>
-<script src="site.js"></script>
+<script src="site.js" defer></script>
 </body>
 </html>

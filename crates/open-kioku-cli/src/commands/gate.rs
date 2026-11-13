@@ -1203,7 +1203,7 @@ fn gate_ripple(
     let base = base
         .filter(|base| gate_rev_exists(repo, base))
         .map(str::to_string);
-    ripple_report(repo, base, only_files, true).ok()
+    ripple_report(repo, base, only_files, true, None).ok()
 }
 
 fn gate_rev_exists(repo: &Path, rev: &str) -> bool {

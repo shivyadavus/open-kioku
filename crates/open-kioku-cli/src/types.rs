@@ -1169,6 +1169,10 @@ struct RippleArgs {
     /// Do not read the index, even when one exists.
     #[arg(long)]
     no_index: bool,
+    /// How many broken and how many possible sites to list for each declaration; the rest are
+    /// counted.
+    #[arg(long, value_name = "N", default_value_t = 12)]
+    sites: usize,
 }
 
 #[derive(Subcommand)]

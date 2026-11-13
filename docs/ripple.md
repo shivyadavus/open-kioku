@@ -30,7 +30,7 @@ names is a site to check, not a verdict.
 
 | Where | What happens |
 |---|---|
-| `ok ripple` | Compares the working tree with `HEAD`, or with `--base <rev>` (a branch, a merge base). `--json` for the report, `--file <path>` to examine one file's declarations, `--no-index` to ignore an index. `--fail-on-broken` exits 1 when a site is broken; a run that could not be made exits 2. Writes nothing. |
+| `ok ripple` | Compares the working tree with `HEAD`, or with `--base <rev>` (a branch, a merge base). `--json` for the report, `--file <path>` to examine one file's declarations, `--no-index` to ignore an index, `--sites <n>` to list more than twelve sites per declaration. `--fail-on-broken` exits 1 when a site is broken; a run that could not be made exits 2. Writes nothing. |
 | The Claude Code hooks | After an `Edit` or `Write`, the agent is told which sites that edit broke, with each one's path, line and reason, once per set of sites. When it stops, the declarations of the files **this conversation edited** are checked again and the user is told what is still broken. No session, plan, index or configuration is involved: `ok gate install claude --apply`, or the plugin, is the setup. |
 | `ok gate ci` | The Change Dossier of a pull request carries a *Ripple* section: the broken sites by path and line with the reason, and no source text. A broken site makes a passing verdict `WARN`. |
 
@@ -70,11 +70,15 @@ declaration is reported when its signature changed or it is gone:
 | `compatible` | Only parameters with a default were added, at the end or keyword-only. Every existing call still fits. | not searched |
 | `types_only` | Same parameters in number and order (and name, where calls can name them); only types or the return type changed. | not searched: what a call passes cannot be read from its text |
 
+A JavaScript or TypeScript `const` that holds a function (`const run = (a, b) => ...`,
+`const run = function (a) {}`, a class's `run = (a) => ...`) is a function with those
+parameters, and a module's other `const` is a constant whose removal is reported.
+
 A name the file still binds is not a removal: a function that became a variable of the same
 name, a method that became an instance attribute, a declaration replaced by an import of the
 same name (`from tenacity import retry`) or kept alive by an export list
 (`export { fetchEvery as fetchAll }`), and a declaration the file still makes as another kind of
-thing. A member of a type that is itself gone is reported once, as the type.
+thing at the same level (a field of some type does not keep a function's name bound). A member of a type that is itself gone is reported once, as the type.
 
 **Sites.** The lines of the working tree that hold the declaration's name are found with `git
 grep` (tracked and untracked, not ignored), and each file with one is read through its syntax
@@ -89,8 +93,9 @@ declaration is never a call:
   it. A call that did not fit before either is `possible`: it is not a call of this declaration
   (a decorator such as `@click.command()` rewrote it), or it could not be read.
 - Code that still names a removed declaration (a call, an import, a use of a removed type) is
-  `broken`. The bare name of a removed function with no call is not counted: it is as likely a
-  field or a variable of that name.
+  `broken`. The bare name of a removed function with no call (`map(pick)`, `Args: OnlyValidArgs`)
+  is counted only where it is attributed, and otherwise left out: it is as likely a field or a
+  variable of that name.
 - Lines the search found with no identifier of the name on them, and prose and configuration
   that name a removed declaration, are counted as *mentions* and listed apart.
 
@@ -100,11 +105,11 @@ What "fits" means per language:
 |---|---|
 | Python | positional count, keyword names, required parameters, keyword-only and positional-only markers; `*args`/`**kwargs` in the declaration accept the rest |
 | TypeScript | the number of required and of accepted parameters (`?`, defaults and rest parameters read) |
-| Rust, Go, Java, C# | the parameter count (variadics and C# defaults read). A Rust path call (`Type::method(value)`) and a C# extension method called on its class (`Ext.Trim(value)`) pass the receiver as the first argument |
+| Rust, Go, Java, C# | the parameter count (variadics and C# defaults read). A Rust path call (`Type::method(value)`) and a C# extension method called on its class (`Ext.Trim(value)`) pass the receiver as the first argument. Go's `f(a, rest...)` unpacks into the variadic parameter itself, so the arguments before it are held to the parameters before it |
 | JavaScript | nothing: a missing argument is `undefined` and a surplus one is dropped, so only removals and renames are reported |
 
-A call that unpacks an argument list (`*args`, `...items`), or that sits in a part of the file
-the parser could not read, is `possible` and not counted.
+A call that unpacks an argument list (`*args`, `...items`; not Go's), or that sits in a part of
+the file the parser could not read, is `possible` and not counted.
 
 ## How a site is attributed
 
@@ -127,13 +132,34 @@ declaring module, and is `possible` (listed, not counted, never held on) otherwi
     (`cache = redis.Redis()`) leads nowhere;
   - the file is in the same Go package or Java package directory; or the language is C#, where
     a namespace is opened whole.
+- **`by receiver type`**, for a member of a type: the member is reached through something the
+  enclosing function says is of the owner's type, and that type's name leads to the declaring
+  module as a free name would have to:
+  - a parameter or a local with a written type (`cmd: Command`, `Command cmd`, `var c Command`),
+    including a Go method's own receiver (`func (c *Command) Run() { c.Out() }`);
+  - a local initialised by a constructor or a typed literal (`new Command()`, `Command{}`,
+    `&Command{}`, `new(Command)`, `Command()` in Python, `Command::new()`);
+  - in Go and Rust, the result of a function or method whose declaration says what it returns,
+    through a name or directly, to six steps: `r := NewRouter()`, `r, err := Open(path)`,
+    `NewRouter().Get(..)`, `r.NewRoute().Path(..)`, `Route::parse(text)`. The declaration is
+    found by name in the working tree; where several of the name return different types, or
+    the one the site reaches returns none this reads, nothing is settled.
+
+  A name is what the nearest function around the use that binds it says it is: a closure sees
+  the names of the function around it, and its own parameter of the same name hides them only
+  inside it. Two bindings of a name in one function that disagree settle nothing. In a language
+  with static types, assigning to a name does not change its type.
 - **`by name`, for a member of a type** (a method, or a constant declared inside it): the site
   reaches it through its own type (`Owner.method`, `Owner::method`, for a type written with a
   capital, outside Go), on the instance inside that type (`self.method`, `this.method`), or, in
   Java and C#, by its bare name inside that type. A call through `super` or `base` is the
   parent's and is not listed. A member the type no longer declares may still be inherited, so
-  where the type names a base its `self.` sites are `possible`. On any other receiver the type
-  is unknown: `possible`.
+  where the type names a base its sites are `possible`; a Go type's bases are the types it
+  embeds, which the repository declares, so there it applies only when something else declares
+  the name. On any other receiver the type is unknown: `possible`.
+- A JavaScript or TypeScript module's default export is named by its importers as they like:
+  when a default-exported declaration is renamed and the module still has a default export, a
+  file that imports the default under the old name is not naming the declaration.
 - A removed declaration whose name is declared again elsewhere may have moved there, so its
   sites are `possible`: a method that another file of the same (partial) type now declares, a
   type or a constant that anything else declares, a function that another module now binds at
@@ -149,8 +175,13 @@ declaring module, and is `possible` (listed, not counted, never held on) otherwi
 
 - It does not type-check. A changed parameter type, a changed return type, a struct field, and a
   behaviour change with the same signature are outside it.
-- It does not follow a call through a receiver of unknown type, a function passed as a value, an
-  alias (without an index), reflection or a string. Those are `possible` or not seen.
+- It does not follow a call through a receiver whose type the function around it does not say:
+  a struct field (`c.parent.Run()`), an untyped parameter, a loop variable, the result of a
+  function with no written return type, a type that only embeds or extends the owner. Nor a
+  function passed as a value under another name, an alias (without an index), reflection or a
+  string. Those are `possible` or not seen.
+- A member removed from a class that has a base is `possible` everywhere outside Go: the base
+  may be a framework's, and may declare it.
 - A name several declarations share is not attributed without an index.
 - A move to another file is not a rename: the old name's sites are listed as `possible` with a
   note that it may have moved.
@@ -169,29 +200,48 @@ a build is run, in the languages that have no compiler, and for whoever reads th
 
 ## Measured
 
-Replayed over the last 300 commits of 46 open-source repositories in seven languages, with no
-index, in two ways: on each **complete merged commit**, where anything it reports is a false
-alarm or a real leftover; and on each commit **with only the declaring file applied**, where what
-it reports can be checked against what the real commit went on to change.
+Four ways, each of which changed it. Method, every number, the false alarms by cause and the
+limits are in [`benchmarks/ripple/`](../benchmarks/ripple/README.md).
 
-- The first form of the check was run on new repositories in five rounds and changed after
-  each. In the last round (10 repositories it had not been run on, 1,615 commits that change
-  code) it named 341 sites from the declaring file alone, of which the commit then changed 333
-  and 6 more were real leftovers; the complete commits raised an alarm in 6, 2 real and 4 false.
-- An independent review then found 18 faults in it, most of them from reading a call as text,
-  and judged it not safe to hold a stop on by default. The reading was rewritten on the syntax
-  tree, and its first replay raised six more false alarms, each now a rule above with a test.
-- As shipped, on all 46 repositories (7,711 commits that change code): 913 sites named from the
-  declaring file, 896 then changed by the commit, 12 of the other 17 real leftovers and 5 in
-  tests the commit commented out instead; on the complete commits, 15 sites in 4 commits, all
-  four real. **That figure is not held out**: the rules were changed after looking at these
-  repositories, which is why the hooks report and do not hold unless asked to.
-- The four real ones are commits on the main branch of a widely used library that still named
-  something they had removed; one was still in place when its repository was cloned.
-- **Recall is not measured**: nothing here says how many broken sites it did not name.
-- On five real signature changes, a frontier model asked to update the callers left nothing
-  broken with or without the hook, so the hook's effect on that outcome is not shown. It was
-  delivered in all five sessions and cost no time.
+**On merged history**, with no index: the last 300 commits of 46 open-source repositories in
+seven languages, on each **complete commit**, where anything it reports is a false alarm or a
+real leftover, and on each commit **with only the declaring file applied**, where what it
+reports can be checked against what the commit went on to change.
 
-Method, every number, the review, the false alarms by cause and the limits are in
-[`benchmarks/ripple/`](../benchmarks/ripple/README.md).
+- As shipped, on those 46 (7,711 commits that change code): 1,411 sites named from the
+  declaring file, 1,398 then changed by the commit, 12 of the other 13 real leftovers; on the
+  complete commits, 15 sites in 4 commits, all four real. **Not held out**: the rules were
+  changed after looking at these repositories.
+- On 14 repositories it had never been run on, the check as first merged named 250 sites, 249
+  of which the commit then changed, with one false alarm on a complete commit. As shipped it
+  names 275 of 275, and one real leftover.
+- Five commits on the main branch of a widely used library still named something they had
+  removed; one was still in place when its repository was cloned.
+
+**By an independent review**, which found 18 faults in its first form, most from reading a
+call as text, and judged it not safe to hold a stop on by default. The default reports.
+
+**Against type checkers**, which is the only one of these that says what it misses: on
+835 signature changes in 15 repositories, with Go's type checker, pyright
+and `tsc` saying what each one broke:
+
+| | Sites the checker reports | Counted, as first merged | Counted, as shipped | Counted or listed as possible |
+|---|---|---|---|---|
+| Go | 1,621 | 21% | 78% | 98% |
+| Python | 774 | 28% | 37% | 81% |
+| TypeScript | 1,504 | 8% | 34% | 93% |
+| **All** | 3,899 | 18% | 53% | 93% |
+
+- The gap between the last two columns is what it sees and will not claim: a method on a
+  receiver whose type the function around it does not say. In Python that is most calls,
+  because most parameters and results carry no type.
+- Of the 2,355 sites it counted, the checker reported 2,066 itself; 282
+  more are uses in a file where the checker reported the name once and then fell silent, or in
+  code the checker does not read; the remaining 7 were read by hand
+  ([which](../benchmarks/ripple/README.md#against-type-checkers-what-it-missed)).
+- Only added parameters and renames were tried, in three languages.
+
+**With a coding agent**: on five real signature changes, with and without being asked to
+update the callers, a frontier model left nothing broken with or without the hooks, and a
+smaller model that left callers broken said so in its answer either way. The notice was
+delivered and was right; its effect on the outcome is not shown.

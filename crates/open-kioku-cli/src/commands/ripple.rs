@@ -3,7 +3,13 @@ fn handle_ripple_command(json: bool, repo: &Path, args: RippleArgs) -> anyhow::R
     let repo = gate_command_repo(repo)?;
     // Status 1 is "a site is broken" under `--fail-on-broken`; a run that could not be made
     // is 2, so a CI step can tell them apart.
-    let report = match ripple_report(&repo, Some(args.base), args.files, !args.no_index) {
+    let report = match ripple_report(
+        &repo,
+        Some(args.base),
+        args.files,
+        !args.no_index,
+        Some(args.sites),
+    ) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("ok ripple: {error:#}");
@@ -33,6 +39,7 @@ fn ripple_report(
     base: Option<String>,
     only_files: Vec<PathBuf>,
     use_index: bool,
+    sites_listed: Option<usize>,
 ) -> anyhow::Result<open_kioku_patch::ripple::RippleReport> {
     let top = gate_git_toplevel(repo).unwrap_or_else(|| repo.to_path_buf());
     let same = match (top.canonicalize(), repo.canonicalize()) {
@@ -58,7 +65,11 @@ fn ripple_report(
     } else {
         None
     };
-    let input = open_kioku_patch::ripple::RippleInput { base, only_files };
+    let input = open_kioku_patch::ripple::RippleInput {
+        base,
+        only_files,
+        sites_listed,
+    };
     Ok(open_kioku_patch::ripple::ripple(
         &top,
         store.as_ref().map(|store| store as &dyn OkStore),

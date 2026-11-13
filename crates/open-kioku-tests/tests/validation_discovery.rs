@@ -4,9 +4,10 @@
 //! callable of a test file as test code, but only what the runner discovers may be planned or
 //! satisfy validation availability.
 
-use assert_cmd::Command;
 use std::collections::BTreeMap;
 use std::path::Path;
+
+mod common;
 
 const TEST: &str = "test_file_symbol";
 const HELPER: &str = "test_file_helper";
@@ -38,8 +39,7 @@ fn indexed_copy(fixture: &str) -> tempfile::TempDir {
         repo.path(),
     );
     for args in [["init", "."], ["index", "."]] {
-        Command::cargo_bin("ok")
-            .unwrap()
+        common::ok_command()
             .current_dir(repo.path())
             .args(args)
             .assert()
@@ -78,8 +78,7 @@ fn expected(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
 }
 
 fn ok_json(repo: &Path, args: &[&str]) -> serde_json::Value {
-    let output = Command::cargo_bin("ok")
-        .unwrap()
+    let output = common::ok_command()
         .current_dir(repo)
         .args(args)
         .assert()
@@ -325,8 +324,7 @@ fn a_repository_of_only_helpers_and_hooks_has_no_validation() {
         serde_json::json!({ "helper": origins.len() }),
         "{status}"
     );
-    let audit = Command::cargo_bin("ok")
-        .unwrap()
+    let audit = common::ok_command()
         .current_dir(repo.path())
         .args(["setup", "audit", "."])
         .output()
