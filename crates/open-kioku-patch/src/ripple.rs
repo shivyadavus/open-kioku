@@ -626,6 +626,14 @@ fn script_binding(text: &str, name: &str) -> Option<ScriptBinding> {
     }
     let at = at?;
     let value = rest.get(at..)?.trim_start();
+    // `const path = require('node:path')` and `const mod = await import('./mod.js')` bring a
+    // name in; they declare nothing of this module's own.
+    let brought_in = ["require(", "await import(", "import("]
+        .iter()
+        .any(|call| value.starts_with(call));
+    if brought_in {
+        return None;
+    }
     let other = constant.then_some(ScriptBinding::Constant);
     // `fetch: (request: Request, env?: Env) => Response = (request, env) => ...`: which
     // parameters may be left out is written in the annotation, not in the value. A function
@@ -1342,6 +1350,46 @@ const BUILTIN_NAMES: &[&str] = &[
     "list", "make", "map", "max", "min", "new", "next", "open", "panic", "print", "println",
     "range", "recover", "repr", "round", "set", "sorted", "str", "sum", "tuple", "type", "vars",
     "zip",
+];
+
+/// Names a JavaScript or TypeScript file can use with no declaration of its own: the browser's
+/// and Node's globals. A removed declaration of one of these names leaves its uses resolving.
+const SCRIPT_GLOBALS: &[&str] = &[
+    "name",
+    "length",
+    "status",
+    "event",
+    "location",
+    "top",
+    "self",
+    "parent",
+    "origin",
+    "history",
+    "screen",
+    "process",
+    "console",
+    "module",
+    "exports",
+    "require",
+    "global",
+    "fetch",
+    "document",
+    "window",
+    "navigator",
+    "performance",
+    "crypto",
+    "close",
+    "open",
+    "stop",
+    "focus",
+    "blur",
+    "print",
+    "find",
+    "scroll",
+    "frames",
+    "opener",
+    "closed",
+    "external",
 ];
 
 /// Byte offsets of `name` as a whole word in `text`.
@@ -2398,8 +2446,17 @@ fn classify_sites(
         // A member the type no longer declares may still be inherited from a base. A Go type's
         // bases are the types it embeds, which the repository declares: with no other
         // declaration of the name anywhere, none of them has it.
-        let inherited =
-            removed && target.owner_has_bases && (site_language != Language::Go || shared);
+        // And a call that no longer fits a changed member of such a type may be a call of an
+        // overload a base declares, when anything else declares the name.
+        let inherited = target.owner_has_bases
+            && if removed {
+                site_language != Language::Go || shared
+            } else {
+                shared
+            };
+        let builtin = builtin
+            || (matches!(site_language, Language::JavaScript | Language::TypeScript)
+                && SCRIPT_GLOBALS.contains(&name));
         let typed = !found.in_error
             && !builtin
             && !unsettled
@@ -3976,10 +4033,12 @@ mod tests {
         );
     }
 
-    /// False alarms the held-out replay raised once more sites were followed: a C# primary
-    /// constructor in place of a written one, an object key and a struct field that carry a
-    /// removed function's name, an arrow property whose optional parameters stand in its type
-    /// annotation, and the uses behind a module that re-exports a renamed name.
+    /// False alarms the replays raised once more sites were followed: a C# primary constructor
+    /// in place of a written one, an object key and a struct field that carry a removed
+    /// function's name, an arrow property whose optional parameters stand in its type
+    /// annotation, the uses behind a module that re-exports a renamed name, a Go method moved
+    /// to another file of its type, a `require` rewritten, a constant named as a global is, a
+    /// Rust macro body, and an overload a base class still declares.
     #[test]
     fn what_only_looks_like_a_use_of_a_removed_declaration_is_not_counted() {
         let temp = changed(
@@ -4000,6 +4059,27 @@ mod tests {
                 (
                     "web/base.ts",
                     "class Hono {\n  fetch: (request: Request, env?: Env, ctx?: Ctx) => Response = (request, ...rest) => {\n    return go(request, rest);\n  }\n}\n\nfunction serve(app: Hono, req: Request) {\n  return app.fetch(req, {});\n}\n",
+                ),
+                (
+                    "cfg/viper.go",
+                    "package cfg\n\ntype Viper struct{}\n\nfunc (v *Viper) find() int {\n\treturn 1\n}\n\nfunc (v *Viper) Read() int {\n\treturn v.find()\n}\n",
+                ),
+                ("cfg/remote.go", "package cfg\n"),
+                (
+                    "watch.cjs",
+                    "const isInside = require('is-inside');\nconst name = 'x';\n\nmodule.exports = (a) => isInside(a) + name;\n",
+                ),
+                (
+                    "src/evidence.rs",
+                    "pub fn negative_count(a: u8) -> u8 {\n    a\n}\n\npub struct Pack {\n    pub negative_count: u8,\n}\n\npub fn pack(a: u8) -> Pack {\n    Pack {\n        negative_count: a,\n    }\n}\n\nmacro_rules! cases {\n    () => {\n        fn negative_count() {}\n    };\n}\n",
+                ),
+                (
+                    "Query.cs",
+                    "class Query {\n    public bool IsMatch(int a, int b) {\n        return true;\n    }\n}\n",
+                ),
+                (
+                    "Composite.cs",
+                    "class Composite : Query {\n    public bool IsMatch(int a, int b, int c) {\n        return true;\n    }\n\n    static bool Use(Composite q) {\n        return q.IsMatch(1, 2);\n    }\n}\n",
                 ),
                 ("web/lib/merge.ts", "export const replaceOption = (a: number) => a;\n"),
                 ("web/index.ts", "export {replaceOption} from './lib/merge.js';\n"),
@@ -4026,6 +4106,30 @@ mod tests {
                     Some("class Hono {\n  fetch: (request: Request, env?: Env, ctx?: Ctx) => Response = (request, env, ctx) => {\n    return go(request, env, ctx);\n  }\n}\n\nfunction serve(app: Hono, req: Request) {\n  return app.fetch(req, {});\n}\n"),
                 ),
                 ("web/lib/merge.ts", Some("export const replaceWith = (a: number) => a;\n")),
+                // A method moved to another file of its type.
+                (
+                    "cfg/viper.go",
+                    Some("package cfg\n\ntype Viper struct{}\n\nfunc (v *Viper) Read() int {\n\treturn v.find()\n}\n"),
+                ),
+                (
+                    "cfg/remote.go",
+                    Some("package cfg\n\nfunc (v *Viper) find() int {\n\treturn 1\n}\n"),
+                ),
+                // A `require` in another form, and a constant named as a global is.
+                (
+                    "watch.cjs",
+                    Some("const {default: isInside} = require('is-inside');\n\nmodule.exports = (a) => isInside(a) + name;\n"),
+                ),
+                // A function renamed, where a struct field and a macro body carry its name.
+                (
+                    "src/evidence.rs",
+                    Some("pub fn negative_signal_count(a: u8) -> u8 {\n    a\n}\n\npub struct Pack {\n    pub negative_count: u8,\n}\n\npub fn pack(a: u8) -> Pack {\n    Pack {\n        negative_count: a,\n    }\n}\n\nmacro_rules! cases {\n    () => {\n        fn negative_count() {}\n    };\n}\n"),
+                ),
+                // A member whose base still declares the two-argument overload.
+                (
+                    "Composite.cs",
+                    Some("class Composite : Query {\n    public bool IsMatch(int a, int b, int c, int d) {\n        return true;\n    }\n\n    static bool Use(Composite q) {\n        return q.IsMatch(1, 2);\n    }\n}\n"),
+                ),
             ],
         );
         let report = report(&temp);
@@ -4043,10 +4147,18 @@ mod tests {
             report.to_text()
         );
         // What takes the name from the re-exporting module is broken only if that is not
-        // mended.
+        // mended; an overload a base may still declare, a method that moved to another file of
+        // its type, and a name that is also a global, are listed and not counted. The struct
+        // field and the macro body are not listed at all.
         assert_eq!(
             possible(&report),
-            vec!["web/test.ts:1", "web/test.ts:3"],
+            vec![
+                "Composite.cs:7",
+                "cfg/viper.go:6",
+                "watch.cjs:3",
+                "web/test.ts:1",
+                "web/test.ts:3"
+            ],
             "{}",
             report.to_text()
         );

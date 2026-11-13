@@ -403,6 +403,8 @@ fn binds_by_position(node: Node<'_>, parent: Node<'_>) -> bool {
         | "short_var_declaration"
         | "assignment_statement" => field == Some("left"),
         "arrow_function" => field == Some("parameter"),
+        // `const {default: isInside} = require(..)` binds `isInside`.
+        "pair_pattern" => field == Some("value"),
         "with_item" | "as_pattern" | "as_pattern_target" | "catch_clause" => true,
         // `a, b := f()` and `a, b = f()`: the list is the left side.
         "expression_list" => parent.parent().is_some_and(|grand| {
@@ -448,6 +450,8 @@ fn classify(language: &Language, node: Node<'_>, source: &[u8]) -> NameUse {
     // The key of an object or struct literal (`{authorization: token}`, `Command{Args: run}`)
     // names a property or a field, not whatever else is called that.
     let literal_key = (parent.kind() == "pair" && parent.child_by_field_name("key") == Some(node))
+        || (parent.kind() == "field_initializer"
+            && parent.child_by_field_name("field") == Some(node))
         || (parent.kind() == "literal_element"
             && parent.parent().is_some_and(|element| {
                 element.kind() == "keyed_element" && element.named_child(0) == Some(parent)
@@ -465,7 +469,8 @@ fn classify(language: &Language, node: Node<'_>, source: &[u8]) -> NameUse {
         // whole module.
         let (callable, ty) = enclosing(parent, source);
         found.within_callable = callable;
-        found.within_type = ty;
+        // A Go method is declared outside its type: the type is its receiver's.
+        found.within_type = ty.or_else(|| go_method_type(parent, source));
         return found;
     }
 
@@ -1049,12 +1054,27 @@ fn arguments_of(language: &Language, arguments: Option<Node<'_>>, source: &[u8])
 fn in_error(node: Node<'_>) -> bool {
     let mut current = Some(node);
     while let Some(here) = current {
-        if here.is_error() || here.is_missing() {
+        // A Rust macro's body is tokens, not a tree: what a name is there is not read.
+        if here.is_error() || here.is_missing() || here.kind() == "token_tree" {
             return true;
         }
         current = here.parent();
     }
     false
+}
+
+/// The type a Go method is declared on: `Command` of `func (c *Command) Run()`.
+fn go_method_type(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.kind() != "method_declaration" {
+        return None;
+    }
+    let receiver = node
+        .child_by_field_name("receiver")?
+        .utf8_text(source)
+        .ok()?;
+    let inner = receiver.trim_matches(['(', ')']);
+    let named = inner.split_whitespace().last().unwrap_or(inner);
+    Some(last_segment(named.trim_start_matches('*')))
 }
 
 /// The innermost callable and the innermost type around `node`, by name.
