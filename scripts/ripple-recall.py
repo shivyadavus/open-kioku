@@ -20,7 +20,8 @@ No project code is run: the checkers read source. Checkers used:
               program built from scripts/ripple-recall-gocheck.go; `go build` stops at the
               first package that fails, which hides the callers in the packages after it)
   python      pyright, basic mode, with its own configuration so a repository's cannot narrow it
-  typescript  tsc --noEmit --strict over every .ts/.tsx file, with its own configuration and no
+  typescript  tsc --noEmit --strict over every .ts/.tsx file, with its own configuration
+              (bundler module resolution, so `./x` and `./x.js` both find `x.ts`) and no
               installed dependencies (their types are `any`; calls inside the repository are
               still checked)
 
@@ -234,7 +235,7 @@ def check_typescript(repo, args):
     if not config.exists():
         config.write_text(json.dumps({
             "compilerOptions": {"noEmit": True, "strict": True, "target": "es2022",
-                                "module": "nodenext", "moduleResolution": "nodenext",
+                                "module": "esnext", "moduleResolution": "bundler",
                                 "skipLibCheck": True, "types": [], "jsx": "preserve",
                                 "allowImportingTsExtensions": True},
             "include": [repo + "/**/*.ts", repo + "/**/*.tsx"],

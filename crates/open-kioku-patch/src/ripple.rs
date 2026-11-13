@@ -2066,8 +2066,8 @@ impl SiteFiles<'_> {
     }
 
     /// The module a JavaScript or TypeScript file imports `name` from, when that module is not
-    /// the declaring one and itself names `name` in an import or an export list: the site
-    /// then depends on that re-export, which is the place the change broke.
+    /// the declaring one and itself names `name` in an import or an export list, or declares a
+    /// `name` of its own: the site then depends on that module, not on the changed declaration.
     fn through_a_reexport(&self, site: &str, name: &str, declaring: &str) -> Option<String> {
         let facts = self.facts.get(site)?.as_ref()?;
         let base = directory(site).unwrap_or_default();
@@ -2121,13 +2121,21 @@ impl SiteFiles<'_> {
             if resolved == declaring || resolved == site {
                 return None;
             }
-            let reexports = self
+            // That module names it in an import or an export list, or declares one of its own.
+            let stands_between = self
                 .facts
                 .get(&resolved)
                 .and_then(Option::as_ref)
                 .and_then(|facts| facts.uses.get(name))
-                .is_some_and(|uses| uses.iter().any(|found| found.kind == NameUseKind::Import));
-            if reexports {
+                .is_some_and(|uses| {
+                    uses.iter().any(|found| {
+                        found.kind == NameUseKind::Import
+                            || (matches!(found.kind, NameUseKind::Declaration { .. })
+                                && found.within_callable.is_none()
+                                && found.within_type.is_none())
+                    })
+                });
+            if stands_between {
                 return Some(resolved);
             }
         }
@@ -4083,6 +4091,12 @@ mod tests {
                     "class Composite : Query {\n    public bool IsMatch(int a, int b, int c) {\n        return true;\n    }\n\n    static bool Use(Composite q) {\n        return q.IsMatch(1, 2);\n    }\n}\n",
                 ),
                 ("web/lib/merge.ts", "export const replaceOption = (a: number) => a;\n"),
+                ("web/adapters/bun/server.ts", "export const getServer = (c: number) => c;\n"),
+                ("web/src/bun/server.ts", "export const getServer = (c: number) => c;\n"),
+                (
+                    "web/src/bun/info.ts",
+                    "import {getServer} from './server';\n\nexport const info = getServer(1);\n",
+                ),
                 ("web/index.ts", "export {replaceOption} from './lib/merge.js';\n"),
                 (
                     "web/test.ts",
@@ -4107,6 +4121,11 @@ mod tests {
                     Some("class Hono {\n  fetch: (request: Request, env?: Env, ctx?: Ctx) => Response = (request, env, ctx) => {\n    return go(request, env, ctx);\n  }\n}\n\nfunction serve(app: Hono, req: Request) {\n  return app.fetch(req, {});\n}\n"),
                 ),
                 ("web/lib/merge.ts", Some("export const replaceWith = (a: number) => a;\n")),
+                // One of two copies of a module changes; the other copy's callers are its own.
+                (
+                    "web/adapters/bun/server.ts",
+                    Some("export const getServer = (c: number, d: number) => c;\n"),
+                ),
                 // A method moved to another file of its type.
                 (
                     "cfg/viper.go",
@@ -4157,6 +4176,7 @@ mod tests {
                 "Composite.cs:7",
                 "cfg/viper.go:6",
                 "watch.cjs:3",
+                "web/src/bun/info.ts:3",
                 "web/test.ts:1",
                 "web/test.ts:3"
             ],
