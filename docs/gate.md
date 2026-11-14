@@ -13,7 +13,7 @@ Who declared the task decides how binding the boundary is:
 
 | Declared by | How | The boundary |
 |---|---|---|
-| Nobody: the prompt | the hooks alone (`auto`, the default) | **advisory**: files outside it are reported and recorded, and are not a failure; forbidden paths are still denied |
+| Nobody: the prompt | the hooks alone (`auto`, the default) | **advisory**: files outside it are recorded for the dossier, not said to the agent, and are not a failure; forbidden paths are still denied |
 | The repository | `mode = "enforce"` in `ok.toml` | binding for every session, prompt-started ones included, from the next tool call after it is set |
 | A person | `ok gate start "<task>"` | binding: a failing change holds the agent at stop; `enforce` also denies at the edit |
 | Nobody: a pull request's words | `ok gate ci --base … --task "<title>"` | **advisory**: files outside it are listed in the dossier; a forbidden path fails the check |
@@ -49,8 +49,13 @@ A session started this way is **advisory**. Its boundary is a plan built from th
 words, and a plan cannot tell a task from a remark: measured on this repository, `"fix it"` and
 `"try again"` plan with the same High confidence as a real commit subject
 ([`benchmarks/gate/`](../benchmarks/gate/README.md)). So the gate does not hold an agent to a
-boundary nobody declared. It tells the agent which edits fall outside it, with
-`ok gate expand <path> --reason "<why>"` as the way to record why one belongs; it denies the
+boundary nobody declared, and it does not tell the agent which edits fall outside it: over
+twenty sessions fixing real Django tickets, 142 of 148 such notices were about a file the real
+fix changed, and the smaller model took 36.6 turns a task answering them against about 25
+without
+([`benchmarks/agent-ab/large-repository.md`](../benchmarks/agent-ab/large-repository.md)). The
+edit is recorded as outside, and `ok gate expand <path> --reason "<why>"` still records why one
+belongs. It denies the
 paths that are forbidden by policy rather than by plan (secrets, key material, generated code,
 dependencies, the index); and it writes the dossier, which lists every changed file outside the
 boundary under *Outside the planned boundary* and gives `WARN`, not `FAIL`, for them. A verdict
@@ -167,7 +172,7 @@ is `ok gate hook <event>`: it reads the harness's JSON on stdin and answers on s
 | Hook | Event | What it does |
 |---|---|---|
 | `pre-tool` | `PreToolUse` on `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | Classifies each path against the boundary. Denies a forbidden path in every mode but `observe`; denies an outside path in `enforce`; records each denial to `.ok/gate/events.jsonl`. Never opens the index: one small JSON read per edit. |
-| `post-tool` | `PostToolUse`, same tools | Records the edit now that it has happened (a call the user refused or that failed is not an edit) and, after one outside or on a caution path, tells the agent so, with the command that widens the boundary. With or without a session, it also tells the agent which calls elsewhere look as if they no longer fit a function the edit changed, and which code still names something it removed ([ripple](ripple.md)), once per set of such sites, and remembers the file as one the conversation edited. |
+| `post-tool` | `PostToolUse`, same tools | Records the edit now that it has happened (a call the user refused or that failed is not an edit) and, in a session someone declared, after one outside or on a caution path, tells the agent so, with the command that widens the boundary (an advisory session records it and says nothing). With or without a session, it also tells the agent which calls elsewhere look as if they no longer fit a function the edit changed, and which code still names something it removed ([ripple](ripple.md)), once per set of such sites, and remembers the file as one the conversation edited. |
 | `pre-tool`, `post-tool` | `PreToolUse` / `PostToolUse` on `Bash` | A shell command can write files the edit tools never see. Before it runs, the paths it names as write targets (`>`/`>>` redirections, `tee`, `sed -i`, `cp`/`mv` destinations, `touch`, `rm`, `git mv`/`git rm`) are judged like edits, and a dirty-tree snapshot is taken; a target outside the repository (`/tmp`, `/dev/null`) is not the gate's concern. After it runs, every path that became dirty and was not named is recorded in the trail and, when outside the boundary, reported to the agent. A write that already landed is recorded as warned, never denied. |
 | `stop` | `Stop` | With or without a session, checks the [ripple](ripple.md) of the files the conversation edited and tells the user what is still broken; with `ripple = "hold"` it holds the agent once on those sites, naming each. Then, in a session: verifies the change and writes the dossier. On `FAIL` in a binding session it holds the agent with the violations and the remedies; when `stop_hook_active` is set (the agent is already continuing because of a stop hook) it reports and never blocks again, so a condition the agent cannot resolve cannot loop. In an advisory session and in `observe` it reports and never holds. A stop with nothing changed since the last verification answers from that verification instead of opening the index again; a prompt-started session that has changed nothing is not verified at all. A session stays open after a stop. A plan still being built for the conversation is waited for (up to twelve seconds), so what the turn edited is judged now; a planner that outlasts the wait is left to finish, and the next stop or the end of the conversation judges those edits against the baseline the prompt recorded. |
 | `prompt`, `session-start` | `UserPromptSubmit`, `SessionStart` | With `auto`: index the repository in the background when it has none; on a prompt, plan in the background, starting a session or widening the conversation's (a slash command, a `!` or `#` line, or a prompt under three characters is not a task; a prompt whose plan has Low confidence starts nothing and changes nothing). The prompt reaches the planner through a marker file, never a command line. A session started by hand is never touched. Otherwise one factual line: whether a session is active, its task and boundary size, and how to widen it. |
@@ -204,7 +209,7 @@ The expansion and its reason are recorded in the Change Dossier.
 | Mode | Outside the boundary | Caution path | Forbidden path |
 |---|---|---|---|
 | `enforce` | denied until widened | allowed, reported | denied |
-| `warn` (default) | allowed, reported; in a declared session verification fails, which holds the agent at stop; in an advisory one it is listed and the verdict is `WARN` | allowed, reported | denied |
+| `warn` (default) | allowed, reported; in a declared session verification fails, which holds the agent at stop; in an advisory one it is recorded without a word to the agent, listed, and the verdict is `WARN` | allowed, reported | denied |
 | `observe` | allowed, recorded; listed in the dossier, never a failure in an advisory session | allowed, recorded | allowed, recorded |
 
 Set the defaults in `ok.toml`:

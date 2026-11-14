@@ -1,0 +1,109 @@
+[
+ {
+  "sha": "0804aed32017f835eb8aa7cf053a935f5bea7c7f",
+  "subject": "Fixed #35899 -- Allowed multiline template tags.",
+  "labels": [
+   "template_tests.syntax_tests.test_basic",
+   "template_tests.syntax_tests.test_comment",
+   "template_tests.syntax_tests.test_named_endblock",
+   "template_tests.syntax_tests.test_partials",
+   "template_tests.syntax_tests.test_verbatim",
+   "template_tests.test_base"
+  ],
+  "status": "usable"
+ },
+ {
+  "sha": "5c13b5a19864807cae7266339554c14e151e5961",
+  "subject": "Fixed #37232 -- Added support for the HTTP QUERY method.",
+  "labels": [
+   "admin_views.tests",
+   "conditional_processing.tests",
+   "csrf_tests.tests",
+   "decorators.test_http",
+   "generic_views.test_base",
+   "middleware.tests",
+   "test_client.tests"
+  ],
+  "status": "usable"
+ },
+ {
+  "sha": "9e06baf2e4dd17834b5deaf3a3e6ae3bff2fcf26",
+  "subject": "Fixed #37066 -- Wrapped async iteration sites in (maybe_)aclosing.",
+  "labels": [
+   "async.tests",
+   "httpwrappers.tests",
+   "pagination.tests",
+   "test_client.tests",
+   "utils_tests.test_text"
+  ],
+  "status": "usable"
+ },
+ {
+  "sha": "a013c821ea7838a953869615b0bdcfdb298cc09f",
+  "subject": "Fixed #37177 -- Reduced per-middleware context switching under ASGI.",
+  "labels": [
+   "middleware_exceptions.tests"
+  ],
+  "status": "usable"
+ },
+ {
+  "sha": "0398417c503e9f32674b36865abc54e575e8bcd7",
+  "subject": "Fixed #36523 -- Added django.utils.module_loading.qualname() helper.",
+  "labels": [
+   "utils_tests.test_module_loading"
+  ],
+  "status": "usable"
+ },
+ {
+  "sha": "537c6df3e641ebc21e9da76c86aea4d36e6a32e2",
+  "subject": "Fixed #32915 -- Suppressed fewer ImportErrors in management commands.",
+  "labels": [
+   "admin_scripts.tests",
+   "settings_tests.tests"
+  ],
+  "status": "unusable"
+ },
+ {
+  "sha": "5f90dc2468bc52373efe4b231c4eb383b3f1edd2",
+  "subject": "Fixed #37178 -- Moved MiddlewareMixin out of utils.deprecation.",
+  "labels": [
+   "deprecation.test_middleware_mixin"
+  ],
+  "status": "usable"
+ },
+ {
+  "sha": "65a9f14196c338d70889bd54753370606b3fb4eb",
+  "subject": "Fixed #36864 -- Supported modules and submodules in import_string().",
+  "labels": [
+   "auth_tests.test_models",
+   "auth_tests.test_validators",
+   "utils_tests.test_module_loading"
+  ],
+  "status": "usable"
+ },
+ {
+  "sha": "99a14b6be85793f3371779cd9bf6fb9d9247f475",
+  "subject": "Fixed #37161 -- Warned via system check on missing \"default\" entry in MAILERS setting.",
+  "labels": [
+   "check_framework.test_mail"
+  ],
+  "status": "usable"
+ },
+ {
+  "sha": "f970a98e464320c09dde8d45009eadfb4d038a57",
+  "subject": "Fixed #37142 -- Moved django_file_prefixes() to django.utils.warnings.",
+  "labels": [
+   "deprecation.tests",
+   "utils_tests.test_warnings"
+  ],
+  "status": "usable"
+ },
+ {
+  "sha": "4bbc27c8686f10f9556cef02dbfa9f5157fbcf56",
+  "subject": "Fixed #36492 -- Restored exact boolean lookup against literals on SQLite.",
+  "labels": [
+   "lookup.tests"
+  ],
+  "status": "usable"
+ }
+]

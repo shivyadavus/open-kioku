@@ -10,6 +10,12 @@ A second measurement, on a repository that is not Open Kioku and with the agent 
 the agent produces, costs about six seconds a task, and that the forbidden-path policy did not
 hold without a session until it was fixed.
 
+A third, on a large repository with the task's tests as the judge, is in
+[`large-repository.md`](large-repository.md): ten real Django fixes, two models, 80 sessions.
+Every task was solved with and without the plugin at the same cost, the agent never called the
+plugin's tools, and the gate's notices about a boundary planned from the prompt were wrong 142
+times in 148 and cost the smaller model turns, which changed what an advisory session says.
+
 ## Method
 
 Six real commits of this repository. For each, a clone checked out at the commit's parent and

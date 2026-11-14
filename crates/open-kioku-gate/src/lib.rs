@@ -410,6 +410,21 @@ impl GateSession {
         }
     }
 
+    /// Whether the agent is told about a decision once the edit is made. A denial always is.
+    /// A warning is, in a session someone declared. In an advisory session the boundary was
+    /// planned from a prompt nobody declared as one, so an edit outside it, or on a caution
+    /// or sibling path, is recorded for the dossier and not said to the agent: over twenty
+    /// sessions fixing real Django tickets, 142 of 148 such notices were about a file the
+    /// real fix changed, and the smaller model took 36.6 turns a task answering them against
+    /// about 25 without (`benchmarks/agent-ab/large-repository.md`). A forbidden path is said in any session.
+    pub fn tells_agent(&self, decision: &PathDecision) -> bool {
+        match decision.action {
+            HookAction::Allow => false,
+            HookAction::Deny => true,
+            HookAction::Warn => !self.advisory || decision.class == PathClass::Forbidden,
+        }
+    }
+
     /// Decide one edit. The path is repository-relative.
     pub fn decide(&self, path: &str) -> PathDecision {
         let path = normalize_str(path);
@@ -2583,6 +2598,15 @@ mod tests {
         assert!(outside.reason.contains("ok gate expand src/other.rs"));
         assert_eq!(s.decide(".env").action, HookAction::Deny);
         assert_eq!(s.decide("src/auth.rs").action, HookAction::Allow);
+        // The outside edit is recorded as warned and not said to the agent: the boundary is
+        // a guess from the prompt. A denial is said, and so is a warning in a session someone
+        // declared.
+        assert!(!s.tells_agent(&outside));
+        assert!(!s.tells_agent(&s.decide("tests/auth_flow.rs")));
+        assert!(s.tells_agent(&s.decide(".env")));
+        let declared = session(GateMode::Warn);
+        assert!(declared.tells_agent(&declared.decide("src/other.rs")));
+        assert!(!declared.tells_agent(&declared.decide("src/auth.rs")));
         let dossier = build_dossier("demo", &s, &plan(), &[], 0, &ChangeInput::default(), None);
         assert!(dossier
             .caveats
