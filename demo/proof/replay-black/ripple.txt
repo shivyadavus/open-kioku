@@ -1,0 +1,23 @@
+Ripple: 6 site(s) no longer fit 1 changed declaration(s).
+
+src/black/cache.py:52  function `get_cache_file`: signature changed
+  - def get_cache_file(mode: Mode)
+  + def get_cache_file(mode: Mode, cache_dir: Path)
+  broken: 6 site(s)
+    tests/test_black.py:2663 (in TestCaching.test_cache_file_length)  cache_file = get_cache_file(case)
+        does not pass `cache_dir`, which is required now [proven]
+    tests/test_black.py:2673 (in TestCaching.test_cache_file_path_ignores_python_cell_magic_separators)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+    tests/test_black.py:2682 (in TestCaching.test_cache_broken_file)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+    tests/test_black.py:2694 (in TestCaching.test_cache_empty_file)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+    tests/test_black.py:2743 (in TestCaching.test_no_cache_when_writeback_diff)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+    tests/test_black.py:2773 (in TestCaching.test_no_cache_when_stdin)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  1 other call(s) fit the new signature
+
+2 changed declaration(s) with nothing to act on:
+  src/black/cache.py:31  `get_cache_dir`: only optional parameters added
+  src/black/cache.py:63  `Cache.read`: only optional parameters added

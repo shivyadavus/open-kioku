@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="A real commit to Black, stopped halfway: Open Kioku names the six calls the change left broken, and the finished commit confirms each one." />
+<meta name="theme-color" content="#0b0d0c" />
+<link rel="canonical" href="https://www.openkioku.com/see-it-work.html" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Open Kioku" />
+<meta property="og:title" content="Open Kioku — see it work on a real commit" />
+<meta property="og:description" content="A real commit to Black, stopped halfway: Open Kioku names the six calls the change left broken, and the finished commit confirms each one." />
+<meta property="og:url" content="https://www.openkioku.com/see-it-work.html" />
+<meta property="og:image" content="https://www.openkioku.com/og-image.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<title>Open Kioku — see it work on a real commit</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+<link rel="stylesheet" href="site.css" />
+</head>
+<body id="top" class="inner">
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="wrap">
+    <a href="index.html" class="brand" aria-label="Open Kioku home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><ellipse cx="32" cy="32" rx="26" ry="15.5" fill="none" stroke="currentColor" stroke-width="3.4"/><path d="M25.5 24.5 18 32l7.5 7.5M38.5 24.5 46 32l-7.5 7.5" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="3.1" fill="currentColor"/></svg>
+      <span>Open Kioku</span>
+    </a>
+    <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="nav"><span></span></button>
+    <nav class="nav" id="nav" aria-label="Primary">
+      <a href="index.html#how">How it works</a>
+      <a href="index.html#ripple">Ripple</a>
+      <a href="see-it-work.html" aria-current="page">See it work</a>
+      <a href="index.html#measured">Measured</a>
+      <a href="docs.html">Docs</a>
+      <a class="nav-cta" href="https://github.com/shivyadavus/open-kioku">View source ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<div class="page-head">
+  <div class="wrap">
+    <p class="crumbs"><a href="index.html">Home</a> › See it work</p>
+    <span class="eyebrow">See it work</span>
+    <h1>A real commit, stopped halfway.</h1>
+    <p class="lede">A commit to Black, the Python formatter, gave one function a new required parameter and updated every caller. We stop that commit halfway, with the function changed and the callers not yet, and ask Open Kioku what is broken. The finished commit is the answer key.</p>
+  </div>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="stats" style="margin-top:0">
+      <div><b>6 of 6</b><span>call sites it named are lines the real commit went on to change</span></div>
+      <div><b>0.2 s</b><span>to name them, on a repository of 504 files</span></div>
+      <div><b>0</b><span>builds, test runs or type checkers involved</span></div>
+      <div><b>26 s</b><span>for one recorded Claude Code session to make the change and leave nothing broken</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="change">
+  <div class="wrap">
+    <div class="head">
+      <span class="eyebrow">1 · The change</span>
+      <h2>One function gets a required parameter.</h2>
+      <p>Python imports this file without complaint. Each call that still passes one argument fails only when it runs.</p>
+    </div>
+    <div class="code"><span class="label">src/black/cache.py</span><pre>-def get_cache_file(mode: Mode) -&gt; Path:
+-    return CACHE_DIR / f&quot;cache.{mode.get_cache_key()}.pickle&quot;
++def get_cache_file(mode: Mode, cache_dir: Path) -&gt; Path:
++    return cache_dir / f&quot;cache.{mode.get_cache_key()}.pickle&quot;</pre><button type="button" data-copy="-def get_cache_file(mode: Mode) -&gt; Path:
+-    return CACHE_DIR / f&quot;cache.{mode.get_cache_key()}.pickle&quot;
++def get_cache_file(mode: Mode, cache_dir: Path) -&gt; Path:
++    return cache_dir / f&quot;cache.{mode.get_cache_key()}.pickle&quot;">Copy</button></div>
+    <p class="note"><a href="https://github.com/psf/black/commit/1ed66a8b3385a000508a03158ac3dc2a8a75a209">psf/black 1ed66a8b33, “Add --cache-dir command-line option” ↗</a></p>
+  </div>
+</section>
+
+<section id="ripple">
+  <div class="wrap">
+    <div class="head">
+      <span class="eyebrow">2 · Ask what it broke</span>
+      <h2>Ripple names every call the change left behind.</h2>
+      <p>It reads the working tree against the last commit and the index of the repository. Nothing is built and nothing is run.</p>
+    </div>
+    <div class="term"><div class="term-bar"><i></i><i></i><i></i><span>psf/black · ok ripple · recorded output, 0.2 s</span></div>
+<pre tabindex="0"><span class="c">$</span> <span class="w">ok ripple</span>
+Ripple: <span class="b">6 site(s)</span> no longer fit 1 changed declaration(s).
+
+src/black/cache.py:52  function `get_cache_file`: signature changed
+<span class="c">  - def get_cache_file(mode: Mode)</span>
+<span class="g">  + def get_cache_file(mode: Mode, cache_dir: Path)</span>
+  broken: 6 site(s)
+    <span class="w">tests/test_black.py:2663</span><span class="c"> (in TestCaching.test_cache_file_length)</span>  cache_file = get_cache_file(case)
+        does not pass `cache_dir`, which is required now [proven]
+    <span class="w">tests/test_black.py:2673</span><span class="c"> (in TestCaching.test_cache_file_path_ignores_python_cell_magic_separators)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+    <span class="w">tests/test_black.py:2682</span><span class="c"> (in TestCaching.test_cache_broken_file)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+    <span class="w">tests/test_black.py:2694</span><span class="c"> (in TestCaching.test_cache_empty_file)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+    <span class="w">tests/test_black.py:2743</span><span class="c"> (in TestCaching.test_no_cache_when_writeback_diff)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+    <span class="w">tests/test_black.py:2773</span><span class="c"> (in TestCaching.test_no_cache_when_stdin)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  1 other call(s) fit the new signature
+
+2 changed declaration(s) with nothing to act on:
+  <span class="w">src/black/cache.py:31</span><span class="c"></span>  `get_cache_dir`: only optional parameters added
+  <span class="w">src/black/cache.py:63</span><span class="c"></span>  `Cache.read`: only optional parameters added</pre>
+</div>
+    <p class="note"><em>proven</em> means the index resolved the call to this declaration. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/ripple.md">How a site is attributed ↗</a></p>
+  </div>
+</section>
+
+<section id="answer-key">
+  <div class="wrap">
+    <div class="head">
+      <span class="eyebrow">3 · The answer key</span>
+      <h2>Then compare it with what the authors did.</h2>
+      <p>The finished commit changed each of the 6 lines ripple named.</p>
+    </div>
+    <div class="table">
+      <table>
+        <thead><tr><th>Site ripple named</th><th>In the finished commit</th></tr></thead>
+        <tbody><tr><td><code>tests/test_black.py:2663</code></td><td>changed by the commit</td></tr><tr><td><code>tests/test_black.py:2673</code></td><td>changed by the commit</td></tr><tr><td><code>tests/test_black.py:2682</code></td><td>changed by the commit</td></tr><tr><td><code>tests/test_black.py:2694</code></td><td>changed by the commit</td></tr><tr><td><code>tests/test_black.py:2743</code></td><td>changed by the commit</td></tr><tr><td><code>tests/test_black.py:2773</code></td><td>changed by the commit</td></tr></tbody>
+      </table>
+    </div>
+    <p class="note">The comparison is made by <a href="https://github.com/shivyadavus/open-kioku/blob/main/scripts/demo-replay.sh">the replay script ↗</a> from <code>git diff</code> of the commit. <a href="https://github.com/shivyadavus/open-kioku/blob/main/benchmarks/ripple/README.md">The same replay on 60 repositories ↗</a></p>
+  </div>
+</section>
+
+<section id="pull-request">
+  <div class="wrap split">
+    <div>
+      <div class="head">
+        <span class="eyebrow">4 · In a pull request</span>
+        <h2>The same finding, where the review happens.</h2>
+        <p><code>ok gate ci</code> judges any pull request, whatever wrote it, and writes a Change Dossier: what the task declared, what the change touched, and what it left broken.</p>
+      </div>
+      <div class="code"><span class="label">In CI</span><pre>ok index .
+ok gate ci --base origin/main \
+  --task &quot;$PR_TITLE&quot; --write dossier.md</pre><button type="button" data-copy="ok index .
+ok gate ci --base origin/main \
+  --task &quot;$PR_TITLE&quot; --write dossier.md">Copy</button></div>
+      <p class="note"><a href="https://github.com/shivyadavus/open-kioku/blob/main/demo/proof/replay-black/dossier.md">The whole dossier for this change ↗</a> · <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/gate.md">The gate ↗</a></p>
+    </div>
+    <div class="card">
+      <span class="step">Change Dossier · Ripple</span>
+      <p><strong>6 site(s) no longer fit what this change altered</strong> (3 changed declaration(s); 1 other call(s) fit).</p>
+      <ul class="ticks"><li><code>tests/test_black.py:2663</code> does not pass <code>cache_dir</code>, which is required now — <code>src/black/cache.py: get_cache_file</code> [proven]</li><li><code>tests/test_black.py:2673</code> does not pass <code>cache_dir</code>, which is required now — <code>src/black/cache.py: get_cache_file</code> [proven]</li><li><code>tests/test_black.py:2682</code> does not pass <code>cache_dir</code>, which is required now — <code>src/black/cache.py: get_cache_file</code> [proven]</li><li><code>tests/test_black.py:2694</code> does not pass <code>cache_dir</code>, which is required now — <code>src/black/cache.py: get_cache_file</code> [proven]</li><li><code>tests/test_black.py:2743</code> does not pass <code>cache_dir</code>, which is required now — <code>src/black/cache.py: get_cache_file</code> [proven]</li><li><code>tests/test_black.py:2773</code> does not pass <code>cache_dir</code>, which is required now — <code>src/black/cache.py: get_cache_file</code> [proven]</li></ul>
+    </div>
+  </div>
+</section>
+
+<section id="agent">
+  <div class="wrap">
+    <div class="head">
+      <span class="eyebrow">5 · In Claude Code</span>
+      <h2>With the hooks, the agent hears it right after the edit.</h2>
+      <p>One recorded session on the same repository, before the commit. The prompt asks for the parameter and does not mention callers.</p>
+    </div>
+    <ol class="steps">
+      <li><div class="body"><h3>The prompt</h3><div class="code prose"><pre>In `src/black/cache.py`, give `get_cache_file` a second required parameter, `cache_dir: Path`, and build the cache file path under it instead of calling `get_cache_dir()` inside the function.</pre><button type="button" data-copy="In `src/black/cache.py`, give `get_cache_file` a second required parameter, `cache_dir: Path`, and build the cache file path under it instead of calling `get_cache_dir()` inside the function.">Copy</button></div></div></li>
+      <li><div class="body"><h3>First edit: the signature</h3><p>The hook answers with the 7 calls that no longer fit: the six in the tests and one in the same file.</p>
+      <div class="term"><div class="term-bar"><i></i><i></i><i></i><span>Claude Code · after the edit · recorded</span></div>
+<pre tabindex="0">Open Kioku: after this edit, <span class="b">7 call site(s)</span> elsewhere look as if they no longer fit what it changed.
+src/black/cache.py:51  function `get_cache_file`: signature changed
+<span class="c">  was: def get_cache_file(mode: Mode)</span>
+<span class="g">  now: def get_cache_file(mode: Mode, cache_dir: Path)</span>
+  <span class="w">src/black/cache.py:68</span><span class="c"> (in Cache.read)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  <span class="w">tests/test_black.py:2663</span><span class="c"> (in TestCaching.test_cache_file_length)</span>  cache_file = get_cache_file(case)
+        does not pass `cache_dir`, which is required now [proven]
+  <span class="w">tests/test_black.py:2673</span><span class="c"> (in TestCaching.test_cache_file_path_ignores_python_cell_magic_separators)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  <span class="w">tests/test_black.py:2682</span><span class="c"> (in TestCaching.test_cache_broken_file)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  <span class="w">tests/test_black.py:2694</span><span class="c"> (in TestCaching.test_cache_empty_file)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  <span class="w">tests/test_black.py:2743</span><span class="c"> (in TestCaching.test_no_cache_when_writeback_diff)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  <span class="w">tests/test_black.py:2773</span><span class="c"> (in TestCaching.test_no_cache_when_stdin)</span>  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+Check each one before you finish: update it, or leave it if it is right as it stands.</pre>
+</div></div></li>
+      <li><div class="body"><h3>Second edit: the call in the same file</h3><p>6 are left, and the hook says so again.</p></div></li>
+      <li><div class="body"><h3>The tests</h3><p>The agent updates the six calls. The next 2 edits get no notice: nothing is left.</p></div></li>
+      <li><div class="body"><h3>At the stop: the Change Dossier</h3><ul class="ticks yes"><li>Boundary: every changed file is inside the declared boundary.</li><li>1 changed declaration(s), 1 a call could break on; no broken site found (7 call(s) checked and fit).</li></ul></div></li>
+    </ol>
+    <p class="note">11 turns, 26 seconds, recorded 2026-11-14. <a href="https://github.com/shivyadavus/open-kioku/blob/main/demo/proof/replay-black/claude-code-session">Every step, both notices and the dossier ↗</a></p>
+  </div>
+</section>
+
+<section id="run">
+  <div class="wrap split">
+    <div>
+      <div class="head">
+        <span class="eyebrow">Run it yourself</span>
+        <h2>One script, the same output.</h2>
+        <p>It clones Black into a temporary directory, prints steps one to four, and removes the clone. It needs git, python3 and <code>ok</code> 5.0.0 or later.</p>
+      </div>
+      <div class="code"><pre>npm install -g open-kioku
+git clone https://github.com/shivyadavus/open-kioku
+open-kioku/scripts/demo-replay.sh</pre><button type="button" data-copy="npm install -g open-kioku
+git clone https://github.com/shivyadavus/open-kioku
+open-kioku/scripts/demo-replay.sh">Copy</button></div>
+      <p class="note">This repository's CI runs the script on every pull request and fails if the output differs from what this page shows.</p>
+    </div>
+    <div>
+      <div class="head">
+        <span class="eyebrow">Or by hand</span>
+        <h2>Five commands.</h2>
+        <p>The same replay, typed out.</p>
+      </div>
+      <div class="code"><pre>git clone https://github.com/psf/black &amp;&amp; cd black
+git checkout 1ed66a8b33~1
+ok index
+git checkout 1ed66a8b33 -- src/black/cache.py
+ok ripple</pre><button type="button" data-copy="git clone https://github.com/psf/black &amp;&amp; cd black
+git checkout 1ed66a8b33~1
+ok index
+git checkout 1ed66a8b33 -- src/black/cache.py
+ok ripple">Copy</button></div>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <div class="head">
+      <span class="eyebrow">Your repository</span>
+      <h2>Set it up with your agent.</h2>
+    </div>
+    <div class="grid cols-4"><a class="card" href="claude-code-setup.html"><h3>Claude Code</h3><span class="go">Set it up →</span></a><a class="card" href="cursor-setup.html"><h3>Cursor</h3><span class="go">Set it up →</span></a><a class="card" href="codex-setup.html"><h3>Codex</h3><span class="go">Set it up →</span></a><a class="card" href="gemini-cli-setup.html"><h3>Gemini CLI</h3><span class="go">Set it up →</span></a></div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Open Kioku · local repository evidence for coding agents</span>
+    <nav aria-label="Footer">
+      <a href="index.html">Home</a>
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/shivyadavus/open-kioku">Source</a>
+      <a href="https://github.com/shivyadavus/open-kioku/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/security-model.md">Security model</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="site.js" defer></script>
+</body>
+</html>

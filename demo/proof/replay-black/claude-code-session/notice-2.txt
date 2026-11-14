@@ -1,0 +1,17 @@
+Open Kioku: after this edit, 6 call site(s) elsewhere look as if they no longer fit what it changed.
+src/black/cache.py:51  function `get_cache_file`: signature changed
+  was: def get_cache_file(mode: Mode)
+  now: def get_cache_file(mode: Mode, cache_dir: Path)
+  tests/test_black.py:2663 (in TestCaching.test_cache_file_length)  cache_file = get_cache_file(case)
+        does not pass `cache_dir`, which is required now [proven]
+  tests/test_black.py:2673 (in TestCaching.test_cache_file_path_ignores_python_cell_magic_separators)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  tests/test_black.py:2682 (in TestCaching.test_cache_broken_file)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  tests/test_black.py:2694 (in TestCaching.test_cache_empty_file)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  tests/test_black.py:2743 (in TestCaching.test_no_cache_when_writeback_diff)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+  tests/test_black.py:2773 (in TestCaching.test_no_cache_when_stdin)  cache_file = get_cache_file(mode)
+        does not pass `cache_dir`, which is required now [proven]
+Check each one before you finish: update it, or leave it if it is right as it stands.
