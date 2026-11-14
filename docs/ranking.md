@@ -188,13 +188,16 @@ in `open-kioku-core` computes it from typed inputs (weights in parentheses):
 - `boundary_tightness` (0.15) and `runtime_corroboration` (0.05): the allowed-file bound and the typed `runtime_corroboration` score component on selected results.
 - `index_coverage` (weight 0; present only with a coverage gap): the lowest indexed share among the languages `IndexCoverage::gaps` returns for the manifest the pack or plan read, carrying one evidence id per gap, `coverage:<language>:<cause>` (`coverage:rust:git_ignore`). The id names the `coverage.by_language`, `coverage.policy_excluded_by_language` and `coverage.policy_excluded_dirs_by_language` entries that `repo_status` and `ok --json status` report, so the signal traces to the persisted manifest. Caps price it, not weight; see "Index coverage gaps".
 - `index_coverage_selected_language` (weight 0; present only when the 0.74 cap applies): a coverage gap whose possibly-first-party files are mostly missing and whose language matches the selected context's, carrying the matching gaps' evidence ids; its value is the indexed share of those files. `ok preflight` and MCP `plan_change {detail: "preflight"}` read this signal to withhold `safe_to_start`; see "Index coverage gaps".
+- `index_coverage_pruned_source` (weight 0, value 0; present only when the task reaches a pruned directory holding git-tracked source): carries one evidence id per directory, `coverage:pruned:<path>`, the same ref a plan's forbidden rules cite. It names the `coverage.pruned` entry `repo_status` and `ok --json status` report, so the signal traces to the persisted manifest. Caps price it, not weight; see "Pruned directories holding tracked source".
 
 Caps apply after the weighted sum, in this order: 0.35 with no primary context; 0.55 when
 exact references, validation targets, and runtime signals are all absent; 0.74 without exact
 evidence; 0.30 when no task term appears in the selected context, or 0.50 when fewer than
 `WEAK_TASK_RELEVANCE` (0.34) of them do; 0.60 with counted negative evidence; 0.50 when
 every named task identifier is unmatched by the selected context; 0.50 or 0.74 beside a
-majority coverage gap under the conditions in "Index coverage gaps"; and 0.94 with any
+majority coverage gap under the conditions in "Index coverage gaps"; 0.50 when the task
+names the path of a pruned directory whose tracked source counts as missing ("Pruned
+directories holding tracked source"); and 0.94 with any
 caveat except a coverage caveat, including a plan's evidence-quality caveats attached
 after scoring. The `Exact` label
 additionally requires `exact_reference_count > 0`; otherwise the label stops at `High`.
@@ -352,6 +355,81 @@ a `lib/` of copied code is `unclassified` and priced as first-party source.
 The languages are looked up only when a gap that can cap exists: a selection's symbol
 supplies its language when it has one, and otherwise its file record is read by path, once
 per distinct primary path. A pack over an index without one reads nothing extra.
+
+### Pruned directories holding tracked source
+
+A coverage gap is per language, and a pruned directory is not one: discovery never walks it, so
+its files are counted only as `tracked_source_files` on its `coverage.pruned` entry, a count
+from `git ls-files`. Two reasons count that source as missing: an undeclared `build` or
+`dist` (`undeclared_build_dir`, the weak rule), and a directory behind a stray `.git` that this
+repository tracks files under (`submodule` with a non-zero count). A name defined there is
+absent from the index and not absent from the repository. Without a link from the task to such a
+directory, a pack would say the name "does not exist in this repository or needs `ok index`".
+
+The prune record holds no file names and no languages, so the link is made without reading
+the directory. `IndexCoverage::pruned_source_links` uses two rules, and both are narrow on
+purpose. Most tasks in a repository with such a directory are about indexed code, and a caveat
+on all of them would teach readers to ignore it.
+
+| Link | Fires when | Directories |
+| --- | --- | --- |
+| named by the task | a task token holding a `/` (`tools/build/plan.py`, `./build/`, `../tools/build/x`, `/tools/build/x`, `` `tools/build` ``) is the directory's path or a path below it, after any leading `./`, `../` or `/`. A bare word (`build`, `dist`) never counts, and neither does a sibling sharing a prefix (`tools/builder/`) or a URL (`https://tools/build/x`, whose host and path are not repository paths) | any listed directory holding tracked source, whatever its reason |
+| an undefined name | a named task identifier (`named_anchors`, never a hyphenated prose word) that no indexed symbol has as its name (`symbols_named`), when the top selected context does not spell it (every named identifier when nothing was selected), or when the selected context spells it as a use of a definition: a call (`name(`) or an import or `use` line. The second case is the commonest one: indexed code calls a function only a pruned directory defines, so the call site is selected and spells the name while the definition is absent. A name the selection spells only as data (an event name in a string, a tool name in a schema) is not looked up, because nothing shows a definition is missing | every listed directory pruned as `undeclared_build_dir`, `submodule` or `msbuild_output` holding tracked source |
+
+Directories pruned on strong evidence (`build_output` with a cache tag or a manifest beside
+it, `dependencies`, `virtual_env`) never link through an undefined name. Their committed files
+are output or installed packages, so a missing name is not explained by them, just as they
+never lower coverage. They link only when the task names their path. A directory with a
+tracked count of zero, or with no count (outside Git), never links. A secret-like path is
+never named: ingest does not list one, and the link skips any such entry an older or imported
+manifest holds. The symbol table is read only when a weak, stray-`.git` or MSBuild output directory holding
+tracked source is listed, once per named task identifier, as a `UNION` of two index searches. Any other repository looks nothing
+up.
+
+A link is reported on context and plan alike, through `open_kioku_context::pruned_source_links`:
+
+- a coverage caveat, exempt from the 0.94 any-caveat cap like a gap's. For an undefined
+  name: `index coverage: compile_plan has no indexed definition and may be in tools/build/,
+  which the index pruned (tools/build/: undeclared build directory, 1 tracked source file); an
+  absence there is not evidence`. For a named directory: `index coverage: the task names
+  dist/, which the index pruned (dist/: build output, 60 tracked source files); the index never
+  read those files`. At most three directories are named, and the rest are counted;
+- the zero-weight `index_coverage_pruned_source` component, citing `coverage:pruned:<path>`;
+- the same facts in the one `coverage` negative evidence item, with
+  `index_manifest.quality.coverage.pruned` and the ids among its `inspected_sources`. Its next
+  probe names the remedy: `[index] keep_dirs` for an undeclared build directory, moving the
+  stray `.git` out of the tree (not deleting it) for a nested repository, or editing through
+  the source for strong-evidence
+  output. It is not counted in `negative_evidence_count`;
+- the `anchor` item's next probe, which says the name may be in the directory, `which the
+  index pruned`, instead of saying it does not exist.
+
+**Cap: 0.50 (`Low`)**, with the blocker `the task names a directory the index pruned:
+tools/build/ (1 tracked source file)`, only when the task names the path of a directory whose
+tracked source counts as missing (`undeclared_build_dir`, `submodule`, `msbuild_output`). The task points at
+files the index never read. A plan adds the risk reason `low confidence: the task names a
+directory the index pruned: …`, and `ok preflight` reads the plan's `Low` label as
+`insufficient_evidence`.
+
+An undefined-name link adds no cap of its own. A name the task asks to create, or to rename
+something to, has no indexed definition by construction. Capping on it would push every such
+task in a repository with a weak pruned directory to `Low`, while the true positives gain
+almost nothing. The unmatched identifier already lowers confidence through the `anchor` item:
+the 0.60 counted-negative-evidence cap, or 0.50 when every named identifier is unmatched. The
+link changes what the pack says about the miss, not how much it costs. A plan adds the
+disclosure `named task anchor(s) … have no indexed definition and may be defined in a directory
+the index pruned: …`. Hyphenated anchors (`--dry-run`, `X-Request-Id`) are flags, headers or
+package names, never symbol names, so they are not looked up and never link.
+
+`ok preflight` and MCP `plan_change {detail: "preflight"}` withhold `safe_to_start` whenever
+the `index_coverage_pruned_source` signal is present, for either link and any reason, and
+answer `start_with_caution` instead: the index cannot say what an edit there touches.
+
+A strong-evidence directory the task names is reported and caps nothing. Its committed files
+are build output by evidence, and an edit to them goes through their source, which the index
+holds. The `anchor` probe names only directories whose tracked source counts as missing.
+With a majority coverage gap as well, it adds that the index excluded most of a language's
+source. The blocker and risk reason name at most three directories, and count the rest.
 
 Use `ok search --explain-ranking "query"` to inspect dominant signals for each
 result. Use `ok eval` to compare baseline ranking, fused ranking, and signal
