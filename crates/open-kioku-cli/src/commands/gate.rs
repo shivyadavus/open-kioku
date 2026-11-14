@@ -2150,16 +2150,29 @@ fn gate_auto_plan(
             return Err(err);
         }
     }
+    // A repository that set `mode = "enforce"` binds a prompt-started session too, so the
+    // agent is told how the boundary works. Otherwise the session is advisory and there is
+    // nothing for the agent to do about it.
+    let binding = OkConfig::load_from_repo(repo)
+        .ok()
+        .and_then(|config| GateMode::parse(&config.gate.mode))
+        .is_some_and(|mode| mode == GateMode::Enforce);
     Ok(Some(if continues {
         "Open Kioku gate: this prompt's plan is being added to the session's boundary in \
          the background."
             .to_string()
-    } else {
+    } else if binding {
         "Open Kioku gate: planning an edit boundary from this prompt in the background. If \
          the prompt reads as a task, edits are judged against that boundary once it is ready, \
          an edit outside it is reported with `ok gate expand <path> --reason \"<why>\"` as \
          the way to record why it belongs, and a Change Dossier is written when you stop. \
          `ok gate status` shows the session, `.ok/gate/start.log` why there is none."
+            .to_string()
+    } else {
+        "Open Kioku gate: a Change Dossier of this session is written when you stop. Work \
+         as you would without it: nothing is held, and you are told after an edit only when \
+         a call elsewhere no longer fits what it changed, or a path is forbidden. `ok gate \
+         status` shows the session."
             .to_string()
     }))
 }
@@ -2438,7 +2451,7 @@ fn gate_hook_post_tool(
         }
         let warned = decisions
             .into_iter()
-            .filter(|d| d.action == HookAction::Warn)
+            .filter(|d| d.action == HookAction::Warn && session.tells_agent(d))
             .map(|d| d.reason)
             .collect::<Vec<_>>();
         let mut notices = Vec::new();
@@ -2475,7 +2488,7 @@ fn gate_hook_post_tool(
     // Named targets the pre-tool hook allowed with a warning: the agent is told now, the way
     // an Edit outside the boundary is told, with the remedy.
     for decision in gate_shell_decisions(repo, &session, &cwd, command) {
-        if decision.action == HookAction::Warn {
+        if decision.action == HookAction::Warn && session.tells_agent(&decision) {
             notices.push(decision.reason);
         }
     }
@@ -2494,7 +2507,7 @@ fn gate_hook_post_tool(
             &decision,
             &input.tool_name,
         ))?;
-        if decision.action != HookAction::Allow {
+        if session.tells_agent(&decision) {
             notices.push(format!(
                 "the command changed `{}` ({}): {}",
                 decision.path,

@@ -1242,7 +1242,7 @@ fn gate_auto_mode_plans_from_the_prompt_and_lasts_for_the_conversation() {
     assert!(started["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap()
-        .contains("planning an edit boundary"));
+        .contains("a Change Dossier of this session is written when you stop"));
     planner_done();
     let first = status();
     assert_eq!(first["session"]["auto"], true, "{first}");
@@ -1297,16 +1297,17 @@ fn gate_auto_mode_plans_from_the_prompt_and_lasts_for_the_conversation() {
     assert!(outside.trim().is_empty(), "advisory: allowed: {outside}");
     std::fs::create_dir_all(repo.join("docs")).unwrap();
     std::fs::write(repo.join("docs/ttl.md"), "ttl\n").unwrap();
-    let told: serde_json::Value = serde_json::from_str(&hook(
+    // The edit is recorded as outside and the agent is told nothing: the boundary was planned
+    // from the prompt, and what it leaves out is for the dossier, not for the agent to answer.
+    let told = hook(
         &repo,
         "post-tool",
         &edit_input(&repo, "Write", "docs/ttl.md"),
-    ))
-    .unwrap();
-    assert!(told["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap()
-        .contains("advisory"));
+    );
+    assert!(
+        told.trim().is_empty(),
+        "advisory: recorded, not said: {told}"
+    );
     let stopped: serde_json::Value = serde_json::from_str(&stop("A")).unwrap();
     assert!(
         stopped.get("decision").is_none(),
@@ -1449,7 +1450,7 @@ fn gate_session_start_indexes_a_repository_that_has_no_index() {
     assert!(prompt["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap()
-        .contains("planning an edit boundary"));
+        .contains("a Change Dossier of this session is written when you stop"));
     assert!(!repo.join(".ok/gate/indexing.json").exists());
     wait_until(
         "the planner to finish",
@@ -1661,7 +1662,7 @@ fn gate_newer_prompt_supersedes_a_plan_still_being_built() {
     assert!(answer["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap()
-        .contains("planning an edit boundary"));
+        .contains("a Change Dossier of this session is written when you stop"));
     planner_done(&repo);
     // The earlier planner finds its marker replaced and backs out.
     let earlier = run({
