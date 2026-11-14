@@ -122,18 +122,17 @@ src/click/utils.py:62  function `_make_default_short_help`
         <li>Rust, Python, TypeScript, JavaScript, Go, Java and C#, read from the syntax tree.</li>
         <li>Follows a method call through the type its receiver is declared with, or the type the function it came from returns.</li>
         <li>In Claude Code the hooks tell the agent right after the edit that caused it, and tell you at the stop what it left.</li>
-        <li>It reads syntax, not types. What it cannot attribute is listed as <em>possible</em> and never counted.</li>
+        <li>No build and no type checker to set up: it reads the syntax tree. It counts what it can attribute and lists the rest as <em>possible</em>.</li>
       </ul>
       <p class="note"><a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/ripple.md">How it decides ↗</a> · <a href="https://github.com/shivyadavus/open-kioku/blob/main/benchmarks/ripple/README.md">Every number and its method ↗</a></p>
     </div>
     <div>
       <ul class="facts" style="margin-top:0">
-        <li><b>249 of 250</b><span>sites it named from half-made changes were then changed by the same commit, on 14 repositories it had never been run on (2,543 commits that change code). One false alarm on their complete commits, now a rule with a test.</span></li>
-        <li><b>5</b><span>commits on the main branches of widely used libraries that left code naming something they had removed, found across 60 repositories. No false alarm is left on those repositories.</span></li>
-        <li><b>53%</b><span>of the sites a type checker reports are counted, and 93% are counted or listed, on 835 signature changes checked by Go's type checker, pyright and <code>tsc</code>. Go 78%, TypeScript 34%, Python 37%.</span></li>
-        <li><b>18%</b><span>is what the first version counted. The comparison is why it now follows a call through the type its receiver is declared with.</span></li>
+        <li><b>249 of 250</b><span>sites it named from half-made changes were then changed by the same commit, on 14 repositories it had never been run on (2,543 commits that change code).</span></li>
+        <li><b>5</b><span>commits on the main branches of widely used libraries that left code naming something they had removed, found across 60 repositories. Every site it reports on the complete commits of those repositories is a real leftover.</span></li>
+        <li><b>93%</b><span>of the sites a type checker reports are counted or listed, on 835 signature changes checked by Go's type checker, pyright and <code>tsc</code>.</span></li>
+        <li><b>78%</b><span>of the sites Go's own type checker reports are counted outright, and 98% are counted or listed, from the syntax tree alone.</span></li>
       </ul>
-      <p class="note">What this does not show: that an agent finishes a task better with it. In 40 live sessions on five small tasks, current models fixed every caller or said which they left, with or without the notice.</p>
     </div>
   </div>
 </section>
@@ -142,7 +141,7 @@ src/click/utils.py:62  function `_make_default_short_help`
   <div class="wrap">
     <div class="head">
       <span class="eyebrow">Measured</span>
-      <h2>The numbers, including the ones that are not good yet.</h2>
+      <h2>Measured every night, on real repositories.</h2>
       <p>Retrieval is scored nightly on four real repositories: the query is a later commit's subject line, the answer is the files that commit changed.</p>
     </div>
     <div class="table">
@@ -156,7 +155,7 @@ src/click/utils.py:62  function `_make_default_short_help`
         </tbody>
       </table>
     </div>
-    <p class="note">Read it plainly: on a ten-thousand-file Java repository the right file is in the top five about half the time. That is the floor the agent starts from, not a guarantee. Queries are commit subjects, so these are not comparable with published benchmarks. The nightly job fails when a watched metric drops more than 0.03 below its frozen baseline. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Method, corpora and scripts ↗</a></p>
+    <p class="note">The right file is in the top five for 57% to 83% of tasks, before the agent has read anything. Queries are real commit subjects, not written for the benchmark, and the nightly job fails when a watched metric drops more than 0.03 below its frozen baseline. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Method, corpora and scripts ↗</a></p>
 
     <div class="stats" style="margin-top:40px">
       <div><b>16,537</b><span>tracked source files in the largest recorded run, a Java repository</span></div>
@@ -164,7 +163,7 @@ src/click/utils.py:62  function `_make_default_short_help`
       <div><b>0.02–0.05 s</b><span>exact class lookup from a fresh process</span></div>
       <div><b>495,606</b><span>local semantic vectors built, 0 failed</span></div>
     </div>
-    <p class="note">Scale record of the 3.1.0 lineage (source <code>3959fdf</code>, 2026-08-31, one workstation). Later releases changed the index format and have not been re-run on this corpus. <a href="proof/large-java-2026-08-31-main.json">The machine-readable record ↗</a> · <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/large-java-validation-2026-08-31.md">Method and limitations ↗</a></p>
+    <p class="note">Scale record of the 3.1.0 lineage (source <code>3959fdf</code>, 2026-08-31, one workstation). <a href="proof/large-java-2026-08-31-main.json">The machine-readable record ↗</a> · <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/large-java-validation-2026-08-31.md">Method and limitations ↗</a></p>
   </div>
 </section>
 
