@@ -23,6 +23,10 @@ Setup, once:
         --tasks benchmarks/agent-ab/large-repository-tasks.json \
         --models default claude-haiku-5-5
 
+`--mode hidden` is the harder setup: the checkout carries the commit's documentation changes
+instead of its tests, the prompt is the commit's subject and message, and the harness brings
+the commit's tests in only after the session, for the verdict.
+
 `--validate <sha>...` checks candidate commits instead of running sessions: for each, the test
 modules the commit changed must fail at its parent with its tests applied and pass at the
 commit. It prints the task list `--tasks` reads. The result of the run recorded in this
@@ -56,6 +60,16 @@ anything under `tests/`. Run them with:
 
 Stop when the change is complete."""
 
+# The harder setup: the agent never sees the task's tests. What it has is what the maintainers
+# wrote about the change in words: the commit's subject and message, and the commit's own
+# documentation changes, already applied.
+HIDDEN_PROMPT = """{subject}
+{body}
+This is the Django repository. Implement this change under `django/`.{docs} You can run the \
+existing tests with `python tests/runtests.py --parallel 1 <labels>`. The change will be \
+judged by the project's own tests for it, which are not in this checkout. Stop when the change \
+is complete."""
+
 
 def run(args, cwd=None, check=True, env=None, timeout=None):
     out = subprocess.run(args, cwd=cwd, capture_output=True, text=True, env=env, timeout=timeout)
@@ -76,7 +90,23 @@ def hunks(diff_text):
     return found
 
 
-def prepare(source, dest, task, arm, ok_bin):
+def take_from_commit(source, dest, sha, prefix):
+    """Write the commit's version of every file it changed under `prefix` into `dest`."""
+    taken = []
+    for path in run(["git", "-C", str(source), "diff", "--name-only", f"{sha}^", sha]).split():
+        if path.startswith(prefix):
+            blob = subprocess.run(["git", "-C", str(source), "show", f"{sha}:{path}"], capture_output=True)
+            target = dest / path
+            if blob.returncode == 0:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(blob.stdout)
+                taken.append(path)
+            elif target.exists():
+                target.unlink()
+    return taken
+
+
+def prepare(source, dest, task, arm, ok_bin, mode="tests"):
     sha = task["sha"]
     if dest.exists():
         shutil.rmtree(dest)
@@ -84,19 +114,13 @@ def prepare(source, dest, task, arm, ok_bin):
     archive = subprocess.Popen(["git", "-C", str(source), "archive", f"{sha}^"], stdout=subprocess.PIPE)
     subprocess.run(["tar", "-x", "-C", str(dest)], stdin=archive.stdout, check=True)
     archive.wait()
-    for path in run(["git", "-C", str(source), "diff", "--name-only", f"{sha}^", sha]).split():
-        if path.startswith("tests/"):
-            blob = subprocess.run(["git", "-C", str(source), "show", f"{sha}:{path}"], capture_output=True)
-            target = dest / path
-            if blob.returncode == 0:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(blob.stdout)
-            elif target.exists():
-                target.unlink()
+    # What of the commit the agent starts with: its tests, or (hidden) its documentation.
+    given = "docs/" if mode == "hidden" else "tests/"
+    take_from_commit(source, dest, sha, given)
     git = ["git", "-C", str(dest), "-c", "user.email=ab@example.invalid", "-c", "user.name=ab"]
     run(git + ["init", "-q"])
     run(git + ["add", "-A", "-f"])
-    run(git + ["commit", "-q", "-m", "baseline: the task's tests"])
+    run(git + ["commit", "-q", "-m", f"baseline: the task's {given.rstrip('/')}"])
     exclude = dest / ".git" / "info" / "exclude"
     exclude.write_text(exclude.read_text() + "\n.ok/\n.claude/\n__pycache__/\n*.pyc\n")
     index_s = None
@@ -173,7 +197,7 @@ def agent(arm, model, checkout, prompt, out_dir, ok_dir, plugin_dir, venv, max_t
     }
 
 
-def judge(source, checkout, task, venv, ok_bin, out_dir):
+def judge(source, checkout, task, venv, ok_bin, out_dir, mode="tests"):
     sha = task["sha"]
     git = ["git", "-C", str(checkout)]
     run(git + ["add", "-A", "-N"], check=False)
@@ -196,6 +220,8 @@ def judge(source, checkout, task, venv, ok_bin, out_dir):
     # The verdict is the harness's own run of the task's test modules on the task's tests.
     if tests_modified:
         run(git + ["checkout", "-q", "HEAD", "--", "tests"], check=False)
+    if mode == "hidden":
+        take_from_commit(source, checkout, sha, "tests/")
     env = dict(os.environ, PYTHONPATH=str(checkout), PYTHONDONTWRITEBYTECODE="1")
     try:
         out = subprocess.run([f"{venv}/bin/python", "tests/runtests.py", "--parallel", "1", "-v", "0",
@@ -262,6 +288,9 @@ def main():
     ap.add_argument("--venv", required=True)
     ap.add_argument("--tasks")
     ap.add_argument("--validate", nargs="+", metavar="SHA")
+    ap.add_argument("--mode", choices=["tests", "hidden"], default="tests",
+                    help="tests: the task's tests are given and may be run. hidden: the agent gets the "
+                         "commit's message and documentation, and is judged by tests it never sees")
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--arms", nargs="+", default=["plain", "kioku"])
     ap.add_argument("--models", nargs="+", default=["default"])
@@ -297,14 +326,23 @@ def main():
                 return None
         cell_out.mkdir(parents=True, exist_ok=True)
         checkout = work / name
-        index_s = prepare(source, checkout, task, arm, ok_bin)
-        prompt = PROMPT.format(subject=task["subject"], labels=" ".join(task["labels"]))
+        index_s = prepare(source, checkout, task, arm, ok_bin, args.mode)
+        if args.mode == "hidden":
+            body = run(["git", "-C", str(source), "log", "-1", "--format=%b", task["sha"]]).strip()
+            docs = [p for p in run(["git", "-C", str(source), "diff", "--name-only", f"{task['sha']}^",
+                                    task["sha"]]).split() if p.startswith("docs/")]
+            said = (" The documentation was already updated for it and describes the expected "
+                    "behaviour: " + ", ".join(f"`{p}`" for p in docs) + ". Do not modify `docs/`.") if docs else ""
+            prompt = HIDDEN_PROMPT.format(subject=task["subject"], body=f"\n{body}\n" if body else "", docs=said)
+        else:
+            prompt = PROMPT.format(subject=task["subject"], labels=" ".join(task["labels"]))
         record = {"task": task["sha"], "subject": task["subject"], "arm": arm, "model": model,
-                  "index_s": index_s}
+                  "index_s": index_s, "prompt": prompt}
         record["agent"] = agent(arm, None if model == "default" else model, checkout, prompt, cell_out,
                                 str(Path(ok_bin).parent), args.plugin_dir, args.venv,
                                 args.max_turns, args.budget)
-        record["judge"] = judge(source, checkout, task, args.venv, ok_bin, cell_out)
+        record["judge"] = judge(source, checkout, task, args.venv, ok_bin, cell_out, args.mode)
+        record["mode"] = args.mode
         with lock:
             spent[0] += record["agent"]["cost_usd"]
             record["spent_so_far"] = round(spent[0], 2)
