@@ -121,6 +121,10 @@ jobs:
           toolchain: stable
       - name: Build the CLI
         run: cargo build -p open-kioku-cli
+      - name: Replay the public demo and compare it with the recorded output
+        # `demo/see-it-work.html` is built from demo/proof/replay-black. This runs the same
+        # replay with the binary of this change and fails when it prints anything else.
+        run: OK_BIN=target/debug/ok scripts/demo-replay.sh --check
       - name: Index this checkout
         run: target/debug/ok index .
       - name: Judge the change against the pull request's own words
@@ -283,6 +287,8 @@ jobs:
         run: |
           chmod +x scripts/validate-docs.sh
           scripts/validate-docs.sh
+      - name: Check the generated site pages are current
+        run: python3 scripts/build-site-pages.py --check
       - name: Validate release metadata
         run: scripts/validate-release-metadata.py
       - name: Validate release trust gates

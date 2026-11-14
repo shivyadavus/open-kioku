@@ -1,0 +1,7 @@
+tests/test_black.py:2663  changed by the commit
+tests/test_black.py:2673  changed by the commit
+tests/test_black.py:2682  changed by the commit
+tests/test_black.py:2694  changed by the commit
+tests/test_black.py:2743  changed by the commit
+tests/test_black.py:2773  changed by the commit
+6 of 6 sites ripple named are on lines the commit went on to change.
